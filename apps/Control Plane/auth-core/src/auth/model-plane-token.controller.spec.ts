@@ -38,7 +38,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
   const availableAudit = () => ({
     publishAuditDurable: jest
       .fn()
-      .mockResolvedValue({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 42 }),
+      .mockResolvedValue({ stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 42 }),
   });
 
   beforeEach(() => {
@@ -347,7 +347,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
         },
       });
       expect(auditPublisher.publishAuditDurable).toHaveBeenCalledWith(
-        'velion.audit.v2.control.auth-core.model_service_token_issued',
+        'verevon.audit.v2.control.auth-core.model_service_token_issued',
         expect.objectContaining({
           occurred_at: issuedAt,
           event_id: `model-token:${createHash('sha256')
@@ -416,7 +416,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
       }),
     );
     expect(auditPublisher.publishAuditDurable).toHaveBeenCalledWith(
-      'velion.audit.v2.control.auth-core.model_service_token_issued',
+      'verevon.audit.v2.control.auth-core.model_service_token_issued',
       expect.objectContaining({
         details: {
           audience: 'model-gateway',
@@ -551,7 +551,7 @@ describe('ModelPlaneTokenController secure ZDR issuance', () => {
     await Promise.resolve();
     expect(returned).toBe(false);
 
-    acknowledge?.({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 43 });
+    acknowledge?.({ stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 43 });
     await expect(issuance).resolves.toEqual({ token: mintedToken });
   });
 

@@ -47,23 +47,23 @@ func TestHandlersFailClosedForMissingMetadataAndDeadLetterFailures(t *testing.T)
 		EventID: "audit-auth-missing-metadata", OccurredAt: time.Now().UTC(), OrgID: "org",
 		Plane: "control", Producer: "auth-core", Event: "missing_metadata",
 	})
-	sub.handleAudit(context.Background())(&nats.Msg{Subject: "velion.audit.v2.control.auth-core.missing_metadata", Data: auditPayload})
+	sub.handleAudit(context.Background())(&nats.Msg{Subject: "verevon.audit.v2.control.auth-core.missing_metadata", Data: auditPayload})
 	usagePayload, _ := json.Marshal(events.UsageEvent{
 		EventID: "usage-missing-metadata", OccurredAt: time.Now().UTC(), OrgID: "org",
 		Plane: "control", Producer: "billing-core", Op: "missing_metadata",
 	})
-	sub.handleUsage(context.Background())(&nats.Msg{Subject: "velion.usage.v2.control.billing-core.missing_metadata", Data: usagePayload})
+	sub.handleUsage(context.Background())(&nats.Msg{Subject: "verevon.usage.v2.control.billing-core.missing_metadata", Data: usagePayload})
 
-	malformedAudit := &nats.Msg{Subject: "velion.audit.v2.control.auth-core.malformed", Data: []byte("not-json")}
+	malformedAudit := &nats.Msg{Subject: "verevon.audit.v2.control.auth-core.malformed", Data: []byte("not-json")}
 	sub.handleAudit(context.Background())(malformedAudit)
-	malformedUsage := &nats.Msg{Subject: "velion.usage.v2.control.billing-core.malformed", Data: []byte("not-json")}
+	malformedUsage := &nats.Msg{Subject: "verevon.usage.v2.control.billing-core.malformed", Data: []byte("not-json")}
 	sub.handleUsage(context.Background())(malformedUsage)
-	if sub.deadLetter(nats.NewMsg("velion.audit.v2.control.auth-core.unroutable"), "audit", "fixture") {
+	if sub.deadLetter(nats.NewMsg("verevon.audit.v2.control.auth-core.unroutable"), "audit", "fixture") {
 		t.Fatal("dead-letter publish unexpectedly succeeded without a stream")
 	}
-	sub.rejectPlaneMismatch(nats.NewMsg("velion.audit.v2.control.auth-core.mismatch"), "audit", time.Now())
-	sub.retryOrDeadLetter(nats.NewMsg("velion.audit.v2.control.auth-core.retry"), "audit")
-	if sequence, ok := messageStreamSequence(nats.NewMsg("velion.audit.v2.control.auth-core.sequence")); ok || sequence != 0 {
+	sub.rejectPlaneMismatch(nats.NewMsg("verevon.audit.v2.control.auth-core.mismatch"), "audit", time.Now())
+	sub.retryOrDeadLetter(nats.NewMsg("verevon.audit.v2.control.auth-core.retry"), "audit")
+	if sequence, ok := messageStreamSequence(nats.NewMsg("verevon.audit.v2.control.auth-core.sequence")); ok || sequence != 0 {
 		t.Fatalf("unbound message sequence = %d, %v", sequence, ok)
 	}
 }
@@ -82,7 +82,7 @@ func TestExhaustedRetryDeadLetterFailureRemainsUnacked(t *testing.T) {
 	for _, kind := range []string{"audit", "usage"} {
 		consumer := "audit-core-control-v3-" + kind
 		if _, err := js.AddConsumer(streamName, &nats.ConsumerConfig{
-			Durable: consumer, DeliverSubject: "_VELION.AUDIT.DELIVER.control." + kind + "-v2",
+			Durable: consumer, DeliverSubject: "_VEREVON.AUDIT.DELIVER.control." + kind + "-v2",
 			DeliverGroup: consumer, FilterSubject: planeSubject(kind, "control"),
 			DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
 			AckWait: 30 * time.Second, MaxDeliver: maxConsumerDeliveries, ReplayPolicy: nats.ReplayInstantPolicy,
@@ -100,7 +100,7 @@ func TestExhaustedRetryDeadLetterFailureRemainsUnacked(t *testing.T) {
 		EventID: "audit-auth-store-down", OccurredAt: time.Now().UTC(), OrgID: "org",
 		Plane: "control", Producer: "auth-core", Event: "store_down",
 	})
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.store_down", payload); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.store_down", payload); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(8 * time.Second)
@@ -110,7 +110,7 @@ func TestExhaustedRetryDeadLetterFailureRemainsUnacked(t *testing.T) {
 	if got := st.auditCalls.Load(); got < maxDeliveries {
 		t.Fatalf("deliveries = %d; want %d", got, maxDeliveries)
 	}
-	if _, err := js.GetLastMsg(streamName, "velion.dlq.audit-core.audit"); err == nil {
+	if _, err := js.GetLastMsg(streamName, "verevon.dlq.audit-core.audit"); err == nil {
 		t.Fatal("unroutable dead-letter was unexpectedly persisted")
 	}
 }
@@ -122,17 +122,17 @@ func TestExhaustedRetryTerminationErrorIsHandled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := js.AddStream(&nats.StreamConfig{
-		Name: streamName, Subjects: []string{"velion.audit.v2.control.auth-core.>", dlqSubject}, Storage: nats.MemoryStorage,
+		Name: streamName, Subjects: []string{"verevon.audit.v2.control.auth-core.>", dlqSubject}, Storage: nats.MemoryStorage,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	syncSub, err := js.SubscribeSync(
-		"velion.audit.v2.control.auth-core.>", nats.Durable("coverage-retry"), nats.ManualAck(), nats.AckExplicit(), nats.MaxDeliver(10),
+		"verevon.audit.v2.control.auth-core.>", nats.Durable("coverage-retry"), nats.ManualAck(), nats.AckExplicit(), nats.MaxDeliver(10),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.retry", []byte(`{"fixture":true}`)); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.retry", []byte(`{"fixture":true}`)); err != nil {
 		t.Fatal(err)
 	}
 	var msg *nats.Msg
@@ -162,7 +162,7 @@ func TestExhaustedRetryTerminationErrorIsHandled(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := streamInfo.Config
-	config.Subjects = []string{"velion.audit.v2.control.auth-core.>"}
+	config.Subjects = []string{"verevon.audit.v2.control.auth-core.>"}
 	if _, err := js.UpdateStream(&config); err != nil {
 		t.Fatal(err)
 	}
@@ -182,14 +182,14 @@ func TestDirectHandlersCoverTerminationErrorsAndUsagePlaneMismatch(t *testing.T)
 	}
 	sub := New(nc, &recordingStore{audits: make(chan *events.AuditEvent, 1), usage: make(chan *events.UsageEvent, 1)})
 	sub.js = js
-	sub.handleAudit(context.Background())(&nats.Msg{Subject: "velion.audit.v2.control.auth-core.bad", Data: []byte("bad")})
-	sub.handleUsage(context.Background())(&nats.Msg{Subject: "velion.usage.v2.control.billing-core.bad", Data: []byte("bad")})
+	sub.handleAudit(context.Background())(&nats.Msg{Subject: "verevon.audit.v2.control.auth-core.bad", Data: []byte("bad")})
+	sub.handleUsage(context.Background())(&nats.Msg{Subject: "verevon.usage.v2.control.billing-core.bad", Data: []byte("bad")})
 
 	payload, _ := json.Marshal(events.UsageEvent{
 		EventID: "usage-forged-plane", OccurredAt: time.Now().UTC(), OrgID: "org",
 		Plane: "model", Producer: "billing-core", Op: "forged",
 	})
-	sub.handleUsage(context.Background())(&nats.Msg{Subject: "velion.usage.v2.control.billing-core.forged", Data: payload})
+	sub.handleUsage(context.Background())(&nats.Msg{Subject: "verevon.usage.v2.control.billing-core.forged", Data: payload})
 }
 
 func TestDuplicateAuditAndUsageEventsAreAcknowledged(t *testing.T) {
@@ -211,14 +211,14 @@ func TestDuplicateAuditAndUsageEventsAreAcknowledged(t *testing.T) {
 		EventID: "audit-auth-duplicate", OccurredAt: time.Now().UTC(), OrgID: "org",
 		Plane: "control", Producer: "auth-core", Event: "duplicate",
 	})
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.duplicate", auditPayload); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.duplicate", auditPayload); err != nil {
 		t.Fatal(err)
 	}
 	usagePayload, _ := json.Marshal(events.UsageEvent{
 		EventID: "usage-duplicate", OccurredAt: time.Now().UTC(),
 		OrgID: "org", Plane: "control", Producer: "billing-core", Op: "duplicate",
 	})
-	if _, err := js.Publish("velion.usage.v2.control.billing-core.duplicate", usagePayload); err != nil {
+	if _, err := js.Publish("verevon.usage.v2.control.billing-core.duplicate", usagePayload); err != nil {
 		t.Fatal(err)
 	}
 	select {

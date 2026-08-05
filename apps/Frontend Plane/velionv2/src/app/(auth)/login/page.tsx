@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
-import { VelionAuthPage } from "@/features/auth/components/VelionAuthPage";
+import { VerevonAuthPage } from "@/features/auth/components/VerevonAuthPage";
 import type { AuthMode } from "@/features/auth/lib/auth-schema";
 import { redirectAuthenticatedUserFromAuth } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Sign in | Velion v2",
-  description: "Velion secure authentication.",
+  title: "Sign in | Verevon v2",
+  description: "Verevon secure authentication.",
   robots: { index: false, follow: false },
 };
 
@@ -36,7 +36,7 @@ export default async function LoginPage({
   }
 
   return (
-    <VelionAuthPage
+    <VerevonAuthPage
       callbackUrl={first(callbackUrl)}
       initialMode={initialMode}
       resetToken={resetToken}

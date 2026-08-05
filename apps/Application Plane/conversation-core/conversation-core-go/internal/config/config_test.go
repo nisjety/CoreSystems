@@ -194,10 +194,10 @@ func TestLoadBuildsSeparateDelegationPrincipalKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.DelegationKeys["velion-gateway"] == "" || cfg.DelegationKeys["conversation-ingest"] == "" {
+	if cfg.DelegationKeys["verevon-gateway"] == "" || cfg.DelegationKeys["conversation-ingest"] == "" {
 		t.Fatalf("DelegationKeys = %#v, want gateway and ingest principals", cfg.DelegationKeys)
 	}
-	if cfg.DelegationKeys["velion-gateway"] == cfg.DelegationKeys["conversation-ingest"] {
+	if cfg.DelegationKeys["verevon-gateway"] == cfg.DelegationKeys["conversation-ingest"] {
 		t.Fatal("gateway and ingest delegation tokens must be distinct")
 	}
 }

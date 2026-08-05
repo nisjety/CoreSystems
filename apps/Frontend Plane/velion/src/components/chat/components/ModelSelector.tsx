@@ -14,7 +14,7 @@ import { useI18n } from '@/components/chat/hooks/i18n';
 import { DEFAULT_MODEL } from '@/app/api/chat/_lib/models'
 import { useModels, type ModelOption } from '@/components/chat/hooks/useModels'
 
-// U2-2 / U3-2 (ui-ux-velion-gap.md §10): the picker is now driven by the
+// U2-2 / U3-2 (ui-ux-verevon-gap.md §10): the picker is now driven by the
 // live capability-core registry via the `useModels()` hook. The hook
 // merges live entries with a static fallback so the dropdown never
 // renders empty and previously-supported model ids are never stranded

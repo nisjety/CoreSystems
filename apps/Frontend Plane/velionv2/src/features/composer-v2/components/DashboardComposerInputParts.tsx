@@ -22,7 +22,7 @@ export function AttachmentPreview({
   }
 
   return (
-    <div className="velion-attachment-preview relative overflow-hidden px-4 pb-2 pt-4">
+    <div className="verevon-attachment-preview relative overflow-hidden px-4 pb-2 pt-4">
       <div className="flex items-start gap-2 overflow-x-auto pb-1">
         {attachments.map((attachment) => {
           const isImage = attachment.type.startsWith("image/") || attachment.url.startsWith("data:image");
@@ -122,7 +122,7 @@ export function SplitText({ text }: { text: string }) {
       {text.split("").map((char, index) => (
         <span
           key={`${char}-${index}`}
-          className="velion-split-char inline-block"
+          className="verevon-split-char inline-block"
           style={{ animationDelay: `${index * 25}ms` }}
         >
           {char === " " ? "\u00a0" : char}
@@ -146,7 +146,7 @@ export function AutocompleteDropdown({
   selectedIndex: number;
 }) {
   return (
-    <div className="velion-popover velion-popover-up min-w-[220px] overflow-hidden rounded-2xl border border-black/[0.05] bg-white shadow-[0_8px_40px_rgba(0,0,0,0.13)] dark:border-white/10 dark:bg-[#141516]">
+    <div className="verevon-popover verevon-popover-up min-w-[220px] overflow-hidden rounded-2xl border border-black/[0.05] bg-white shadow-[0_8px_40px_rgba(0,0,0,0.13)] dark:border-white/10 dark:bg-[#141516]">
       <div className="px-4 pb-1 pt-3">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-[#bbb]">{category}</span>
       </div>
@@ -176,7 +176,7 @@ export function AutocompleteDropdown({
 
 export function TurnReceipt({ turn }: { turn: ComposerTurn }) {
   return (
-    <div className="velion-composer-turn-receipt velion-fade-up mt-3 rounded-[18px] border border-black/[0.05] bg-white/80 p-3 text-[12px] text-[#666] shadow-[0_10px_28px_rgba(0,0,0,0.04)] backdrop-blur-sm dark:border-[#2A2C31] dark:bg-[#141516]/85 dark:text-[#AEB4C0]">
+    <div className="verevon-composer-turn-receipt verevon-fade-up mt-3 rounded-[18px] border border-black/[0.05] bg-white/80 p-3 text-[12px] text-[#666] shadow-[0_10px_28px_rgba(0,0,0,0.04)] backdrop-blur-sm dark:border-[#2A2C31] dark:bg-[#141516]/85 dark:text-[#AEB4C0]">
       <div className="flex items-start gap-2">
         <span className="mt-0.5 grid size-7 shrink-0 place-items-center rounded-full bg-[#111111] text-white">
           <ArrowUp className="size-3.5" />

@@ -1,18 +1,18 @@
-# Velion — Phase 1 "Honest Core Loop" Execution Plan
+# Verevon — Phase 1 "Honest Core Loop" Execution Plan
 
 > **Status:** Approved 2026-06-19 (recon-grounded + hardened by a 6-persona honesty-first review council). **Gated on Phase 0 (`docs/PHASE_0_PLAN.md`) being merged.**
-> **Goal:** Wire already-built backends through the Phase-0-clean gateway so the **monitor → brief → approve** spine is genuinely LIVE — without shipping a single new fabrication. Source audit: `Velion-ai-first.md`.
+> **Goal:** Wire already-built backends through the Phase-0-clean gateway so the **monitor → brief → approve** spine is genuinely LIVE — without shipping a single new fabrication. Source audit: `Verevon-ai-first.md`.
 >
 > ## THE ABSOLUTE RULE — no new fakeness
 > A reviewer must be able to point at **any rendered number, label, or status** and trace it to a real upstream response for a real org *today* — OR it is **explicitly labeled** setup / preview / empty / unavailable. No zeros-as-data, no placeholder-as-live, no per-connection claim the events can't support, no "execute" copy where nothing executes, no "complete export" where it's partial, no "monitoring" affordance where nothing runs. Replacing one fabrication with a quieter one is failure.
 >
 > ## Hard invariants (every PR)
-> - Gated on **Phase 0 merged**: `rg 'fn org_id_from_headers' "apps/Frontend Plane/velionv3/apps/gateway/src"` = 0; `x-velion-org-id` in `STRIPPED_HEADERS`. **Every new domain resolves org/identity via `upstream::authorized_org_id` / validated `AuthenticatedUser.user_id` only — never a client header/query/body**, proven by a negative test (spoofed org ignored).
+> - Gated on **Phase 0 merged**: `rg 'fn org_id_from_headers' "apps/Frontend Plane/verevonv3/apps/gateway/src"` = 0; `x-verevon-org-id` in `STRIPPED_HEADERS`. **Every new domain resolves org/identity via `upstream::authorized_org_id` / validated `AuthenticatedUser.user_id` only — never a client header/query/body**, proven by a negative test (spoofed org ignored).
 > - Each PR is a focused, revertible commit on its own branch (branch off `main`; never reset/clean the user's tree).
 > - **Never change the live DB password hex** (`apps/Control Plane/.env`); use it where a Control-Plane container is recreated (the documented drift is a live landmine).
 > - Quality gates green per PR: gateway `cargo fmt --check` + `clippy -- -D warnings` (gateway-crate-scoped, no `--workspace`) + `cargo test`; Go `go test -race ./...`; SPA `pnpm typecheck && pnpm lint && pnpm test && pnpm build`; live smoke through the running gateway.
 
-Paths: gateway = `apps/Frontend Plane/velionv3/apps/gateway`; SPA = `apps/Frontend Plane/velionv3/src` (quote the space).
+Paths: gateway = `apps/Frontend Plane/verevonv3/apps/gateway`; SPA = `apps/Frontend Plane/verevonv3/src` (quote the space).
 
 ---
 
@@ -46,7 +46,7 @@ After PR-0, the enablers **A1, B1, C1, D0, E1** are mutually independent and par
 
 ### Track A — insight-core (Market Intelligence, registry-only)
 - **`A1` — deploy** *(depends: PR-0)*: new Dockerfile (mirror `social-core`, **drop** its DATABASE_URL + NATS env — insight-core has neither); Application Plane compose service **pinned `replicas: 1`** (in-memory per-process repo); `INTERNAL_API_KEY` = the gateway's forwarded key (config.go hard-fails if empty); set `INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE` explicitly. **DoD:** container builds + healthy single replica; `/api/v1/insights/connectors` returns the real registry behind the internal key (not 401/404/502).
-- **`A2` — gateway + SPA** *(depends: A1 + PR-0)*: `insights.rs` (mirror `audit.rs`: `proxy_json` + `authorized_org_id`, empty-org → empty success envelope) with a **private `normalize_connector`** fn (insight-core `ConnectorSlot[]` → SPA `{id,kind,label,status}`) + `#[cfg(test)]` shape test; add `insight_core_url` to AppState/`config.rs`/**`test_state`** (or tests won't compile); merge in `build_router`. SPA: **drop `x-velion-org-id`**; rewrite `insights-client.test.ts` to assert the header is absent + no internal-key leak; metrics render an explicit **"not yet reporting / connect a source"** empty-state; `insightCore.state` never `"live"` for metrics. **DoD:** InsightsPage stops 404ing; registry renders; no zeros-as-data; gates green.
+- **`A2` — gateway + SPA** *(depends: A1 + PR-0)*: `insights.rs` (mirror `audit.rs`: `proxy_json` + `authorized_org_id`, empty-org → empty success envelope) with a **private `normalize_connector`** fn (insight-core `ConnectorSlot[]` → SPA `{id,kind,label,status}`) + `#[cfg(test)]` shape test; add `insight_core_url` to AppState/`config.rs`/**`test_state`** (or tests won't compile); merge in `build_router`. SPA: **drop `x-verevon-org-id`**; rewrite `insights-client.test.ts` to assert the header is absent + no internal-key leak; metrics render an explicit **"not yet reporting / connect a source"** empty-state; `insightCore.state` never `"live"` for metrics. **DoD:** InsightsPage stops 404ing; registry renders; no zeros-as-data; gates green.
 
 ### Track B — AI-action HITL (the centerpiece)
 - **`B1` — cc-go backend** *(depends: Phase 0)*: add `ListAIActions` across Repository/PGRepository/Service/Handler + routes `GET /ai-actions` (+ gated `/internal/ai-actions`), mirroring `ListTickets` (org-scoped `WHERE org_id=$1`, `status` default `suggested`, `conversationId` filter, limit clamp 1..100). **Harden `ReviewAIAction`** (`repository.go:374`): capture the UPDATE `CommandTag`; if `RowsAffected()==0` roll back + return `conversation.ErrNotFound` (→404) and **do NOT write the phantom `conversation_ai_reviews` row**; validate `Decision ∈ {approved,rejected}` (→400). **DoD:** `go test -race ./...` green incl. new table-driven tests (org-isolation; 404 on missing/foreign-org with no phantom row; decision-enum).

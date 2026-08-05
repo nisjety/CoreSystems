@@ -1,4 +1,4 @@
-# Velion Studio Core — Future Architecture
+# Verevon Studio Core — Future Architecture
 
 **Status:** Proposed architecture
 **Date:** 2026-07-18
@@ -6,25 +6,25 @@
 
 ## Purpose
 
-Velion Studio will combine:
+Verevon Studio will combine:
 
 - Open Design's agent-native creation loop: brief → plan → generate → preview → critique → revise → export.
 - Penpot's collaborative design-document model: vector objects, frames, components, variants, design tokens, responsive layouts, inspectable code, and real-time collaboration.
-- Velion's own frontend design, organization boundaries, approvals, business data, integrations, Social, Inbox, and agent workflows.
+- Verevon's own frontend design, organization boundaries, approvals, business data, integrations, Social, Inbox, and agent workflows.
 
-This is a Velion-native architecture. We are not copying either product's desktop shell, frontend, trust model, or service boundaries.
+This is a Verevon-native architecture. We are not copying either product's desktop shell, frontend, trust model, or service boundaries.
 
 ## Product definition
 
-Velion Studio is a collaborative, AI-first workspace where a user can create an editable design, ask Velion to change it, review the result, connect it to real business data, and publish an approved artifact to another Velion workflow.
+Verevon Studio is a collaborative, AI-first workspace where a user can create an editable design, ask Verevon to change it, review the result, connect it to real business data, and publish an approved artifact to another Verevon workflow.
 
 The canonical source of truth is a structured design document. Generated HTML, SVG, images, decks, PDFs, and videos are compiled artifacts and never the primary editable state.
 
 ## Ownership and service boundaries
 
 ```text
-Velion Studio UI (Frontend Plane)
-  ├─ Velion visual language and interaction design
+Verevon Studio UI (Frontend Plane)
+  ├─ Verevon visual language and interaction design
   ├─ canvas/editor, inspector, comments, review states
   ├─ artifact preview and export controls
   └─ chat/copilot entry points
@@ -206,7 +206,7 @@ All mutating endpoints require an idempotency key, validated organization scope,
 
 ## Migration from the current Studio
 
-The current Velion Studio canvas and gateway endpoints are a prototype surface. Migration should be staged:
+The current Verevon Studio canvas and gateway endpoints are a prototype surface. Migration should be staged:
 
 1. Keep the existing UI route and API response shape behind a compatibility adapter.
 2. Introduce the canonical document and artifact contracts in shared types.
@@ -216,7 +216,7 @@ The current Velion Studio canvas and gateway endpoints are a prototype surface. 
 6. Connect Model Plane runs and artifact manifests.
 7. Remove the compatibility store only after live tenant-isolation and recovery tests pass.
 
-Do not copy Open Design's local daemon or Penpot's entire frontend/backend into the monorepo. Reuse ideas and separately licensed components only after a file-level license review, while keeping Velion's own frontend design and plane ownership.
+Do not copy Open Design's local daemon or Penpot's entire frontend/backend into the monorepo. Reuse ideas and separately licensed components only after a file-level license review, while keeping Verevon's own frontend design and plane ownership.
 
 ## Acceptance criteria for implementation
 

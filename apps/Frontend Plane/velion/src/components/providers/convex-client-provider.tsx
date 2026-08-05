@@ -26,7 +26,7 @@ type ConvexTokenResponse = {
  * confused some users / linters; this is the canonical shape from the
  * Convex docs.
  *
- * The hook receives nothing — it pulls auth state via the velion
+ * The hook receives nothing — it pulls auth state via the verevon
  * `useAuth` hook and exposes the contract Convex expects. The returned
  * object is memoized so its identity only changes when the underlying
  * auth values change. Without this memo, every parent render of

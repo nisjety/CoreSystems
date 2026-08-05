@@ -7,8 +7,8 @@ import (
 
 func TestCompatAdapterTranslatesAllLegacySubjects(t *testing.T) {
 	cases := []string{
-		"velion.agent.run.run-1.event",
-		"velion.session.sess-1.command",
+		"verevon.agent.run.run-1.event",
+		"verevon.session.sess-1.command",
 		"aqencia.reasoning.reasoning.started",
 		"aqencia.reasoning.reasoning.completed",
 		"aqencia.reasoning.usage.recorded",
@@ -57,7 +57,7 @@ func TestFeatureFlagToggle(t *testing.T) {
 }
 
 func TestTranslateRoundTrip(t *testing.T) {
-	legacy := "velion.agent.run.run-42.event"
+	legacy := "verevon.agent.run.run-42.event"
 	v1 := TranslateLegacySubject(legacy)
 	back := TranslateNewToLegacy(v1)
 	if back == "" {

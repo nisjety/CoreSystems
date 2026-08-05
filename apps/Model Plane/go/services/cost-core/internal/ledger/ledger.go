@@ -191,7 +191,7 @@ type Ledger interface {
 
 	// PurgeOrg permanently deletes every cost/usage row scoped to orgID. Used
 	// by the GDPR org-erasure consumer (internal/consumers/org_erasure_consumer.go)
-	// when org-core publishes velion.gdpr.erasure.requested for
+	// when org-core publishes verevon.gdpr.erasure.requested for
 	// subject_type=="organization". Idempotent: calling it twice for the same
 	// orgID is safe (the second call deletes zero rows). Must never affect any
 	// other org's rows.

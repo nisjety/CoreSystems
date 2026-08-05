@@ -27,17 +27,17 @@ plugins:
     out: ../python/mp-events-py/src/mp_events/_gen
 
   # TypeScript — protoc-gen-es (message types only; transport-agnostic).
-  # Output lands in velion's lib/model-plane/gen/ so the frontend can
+  # Output lands in verevon's lib/model-plane/gen/ so the frontend can
   # construct typed requests + decode typed responses without a separate
-  # gRPC client. velion uses Connect-RPC over HTTP for the actual wire
+  # gRPC client. verevon uses Connect-RPC over HTTP for the actual wire
   # call (see lib/model-plane/reasoning.ts for the existing pattern).
   - remote: buf.build/bufbuild/es
-    out: ../../Frontend Plane/velion/src/lib/model-plane/gen
+    out: ../../Frontend Plane/verevon/src/lib/model-plane/gen
     opt:
       - target=ts
       - import_extension=js
   - remote: buf.build/bufbuild/connect-es
-    out: ../../Frontend Plane/velion/src/lib/model-plane/gen
+    out: ../../Frontend Plane/verevon/src/lib/model-plane/gen
     opt:
       - target=ts
       - import_extension=js

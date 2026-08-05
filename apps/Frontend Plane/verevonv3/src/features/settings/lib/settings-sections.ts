@@ -1,0 +1,148 @@
+export const workspaceSettingsSectionIds = [
+  'workspace',
+  'members',
+  'platform-users',
+  'billing',
+  'sso',
+  'org-security',
+  'integrations',
+  'trust',
+  'router-policy',
+  'finetune',
+  'mcp',
+  'skills',
+  'plugins',
+  'cron',
+  'memory',
+] as const
+
+export type WorkspaceSettingsSectionId = (typeof workspaceSettingsSectionIds)[number]
+
+export type SectionDetail = {
+  id: WorkspaceSettingsSectionId
+  label: string
+  title: string
+  description: string
+  saveLabel: string
+}
+
+export const workspaceSettingsSections: SectionDetail[] = [
+  {
+    id: 'workspace',
+    label: 'Workspace',
+    title: 'Workspace settings',
+    description: 'Manage shared identity, domains, regional defaults, and operational ownership.',
+    saveLabel: 'Save workspace',
+  },
+  {
+    id: 'members',
+    label: 'Members & roles',
+    title: 'Members & roles',
+    description: 'Control who has access, what they can do, and how seats are used.',
+    saveLabel: 'Save members',
+  },
+  {
+    id: 'platform-users',
+    label: 'All users (platform)',
+    title: 'All users',
+    description: 'Every user across all organizations. Platform super-admin only.',
+    saveLabel: 'Save',
+  },
+  {
+    id: 'billing',
+    label: 'Billing',
+    title: 'Billing',
+    description: 'Review plan, usage, payment method, invoices, and spending controls.',
+    saveLabel: 'Save billing',
+  },
+  {
+    id: 'sso',
+    label: 'SSO',
+    title: 'SSO',
+    description: 'Configure organization sign-in, identity providers, domain enforcement, and provisioning.',
+    saveLabel: 'Save SSO',
+  },
+  {
+    id: 'org-security',
+    label: 'Org security',
+    title: 'Org security',
+    description: 'Set organization-wide security requirements, session policy, and audit controls.',
+    saveLabel: 'Save security',
+  },
+  {
+    id: 'integrations',
+    label: 'Integrations',
+    title: 'Integrations',
+    description: 'Connect shared support, CRM, communication, and automation systems.',
+    saveLabel: 'Save integrations',
+  },
+  {
+    id: 'trust',
+    label: 'Trust Center',
+    title: 'Trust Center',
+    description:
+      'See exactly what each connected app can access, what data the AI has fetched, and how it is retained.',
+    saveLabel: 'Save trust settings',
+  },
+  {
+    id: 'router-policy',
+    label: 'Router policy',
+    title: 'Router policy',
+    description: 'Tune the Verevon intent layer: complexity scoring, budgets, and the model routing table.',
+    saveLabel: 'Save router policy',
+  },
+  {
+    id: 'finetune',
+    label: 'Fine-tune jobs',
+    title: 'Fine-tune jobs',
+    description: 'Manage Azure model fine-tuning jobs: upload training data, launch jobs, and track status.',
+    saveLabel: 'Save fine-tune',
+  },
+  {
+    id: 'mcp',
+    label: 'MCP-servere',
+    title: 'MCP-servere',
+    description: 'Registrer eksterne MCP-tjenere agenten kan bruke, og styr hvilke verktøy som er tillatt.',
+    saveLabel: 'Lagre MCP-servere',
+  },
+  {
+    id: 'skills',
+    label: 'Ferdigheter',
+    title: 'Ferdigheter',
+    description: 'Org-dekkende ferdigheter agenten bruker i chat — instrukser som injiseres når en samtale treffer utløser-nøkkelordene.',
+    saveLabel: 'Lagre ferdigheter',
+  },
+  {
+    id: 'plugins',
+    label: 'Plugin-pakker',
+    title: 'Plugin-pakker',
+    description: 'Registrer plugin-manifester som kan bidra med verktøy, ferdigheter og hooks. Inaktiv til en administrator aktiverer dem.',
+    saveLabel: 'Lagre plugins',
+  },
+  {
+    id: 'cron',
+    label: 'Planlagte kjøringer',
+    title: 'Planlagte kjøringer',
+    description: 'Tidsstyrte oppgaver agenten kjører automatisk via cron-uttrykk. Sweeperen fyrer forfalte planer og beregner neste kjøring.',
+    saveLabel: 'Lagre planer',
+  },
+  {
+    id: 'memory',
+    label: 'Minne',
+    title: 'Minne',
+    description: 'Se hva Verevon har lagret om deg på tvers av alle samtaler, og slett det du ikke vil at agenten skal huske.',
+    saveLabel: 'Lagre',
+  },
+]
+
+const sectionDetails = Object.fromEntries(
+  workspaceSettingsSections.map((section) => [section.id, section]),
+) as Record<WorkspaceSettingsSectionId, SectionDetail>
+
+export function isWorkspaceSettingsSection(value: string): value is WorkspaceSettingsSectionId {
+  return workspaceSettingsSectionIds.includes(value as WorkspaceSettingsSectionId)
+}
+
+export function getWorkspaceSettingsSection(value: WorkspaceSettingsSectionId): SectionDetail {
+  return sectionDetails[value]
+}

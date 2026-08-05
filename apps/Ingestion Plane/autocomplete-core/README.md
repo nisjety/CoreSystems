@@ -1,6 +1,6 @@
 # autocomplete-core
 
-Tenant-scoped typeahead for Velion and Quarry search flows.
+Tenant-scoped typeahead for Verevon and Quarry search flows.
 
 `autocomplete-core` is the input-assistance layer in front of Quarry. It
 does not execute search and does not generate answers. It consumes Quarry
@@ -22,14 +22,14 @@ Implemented:
 
 Still pending:
 
-- Live Velion suggestion E2E after the Docker recovery/redeploy
+- Live Verevon suggestion E2E after the Docker recovery/redeploy
 - Title ingestion once Quarry emits title-bearing metadata events
 - Optional correction endpoint after enough query corpus exists
 
 ## Architecture
 
 ```
-Velion server proxy
+Verevon server proxy
         │ GET /v1/suggestions
         ▼
 autocomplete-core
@@ -66,7 +66,7 @@ authoritative hydration store while Sonic stays the low-latency index.
 ## API
 
 Trusted callers should pass the tenant with `x-org-id`. Direct browser calls
-should go through a Velion/backend proxy so auth and rate limits stay outside
+should go through a Verevon/backend proxy so auth and rate limits stay outside
 this internal service.
 
 ```http

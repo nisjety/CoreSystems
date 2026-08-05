@@ -109,7 +109,7 @@ rg -Fq 'condition: service_healthy' "$compose"
 # Auth starts. No global/destructive broker operations are permitted.
 rg -Fq 'provision-audit' "$compose"
 rg -Fq 'condition: service_completed_successfully' "$compose"
-rg -Fq 'subjects: ["velion.audit.v2.control.auth-core.>"]' "$fixture"
+rg -Fq 'subjects: ["verevon.audit.v2.control.auth-core.>"]' "$fixture"
 rg -Fq 'max_msgs: 10_000' "$fixture"
 rg -Fq 'max_bytes: 8 * 1024 * 1024' "$fixture"
 rg -Fq 'max_age: nanos(60 * 60 * 1_000)' "$fixture"

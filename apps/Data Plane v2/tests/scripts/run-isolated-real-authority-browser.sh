@@ -4,7 +4,7 @@ set +x
 umask 077
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-FRONTEND_ROOT="$ROOT/../Frontend Plane/velionv3"
+FRONTEND_ROOT="$ROOT/../Frontend Plane/verevonv3"
 ISOLATED_OVERRIDE="$ROOT/tests/e2e/isolated/docker-compose.yml"
 AUTHORITY_OVERRIDE="$ROOT/tests/e2e/isolated/real-authority-compose.yml"
 BROWSER_OVERRIDE="$ROOT/tests/e2e/isolated/real-authority-browser-compose.yml"
@@ -180,7 +180,7 @@ export REAL_AUTHORITY_GATEWAY_CONVERSATION_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_PLANE_PRINCIPALS_JSON=$(printf '%s' \
   '{"retrieval-engine":{"credential":"'"$CONTROL_POLICY_SERVICE_API_KEY"'","audiences":["control-policy"],"orgIds":[],"allowAnyOrg":true,"scopes":["data:authorization:decide"],"scopesByAudience":{"control-policy":["data:authorization:decide"]}},"embedding-engine":{"credential":"'"$MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY"'","audiences":["inference-core"],"orgIds":[],"allowAnyOrg":true,"scopes":["inference:invoke"],"scopesByAudience":{"inference-core":["inference:invoke"]}},"browser-fixture-seeder":{"credential":"'"$REAL_AUTHORITY_PERSISTENCE_SERVICE_API_KEY"'","audiences":["data-plane"],"orgIds":[],"allowAnyOrg":true,"allowPersistentData":true,"scopes":["documents:write","org:data:write_all"],"scopesByAudience":{"data-plane":["documents:write","org:data:write_all"]}}}')
 export REAL_AUTHORITY_USER_CREDENTIALS_JSON=$(printf '%s' \
-  '[{"principal":"velion-gateway","audience":"user-core","token":"'"$REAL_AUTHORITY_GATEWAY_TOKEN"'","scopes":["users:read:self","users:write:self"]},{"principal":"retrieval-engine","audience":"user-core","token":"'"$REAL_AUTHORITY_RETRIEVAL_TOKEN"'","scopes":["authz:read"]}]')
+  '[{"principal":"verevon-gateway","audience":"user-core","token":"'"$REAL_AUTHORITY_GATEWAY_TOKEN"'","scopes":["users:read:self","users:write:self"]},{"principal":"retrieval-engine","audience":"user-core","token":"'"$REAL_AUTHORITY_RETRIEVAL_TOKEN"'","scopes":["authz:read"]}]')
 
 readonly -a compose=(docker compose --project-name "$project" -f "$ROOT/docker-compose.yml" -f "$ISOLATED_OVERRIDE" -f "$AUTHORITY_OVERRIDE" -f "$BROWSER_OVERRIDE")
 
@@ -390,7 +390,7 @@ for _ in {1..120}; do
   fi
   sleep 1
 done
-[ "$frontend_ready" -eq 1 ] || { echo "isolated Velion frontend did not become ready" >&2; exit 1; }
+[ "$frontend_ready" -eq 1 ] || { echo "isolated Verevon frontend did not become ready" >&2; exit 1; }
 
 REAL_AUTHORITY_BASE_URL="$REAL_AUTHORITY_PUBLIC_ORIGIN" \
 REAL_AUTHORITY_FIXTURE_FILE="$authority_file" \
@@ -398,4 +398,4 @@ REAL_AUTHORITY_BROWSER_FIXTURE_FILE="$browser_fixture_file" \
 REAL_AUTHORITY_PLAYWRIGHT_OUTPUT_DIR="$runtime_dir/playwright" \
 pnpm --dir "$FRONTEND_ROOT" exec playwright test --config=playwright.real-authority.config.ts --project=real-authority
 
-echo "PASS: disposable real Auth/User/Data/Velion browser Knowledge and GraphRAG E2E"
+echo "PASS: disposable real Auth/User/Data/Verevon browser Knowledge and GraphRAG E2E"

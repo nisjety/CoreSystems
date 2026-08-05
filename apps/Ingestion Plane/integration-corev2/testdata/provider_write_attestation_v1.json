@@ -23,7 +23,7 @@
   },
   "header": {
     "alg": "EdDSA",
-    "typ": "velion.provider-write-attestation+jwt",
+    "typ": "verevon.provider-write-attestation+jwt",
     "kid": "conversation-write-2026-07"
   },
   "claims": {

@@ -33,23 +33,23 @@ Phase 5 focuses on completing event publishing across all Control Plane services
 **user-core service:**
 ```
 ✅ Shared NATS: AQENCIA_CONTROLPLANE stream ready
-✅ Connected to shared NATS: nats://velion-nats:4222
-✅ Connected to shared NATS (velion-nats)
+✅ Connected to shared NATS: nats://verevon-nats:4222
+✅ Connected to shared NATS (verevon-nats)
 ✅ user-core service connected to shared NATS for event publishing
 ```
 
 **org-core service:**
 ```
 ✅ Shared NATS (org-core): AQENCIA_CONTROLPLANE stream ready
-✅ Connected to shared NATS (org-core): nats://velion-nats:4222
-✅ org-core connected to shared NATS (velion-nats)
+✅ Connected to shared NATS (org-core): nats://verevon-nats:4222
+✅ org-core connected to shared NATS (verevon-nats)
 ```
 
 **billing-core service:**
 ```
 ✅ Shared NATS (billing-core): AQENCIA_CONTROLPLANE stream ready
-✅ Connected to shared NATS (billing-core): nats://velion-nats:4222
-✅ billing-core connected to shared NATS (velion-nats)
+✅ Connected to shared NATS (billing-core): nats://verevon-nats:4222
+✅ billing-core connected to shared NATS (verevon-nats)
 ```
 
 **auth-core service:**
@@ -58,7 +58,7 @@ Phase 5 focuses on completing event publishing across all Control Plane services
 ✅ Organization event middleware registered
 ✅ Direct NATS connection established
 [SharedNatsService] AQENCIA_CONTROLPLANE JetStream stream ready
-[SharedNatsService] Connected to shared NATS at nats://velion-nats:4222
+[SharedNatsService] Connected to shared NATS at nats://verevon-nats:4222
 ```
 
 ---
@@ -196,7 +196,7 @@ controlplane-redis      redis:7             ✅ Running (Healthy)
                         │                 │
                 ┌───────▼─────────────────▼────────────┐
                 │    Shared NATS Broker Core            │
-                │    velion-nats:4222                 │
+                │    verevon-nats:4222                 │
                 │   Token: aqencia-shared-nats-token   │
                 └───────┬──────────────────────────────┘
                         │
@@ -272,7 +272,7 @@ controlplane-redis      redis:7             ✅ Running (Healthy)
 ## Critical Context
 
 **Shared NATS Configuration:**
-- Broker: `nats://velion-nats:4222`
+- Broker: `nats://verevon-nats:4222`
 - Token: `aqencia-shared-nats-token-2026`
 - JetStream Stream: `AQENCIA_CONTROLPLANE`
 - Subject Pattern: `aqencia.controlplane.>`

@@ -20,7 +20,7 @@ export function ChatMarkdown({ content, className }: ChatMarkdownProps) {
   return (
     <div
       className={cn(
-        "velion-chat-prose text-[15px] leading-[1.68] text-[#24262D] dark:text-[#F4F6F8]",
+        "verevon-chat-prose text-[15px] leading-[1.68] text-[#24262D] dark:text-[#F4F6F8]",
         className,
       )}
     >

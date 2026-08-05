@@ -4,7 +4,7 @@ Baseline live audit: 2026-07-10
 
 Remediation re-verification: 2026-07-11
 
-Velion/GraphRAG re-verification: 2026-07-15
+Verevon/GraphRAG re-verification: 2026-07-15
 
 Compose/rebuild re-verification: 2026-07-16
 
@@ -89,7 +89,7 @@ unchanged and not production-ready.
   401/401/200/403 for no credential, forged header, valid bearer, and valid
   bearer plus spoofed organization.
 - A supported-contract fixture created two real users and organizations through
-  Auth Core/User Core/Control. Velion Playwright passed **2/2**: authorized
+  Auth Core/User Core/Control. Verevon Playwright passed **2/2**: authorized
   Knowledge, GraphRAG, and navbar retrieval are usable, while spoofed tenant and
   search calls contain none of the second fixture's serialized fields.
 - The restrictive signed-ZDR run left stabilized final state identical across
@@ -119,9 +119,9 @@ graph content were suppressed. No shared/customer content was enumerated and no
 rebuild, cleanup, purge, bulk delete, global admin, or destructive endpoint was
 invoked. Each final harness removed only its own random project resources.
 
-## 2026-07-15 Velion/GraphRAG addendum
+## 2026-07-15 Verevon/GraphRAG addendum
 
-The Velion gateway no longer uses a shared internal key as interactive Data
+The Verevon gateway no longer uses a shared internal key as interactive Data
 authority. Every documents, retrieval, wiki, source, graph, navbar-search,
 ingestion-source, onboarding graph-preview, and Operating Map call mints an
 `aud=data-plane` bearer from the verified session, pins tenant from canonical
@@ -152,8 +152,8 @@ Sanitized source evidence dated 2026-07-15:
 | Graph | 28 passed, 1 explicit disposable-PostgreSQL ignore; focused extractor 9/9; strict clippy passed |
 | Retrieval | 193 non-ignored passed, 10 explicit infrastructure ignores; strict all-target clippy passed |
 | Auth Core registry | 12/12 focused tests and build passed; 90.19% statements / 93.84% branches / 100% functions / 89.79% lines |
-| Velion Gateway | 272/272 tests passed |
-| Velion SPA | 68 files / 360 tests, typecheck, and production build passed; lint has zero errors and one pre-existing warning |
+| Verevon Gateway | 272/272 tests passed |
+| Verevon SPA | 68 files / 360 tests, typecheck, and production build passed; lint has zero errors and one pre-existing warning |
 | Documents signed ZDR | RED/GREEN required-claim, monotonic single/bulk, and source-object pre-persistence tests; full race/vet/build passed; auth 95.5%, both changed ZDR decision helpers 100% (broad handler package 14.9%) |
 
 The passing checkpoint used the durable command
@@ -394,7 +394,7 @@ management before deployment; this program did not mutate secrets.
    Execution/Model gRPC listeners without the equivalent contract must remain
    disabled; re-enabling them would reopen an MVP blocker.
 3. Signed Control plus original-user-proof read delegation and the real-user
-   Velion journey pass in isolation. Grant mutation/listing remains denied until
+   Verevon journey pass in isolation. Grant mutation/listing remains denied until
    resource-owner authorization is defined.
 4. Quickwit durable safe orchestration exists and its isolated PostgreSQL
    lifecycle passed, but destructive clear remains 501 pending trustworthy

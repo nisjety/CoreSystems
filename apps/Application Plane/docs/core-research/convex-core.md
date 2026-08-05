@@ -6,7 +6,7 @@ _Audited 2026-07-11. Evidence grades: **[live-curl]** = verified against a runni
 
 ## Current State
 
-`convex-core` is the Application Plane's reactive projection / subscription layer. It is **non-authoritative** — it mirrors Control/Model/Ingestion Plane state so the Velion v3 frontend can subscribe reactively. It is **live** on the backend + HTTP-actions surface; the separate `convex-gateway` container's own HTTP port is dead but that does not break projections (see below).
+`convex-core` is the Application Plane's reactive projection / subscription layer. It is **non-authoritative** — it mirrors Control/Model/Ingestion Plane state so the Verevon v3 frontend can subscribe reactively. It is **live** on the backend + HTTP-actions surface; the separate `convex-gateway` container's own HTTP port is dead but that does not break projections (see below).
 
 Four containers:
 
@@ -47,7 +47,7 @@ Broken: `org.member.removed` (finding 1), `import.completed` (finding 3).
 ## Stub, Mock, Placeholder, and Breakage Audit
 
 1. **`onOrganizationMemberRemoved` is called but never defined — CONFIRMED [live-curl].**
-   `http.ts:276` (`case "onOrganizationMemberRemoved"` → `ctx.runAction(internal.nats.onOrganizationMemberRemoved,…)`) and `nats-subscriber.js:308` both invoke it; `velion.controlplane.org.member.removed` is actively subscribed (`nats-subscriber.js:121`). No `export const onOrganizationMemberRemoved` exists anywhere in `convex/` (nats.ts defines up to `onOrganizationMemberAdded`/`onImportCompleted` only). Live probe:
+   `http.ts:276` (`case "onOrganizationMemberRemoved"` → `ctx.runAction(internal.nats.onOrganizationMemberRemoved,…)`) and `nats-subscriber.js:308` both invoke it; `verevon.controlplane.org.member.removed` is actively subscribed (`nats-subscriber.js:121`). No `export const onOrganizationMemberRemoved` exists anywhere in `convex/` (nats.ts defines up to `onOrganizationMemberAdded`/`onImportCompleted` only). Live probe:
    `POST :3211/api/webhook/nats/onOrganizationMemberRemoved` → **HTTP 500 `{"error":"Couldn't resolve api.nats.onOrganizationMemberRemoved"}`**.
    Impact: member removals in the Control Plane never propagate to the Convex projection (subscriber catches the error and continues) → stale membership mirror. The prior Phase-1 finding is **still open**.
 
@@ -55,7 +55,7 @@ Broken: `org.member.removed` (finding 1), `import.completed` (finding 3).
    `http.ts` webhooks `ragComplete`/`jobProgress` call `api.jobs.getByExternalId`, `updateStatus`, `updateProgress`. No `convex/jobs.ts` exists (a `jobs` table is defined in `schema.ts:125` but is orphaned — no function reads it). Because `_generated/api.js` is `anyApi`, the reference resolves at ref-time but fails at call-time exactly like finding 1. `/webhooks/rag/complete` and `/webhooks/job/progress` are dead legacy (Org-Core/AI-Core RAG-job webhooks); not wired to any current caller.
 
 3. **`api.imports.recordCompleted` references a missing module — NEW/CONFIRMED [source-only].**
-   `nats.ts:264` (`onImportCompleted`, subject `velion.ingestion.import.completed`) calls `api.imports.recordCompleted`. No `convex/imports.ts` module and no `imports` table. For an org that exists the handler fails at that call (for a missing org it returns `org_not_found` first). Crawl-lifecycle projection works (uses `ingestJobs`); the discrete `import.completed` event does not.
+   `nats.ts:264` (`onImportCompleted`, subject `verevon.ingestion.import.completed`) calls `api.imports.recordCompleted`. No `convex/imports.ts` module and no `imports` table. For an org that exists the handler fails at that call (for a missing org it returns `org_not_found` first). Crawl-lifecycle projection works (uses `ingestJobs`); the discrete `import.completed` event does not.
 
 4. **`verifyWebhookSignature` is a stub — [source-only].**
    `http.ts:172-183`: returns `true` when `WEBHOOK_SECRET` is unset; when set, only checks `signature.startsWith("sha256=")` — no HMAC. Genuine security stub. Low live impact (the webhooks it guards are already broken via finding 2), but real if those are ever restored. Distinct from the `X-Service-Key` ingest path, which is properly fail-closed.

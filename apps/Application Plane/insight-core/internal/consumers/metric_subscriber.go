@@ -18,14 +18,14 @@ import (
 
 const (
 	metricSubscriberDurable = "insight-core-metric-subscriber"
-	applicationSubject      = "velion.application.>"
+	applicationSubject      = "verevon.application.>"
 
 	// Subject-domain prefixes that disambiguate the producer behind an
 	// application event. The bare LifecycleEvent.Type values do not encode
 	// their domain, so the subject prefix is the honest source-of-truth for
 	// per-producer attribution (surface + source).
-	conversationSubjectPrefix = "velion.application.conversation."
-	socialSubjectPrefix       = "velion.application.social."
+	conversationSubjectPrefix = "verevon.application.conversation."
+	socialSubjectPrefix       = "verevon.application.social."
 
 	// metricSource* identify the upstream producer on each recorded metric so
 	// the metrics view can attribute counts honestly. NOT a label of intent —
@@ -59,7 +59,7 @@ type applicationEvent struct {
 }
 
 // metricsSnapshottedType is social-core's event type (subject minus the
-// `velion.application.social.` prefix) for SubjectMetricsSnapshotted. Handled
+// `verevon.application.social.` prefix) for SubjectMetricsSnapshotted. Handled
 // separately from socialMapping because it carries real per-metric values
 // fetched from social-core, not a fixed count of 1.
 const metricsSnapshottedType = "metrics.snapshotted"
@@ -71,7 +71,7 @@ type metricTarget struct {
 }
 
 // conversationMapping maps a conversation-core event Type (the subject minus
-// the `velion.application.conversation.` prefix) to an insight (surface,
+// the `verevon.application.conversation.` prefix) to an insight (surface,
 // metric, source). Each mapped event contributes a count of 1. Types not in
 // this map are skipped — never mapped to a fabricated metric.
 //
@@ -89,7 +89,7 @@ var conversationMapping = map[string]metricTarget{
 }
 
 // aiActionReviewedType is conversation-core's event type (subject minus the
-// `velion.application.conversation.` prefix) for SubjectAIActionReviewed.
+// `verevon.application.conversation.` prefix) for SubjectAIActionReviewed.
 // Handled separately from conversationMapping because the same event type
 // must resolve to one of TWO distinct metrics depending on the reviewer's
 // real decision — never a single undifferentiated "reviewed" count that
@@ -108,7 +108,7 @@ var aiActionDecisionMetrics = map[string]string{
 }
 
 // socialMapping maps a social-core lifecycle event Type (the subject minus the
-// `velion.application.social.` prefix, e.g. `post.created`,
+// `verevon.application.social.` prefix, e.g. `post.created`,
 // `publish_job.completed`) to an insight (surface=social). Types not in this
 // map are skipped — never mapped to a fabricated metric. Mirrors the subject
 // constants in social-core/internal/social/types.go.
@@ -149,7 +149,7 @@ func NewMetricSubscriber(js nats.JetStreamContext, recorder MetricRecorder, fetc
 }
 
 func (s *MetricSubscriber) Start(_ context.Context) error {
-	return s.consumer.BindProvisioned(applicationSubject, "VELION_APPLICATION", metricSubscriberDurable, s.handle)
+	return s.consumer.BindProvisioned(applicationSubject, "VEREVON_APPLICATION", metricSubscriberDurable, s.handle)
 }
 
 func (s *MetricSubscriber) Stop() { s.consumer.Stop() }
@@ -193,8 +193,8 @@ func metricEventID(eventID, metric string) string {
 
 // resolveTarget selects the (surface, metric, source) for an application event
 // from the producer that published it. The subject domain is the
-// source-of-truth: a `velion.application.social.*` subject resolves against the
-// social mapping, `velion.application.conversation.*` against the conversation
+// source-of-truth: a `verevon.application.social.*` subject resolves against the
+// social mapping, `verevon.application.conversation.*` against the conversation
 // mapping. Any other subject domain, or a type not in the resolved domain's
 // allow-list, returns ok=false — the event is skipped, never counted.
 func resolveTarget(subject string, eventType string) (metricTarget, bool) {

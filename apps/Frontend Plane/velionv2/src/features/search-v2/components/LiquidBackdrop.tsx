@@ -4,7 +4,7 @@
  * LiquidBackdrop — a pure-presentational animated "liquid glass" gradient.
  *
  * Renders an airy, near-white cream surface with a few pale warm colour blobs
- * (coral + apricot + soft-accent, from the Velion brand palette) that drift
+ * (coral + apricot + soft-accent, from the Verevon brand palette) that drift
  * slowly behind the content. Two visual variants:
  *
  *  - "idle"   → barely-there pale warm drift for the empty search prompt.
@@ -40,19 +40,19 @@ export function LiquidBackdrop({ variant = "idle", className }: LiquidBackdropPr
       aria-hidden="true"
       data-variant={variant}
       className={[
-        "velion-liquid-backdrop pointer-events-none absolute inset-0 overflow-hidden",
+        "verevon-liquid-backdrop pointer-events-none absolute inset-0 overflow-hidden",
         className ?? "",
       ].join(" ")}
     >
       {/* Base wash — static gradient, no motion. */}
-      <div className="velion-liquid-base absolute inset-0" />
+      <div className="verevon-liquid-base absolute inset-0" />
 
       {/* Drifting colour blobs. Each is a soft radial gradient on its own
           GPU layer; they orbit on slightly different cadences so the field
           never visibly loops. */}
-      <div className={`velion-liquid-blob velion-liquid-blob-1 ${animate ? "is-animated" : ""}`} />
-      <div className={`velion-liquid-blob velion-liquid-blob-2 ${animate ? "is-animated" : ""}`} />
-      <div className={`velion-liquid-blob velion-liquid-blob-3 ${animate ? "is-animated" : ""}`} />
+      <div className={`verevon-liquid-blob verevon-liquid-blob-1 ${animate ? "is-animated" : ""}`} />
+      <div className={`verevon-liquid-blob verevon-liquid-blob-2 ${animate ? "is-animated" : ""}`} />
+      <div className={`verevon-liquid-blob verevon-liquid-blob-3 ${animate ? "is-animated" : ""}`} />
     </div>
   );
 }

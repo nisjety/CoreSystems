@@ -5,7 +5,7 @@ import type { BetterAuthPlugin } from 'better-auth';
  * Minimal core-publish surface the audit plugin needs. Satisfied by
  * DirectNatsService (the LOCAL control-plane bus → controlplane-nats, where
  * audit-core's primary subscription listens). Audit deliberately uses the local
- * bus, not the shared velion-nats bus (which carries cross-plane domain/ACL
+ * bus, not the shared verevon-nats bus (which carries cross-plane domain/ACL
  * events), so it never depends on the shared bus being up.
  */
 interface AuditNatsPublisher {
@@ -31,10 +31,10 @@ export interface AuditEvent {
 }
 
 /**
- * audit-core AuditEvent schema (velion.audit.v2.control.auth-core.<event>)
+ * audit-core AuditEvent schema (verevon.audit.v2.control.auth-core.<event>)
  * org_id, plane, and event are REQUIRED fields — omit the publish when org_id is absent.
  */
-interface VelionAuditEvent {
+interface VerevonAuditEvent {
   occurred_at: string;
   event_id: string;
   org_id: string;
@@ -59,17 +59,17 @@ export function setAuditNatsPublisher(svc: AuditNatsPublisher | null): void {
 }
 
 /**
- * Publish to velion.audit.v2.control.auth-core.<event> over the LOCAL control-plane bus
+ * Publish to verevon.audit.v2.control.auth-core.<event> over the LOCAL control-plane bus
  * (controlplane-nats), only when org_id is known (audit-core rejects events
  * without it). Core publish matches audit-core's core QueueSubscribe.
  */
-export async function publishVelionAuditDurable(
-  evt: VelionAuditEvent,
+export async function publishVerevonAuditDurable(
+  evt: VerevonAuditEvent,
 ): Promise<void> {
   if (!auditNats) {
     throw new Error('Durable audit transport unavailable');
   }
-  const subject = `velion.audit.v2.control.auth-core.${evt.event}`;
+  const subject = `verevon.audit.v2.control.auth-core.${evt.event}`;
   await auditNats.publishAuditDurable(subject, {
     ...evt,
     plane: 'control',
@@ -168,7 +168,7 @@ export function auditPlugin(): BetterAuthPlugin {
                 ) {
                   throw new Error('Sign-in has no stable audit identity');
                 }
-                await publishVelionAuditDurable({
+                await publishVerevonAuditDurable({
                   occurred_at: new Date(sessionCreatedAt).toISOString(),
                   event_id: `session:${sessionId}:sign_in`,
                   org_id: orgId,

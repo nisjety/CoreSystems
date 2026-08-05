@@ -1,7 +1,7 @@
-//! Runtime-tunable configuration for the Velion intent layer.
+//! Runtime-tunable configuration for the Verevon intent layer.
 //!
-//! The intent layer ([`super::intent`]) turns a `velion-budget` /
-//! `velion-balance` / `velion-genius` mode into a concrete model id by
+//! The intent layer ([`super::intent`]) turns a `verevon-budget` /
+//! `verevon-balance` / `verevon-genius` mode into a concrete model id by
 //! combining heuristic task complexity with the org's budget posture. The
 //! exact numbers behind those two steps — the complexity scoring weights, the
 //! reasoning-keyword list, and the (mode × complexity) → model table — used to
@@ -16,14 +16,14 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::intent::{Complexity, VelionMode, CHEAP_FALLBACK};
+use super::intent::{Complexity, VerevonMode, CHEAP_FALLBACK};
 
 /// The full runtime routing policy. Serializes as `snake_case` JSON; the
 /// canonical schema is this struct (session-core stores it as an opaque string).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct RoutingPolicy {
-    /// Master switch for the intent layer. When `false`, `velion-*` ids fall
+    /// Master switch for the intent layer. When `false`, `verevon-*` ids fall
     /// through to the legacy per-provider default resolution.
     pub enabled: bool,
     /// Monthly USD budget cap — the denominator for the budget posture.
@@ -43,7 +43,7 @@ pub struct RoutingPolicy {
     /// quota **per deployment**, so a sibling Claude deployment is a real,
     /// usually-healthy alternative rather than a retry of the same bucket.
     ///
-    /// Only consulted for a model the intent layer resolved from a `velion-*`
+    /// Only consulted for a model the intent layer resolved from a `verevon-*`
     /// mode — never for a model the caller pinned. An empty ladder disables the
     /// behaviour entirely.
     #[serde(default = "default_tool_fallback_ladder")]
@@ -258,11 +258,11 @@ impl RoutingPolicy {
     /// The model id for a `(mode, complexity)` pair, before any budget posture
     /// adjustment. Mirrors the old `choose()` table body.
     #[must_use]
-    pub fn cell(&self, mode: VelionMode, complexity: Complexity) -> &str {
+    pub fn cell(&self, mode: VerevonMode, complexity: Complexity) -> &str {
         let row = match mode {
-            VelionMode::Budget => &self.table.budget,
-            VelionMode::Balance => &self.table.balance,
-            VelionMode::Genius => &self.table.genius,
+            VerevonMode::Budget => &self.table.budget,
+            VerevonMode::Balance => &self.table.balance,
+            VerevonMode::Genius => &self.table.genius,
         };
         match complexity {
             Complexity::Simple => &row.simple,
@@ -390,7 +390,7 @@ mod tests {
         }"#;
         let parsed: RoutingPolicy = serde_json::from_str(json).expect("parse external json");
         assert_eq!(
-            parsed.cell(VelionMode::Genius, Complexity::Complex),
+            parsed.cell(VerevonMode::Genius, Complexity::Complex),
             "claude-opus-4-8"
         );
         assert_eq!(parsed.complexity.keywords, vec!["prove", "derive"]);
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn default_matches_old_choose_for_all_cells() {
         let policy = RoutingPolicy::default();
-        for mode in [VelionMode::Budget, VelionMode::Balance, VelionMode::Genius] {
+        for mode in [VerevonMode::Budget, VerevonMode::Balance, VerevonMode::Genius] {
             for cx in [
                 Complexity::Simple,
                 Complexity::Moderate,
@@ -423,41 +423,41 @@ mod tests {
         let policy = RoutingPolicy::default();
         // Budget — cheapest tier.
         assert_eq!(
-            policy.cell(VelionMode::Budget, Complexity::Simple),
+            policy.cell(VerevonMode::Budget, Complexity::Simple),
             "gpt-5-nano"
         );
         assert_eq!(
-            policy.cell(VelionMode::Budget, Complexity::Moderate),
+            policy.cell(VerevonMode::Budget, Complexity::Moderate),
             "gpt-4o-mini"
         );
         assert_eq!(
-            policy.cell(VelionMode::Budget, Complexity::Complex),
+            policy.cell(VerevonMode::Budget, Complexity::Complex),
             "gpt-5-mini"
         );
         // Balance — rises to a strong reasoner only when complex.
         assert_eq!(
-            policy.cell(VelionMode::Balance, Complexity::Simple),
+            policy.cell(VerevonMode::Balance, Complexity::Simple),
             "gpt-4o-mini"
         );
         assert_eq!(
-            policy.cell(VelionMode::Balance, Complexity::Moderate),
+            policy.cell(VerevonMode::Balance, Complexity::Moderate),
             "gpt-5-mini"
         );
         assert_eq!(
-            policy.cell(VelionMode::Balance, Complexity::Complex),
+            policy.cell(VerevonMode::Balance, Complexity::Complex),
             "claude-sonnet-4-6"
         );
         // Genius — tops out at Opus, efficient on trivial turns.
         assert_eq!(
-            policy.cell(VelionMode::Genius, Complexity::Simple),
+            policy.cell(VerevonMode::Genius, Complexity::Simple),
             "gpt-5-mini"
         );
         assert_eq!(
-            policy.cell(VelionMode::Genius, Complexity::Moderate),
+            policy.cell(VerevonMode::Genius, Complexity::Moderate),
             "claude-sonnet-4-6"
         );
         assert_eq!(
-            policy.cell(VelionMode::Genius, Complexity::Complex),
+            policy.cell(VerevonMode::Genius, Complexity::Complex),
             "claude-opus-4-8"
         );
     }

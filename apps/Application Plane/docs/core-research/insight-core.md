@@ -14,10 +14,10 @@ It is a **real, wired, honest service**, not a placeholder. `go build ./...` is 
 
 The **later view is correct as of this audit**:
 
-- **Wired to Velion v3.** The gateway registers the insights router (`apps/gateway/src/main.rs` merges `domains::insights::router`) exposing `GET /api/v1/insights/connectors` and `GET /api/v1/insights/overview`, proxying to `INSIGHT_CORE_URL` (default `http://insight-core:3163`) and forwarding `x-org-id` from the validated session. `domains/briefs.rs` additionally fans in `/api/v1/insights/overview` for the briefs surface. The SPA has a full `/insights` route tree (`overview|social|inbox|agents|campaigns|experiments`) in `src/app/App.tsx`, an `InsightsPage` component, `@/shared/api/insights-client`, and an `insights-workspace` lib [source-only]. The old "v3 `/api/v1/insights/overview` 404" is **stale** — the route exists end-to-end.
+- **Wired to Verevon v3.** The gateway registers the insights router (`apps/gateway/src/main.rs` merges `domains::insights::router`) exposing `GET /api/v1/insights/connectors` and `GET /api/v1/insights/overview`, proxying to `INSIGHT_CORE_URL` (default `http://insight-core:3163`) and forwarding `x-org-id` from the validated session. `domains/briefs.rs` additionally fans in `/api/v1/insights/overview` for the briefs surface. The SPA has a full `/insights` route tree (`overview|social|inbox|agents|campaigns|experiments`) in `src/app/App.tsx`, an `InsightsPage` component, `@/shared/api/insights-client`, and an `insights-workspace` lib [source-only]. The old "v3 `/api/v1/insights/overview` 404" is **stale** — the route exists end-to-end.
 - **Consumes real data, produces no synthetic metrics.** Three producer legs record real lifecycle events as metric events (never fabricated):
-  1. `conversation-core` → `surface=inbox` (ticket/conversation/message/ai_action counts) — shared `velion-nats` bus, subject `velion.application.conversation.*`.
-  2. `social-core` → `surface=social` (post/campaign/approval/publish_job counts) plus `surface=external_analytics` (real provider metric rows fetched on `metrics.snapshotted` via `GET /api/v1/social/metrics`) — same bus, `velion.application.social.*`.
+  1. `conversation-core` → `surface=inbox` (ticket/conversation/message/ai_action counts) — shared `verevon-nats` bus, subject `verevon.application.conversation.*`.
+  2. `social-core` → `surface=social` (post/campaign/approval/publish_job counts) plus `surface=external_analytics` (real provider metric rows fetched on `metrics.snapshotted` via `GET /api/v1/social/metrics`) — same bus, `verevon.application.social.*`.
   3. `model-plane-agents` → `surface=agents` (`RUN_STARTED/COMPLETED/FAILED`, `ACTION_COMPLETED`, `APPROVAL_REQUESTED/DECIDED`) — the isolated **model-plane NATS bus**, subject `mp.v1.run.*.event` + `mp.v1.orchestration.approval`. This is the "RUN_* insights producer" from the Phase 7 B12 work.
 
   The rollup layer only counts events on an explicit allow-list (`conversationMapping`/`socialMapping`/`agentMetricMapping`); unmapped types are skipped, orgless events are skipped, and producer attribution (`source`) is threaded honestly from the subject domain. Briefs below `BriefMinEvents=5` are labelled `preview` with an honest disclosure — never a fabricated trend.
@@ -62,7 +62,7 @@ So the analytics pipeline is real and correctly wired, but the overview/scorecar
 
 Running container env [inspect]:
 - `DATABASE_URL=postgresql://appuser:application-postgres-secret@application-postgres:5432/application_plane` → durable PG mode active (schema `insight_core`, migration 002 namespaces the table away from the other cores sharing application-postgres).
-- `NATS_URL=nats://velion-nats:4222` (+ token) → conversation/social metric subscriber active.
+- `NATS_URL=nats://verevon-nats:4222` (+ token) → conversation/social metric subscriber active.
 - `MODEL_PLANE_NATS_URL=nats://model-plane-nats-1:4222` → agents subscriber active; `main.go` provisions a bounded `MODEL_PLANE_RUN_EVENTS` stream (48h/64MB) so the durable consumer can bind to the Model Plane's otherwise stream-less core-NATS run events.
 - `SOCIAL_CORE_URL=http://social-core:3162`, `INTEGRATION_CORE_URL=http://integration-api:3026`, `INTERNAL_API_KEY` = shared cross-plane key.
 - **`NOTIFICATION_CORE_URL` is NOT set** (absent from the running env and from the compose block, lines 561-594) → the daily-brief scheduler is **disabled at runtime** (`main.go` requires `NOTIFICATION_CORE_URL != "" && DATABASE_URL != ""`). The delivery code is complete and unit-tested but inert here.

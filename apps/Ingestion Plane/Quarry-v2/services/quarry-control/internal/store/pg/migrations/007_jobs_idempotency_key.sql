@@ -1,4 +1,4 @@
--- Add idempotency_key for job creation de-dupe. Velion's onboarding
+-- Add idempotency_key for job creation de-dupe. Verevon's onboarding
 -- wizard generates a key per submit attempt; if the user double-clicks
 -- the Submit button or the network retries the same POST, control
 -- returns the existing job record (200) instead of creating a

@@ -20,7 +20,7 @@ import (
 
 // deletionFanoutRecorder is a fake orgcore.SharedPublisher that records every
 // PublishPlain call so tests can assert on the exact cross-plane Flow C
-// events (velion.org.deletion.pending/.cancelled) a request produced,
+// events (verevon.org.deletion.pending/.cancelled) a request produced,
 // without standing up real NATS. Mirrors the existing
 // sharedPlanChangeTestPublisher fake in internal/org/plan_change_postgres_test.go.
 type deletionFanoutRecorder struct {
@@ -34,8 +34,11 @@ type deletionFanoutRecorder struct {
 func (r *deletionFanoutRecorder) PublishOrgCreated(context.Context, string, string, string, string, map[string]any) {
 }
 func (r *deletionFanoutRecorder) PublishOrgUpdated(context.Context, string, map[string]any) {}
-func (r *deletionFanoutRecorder) PublishOrgDeleted(context.Context, string, string)          {}
+func (r *deletionFanoutRecorder) PublishOrgDeleted(context.Context, string, string)         {}
 func (r *deletionFanoutRecorder) PublishPlanChanged(context.Context, string, string, string, string, string, string, int64) error {
+	return nil
+}
+func (r *deletionFanoutRecorder) PublishInteractiveRetentionEnabled(context.Context, string, int64) error {
 	return nil
 }
 func (r *deletionFanoutRecorder) PublishMemberAdded(context.Context, string, string, string, string, string) {
@@ -75,8 +78,8 @@ func (r *deletionFanoutRecorder) lastPayload(subject string) (map[string]any, bo
 // TestControlLifecycleOrgDeletionSelfServiceHTTPFlow exercises the full Flow
 // C org-deletion HTTP surface end to end against a disposable Postgres:
 // soft-delete's confirm/org_name gate, ledger creation +
-// velion.org.deletion.pending on success, restore's 409-when-not-pending /
-// 200-when-pending + velion.org.deletion.cancelled, and the
+// verevon.org.deletion.pending on success, restore's 409-when-not-pending /
+// 200-when-pending + verevon.org.deletion.cancelled, and the
 // mark-exported/acknowledge/status self-or-admin gate (an active member acts
 // on their own row; a caller who is not a member of this org at all is
 // rejected; an owner sees every member's ledger row via status, a plain
@@ -170,7 +173,7 @@ func TestControlLifecycleOrgDeletionSelfServiceHTTPFlow(t *testing.T) {
 		nonce := nextNonce()
 		digest := serviceDelegationBodyDigest([]byte(body))
 		claims := serviceDelegationClaims{
-			Principal:  "velion-gateway",
+			Principal:  "verevon-gateway",
 			Audience:   "org-core",
 			Timestamp:  now.UTC().Format(time.RFC3339),
 			Nonce:      nonce,
@@ -237,16 +240,16 @@ func TestControlLifecycleOrgDeletionSelfServiceHTTPFlow(t *testing.T) {
 		t.Fatalf("deletion ledger missing active members: %+v", ledger)
 	}
 
-	pendingPayload, ok := fanout.lastPayload("velion.org.deletion.pending")
+	pendingPayload, ok := fanout.lastPayload("verevon.org.deletion.pending")
 	if !ok {
-		t.Fatal("velion.org.deletion.pending was not published")
+		t.Fatal("verevon.org.deletion.pending was not published")
 	}
 	if pendingPayload["org_id"] != orgID || pendingPayload["org_name"] != orgName || pendingPayload["requested_by"] != ownerID {
-		t.Fatalf("velion.org.deletion.pending payload = %+v", pendingPayload)
+		t.Fatalf("verevon.org.deletion.pending payload = %+v", pendingPayload)
 	}
 	deadlineStr, _ := pendingPayload["deadline"].(string)
 	if _, err := time.Parse(time.RFC3339, deadlineStr); err != nil {
-		t.Fatalf("velion.org.deletion.pending deadline %q is not RFC3339: %v", deadlineStr, err)
+		t.Fatalf("verevon.org.deletion.pending deadline %q is not RFC3339: %v", deadlineStr, err)
 	}
 	memberIDs, _ := pendingPayload["member_user_ids"].([]string)
 	memberSet := map[string]bool{}
@@ -254,7 +257,7 @@ func TestControlLifecycleOrgDeletionSelfServiceHTTPFlow(t *testing.T) {
 		memberSet[id] = true
 	}
 	if !memberSet[ownerID] || !memberSet[memberID] {
-		t.Fatalf("velion.org.deletion.pending member_user_ids = %v, want to include %q and %q", memberIDs, ownerID, memberID)
+		t.Fatalf("verevon.org.deletion.pending member_user_ids = %v, want to include %q and %q", memberIDs, ownerID, memberID)
 	}
 
 	// --- retrying soft-delete on an already-deleted org fails, and must not
@@ -322,16 +325,16 @@ func TestControlLifecycleOrgDeletionSelfServiceHTTPFlow(t *testing.T) {
 	}
 
 	// --- restore: reverses the pending deletion, clears the ledger, and
-	// publishes velion.org.deletion.cancelled. ---
+	// publishes verevon.org.deletion.cancelled. ---
 	if resp := doAs(nethttp.MethodPost, restorePath, "", ownerID, "owner"); resp.Code != nethttp.StatusOK {
 		t.Fatalf("restore status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	cancelledPayload, ok := fanout.lastPayload("velion.org.deletion.cancelled")
+	cancelledPayload, ok := fanout.lastPayload("verevon.org.deletion.cancelled")
 	if !ok {
-		t.Fatal("velion.org.deletion.cancelled was not published")
+		t.Fatal("verevon.org.deletion.cancelled was not published")
 	}
 	if cancelledPayload["org_id"] != orgID || cancelledPayload["cancelled_by"] != ownerID {
-		t.Fatalf("velion.org.deletion.cancelled payload = %+v", cancelledPayload)
+		t.Fatalf("verevon.org.deletion.cancelled payload = %+v", cancelledPayload)
 	}
 	remainingLedger, err := repo.ListDeletionLedger(ctx, orgID)
 	if err != nil {

@@ -1,4 +1,4 @@
-//! Shipping quote tool for the agentic loop — Velion's freight aggregator.
+//! Shipping quote tool for the agentic loop — Verevon's freight aggregator.
 //!
 //! Backed by `shipping-core` (Ingestion Plane), the carrier-adapter fleet
 //! migrated from Suplayer-System: parallel quote fan-out across Bring,
@@ -59,7 +59,7 @@ pub struct QuoteInput {
     pub segment: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct AddressInput {
     pub name: String,
     #[serde(default)]
@@ -70,12 +70,21 @@ pub struct AddressInput {
     pub country: String,
     #[serde(default)]
     pub is_business: bool,
+    /// Delivery-notification contact. Optional here — the model has no
+    /// reason to know either for a recipient it has never met — but some
+    /// carriers (Bring included) reject a booking outright without at
+    /// least one on the recipient. `book_shipment`'s callers fill this in
+    /// from user-core when the model omits it; see `user_core_client`.
+    #[serde(default)]
+    pub phone: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// Input for book_shipment: the chosen quote's identity + the shipment.
 /// `customs` passes through verbatim to shipping-core, which enforces the
 /// cross-border requirement server-side.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct BookInput {
     #[serde(default)]
     pub quote_ref: String,
@@ -96,10 +105,24 @@ pub struct BookInput {
     pub booked_by: String,
 }
 
+/// Result of a successful `book_shipment` call: text for the model, plus
+/// shipping-core's own durable `booking_id` — the authoritative receipt a
+/// durable approval-continuation outcome may cite (see
+/// `approval_delivery_worker`). Always present on `Ok` (unlike
+/// `IntegrationActionsClient::execute_action`'s heuristic, optional
+/// `provider_receipt_id`): the create step's response is required to carry
+/// it or `book_shipment` already returns `Err` before reaching confirm.
+#[derive(Debug)]
+pub struct BookingOutcome {
+    pub rendered: String,
+    pub booking_id: String,
+}
+
 fn address_json(a: &AddressInput) -> Value {
     serde_json::json!({
         "name": a.name, "street": a.street, "postal_code": a.postal_code,
         "city": a.city, "country": a.country, "is_business": a.is_business,
+        "phone": a.phone, "email": a.email,
     })
 }
 
@@ -238,7 +261,7 @@ impl ShippingToolsClient {
         org_id: &str,
         approval_id: &str,
         idempotency_key: &str,
-    ) -> Result<String, String> {
+    ) -> Result<BookingOutcome, String> {
         if approval_id.trim().is_empty() || idempotency_key.trim().is_empty() {
             return Err(
                 "booking blocked: durable approval and idempotency key are required".to_owned(),
@@ -304,10 +327,14 @@ impl ShippingToolsClient {
             .get("booking_ref")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        Ok(format!(
+        let rendered = format!(
             "Shipment BOOKED with {carrier}.\n- Booking id: {booking_id}\n- Carrier ref: {booking_ref}\n- Tracking number: {tracking}\n- Label: {}\nThe label PDF and audit trail are available on the booking.",
             if booked.get("has_label").and_then(Value::as_bool).unwrap_or(false) { "stored" } else { "not available" },
-        ))
+        );
+        Ok(BookingOutcome {
+            rendered,
+            booking_id,
+        })
     }
 
     async fn post_json(
@@ -341,7 +368,7 @@ impl ShippingToolsClient {
     }
 
     /// GET /api/carriers — the registered fleet (mock vs credentialed real
-    /// adapters), so the model can answer "which carriers can Velion compare".
+    /// adapters), so the model can answer "which carriers can Verevon compare".
     pub async fn list_carriers(&self, org_id: &str) -> Result<String, String> {
         let token = self.mint_ingestion_token(org_id, "shipping:read").await?;
         let resp = self
@@ -707,6 +734,8 @@ mod tests {
                 city: "Oslo".to_owned(),
                 country: "NO".to_owned(),
                 is_business: true,
+                phone: None,
+                email: None,
             },
             to: AddressInput {
                 name: "Synthetic Recipient".to_owned(),
@@ -715,6 +744,8 @@ mod tests {
                 city: "Trondheim".to_owned(),
                 country: "NO".to_owned(),
                 is_business: true,
+                phone: None,
+                email: None,
             },
             weight_kg: 1.0,
             length_cm: 10.0,
@@ -749,8 +780,8 @@ mod tests {
                 "carrier_code": "mock-bring",
                 "service_name": "Synthetic Service",
                 "price": {"amount_cents": 1000, "currency": "NOK"},
-                "from": {"name":"Synthetic Sender","street":"Testveien 1","postal_code":"0001","city":"Oslo","country":"NO","is_business":true},
-                "to": {"name":"Synthetic Recipient","street":"Testgata 2","postal_code":"7010","city":"Trondheim","country":"NO","is_business":true},
+                "from": {"name":"Synthetic Sender","street":"Testveien 1","postal_code":"0001","city":"Oslo","country":"NO","is_business":true,"phone":null,"email":null},
+                "to": {"name":"Synthetic Recipient","street":"Testgata 2","postal_code":"7010","city":"Trondheim","country":"NO","is_business":true,"phone":null,"email":null},
                 "package": {"weight_kg":1.0,"length_cm":10.0,"width_cm":10.0,"height_cm":10.0,"dangerous_good":false},
                 "customs": null,
                 "booked_by": "user-test",
@@ -795,6 +826,8 @@ mod tests {
                 city: "Oslo".to_owned(),
                 country: "NO".to_owned(),
                 is_business: true,
+                phone: None,
+                email: None,
             },
             to: AddressInput {
                 name: "Synthetic Recipient".to_owned(),
@@ -803,6 +836,8 @@ mod tests {
                 city: "Trondheim".to_owned(),
                 country: "NO".to_owned(),
                 is_business: true,
+                phone: None,
+                email: None,
             },
             weight_kg: 1.0,
             length_cm: 10.0,

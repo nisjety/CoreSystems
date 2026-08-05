@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 
 import { resolveChatActor } from '../chat/_lib/session-store'
 
-// U2-14 (ui-ux-velion-gap.md §10 + Option A consolidation): Skills proxy
+// U2-14 (ui-ux-verevon-gap.md §10 + Option A consolidation): Skills proxy
 // now hits the Model Plane v1 Go `capability-core` service at
 // `/api/v1/skills` instead of agent-core-v2 (v2 Python).
 //

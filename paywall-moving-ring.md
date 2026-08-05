@@ -3,7 +3,7 @@
     - main [ref=e12]:
       - generic [ref=e13]:
         - generic [ref=e14]:
-          - heading "Do more with Velion" [level=1] [ref=e15]
+          - heading "Do more with Verevon" [level=1] [ref=e15]
           - paragraph [ref=e16]: Select a plan based on your needs
         - generic [ref=e17]:
           - button "Monthly" [ref=e18]
@@ -18,7 +18,7 @@
           - generic [ref=e33]:
             - generic [ref=e34]: $0
             - generic [ref=e35]: /month
-          - paragraph [ref=e36]: 14-day trial with Velion and the AI agent included.
+          - paragraph [ref=e36]: 14-day trial with Verevon and the AI agent included.
           - list [ref=e37]:
             - listitem [ref=e38]
             - listitem [ref=e42]

@@ -16,12 +16,12 @@ import {
 } from "lucide-react";
 
 import {
-  VelionButton,
-  VelionInput,
-  VelionSegmented,
-  VelionSegmentedButton,
-  VelionSelect,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonInput,
+  VerevonSegmented,
+  VerevonSegmentedButton,
+  VerevonSelect,
+} from "@/components/ui/verevon-ui";
 import { KnowledgeAddSourceModal } from "@/features/knowledge-v2/components/KnowledgeAddSourceModal";
 import { KnowledgeDiagnosticsPanel } from "@/features/knowledge-v2/components/KnowledgeDiagnosticsPanel";
 import type {
@@ -178,7 +178,7 @@ function filterKnowledgePayload(
   };
 }
 
-export function VelionKnowledgePage() {
+export function VerevonKnowledgePage() {
   const [activeView, setActiveView] = useState<KnowledgeView>("overview");
   const [selectedCollectionId, setSelectedCollectionId] = useState("all");
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
@@ -373,7 +373,7 @@ export function VelionKnowledgePage() {
   }
 
   return (
-    <div className="velion-page-surface h-full min-h-0 overflow-y-auto">
+    <div className="verevon-page-surface h-full min-h-0 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[1560px] flex-col gap-5 p-4 sm:p-5 lg:p-7">
         <WorkspaceHeader
           activeView={activeView}
@@ -389,7 +389,7 @@ export function VelionKnowledgePage() {
         {notice ? <NoticeBanner notice={notice} /> : null}
 
         {loading && !liveKnowledge ? (
-          <section className="velion-panel p-5 text-[13px] text-[#666B64] dark:text-[#AEB4C0]">
+          <section className="verevon-panel p-5 text-[13px] text-[#666B64] dark:text-[#AEB4C0]">
             Loading knowledge workspace…
           </section>
         ) : null}
@@ -463,7 +463,7 @@ function WorkspaceHeader({
     <header className="flex flex-col gap-4 border-b border-[#DDDCD6] pb-5 dark:border-[#292B31] lg:flex-row lg:items-end lg:justify-between">
       <div className="min-w-0">
         <div className="relative inline-flex max-w-full items-center">
-          <VelionSelect
+          <VerevonSelect
             aria-label="Select knowledge collection"
             value={selectedCollectionId}
             onChange={(event) => onCollectionChange(event.target.value)}
@@ -474,10 +474,10 @@ function WorkspaceHeader({
                 {collection.label}
               </option>
             ))}
-          </VelionSelect>
+          </VerevonSelect>
           <ChevronDown className="pointer-events-none absolute right-0 top-1/2 size-6 -translate-y-1/2 text-[#8A8A84]" strokeWidth={2} />
         </div>
-        <p className="velion-page-body mt-3 max-w-2xl">
+        <p className="verevon-page-body mt-3 max-w-2xl">
           Overview of folders, integrations, files, and retrieval health for this knowledge space.
         </p>
       </div>
@@ -485,19 +485,19 @@ function WorkspaceHeader({
       <div className="flex flex-wrap items-center gap-2">
         <SegmentedView activeView={activeView} onActiveViewChange={onActiveViewChange} />
         <Link href="/ingestions">
-          <VelionButton radius="sm" className="px-3">
+          <VerevonButton radius="sm" className="px-3">
             <ArrowUpRight className="size-4" />
             Ingestions
-          </VelionButton>
+          </VerevonButton>
         </Link>
-        <VelionButton radius="sm" className="px-3" onClick={onSync} disabled={syncing}>
+        <VerevonButton radius="sm" className="px-3" onClick={onSync} disabled={syncing}>
           <RefreshCw className={cn("size-4", syncing && "animate-spin")} />
           Sync
-        </VelionButton>
-        <VelionButton variant="primary" radius="sm" className="px-3" onClick={onAddSource}>
+        </VerevonButton>
+        <VerevonButton variant="primary" radius="sm" className="px-3" onClick={onAddSource}>
           <FilePlus2 className="size-4" />
           Add source
-        </VelionButton>
+        </VerevonButton>
       </div>
     </header>
   );
@@ -517,18 +517,18 @@ function SegmentedView({
   ];
 
   return (
-    <VelionSegmented>
+    <VerevonSegmented>
       {views.map((view) => (
-        <VelionSegmentedButton
+        <VerevonSegmentedButton
           key={view.id}
           aria-pressed={activeView === view.id}
           onClick={() => onActiveViewChange(view.id)}
         >
           {view.icon}
           {view.label}
-        </VelionSegmentedButton>
+        </VerevonSegmentedButton>
       ))}
-    </VelionSegmented>
+    </VerevonSegmented>
   );
 }
 
@@ -592,7 +592,7 @@ function OverviewCanvas({
 
 function LiveSourceInspector({ liveKnowledge }: { liveKnowledge: LiveKnowledgePayload }) {
   return (
-    <section className="velion-panel p-5">
+    <section className="verevon-panel p-5">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h2 className="text-[22px] font-semibold leading-tight tracking-normal text-[#111111] dark:text-white">
@@ -656,7 +656,7 @@ function FolderCard({ folder }: { folder: LiveKnowledgeFolder }) {
         <div className="absolute inset-[-18px] backdrop-blur-[2px]" />
         <div className="absolute inset-0 bg-[linear-gradient(105deg,rgba(255,255,255,0.16),transparent_24%,rgba(255,255,255,0.1)_57%,transparent_72%)]" />
         <div className="absolute right-6 top-8 max-w-[160px] text-right text-[20px] font-semibold leading-[1.04] text-white drop-shadow-[0_2px_8px_rgba(0,0,0,0.18)] sm:right-8 sm:max-w-[230px] sm:text-[24px]">
-          {folder.connections[0] ?? "Velion"}
+          {folder.connections[0] ?? "Verevon"}
           <br />
           Source Group
         </div>
@@ -687,7 +687,7 @@ function FolderCard({ folder }: { folder: LiveKnowledgeFolder }) {
 
 function IntegrationCard({ integration }: { integration: LiveKnowledgeIntegration }) {
   return (
-    <article className="velion-panel p-4">
+    <article className="verevon-panel p-4">
       <div className="flex items-start justify-between gap-3">
         <span className="grid size-10 place-items-center rounded-[8px] bg-[#F1F2ED] text-[13px] font-bold text-[#272B25] dark:bg-[#101114] dark:text-white">
           {integration.name.slice(0, 1)}
@@ -718,7 +718,7 @@ function WebSourcesPanel({ webSources }: { webSources: LiveKnowledgeWebSource[] 
       <SectionHeader title="Tracked web sources" description="Quarry-backed website targets that can refresh into the knowledge workspace." />
       <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-3">
         {webSources.length > 0 ? webSources.map((source) => (
-          <article key={source.id} className="velion-panel p-4">
+          <article key={source.id} className="verevon-panel p-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h3 className="truncate text-[16px] font-semibold text-[#171A16] dark:text-white">{source.name}</h3>
@@ -768,7 +768,7 @@ function FilesTable({
   searchQuery: string;
 }) {
   return (
-    <section className="velion-panel overflow-hidden">
+    <section className="verevon-panel overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-[#E4E3DD] px-4 py-3 dark:border-[#292B31]">
         <div>
           <h2 className="text-[22px] font-semibold text-[#111111] dark:text-white">Files</h2>
@@ -776,7 +776,7 @@ function FilesTable({
         </div>
         <label className="hidden min-w-[280px] items-center rounded-[8px] border border-[#DAD8D1] bg-[#FAFAF8] px-3 py-2 dark:border-[#30333A] dark:bg-[#101114] sm:flex">
           <Search className="size-4 text-[#8B8E86]" />
-          <VelionInput
+          <VerevonInput
             aria-label="Search files and sources"
             value={searchQuery}
             onChange={(event) => onSearchChange(event.target.value)}
@@ -828,7 +828,7 @@ function MetricPanel({ metrics }: { metrics: LiveKnowledgeMetric[] }) {
   return (
     <aside className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-1">
       {metrics.map((metric) => (
-        <article key={metric.label} className="velion-panel p-4">
+        <article key={metric.label} className="verevon-panel p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="text-[13px] font-medium text-[#555A52] dark:text-[#AEB4C0]">{metric.label}</h2>
@@ -883,7 +883,7 @@ function ChunksCanvas({
 }) {
   return (
     <main className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
-      <section className="velion-panel p-3">
+      <section className="verevon-panel p-3">
         <h2 className="px-1 text-[14px] font-semibold text-[#171A16] dark:text-white">Sources</h2>
         <div className="mt-3 space-y-1">
           {sources.length > 0 ? sources.map((source) => (
@@ -924,7 +924,7 @@ function GraphPanel({
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
 
   return (
-    <section className="velion-panel velion-panel-muted relative min-h-[620px] overflow-hidden" aria-label="RAGGraph relationship map">
+    <section className="verevon-panel verevon-panel-muted relative min-h-[620px] overflow-hidden" aria-label="RAGGraph relationship map">
       <div className="flex items-center justify-between gap-3 border-b border-[#E4E3DD] px-4 py-3 dark:border-[#292B31]">
         <div>
           <h2 className="text-[18px] font-semibold text-[#171A16] dark:text-white">RAGGraph relationship map</h2>
@@ -1012,7 +1012,7 @@ function GraphInspectorPanel({
     .slice(0, 4);
 
   return (
-    <section className="velion-panel p-4">
+    <section className="verevon-panel p-4">
       <h2 className="text-[20px] font-semibold text-[#171A16] dark:text-white">{selectedNode.label}</h2>
       <p className="mt-2 text-[13px] leading-5 text-[#666B64] dark:text-[#AEB4C0]">
         {formatGraphGroup(selectedNode.group)} · {selectedNode.sourceRefs.length} linked chunk reference{selectedNode.sourceRefs.length === 1 ? "" : "s"}.
@@ -1058,7 +1058,7 @@ function ChunksPanel({ source }: { source: LiveKnowledgeSource | null }) {
   }
 
   return (
-    <section className="velion-panel p-4">
+    <section className="verevon-panel p-4">
       <h2 className="text-[20px] font-semibold text-[#171A16] dark:text-white">{source.title}</h2>
       <p className="mt-2 text-[13px] leading-5 text-[#666B64] dark:text-[#AEB4C0]">{source.description}</p>
       <div className="mt-4 flex flex-wrap gap-2">
@@ -1113,7 +1113,7 @@ function EmptyPanel({
   description: string;
 }) {
   return (
-    <section className="velion-panel p-5">
+    <section className="verevon-panel p-5">
       <h2 className="text-[18px] font-semibold text-[#171A16] dark:text-white">{title}</h2>
       <p className="mt-2 text-[13px] leading-5 text-[#666B64] dark:text-[#AEB4C0]">{description}</p>
     </section>

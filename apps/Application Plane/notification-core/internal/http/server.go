@@ -64,10 +64,10 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	internal := router.Group("/api/v1", delegated)
 	internal.POST("/notification-requests", handler.CreateNotificationRequest)
 
-	// U5-2 (ui-ux-velion-gap.md): the wire surface velion's
+	// U5-2 (ui-ux-verevon-gap.md): the wire surface verevon's
 	// src/lib/notifications/client.ts expects. All routes are gated on the
 	// internal API key; per-user routes additionally require x-user-id.
-	gated := router.Group("/", delegated, requireServicePrincipal("velion-gateway"))
+	gated := router.Group("/", delegated, requireServicePrincipal("verevon-gateway"))
 	{
 		// Feed
 		feedRoutes := gated.Group("/notifications", requireScopedIdentityHeaders(), requireActiveMembership(handler.recipients))

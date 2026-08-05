@@ -397,7 +397,7 @@ function ImageGallery({ images }: { images: ImageHit[] }) {
             onClick={() => setExpanded(image)}
             title={image.title ?? safeHostname(image.url)}
             aria-label={`Forstørr bilde — ${image.title ?? safeHostname(image.url)}`}
-            className="velion-glass-soft group mb-3 block w-full break-inside-avoid cursor-zoom-in overflow-hidden rounded-[18px] text-left transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
+            className="verevon-glass-soft group mb-3 block w-full break-inside-avoid cursor-zoom-in overflow-hidden rounded-[18px] text-left transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -533,7 +533,7 @@ function VideoGridSkeleton() {
       className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"
     >
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="velion-glass-soft overflow-hidden rounded-[18px]">
+        <div key={i} className="verevon-glass-soft overflow-hidden rounded-[18px]">
           <div className="aspect-video w-full animate-pulse bg-white/45 dark:bg-white/[0.06]" />
           <div className="space-y-1.5 px-3 py-2">
             <div className="h-3 w-4/5 animate-pulse rounded bg-white/45 dark:bg-white/[0.06]" />
@@ -573,7 +573,7 @@ function VideoCard({ video }: { video: VideoHit }) {
         }
       }}
       title={video.title ?? safeHostname(video.url)}
-      className="velion-glass-soft group flex cursor-pointer flex-col overflow-hidden rounded-[18px] transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
+      className="verevon-glass-soft group flex cursor-pointer flex-col overflow-hidden rounded-[18px] transition hover:shadow-[0_14px_36px_rgba(76,60,92,0.16)]"
     >
       <div className="relative aspect-video w-full overflow-hidden bg-black/[0.06] dark:bg-white/[0.04]">
         {playing && embedSrc ? (
@@ -708,14 +708,14 @@ function VideosTab({ query }: { query: string }) {
   if (status === "loading" || status === "idle") return <VideoGridSkeleton />;
   if (status === "error") {
     return (
-      <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
+      <div className="verevon-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
         {error ?? "Videosøk kunne ikke fullføres."}
       </div>
     );
   }
   if (videos.length === 0) {
     return (
-      <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
+      <div className="verevon-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
         Ingen videoer funnet for{" "}
         <span className="font-medium text-[#1A1A1A] dark:text-white">{query}</span>.
       </div>
@@ -760,9 +760,9 @@ function ThreadTurnView({ turn }: { turn: ThreadTurn }) {
 
   return (
     <motion.div className="flex justify-start" {...bubbleMotion}>
-      <div className="velion-glass-soft max-w-[92%] rounded-[18px] rounded-bl-[6px] px-4 py-3">
+      <div className="verevon-glass-soft max-w-[92%] rounded-[18px] rounded-bl-[6px] px-4 py-3">
         <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
-          Velion
+          Verevon
         </p>
         {turn.error ? (
           <p
@@ -774,7 +774,7 @@ function ThreadTurnView({ turn }: { turn: ThreadTurn }) {
         ) : isEmptyStreaming ? (
           <p
             className="flex items-center gap-1 text-[13px] text-[#9A9188] dark:text-[#737780]"
-            aria-label="Velion skriver…"
+            aria-label="Verevon skriver…"
           >
             <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.2s]" />
             <span className="size-1.5 animate-bounce rounded-full bg-current [animation-delay:-0.1s]" />
@@ -1300,7 +1300,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           <label className="sr-only" htmlFor="answer-search-query">
             Søk
           </label>
-          <div className="velion-glass-input flex h-10 min-w-0 flex-1 items-center rounded-full px-4">
+          <div className="verevon-glass-input flex h-10 min-w-0 flex-1 items-center rounded-full px-4">
             <Search className="mr-2 size-4 shrink-0 text-[#9A9188]" />
             <input
               id="answer-search-query"
@@ -1363,14 +1363,14 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
           {/* Error state */}
           {!loading && error ? (
-            <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
+            <div className="verevon-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
               {error}
             </div>
           ) : null}
 
           {/* ---- mode: "fetch" ---- */}
           {!loading && !error && mode === "fetch" && fetchedPage ? (
-            <div className="velion-glass rounded-3xl px-5 py-4">
+            <div className="verevon-glass rounded-3xl px-5 py-4">
               <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#737780]">
                 Hentet side
               </p>
@@ -1411,7 +1411,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           {!loading && !error && mode === "search" && (answer || answerStreaming) ? (
             <motion.section
               aria-labelledby="ai-summary-heading"
-              className="velion-glass rounded-3xl px-5 py-4"
+              className="verevon-glass rounded-3xl px-5 py-4"
               variants={listItem}
               initial="hidden"
               animate="show"
@@ -1442,7 +1442,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                       href={citation.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="velion-glass-soft inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-[#504A43] transition hover:shadow-[0_8px_20px_rgba(76,60,92,0.14)] dark:text-[#D4D6DC]"
+                      className="verevon-glass-soft inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium text-[#504A43] transition hover:shadow-[0_8px_20px_rgba(76,60,92,0.14)] dark:text-[#D4D6DC]"
                     >
                       {citation.title ?? safeHostname(citation.url)}
                       <ExternalLink className="size-2.5 shrink-0 opacity-60" />
@@ -1474,7 +1474,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
                       href={result.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="velion-glass-soft group block rounded-3xl px-4 py-3 transition hover:shadow-[0_14px_34px_rgba(76,60,92,0.14)]"
+                      className="verevon-glass-soft group block rounded-3xl px-4 py-3 transition hover:shadow-[0_14px_34px_rgba(76,60,92,0.14)]"
                     >
                       {result.title ? (
                         <p className="text-[13px] font-semibold text-[#1A1A1A] group-hover:text-[#EE7A50] dark:text-[#F7F8F8]">
@@ -1504,7 +1504,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           {!loading && !error && mode === "search" && results.length === 0 && !answer && citations.length === 0 ? (
             <div
               role="status"
-              className="velion-glass-soft rounded-3xl px-4 py-3.5 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]"
+              className="verevon-glass-soft rounded-3xl px-4 py-3.5 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]"
             >
               <p className="font-medium text-[#1A1A1A] dark:text-white">Ingen webresultater</p>
               <p className="mt-1 text-[12px] leading-relaxed text-[#9A9188] dark:text-[#9A9EA8]">
@@ -1546,7 +1546,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
               {/* Error state */}
               {imagesStatus === "error" ? (
-                <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
+                <div className="verevon-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#B04020] dark:text-[#E8A090]">
                   {imagesError ?? "Bildesøk kunne ikke fullføres."}
                 </div>
               ) : null}
@@ -1558,7 +1558,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
 
               {/* Empty state */}
               {imagesStatus === "loaded" && images.length === 0 ? (
-                <div className="velion-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
+                <div className="verevon-glass-soft rounded-3xl px-4 py-3 text-[13px] text-[#7A756F] dark:text-[#B6BAC4]">
                   Ingen bilder funnet for{" "}
                   <span className="font-medium text-[#1A1A1A] dark:text-white">{submittedQuery}</span>.
                 </div>
@@ -1596,7 +1596,7 @@ export function SearchAnswerView({ initialQuery }: { initialQuery: string }) {
           <label className="sr-only" htmlFor="search-follow-up">
             Stille oppfølgingsspørsmål
           </label>
-          <div className="velion-glass-input flex min-w-0 flex-1 items-end rounded-[22px] px-4 py-2">
+          <div className="verevon-glass-input flex min-w-0 flex-1 items-end rounded-[22px] px-4 py-2">
             <textarea
               id="search-follow-up"
               rows={1}

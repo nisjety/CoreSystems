@@ -32,7 +32,7 @@ shell**. Its HTTP session lifecycle is real and live. But in the deployed
 configuration every channel runs the **noop (echo) adapter**, the gRPC port
 registers **zero services**, the voice pipeline and WebSocket adapter are
 **unwired skeletons**, the HTTP API is **unauthenticated**, and nothing in the
-system calls it. It is *not* in the Velion chat path and is *not* why chat tools
+system calls it. It is *not* in the Verevon chat path and is *not* why chat tools
 failed.
 
 **The MCP question is answered here and the answer is: no.** MCP bridging is a

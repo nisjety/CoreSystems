@@ -3,7 +3,7 @@
  *
  * Org-scoped CRUD plus a few helpers for the playground citation
  * surface. All mutations require both `orgId` (for RLS-like scoping)
- * and `createdBy`/`userId` for audit; the velion server-side `qa-store`
+ * and `createdBy`/`userId` for audit; the verevon server-side `qa-store`
  * passes the resolved `actor.convexOrgId` / `convexUserId` from
  * `resolveChatActor()`.
  */

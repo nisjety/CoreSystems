@@ -404,7 +404,7 @@ const authOptions: BetterAuthOptions = {
         typeof requestBody.invitationId === 'string'
           ? requestBody.invitationId
           : '';
-      const marker = ctx.request?.headers.get('x-velion-invitation-acceptance');
+      const marker = ctx.request?.headers.get('x-verevon-invitation-acceptance');
       if (
         !verifyInvitationAcceptanceInternalMarker(
           marker,
@@ -1377,7 +1377,7 @@ const authOptions: BetterAuthOptions = {
   socialProviders: {
     // Environment-driven social provider configuration.
     //
-    // G29 (velion-gap.md): every social provider that we want to keep
+    // G29 (verevon-gap.md): every social provider that we want to keep
     // refreshable on the back-end (so user-core's Graph enrichment + the
     // /internal/oauth/refresh endpoint can keep working past the 1h
     // access-token expiry) must request a refresh-token-issuing scope at

@@ -30,7 +30,7 @@ Reference counts of `INTERNAL_API_KEY` / `x-internal-api-key` by service
 
 | Service (plane) | refs |
 |---|---|
-| Frontend/velion (+ v2/v3) | 275 / 43 / 23 |
+| Frontend/verevon (+ v2/v3) | 275 / 43 / 23 |
 | Control/auth-core | 29 |
 | Ingestion/finspo-core | 11 |
 | Data Plane v2/services | 11 |
@@ -79,7 +79,7 @@ Each gets `INTERNAL_API_KEY_<CORE>` and, during rollout, ALSO keeps accepting th
 legacy shared `INTERNAL_API_KEY` (dual-accept — see §4).
 
 **Callers (need the target core's key under a per-target name):** the Frontend
-gateway/BFF (velion v3 gateway is the biggest caller surface), and every core
+gateway/BFF (verevon v3 gateway is the biggest caller surface), and every core
 that calls another core (e.g. exec-core → integration-corev2, conversation-core →
 integration-corev2, gateway → all cores). For each caller→callee edge, set
 `<CALLEE>_INTERNAL_KEY=<the callee's INTERNAL_API_KEY_<CALLEE>>`.

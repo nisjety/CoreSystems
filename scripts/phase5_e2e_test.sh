@@ -149,14 +149,14 @@ echo "📋 Test 6: NATS JetStream Configuration"
 echo "─────────────────────────────────────────────────────────────────────────"
 
 echo "  Shared NATS Configuration:"
-echo "    Broker: nats://velion-nats:4222"
+echo "    Broker: nats://verevon-nats:4222"
 echo "    Token: aqencia-shared-nats-token-2026"
 echo "    Stream: AQENCIA_CONTROLPLANE"
 echo "    Subject: aqencia.controlplane.>"
 echo ""
 
 # Try to check NATS connectivity via DNS
-nats_host_status=$(getent hosts velion-nats 2>/dev/null && echo "✅ hostname resolves" || echo "⚠️  hostname resolution unavailable")
+nats_host_status=$(getent hosts verevon-nats 2>/dev/null && echo "✅ hostname resolves" || echo "⚠️  hostname resolution unavailable")
 echo "  $nats_host_status"
 echo ""
 

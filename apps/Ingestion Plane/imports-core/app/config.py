@@ -27,12 +27,12 @@ class Settings(BaseSettings):
     nats_token: str | None = Field(default=None, alias="NATS_TOKEN")
 
     nats_shared_url: str = Field(
-        default="nats://velion-nats:4222",
-        validation_alias=AliasChoices("VELION_NATS_URL", "NATS_SHARED_URL"),
+        default="nats://verevon-nats:4222",
+        validation_alias=AliasChoices("VEREVON_NATS_URL", "NATS_SHARED_URL"),
     )
     nats_shared_token: str = Field(
         default="",
-        validation_alias=AliasChoices("VELION_NATS_TOKEN", "NATS_SHARED_TOKEN"),
+        validation_alias=AliasChoices("VEREVON_NATS_TOKEN", "NATS_SHARED_TOKEN"),
     )
 
     # Internal API key for service-to-service authentication.

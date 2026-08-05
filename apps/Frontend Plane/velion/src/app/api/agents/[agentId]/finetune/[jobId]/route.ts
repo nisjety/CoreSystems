@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
 /**
- * Wave 7 (velion ui-ux-velion-gap.md §17): per-job finetune proxy.
+ * Wave 7 (verevon ui-ux-verevon-gap.md §17): per-job finetune proxy.
  *
  * GET    /api/agents/{agentId}/finetune/{jobId}  — single-row read
  * DELETE /api/agents/{agentId}/finetune/{jobId}  — cancel (admin scope

@@ -4,7 +4,7 @@
  * Issues short-lived RS256 JWTs for every non-Model-Plane audience
  * (`data-plane`, `quarry`, `ingestion`, `control-plane`,
  * `application-plane`). Mirrors the Model-Plane controller pattern but
- * keeps the per-audience route slug so velion's call sites match the
+ * keeps the per-audience route slug so verevon's call sites match the
  * existing `mintPlaneToken({ audience, ... })` helper without rewrites.
  *
  * Routes:
@@ -22,7 +22,7 @@
  *
  * The path slug is parsed back into a `PlaneAudience` and validated
  * against the configured set in `ConvexTokenService.isKnownPlaneAudience`
- * — unknown audiences surface as 404 so a typo on the velion side never
+ * — unknown audiences surface as 404 so a typo on the verevon side never
  * gets a silent fallback token.
  *
  * All tokens share the keypair / JWKS that `convex-auth.controller.ts`
@@ -297,7 +297,7 @@ export class PlaneTokenController {
         'plane-token',
       );
       await this.directNats.publishAuditDurable(
-        `velion.audit.v2.control.auth-core.${event}`,
+        `verevon.audit.v2.control.auth-core.${event}`,
         {
           occurred_at: auditIdentity.occurredAt,
           event_id: auditIdentity.eventId,

@@ -69,7 +69,7 @@ setOrganizationEventPublisher({
   async publishOrganizationDeletionProjection(_data, eventID) {
     deletionPublications.push(eventID);
   },
-  async publishVelionAudit(payload) {
+  async publishVerevonAudit(payload) {
     auditPublications.push({ ...payload });
   },
 });
@@ -334,7 +334,7 @@ async function seedRepairAndConverge() {
   assert.match(createdInvitation.id, /^[A-Za-z0-9_-]+$/);
   const invitationID = createdInvitation.id;
 
-  // Better Auth rejects the repeated mutation before inserting. Velion's
+  // Better Auth rejects the repeated mutation before inserting. Verevon's
   // gateway normalizes this exact canonical condition to a successful no-op.
   const duplicateInvitation = await canonicalAuthRequest(
     "/organization/invite-member",

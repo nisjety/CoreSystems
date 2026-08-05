@@ -13,25 +13,25 @@ import {
   PanelLeftOpen,
   Trash2,
 } from "lucide-react";
-import { AgentsExpandedSidebarPanel } from "@/features/shell-v2/components/VelionSidebarAgentsPanel";
-import { InboxExpandedSidebarPanel } from "@/features/shell-v2/components/VelionSidebarInboxPanel";
-import { KnowledgeExpandedSidebarPanel } from "@/features/shell-v2/components/VelionSidebarKnowledgePanel";
+import { AgentsExpandedSidebarPanel } from "@/features/shell-v2/components/VerevonSidebarAgentsPanel";
+import { InboxExpandedSidebarPanel } from "@/features/shell-v2/components/VerevonSidebarInboxPanel";
+import { KnowledgeExpandedSidebarPanel } from "@/features/shell-v2/components/VerevonSidebarKnowledgePanel";
 import {
   AccountExpandedSidebarPanel,
   SettingsExpandedSidebarPanel,
-} from "@/features/shell-v2/components/VelionSidebarSettingsPanels";
+} from "@/features/shell-v2/components/VerevonSidebarSettingsPanels";
 import {
   SidebarPanelTitle,
   SidebarSearchField,
-} from "@/features/shell-v2/components/VelionSidebarPrimitives";
+} from "@/features/shell-v2/components/VerevonSidebarPrimitives";
 import { sidebarType } from "@/features/shell-v2/lib/sidebar-style";
 import {
-  useVelionChatWorkspaceSafe,
+  useVerevonChatWorkspaceSafe,
   type ChatSession,
   type ChatWorkspaceValue,
 } from "@/features/chat-v2/lib/chat-workspace";
 import { formatRelative } from "@/features/chat-v2/lib/chat-format";
-import type { VelionRoute } from "@/features/shell-v2/lib/shell-data";
+import type { VerevonRoute } from "@/features/shell-v2/lib/shell-data";
 import {
   getSidebarSectionForPath,
   isSidebarPathActive,
@@ -50,8 +50,8 @@ export const SIDEBAR_EXPANDED_WIDTH = 320;
 const MINI_NAV_BUTTON_CLASS =
   "relative flex h-9 w-full items-center justify-center rounded-[10px] transition-colors duration-150";
 
-type VelionSidebarProps = {
-  activeRoute: VelionRoute;
+type VerevonSidebarProps = {
+  activeRoute: VerevonRoute;
   expanded: boolean;
   expandedWidth?: number;
   expansionLocked?: boolean;
@@ -59,14 +59,14 @@ type VelionSidebarProps = {
   onOpenSearch: () => void;
 };
 
-export function VelionSidebar({
+export function VerevonSidebar({
   activeRoute,
   expanded,
   expandedWidth = SIDEBAR_EXPANDED_WIDTH,
   expansionLocked = false,
   onExpandedChange,
   onOpenSearch,
-}: VelionSidebarProps) {
+}: VerevonSidebarProps) {
   const pathname = usePathname();
   const activeSection = getSidebarSectionForPath(pathname, activeRoute);
   const mainSections = sidebarSections.filter((section) => !section.pinnedBottom);
@@ -78,7 +78,7 @@ export function VelionSidebar({
   return (
     <aside
       className={cn(
-        "velion-sidebar-themed fixed bottom-0 left-0 top-14 z-[var(--velion-z-sidebar)] hidden overflow-hidden transition-[width,background-color] duration-300 ease-out md:block",
+        "verevon-sidebar-themed fixed bottom-0 left-0 top-14 z-[var(--verevon-z-sidebar)] hidden overflow-hidden transition-[width,background-color] duration-300 ease-out md:block",
         sidebarType.root,
       )}
       style={{ width: expanded ? expandedWidth : SIDEBAR_MINIMIZED_WIDTH }}
@@ -172,7 +172,7 @@ function ExpandedSidebarPanel({
   pathname: string;
   onCollapse: () => void;
 }) {
-  const chatWorkspace = useVelionChatWorkspaceSafe();
+  const chatWorkspace = useVerevonChatWorkspaceSafe();
   const [searchQuery, setSearchQuery] = useState("");
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const [activeTabId, setActiveTabId] = useState<string | null>(() => activeSection.panelTabs?.[0]?.id ?? null);
@@ -233,7 +233,7 @@ function ExpandedSidebarPanel({
               className={cn(
                 "pb-2.5 transition-colors",
                 activeTabId === tab.id
-                  ? "velion-sidebar-tab-active border-b-2 text-[#1C1C1E] dark:text-white"
+                  ? "verevon-sidebar-tab-active border-b-2 text-[#1C1C1E] dark:text-white"
                   : "text-[#9B9EA8] hover:text-[#4A4C54] dark:hover:text-[#D0D6E0]",
               )}
             >
@@ -552,7 +552,7 @@ function SidebarPanelLink({
           className={cn(
             "group flex h-9 w-full items-center gap-2.5 rounded-[9px] px-2 text-left transition-colors duration-150",
             active
-              ? "velion-sidebar-panel-active text-[#1C1C1E] dark:text-white"
+              ? "verevon-sidebar-panel-active text-[#1C1C1E] dark:text-white"
               : "text-[#3A3C44] hover:bg-[#F6F7F9] hover:text-[#1C1C1E] dark:text-[#D0D6E0] dark:hover:bg-[#191A1F] dark:hover:text-white",
           )}
           aria-expanded={expanded}
@@ -576,7 +576,7 @@ function SidebarPanelLink({
                     "flex w-full items-center rounded-[7px] py-[6px] pl-4 pr-2 text-left transition-colors",
                     subActive ? sidebarType.row : sidebarType.rowNormal,
                     subActive
-                      ? "velion-sidebar-panel-active text-[#1C1C1E] dark:text-white"
+                      ? "verevon-sidebar-panel-active text-[#1C1C1E] dark:text-white"
                       : "text-[#4A4C54] hover:bg-[#F4F5F8] hover:text-[#1C1C1E] dark:text-[#AEB4C0] dark:hover:bg-[#191A1F] dark:hover:text-white",
                   )}
                 >
@@ -597,7 +597,7 @@ function SidebarPanelLink({
       className={cn(
         "group flex h-9 w-full items-center gap-2.5 rounded-[9px] px-2 text-left transition-colors duration-150",
         active
-          ? "velion-sidebar-panel-active text-[#1C1C1E] dark:text-white"
+          ? "verevon-sidebar-panel-active text-[#1C1C1E] dark:text-white"
           : "text-[#3A3C44] hover:bg-[#F6F7F9] hover:text-[#1C1C1E] dark:text-[#D0D6E0] dark:hover:bg-[#191A1F] dark:hover:text-white",
       )}
     >
@@ -642,7 +642,7 @@ function MiniSectionLink({
         className={cn(
           MINI_NAV_BUTTON_CLASS,
           active
-            ? "velion-sidebar-mini-active"
+            ? "verevon-sidebar-mini-active"
             : "text-[#9B9EA8] hover:bg-[#EBEBEB] hover:text-[#3A3C44] dark:text-[#8A8F98] dark:hover:bg-[#191A1F] dark:hover:text-white",
         )}
       >
@@ -672,7 +672,7 @@ function MiniAccountLink({
         className={cn(
           MINI_NAV_BUTTON_CLASS,
           active
-            ? "velion-sidebar-mini-active"
+            ? "verevon-sidebar-mini-active"
             : "text-[#9B9EA8] hover:bg-[#EBEBEB] hover:text-[#3A3C44] dark:text-[#8A8F98] dark:hover:bg-[#191A1F] dark:hover:text-white",
         )}
       >
@@ -703,7 +703,7 @@ function MiniActionButton({
         className={cn(
           MINI_NAV_BUTTON_CLASS,
           active
-            ? "velion-sidebar-mini-active"
+            ? "verevon-sidebar-mini-active"
             : "text-[#9B9EA8] hover:bg-[#EBEBEB] hover:text-[#3A3C44] dark:text-[#8A8F98] dark:hover:bg-[#191A1F] dark:hover:text-white",
         )}
       >

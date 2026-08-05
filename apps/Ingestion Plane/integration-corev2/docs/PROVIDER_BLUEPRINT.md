@@ -2,7 +2,7 @@
 
 ## Goal
 
-`integration-corev2` is the first-party Velion integration core and the direct
+`integration-corev2` is the first-party Verevon integration core and the direct
 replacement for the existing Ingestion Plane `integration-core` v1. Nango and
 the existing NestJS services are references for product shape and provider edge
 cases, not runtime dependencies.
@@ -36,7 +36,7 @@ internal contracts and must not store provider tokens.
 
 ```mermaid
 flowchart LR
-  UI["Velion UI / BFF"] --> IC["integration-corev2"]
+  UI["Verevon UI / BFF"] --> IC["integration-corev2"]
   IC --> CP["auth-core / org-core / billing-core"]
   IC --> OAuth["Provider OAuth"]
   IC --> Vault["Encrypted token vault"]
@@ -96,7 +96,7 @@ Each provider should add these pieces in order:
 ## Migration Rules
 
 - New callers should use `integration-corev2` contracts first.
-- Old Nango connection IDs should be migrated to Velion connection IDs through a
+- Old Nango connection IDs should be migrated to Verevon connection IDs through a
   compatibility mapping, not leaked into new APIs.
 - Existing v1 callers should be able to keep the same high-level route shape:
   `/api/v1/providers`, `/api/v1/providers/{provider}/connect-session`,
@@ -107,7 +107,7 @@ Each provider should add these pieces in order:
   token leases while its provider actions are moved or replaced by named Go
   operations.
 - NestJS-style `/integrations/...` compatibility routes may exist during
-  migration, but they must resolve a Velion connection and execute only
+  migration, but they must resolve a Verevon connection and execute only
   whitelisted named actions.
 - `unified-service` consumes integration events and read models only. It must
   not own OAuth credentials.
@@ -119,7 +119,7 @@ Microsoft mail/calendar reads, Google Drive listing, GitHub repositories, and
 Notion pages/databases. The Go core keeps these as named operations instead of
 copying the broad proxy shape. Stripe billing reads are also named actions.
 
-This is intentional: Velion workers can do the important jobs, but the broker
+This is intentional: Verevon workers can do the important jobs, but the broker
 does not become an arbitrary request tunnel to every provider API.
 
 Raw provider proxy routes should return `410 Gone`. If a product workflow needs
@@ -128,9 +128,9 @@ tests, audit metadata, and capability review.
 
 ## Sync, Webhook, And Token-Lease Primitives
 
-Nango's useful primitives are rebuilt as Velion-owned records:
+Nango's useful primitives are rebuilt as Verevon-owned records:
 
-- Connect sessions create Velion connection IDs, scopes, and capabilities.
+- Connect sessions create Verevon connection IDs, scopes, and capabilities.
 - `/internal/connectors/token` leases provider tokens to trusted services and
   records a token lease without exposing tokens to browser code.
 - `/api/v1/sync-jobs` creates durable sync intent records. Internal workers use

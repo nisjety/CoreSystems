@@ -112,7 +112,7 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 		return
 	}
 	switch principal.ServiceID {
-	case "velion-gateway":
+	case "verevon-gateway":
 		if request.Recipient.Kind != notification.RecipientKindUser || request.Recipient.ID != principal.UserID {
 			c.JSON(http.StatusForbidden, gin.H{"error": "gateway may notify only the delegated user"})
 			return
@@ -150,7 +150,7 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 	notificationType = strings.TrimSpace(notificationType)
 	allowed := map[string]map[string]struct{}{
-		"velion-gateway": {
+		"verevon-gateway": {
 			"notification.created": {},
 		},
 		"support-worker": {

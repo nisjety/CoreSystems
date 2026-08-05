@@ -1515,6 +1515,68 @@ func TestMicrosoftSyncJobWaitsForFinspoHandoff(t *testing.T) {
 	}
 }
 
+func TestInboxSyncQueuesAuthorizedMailboxForEmailWorker(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                   "conn-google-mail",
+		ProviderKey:          "google",
+		ConnectorType:        "google-workspace",
+		OrganizationID:       "org-1",
+		UserID:               "user-1",
+		Status:               "active",
+		Capabilities:         []string{"gmail.read"},
+		AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	req := httptest.NewRequest("POST", "/api/v1/connections/conn-google-mail/inbox-sync", strings.NewReader(`{"channel":"email"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	var decoded struct {
+		Data struct {
+			SyncJob store.SyncJob `json:"syncJob"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("Decode error: %v", err)
+	}
+	job := decoded.Data.SyncJob
+	if job.Mode != "inbox" || job.Status != "waiting_provider" {
+		t.Fatalf("job mode/status = %q/%q, want inbox/waiting_provider", job.Mode, job.Status)
+	}
+	if job.Metadata["handoffTarget"] != "email-worker" || job.Metadata["inboxChannel"] != "email" {
+		t.Fatalf("job metadata = %#v, want email-worker email handoff", job.Metadata)
+	}
+}
+
+func TestInboxSyncRejectsChannelWithoutGrantedInboxRead(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-google-profile", ProviderKey: "google", ConnectorType: "google-workspace",
+		OrganizationID: "org-1", UserID: "user-1", Status: "active",
+		Capabilities: []string{"profile.read"}, AccessTokenExpiresAt: time.Now().Add(time.Hour),
+	})
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service})
+
+	req := httptest.NewRequest("POST", "/api/v1/connections/conn-google-profile/inbox-sync", strings.NewReader(`{"channel":"email"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test error: %v", err)
+	}
+	if resp.StatusCode != fiber.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.StatusCode)
+	}
+}
+
 func TestExtendTeamsInboxHistoryQueuesNextThirtyDays(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
@@ -2437,7 +2499,7 @@ func TestInternalTokenBrokerPublishesRedactedLeaseEvent(t *testing.T) {
 		t.Fatalf("events = %#v, want one token lease event", publisher.events)
 	}
 	event := publisher.events[0]
-	if event.Type != "velion.ingestion.integration.token_lease_created" {
+	if event.Type != "verevon.ingestion.integration.token_lease_created" {
 		t.Fatalf("event type = %s, want token lease created", event.Type)
 	}
 	if event.OrganizationID != "org-1" || event.ConnectionID != "conn-social-lease" || event.ProviderKey != "x" {

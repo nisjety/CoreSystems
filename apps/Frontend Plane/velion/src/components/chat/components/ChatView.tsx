@@ -59,7 +59,7 @@ const formatTime = (timestamp: Date | string) => {
 
 type MessageFeedback = "liked" | "disliked" | null;
 
-const MESSAGE_FEEDBACK_STORAGE_KEY = "velion-chat-message-feedback:v1";
+const MESSAGE_FEEDBACK_STORAGE_KEY = "verevon-chat-message-feedback:v1";
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
 	if (!text.trim()) {
@@ -875,7 +875,7 @@ export function ChatView({
 								<div className="rounded-full border border-[var(--linear-border)] bg-white px-3 py-1.5 text-[12px] font-medium text-[#7d828a] shadow-[0_10px_30px_rgba(20,21,24,0.05)]">
 									<span className="inline-flex items-center gap-1.5">
 										<Sparkles className="h-3.5 w-3.5 text-[var(--linear-accent)]" />
-										Velion workspace agent
+										Verevon workspace agent
 									</span>
 								</div>
 							</div>

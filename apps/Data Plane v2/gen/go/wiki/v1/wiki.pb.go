@@ -162,7 +162,7 @@ type WikiPageVersion struct {
 	PublishedAt     *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=published_at,json=publishedAt,proto3" json:"published_at,omitempty"`
 	Metadata        *structpb.Struct       `protobuf:"bytes,12,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// Server-scrubbed HTML render (bluemonday UGC policy). Trusted-render
-	// surfaces (Velion) should display `safe_html`; treat `content` as raw
+	// surfaces (Verevon) should display `safe_html`; treat `content` as raw
 	// markdown. Set only when the scrub passed — see `safe_html_ok`.
 	SafeHtml *string `protobuf:"bytes,13,opt,name=safe_html,json=safeHtml,proto3,oneof" json:"safe_html,omitempty"`
 	// True iff the bluemonday scrub passed without flagging suspicious markup.

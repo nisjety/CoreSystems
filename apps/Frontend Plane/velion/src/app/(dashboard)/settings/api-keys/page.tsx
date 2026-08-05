@@ -10,7 +10,7 @@
  * Follow-up (tracked in `docs/phase-a-implementation-plan.md` A3.4):
  *   - auth-core: `POST/GET/DELETE /api/auth/api-keys` (Better Auth has
  *     a plugin for this; the wire-up is the work).
- *   - velion: replace this stub with a list/create/revoke UI.
+ *   - verevon: replace this stub with a list/create/revoke UI.
  */
 
 'use client'

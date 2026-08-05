@@ -1,6 +1,6 @@
-# Velion — Phase Next Roadmap (Road to Full Functionality)
+# Verevon — Phase Next Roadmap (Road to Full Functionality)
 
-> **Status:** Drafted 2026-06-26 from a fresh five-cluster code audit (agentic/model-plane, trust/compliance/GDPR, customer-surfaces, knowledge/search/ingestion, platform/multitenancy/ops), reconciled against `VELION.md` and the shipped `docs/PHASE_0..4` + `PHASE_OWNERSHIP` plans.
+> **Status:** Drafted 2026-06-26 from a fresh five-cluster code audit (agentic/model-plane, trust/compliance/GDPR, customer-surfaces, knowledge/search/ingestion, platform/multitenancy/ops), reconciled against `VEREVON.md` and the shipped `docs/PHASE_0..4` + `PHASE_OWNERSHIP` plans.
 > **Continues the existing numbering.** Shipped: Phase 0 (survival), Phase 1 (honest core loop), Phase 2 (wedge spine + leads), Phase 3 (residency-honest wedge), Phase 4 (data-driven UI), Ownership (fine-grained authz substrate). This document defines **Phase 5–9**.
 > **The discipline that survived every prior phase stays load-bearing here:** no control is represented as in place without engineering confirmation, and no privacy/security/trust claim ships without its backing gate in the *same* release.
 
@@ -8,9 +8,9 @@
 
 ## 1. Definition of "full functionality"
 
-Velion is at "full functionality" — shippable, production-grade, and trust-claimable — when **all** of the following hold:
+Verevon is at "full functionality" — shippable, production-grade, and trust-claimable — when **all** of the following hold:
 
-- **The agent-runner is *credible in production*, not just operational.** The governed multi-step ReAct loop already runs end-to-end; full functionality additionally means every run carries **real cost telemetry** (cost-core ledger fed per inference) and **continuous quality/eval signal** (no permanently-null `costUsd`/`confidence` columns in the Agent Run Console). This is the explicit enterprise hook in `VELION.md`'s own competitive strategy.
+- **The agent-runner is *credible in production*, not just operational.** The governed multi-step ReAct loop already runs end-to-end; full functionality additionally means every run carries **real cost telemetry** (cost-core ledger fed per inference) and **continuous quality/eval signal** (no permanently-null `costUsd`/`confidence` columns in the Agent Run Console). This is the explicit enterprise hook in `VEREVON.md`'s own competitive strategy.
 - **Multi-tenant production is safe and observable.** Org isolation is enforced not only at the app/gateway layer but with a DB backstop (RLS active), schema evolution is versioned (a real `schema_migrations` ledger on every Control-Plane core, migrations applied on deploy), the gateway caches session validation and rate-limits fleet-wide, and there is per-tenant request/error/latency visibility on the identity/billing/session/audit hot paths and at the BFF edge.
 - **Procurement-grade trust is *earned*, not just *built*.** The controls exist and are honestly gated today; full functionality means a public Trust Center backed by **at least one third-party attestation in flight** (SOC 2 II / ISO 27001 / ISO 42001 / EU AI Act / pentest), a **cross-plane erasure fan-out** that actually purges derived copies (so Art. 17 "erased everywhere" is true), a complete DSAR export, enforced CSP, and per-class retention sweeps on content-bearing stores.
 - **There is at least one self-serve revenue surface that works out-of-the-box.** Either the Brreg lead-builder is sellable (a plan/add-on grants the `leads` entitlement instead of 402-ing every org) **or** an embeddable end-customer widget exists — ideally both. Today neither monetizes without manual operator intervention.
@@ -20,7 +20,7 @@ Velion is at "full functionality" — shippable, production-grade, and trust-cla
 
 ## 2. Where we are
 
-`VELION.md` self-rates **~72% production-real (backends ~85%)**, and this audit confirms that framing with two corrections in Velion's favour and several hard blockers against it. **In Velion's favour:** the multi-step governed agent loop is genuinely live end-to-end (the "MVP no-tool dispatch" label in `VELION.md`/`grpc.rs` is *stale* — `execution-core` runs a real capped ReAct loop), and two roadmap items already shipped (the **public Trust Center** on `velion-web`, and the **Data-Plane erasure subscriber**). **Against it:** the credibility layer the GTM leans on is not yet wired — **cost is hardcoded `null` on every run and there is no eval in the serving path** — and the trust *claims* are not yet *earned* (zero certifications, no real cross-plane derived-copy purge). The remaining work is heavily **wiring and operational hardening of already-built backends**, plus three genuinely net-new builds (Channel Plane / embeddable widget, connector content-sync workers, evaluation service).
+`VEREVON.md` self-rates **~72% production-real (backends ~85%)**, and this audit confirms that framing with two corrections in Verevon's favour and several hard blockers against it. **In Verevon's favour:** the multi-step governed agent loop is genuinely live end-to-end (the "MVP no-tool dispatch" label in `VEREVON.md`/`grpc.rs` is *stale* — `execution-core` runs a real capped ReAct loop), and two roadmap items already shipped (the **public Trust Center** on `verevon-web`, and the **Data-Plane erasure subscriber**). **Against it:** the credibility layer the GTM leans on is not yet wired — **cost is hardcoded `null` on every run and there is no eval in the serving path** — and the trust *claims* are not yet *earned* (zero certifications, no real cross-plane derived-copy purge). The remaining work is heavily **wiring and operational hardening of already-built backends**, plus three genuinely net-new builds (Channel Plane / embeddable widget, connector content-sync workers, evaluation service).
 
 ---
 
@@ -103,14 +103,14 @@ Sequenced by **dependency + leverage**: quick high-leverage ops fixes and the tw
 
 ### Phase 8 — "Trust, earned" (GDPR fan-out + DSAR + public-trust + certification path)
 
-- **Goal:** turn Velion's *built* controls into *earned, claimable* trust — the unlock for trust-led enterprise deals and the differentiator against a Vanta-backed competitor.
+- **Goal:** turn Verevon's *built* controls into *earned, claimable* trust — the unlock for trust-led enterprise deals and the differentiator against a Vanta-backed competitor.
 - **Scope (audited items):**
-  - **B7** Cross-plane erasure fan-out — add a content-purge subscriber per plane to `velion.gdpr.erasure.requested`: DP byte/chunk/embedding delete (today's subscriber only *re-owns* rows), MP run-history + conversation + inference-cache purge, App Convex/conversation-core purge, Ingestion CAS/crawl purge — each idempotent + audited. Makes Art. 17 "erased everywhere" *true*.
+  - **B7** Cross-plane erasure fan-out — add a content-purge subscriber per plane to `verevon.gdpr.erasure.requested`: DP byte/chunk/embedding delete (today's subscriber only *re-owns* rows), MP run-history + conversation + inference-cache purge, App Convex/conversation-core purge, Ingestion CAS/crawl purge — each idempotent + audited. Makes Art. 17 "erased everywhere" *true*.
   - **B8** DSAR completeness — extend `BuildDSARExport` (user-core) to assemble MP run-history/conversations + DP documents via the same subscribers (export side); add a public/unauthenticated intake with identity verification for non-account subjects; enforce step-up re-auth on `DELETE /api/v1/privacy/erase`.
   - **GDPR policy-metadata propagation** — attach + carry the full 7-field envelope (purpose, lawful basis, retention, residency, privacy class, third-party processing, deletion scope) on every durable record + cross-plane NATS job, enforced at each plane's ingest boundary. Underpins per-class retention + erasure scoping.
   - **Retention sweeps for non-audit stores** — per-store janitor for MP run-history/conversations and Ingestion CAS/crawl, honoring per-class retention from the privacy taxonomy (audit-core already sweeps; others grow unbounded).
   - **ZDR vendor propagation** — confirm/contract ZDR+region with Anthropic & OpenAI, *or* hard-gate ZDR requests to the Azure-EU path only in the `FallbackChain`/model-router (today a downgrade/fallback could route a ZDR request to an unconfirmed vendor).
-  - **B10 / public trust** — stand up the cert path (SOC 2 II / ISO 27001 / ISO 42001 / EU AI Act / pentest); enrich the *already-shipped* public Trust Center (`velion-web/src/app/trust`) with a machine-readable data-flow/architecture map and a wired request-access intake (reuse the DSAR intake plumbing). Lead on **ISO 42001 / EU AI Act** as the sovereign-AI wedge.
+  - **B10 / public trust** — stand up the cert path (SOC 2 II / ISO 27001 / ISO 42001 / EU AI Act / pentest); enrich the *already-shipped* public Trust Center (`verevon-web/src/app/trust`) with a machine-readable data-flow/architecture map and a wired request-access intake (reuse the DSAR intake plumbing). Lead on **ISO 42001 / EU AI Act** as the sovereign-AI wedge.
 - **Why now / sequencing:** the certifications (B10, XL, months-long, external auditors) require the operational controls from Phases 6–8 *operating as evidence* — RLS active, retention sweeps running, CSP enforced, audit complete, erasure provable. So the cert window opens here, after the substrate is real. B7 and B8 share subscribers (build once, use for both erase and export). B9 (next) reuses the per-user_id keying this phase introduces on derived stores.
 - **Dependencies:** Phase 6 (RLS, observability as cert evidence); Phase 5 (CSP enforce); the erasure publisher (live) + DP subscriber (live) as the pattern to replicate.
 - **Rough effort:** **XL** (B10 XL is largely process/audit, not code; B7 L, B8 M, the rest M–L).
@@ -119,7 +119,7 @@ Sequenced by **dependency + leverage**: quick high-leverage ops fixes and the tw
 
 ### Phase 9 — "Honest depth + the external-facing product" (private-until-shared claim + Channel Plane + widget)
 
-- **Goal:** ship the two highest-ceiling surfaces — the *claimable* per-user privacy guarantee and the external visitor → agent path — that turn Velion from an internal workbench into a deployable end-customer product.
+- **Goal:** ship the two highest-ceiling surfaces — the *claimable* per-user privacy guarantee and the external visitor → agent path — that turn Verevon from an internal workbench into a deployable end-customer product.
 - **Scope (audited items):**
   - **B9** Private-until-shared as a claimable guarantee — thread `user_id` through `ExecuteStep` (proto change, tracked PR-4; regenerate mp-contracts) **and** graph-index gRPC; activate the Qdrant/Quickwit payload pre-filters (today only a retrieval post-filter exists); flip `CONTROL_PLANE_ENFORCEMENT` to strict in the *same* release; pass the four-path honesty test (dense/sparse/wiki/graph all gate on identity) **before** any "Private" badge or "AI only sees your data" copy renders. *Also closes the `ExecuteStep` viewer-scoping gap on the single-step path.*
   - **B15** Channel Plane runtime — net-new build: adapter-core / widget-core / public visitor conversation runtime (owns visitor identity bootstrap + public conversation runtime + channel adapters).
@@ -141,13 +141,13 @@ Sequenced by **dependency + leverage**: quick high-leverage ops fixes and the tw
 2. **Seed the `leads` entitlement (B2)** — one entry in `defaultEntitlementsByPlan` (or an add-on SKU) turns an already-Brreg-live-verified, metered, audited lead-builder into self-serve revenue instead of a universal 402.
 3. **dpv2 migration-on-deploy (B3)** — a migrate init-container on the dpv2 compose stack ends the class of stale-schema 500s already seen with `operating_maps`.
 4. **CSP enforce** — collect report-only violations, tighten the policy, load-test, then the one-line `Content-Security-Policy-Report-Only` → `Content-Security-Policy` rename at `nginx.conf:35`.
-5. **Correct the stale `execution-core` doc-comments** (`grpc.rs:224-241` "no-tool slice") and the `VELION.md` "MVP no-tool dispatch" line — the real multi-step ReAct loop is live; the docs under-sell a shipped capability.
+5. **Correct the stale `execution-core` doc-comments** (`grpc.rs:224-241` "no-tool slice") and the `VEREVON.md` "MVP no-tool dispatch" line — the real multi-step ReAct loop is live; the docs under-sell a shipped capability.
 
 ---
 
 ## 6. Explicitly out of scope / cut
 
-Restated verbatim from `VELION.md` — **cut, not deferred** — so the roadmap stays on the wedge (breadth is how a small team dies; the bet is depth):
+Restated verbatim from `VEREVON.md` — **cut, not deferred** — so the roadmap stays on the wedge (breadth is how a small team dies; the bet is depth):
 
 - **Meeting notes**
 - **Podcast / video repurposing**

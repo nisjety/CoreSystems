@@ -49,7 +49,7 @@ func main() {
 		InboxPrefix: "_INBOX.APPLICATION_NOTIFICATION", Name: cfg.ServiceName,
 	})
 	if err != nil {
-		log.Fatalf("connect velion nats: %v", err)
+		log.Fatalf("connect verevon nats: %v", err)
 	}
 	defer func() {
 		if err := natsClient.Conn.Drain(); err != nil {
@@ -185,8 +185,24 @@ func main() {
 		log.Fatalf("configure delegation verifier: %v", err)
 	}
 	server := httpserver.NewServer(cfg.HTTPPort, handler, delegationVerifier)
+	// consumerCtx is process-lifetime rather than startup-bounded: every
+	// subscription handler may call notificationService for as long as this
+	// process accepts events.
+	consumerCtx, consumerCancel := context.WithCancel(context.Background())
 
-	// ── Shared bus consumers ────────────────────────────────────────────
+	// ── Application-local and shared-bus consumers ───────────────────────
+	// ConversationFollowedMessageSubscriber is deliberately enabled on this
+	// Application-Plane-local bus. conversation-core owns follower selection;
+	// notification-core still verifies each recipient's current organization
+	// membership and notification preference before it can create delivery.
+	// The event projection carries no customer text or sender data.
+	conversationFollowSubscriber := consumers.NewConversationFollowedMessageSubscriber(natsClient.JS, notificationService)
+	if err := conversationFollowSubscriber.Start(consumerCtx); err != nil {
+		log.Printf("notification-core: conversation-followed-message subscriber disabled: %v", err)
+	} else {
+		defer conversationFollowSubscriber.Stop()
+	}
+
 	// Most shared-bus notification consumers (ControlSessionSubscriber,
 	// SocialPublishFailedSubscriber, IdentitySyncSubscriber) remain off
 	// until workload-signed, revisioned authority events and subject ACLs
@@ -200,17 +216,12 @@ func main() {
 	// that hardening work lands.
 	log.Printf("notification-core: unsigned shared-bus consumers intentionally disabled (except org-deletion)")
 
-	// consumerCtx (not startupCtx, which is bounded to 15s) lives for the
-	// process lifetime — it's captured by the subscription's message
-	// handlers and used on every Accept call for as long as the service
-	// runs, not just at startup. consumerCancel is deferred AFTER
+	// consumerCancel is deferred AFTER
 	// orgDeletionSubscriber's Stop() below (not here) so that, on shutdown,
 	// defers run in the reverse order: cancel first (signalling the
 	// background retry goroutine to exit before it can call sub.Start again)
 	// and only then Stop — avoiding a Start/Stop race on the subscriber's
 	// subscription slice.
-	consumerCtx, consumerCancel := context.WithCancel(context.Background())
-
 	// Runs on the dedicated shared-broker client (notification-core-gdpr
 	// identity) constructed above — independent of natsClient, since this
 	// subscriber never touches the Application-Plane-local broker. Gated on

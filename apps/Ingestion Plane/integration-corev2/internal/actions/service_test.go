@@ -2,14 +2,168 @@ package actions
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
+
+func TestExecuteMicrosoftMailSendTranslatesVerevonEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.0/me/sendMail" {
+			t.Fatalf("path = %s, want /v1.0/me/sendMail", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		message, ok := body["message"].(map[string]any)
+		if !ok {
+			t.Fatalf("body = %#v, want Graph message envelope", body)
+		}
+		if message["subject"] != "Delivery update" {
+			t.Fatalf("message subject = %#v", message["subject"])
+		}
+		headers, _ := message["internetMessageHeaders"].([]any)
+		if len(headers) != 1 {
+			t.Fatalf("internetMessageHeaders = %#v, want one opaque correlation header", message["internetMessageHeaders"])
+		}
+		bodyContent, _ := message["body"].(map[string]any)
+		if bodyContent["contentType"] != "HTML" || bodyContent["content"] != "<p>Checked</p>" {
+			t.Fatalf("message body = %#v, want HTML content", bodyContent)
+		}
+		recipients, _ := message["toRecipients"].([]any)
+		if len(recipients) != 1 {
+			t.Fatalf("toRecipients = %#v, want one recipient", message["toRecipients"])
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token", Operation: "mail.send",
+		Body: map[string]any{"subject": "Delivery update", "bodyText": "Checked", "bodyHtml": "<p>Checked</p>", "to": []string{"customer@example.com"}, "correlationId": "outintent_123"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteGoogleGmailSendTranslatesVerevonEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gmail/v1/users/me/messages/send" {
+			t.Fatalf("path = %s, want Gmail send endpoint", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("Decode body error: %v", err)
+		}
+		raw, ok := body["raw"].(string)
+		if !ok || raw == "" {
+			t.Fatalf("body = %#v, want RFC-822 raw message", body)
+		}
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil {
+			t.Fatalf("decode raw message: %v", err)
+		}
+		wire := string(decoded)
+		for _, required := range []string{"To: customer@example.com", "Subject: Delivery update", "In-Reply-To: <customer-message@example.com>", "References: <root@example.com> <customer-message@example.com>", "X-Verevon-Outbound-Intent: outintent_123", "Checked"} {
+			if !strings.Contains(wire, required) {
+				t.Fatalf("raw message missing %q:\n%s", required, wire)
+			}
+		}
+		if body["threadId"] != "gmail-thread-1" {
+			t.Fatalf("threadId = %#v, want gmail-thread-1", body["threadId"])
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "gmail-message-1"})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "google"}, AccessToken: "token", Operation: "gmail.send",
+		Body: map[string]any{"subject": "Delivery update", "bodyText": "Checked", "to": []string{"customer@example.com"}, "threadId": "gmail-thread-1", "inReplyTo": "<customer-message@example.com>", "references": "<root@example.com> <customer-message@example.com>", "correlationId": "outintent_123"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, _ := result.Result.(map[string]any)
+	if payload["id"] != "gmail-message-1" {
+		t.Fatalf("result = %#v, want Gmail message response", result.Result)
+	}
+}
+
+func TestMailSendPayloadRejectsHeaderInjection(t *testing.T) {
+	_, err := gmailSendPayload(map[string]any{
+		"subject":  "Delivery update\r\nBcc: attacker@example.com",
+		"bodyText": "Checked",
+		"to":       []string{"customer@example.com"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "subject cannot contain line breaks") {
+		t.Fatalf("gmailSendPayload error = %v, want subject header validation", err)
+	}
+
+	_, err = microsoftMailSendPayload(map[string]any{
+		"subject":  "Delivery update",
+		"bodyText": "Checked",
+		"to":       []string{"customer@example.com\r\nBcc: attacker@example.com"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid mail recipient") {
+		t.Fatalf("microsoftMailSendPayload error = %v, want recipient validation", err)
+	}
+
+	_, err = gmailSendPayload(map[string]any{
+		"subject":    "Delivery update",
+		"bodyText":   "Checked",
+		"to":         []string{"customer@example.com"},
+		"references": "<root@example.com>\r\nBcc: attacker@example.com",
+	})
+	if err == nil || !strings.Contains(err.Error(), "references cannot contain line breaks") {
+		t.Fatalf("gmailSendPayload error = %v, want reference header validation", err)
+	}
+
+	_, err = gmailSendPayload(map[string]any{
+		"subject":       "Delivery update",
+		"bodyText":      "Checked",
+		"to":            []string{"customer@example.com"},
+		"correlationId": "outintent_123\r\nX-Injected: true",
+	})
+	if err == nil || !strings.Contains(err.Error(), "correlationId contains invalid characters") {
+		t.Fatalf("gmailSendPayload error = %v, want correlation token validation", err)
+	}
+}
+
+func TestMailSendPayloadKeepsNativeProviderBodiesImmutable(t *testing.T) {
+	graphNative := map[string]any{"message": map[string]any{"subject": "native"}, "saveToSentItems": false}
+	graphPayload, err := microsoftMailSendPayload(graphNative)
+	if err != nil {
+		t.Fatalf("microsoftMailSendPayload error: %v", err)
+	}
+	graphPayload["saveToSentItems"] = true
+	if graphNative["saveToSentItems"] != false {
+		t.Fatalf("native Graph payload was mutated: %#v", graphNative)
+	}
+
+	gmailNative := map[string]any{"raw": "already-encoded", "threadId": "thread-1"}
+	gmailPayload, err := gmailSendPayload(gmailNative)
+	if err != nil {
+		t.Fatalf("gmailSendPayload error: %v", err)
+	}
+	if !reflect.DeepEqual(gmailPayload, gmailNative) {
+		t.Fatalf("Gmail payload = %#v, want %#v", gmailPayload, gmailNative)
+	}
+	gmailPayload["threadId"] = "thread-2"
+	if gmailNative["threadId"] != "thread-1" {
+		t.Fatalf("native Gmail payload was mutated: %#v", gmailNative)
+	}
+}
 
 func TestExecuteSlackChannelsList(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -271,13 +425,13 @@ func TestExecuteSnapchatMissingProfileIDErrors(t *testing.T) {
 
 func TestExecuteGitHubRepoEscapesPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/triodelab/velion" {
-			t.Fatalf("path = %s, want /repos/triodelab/velion", r.URL.Path)
+		if r.URL.Path != "/repos/triodelab/verevon" {
+			t.Fatalf("path = %s, want /repos/triodelab/verevon", r.URL.Path)
 		}
 		if got := r.Header.Get("X-GitHub-Api-Version"); got == "" {
 			t.Fatalf("missing GitHub API version header")
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"full_name": "triodelab/velion"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"full_name": "triodelab/verevon"})
 	}))
 	defer server.Close()
 
@@ -286,7 +440,7 @@ func TestExecuteGitHubRepoEscapesPath(t *testing.T) {
 		Connection:  store.Connection{ProviderKey: "github"},
 		AccessToken: "token",
 		Operation:   "repo",
-		Params:      map[string]any{"owner": "triodelab", "repo": "velion"},
+		Params:      map[string]any{"owner": "triodelab", "repo": "verevon"},
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
@@ -340,8 +494,8 @@ func TestExecuteGitHubTeams(t *testing.T) {
 
 func TestExecuteGitHubContentsGetEscapesPathSegments(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/triodelab/velion/contents/docs/README.md" {
-			t.Fatalf("path = %s, want /repos/triodelab/velion/contents/docs/README.md", r.URL.Path)
+		if r.URL.Path != "/repos/triodelab/verevon/contents/docs/README.md" {
+			t.Fatalf("path = %s, want /repos/triodelab/verevon/contents/docs/README.md", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("ref"); got != "main" {
 			t.Fatalf("ref = %q, want main", got)
@@ -358,7 +512,7 @@ func TestExecuteGitHubContentsGetEscapesPathSegments(t *testing.T) {
 		Connection:  store.Connection{ProviderKey: "github"},
 		AccessToken: "token",
 		Operation:   "contents.get",
-		Params:      map[string]any{"owner": "triodelab", "repo": "velion", "path": "docs/README.md", "ref": "main"},
+		Params:      map[string]any{"owner": "triodelab", "repo": "verevon", "path": "docs/README.md", "ref": "main"},
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
@@ -367,8 +521,8 @@ func TestExecuteGitHubContentsGetEscapesPathSegments(t *testing.T) {
 
 func TestExecuteGitHubIssueCreatePostsJSON(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/triodelab/velion/issues" {
-			t.Fatalf("path = %s, want /repos/triodelab/velion/issues", r.URL.Path)
+		if r.URL.Path != "/repos/triodelab/verevon/issues" {
+			t.Fatalf("path = %s, want /repos/triodelab/verevon/issues", r.URL.Path)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer token" {
 			t.Fatalf("Authorization = %q, want Bearer token", got)
@@ -389,7 +543,7 @@ func TestExecuteGitHubIssueCreatePostsJSON(t *testing.T) {
 		Connection:  store.Connection{ProviderKey: "github"},
 		AccessToken: "token",
 		Operation:   "issues.create",
-		Params:      map[string]any{"owner": "triodelab", "repo": "velion"},
+		Params:      map[string]any{"owner": "triodelab", "repo": "verevon"},
 		Body:        map[string]any{"title": "Fix checkout"},
 	})
 	if err != nil {
@@ -399,8 +553,8 @@ func TestExecuteGitHubIssueCreatePostsJSON(t *testing.T) {
 
 func TestExecuteGitHubPullsList(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/triodelab/velion/pulls" {
-			t.Fatalf("path = %s, want /repos/triodelab/velion/pulls", r.URL.Path)
+		if r.URL.Path != "/repos/triodelab/verevon/pulls" {
+			t.Fatalf("path = %s, want /repos/triodelab/verevon/pulls", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("state"); got != "open" {
 			t.Fatalf("state = %q, want open", got)
@@ -414,7 +568,7 @@ func TestExecuteGitHubPullsList(t *testing.T) {
 		Connection:  store.Connection{ProviderKey: "github"},
 		AccessToken: "token",
 		Operation:   "pulls.list",
-		Params:      map[string]any{"owner": "triodelab", "repo": "velion", "state": "open"},
+		Params:      map[string]any{"owner": "triodelab", "repo": "verevon", "state": "open"},
 	})
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)

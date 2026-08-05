@@ -14,7 +14,7 @@ func DefaultConnectorSlots(opts ConnectorSlotOptions) []ConnectorSlot {
 	return []ConnectorSlot{
 		{
 			Type:          "social-core",
-			DisplayName:   "Velion Social",
+			DisplayName:   "Verevon Social",
 			Surface:       SurfaceSocial,
 			Status:        ConnectorStatusNative,
 			Authorization: "internal_application_plane_event",
@@ -28,7 +28,7 @@ func DefaultConnectorSlots(opts ConnectorSlotOptions) []ConnectorSlot {
 		},
 		{
 			Type:          "conversation-core",
-			DisplayName:   "Velion Inbox",
+			DisplayName:   "Verevon Inbox",
 			Surface:       SurfaceInbox,
 			Status:        ConnectorStatusNative,
 			Authorization: "internal_application_plane_event",
@@ -42,7 +42,7 @@ func DefaultConnectorSlots(opts ConnectorSlotOptions) []ConnectorSlot {
 		},
 		{
 			Type:          "model-plane-agents",
-			DisplayName:   "Velion Agents",
+			DisplayName:   "Verevon Agents",
 			Surface:       SurfaceAgents,
 			Status:        ConnectorStatusPlanned,
 			Authorization: "internal_event_or_model_plane_api",
@@ -56,7 +56,7 @@ func DefaultConnectorSlots(opts ConnectorSlotOptions) []ConnectorSlot {
 		},
 		{
 			Type:          "campaign-core",
-			DisplayName:   "Velion Campaigns",
+			DisplayName:   "Verevon Campaigns",
 			Surface:       SurfaceCampaigns,
 			Status:        ConnectorStatusPlanned,
 			Authorization: "internal_application_plane_event",

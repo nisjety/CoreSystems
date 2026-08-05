@@ -25,10 +25,10 @@ const (
 	RetentionModeStandard = "standard"
 	RetentionModeZDR      = "zdr"
 
-	SubjectNotificationRequestAccepted   = "velion.application.notification.request.accepted"
-	SubjectNotificationRequestSubmitted  = "velion.application.notification.request.submitted"
-	SubjectNotificationRequestFailed     = "velion.application.notification.request.failed"
-	SubjectNotificationRequestSuppressed = "velion.application.notification.request.suppressed"
+	SubjectNotificationRequestAccepted   = "verevon.application.notification.request.accepted"
+	SubjectNotificationRequestSubmitted  = "verevon.application.notification.request.submitted"
+	SubjectNotificationRequestFailed     = "verevon.application.notification.request.failed"
+	SubjectNotificationRequestSuppressed = "verevon.application.notification.request.suppressed"
 )
 
 var ErrNotFound = errors.New("notification request not found")

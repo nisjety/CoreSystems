@@ -196,7 +196,7 @@ class OnboardingServiceAPI {
 
       // Fallback heuristic (used when session-context is unavailable or
       // returns no onboardingStatus). Kept for resilience during the
-      // zero-input rollout — see velion-gap.md G18.
+      // zero-input rollout — see verevon-gap.md G18.
       let hasProfile = false
       let onboardingComplete = false
       try {
@@ -400,7 +400,7 @@ class OnboardingServiceAPI {
         url: data.url,
         crawlJobId: data.crawlJobId,
       }
-      // G45 (velion-gap.md §8.31 / Slice F): skip the legacy 'connect' step in
+      // G45 (verevon-gap.md §8.31 / Slice F): skip the legacy 'connect' step in
       // the wizard. Connector consent is deferred to a post-first-value prompt
       // on the dashboard (`<ConnectorConsentPrompt />`). The 'connect' step is
       // kept in the OnboardingState union for back-compat with sessions
@@ -658,7 +658,7 @@ class OnboardingServiceAPI {
 
   /**
    * G3 + G16: server-side onboarding-state writer. Forwards `{ step, state }`
-   * to `/api/user/me/onboarding-state` (user-core via velion proxy). Always
+   * to `/api/user/me/onboarding-state` (user-core via verevon proxy). Always
    * best-effort — the local cache write that the caller already did is the
    * source of truth for "did this attempt succeed at all"; the server write
    * is the multi-device resume hook.

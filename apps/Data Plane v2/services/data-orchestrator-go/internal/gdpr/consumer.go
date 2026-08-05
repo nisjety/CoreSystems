@@ -23,8 +23,8 @@ import (
 const (
 	controlSharedStream     = "AQENCIA_CONTROLPLANE"
 	durableConsumerName     = "data-orchestrator-org-erasure"
-	durableDeliverySubject  = "_VELION.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
-	erasureDLQSubject       = "velion.gdpr.erasure.dlq.data-orchestrator-org-purge"
+	durableDeliverySubject  = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
+	erasureDLQSubject       = "verevon.gdpr.erasure.dlq.data-orchestrator-org-purge"
 	terminalDeliveryAttempt = uint64(10)
 	consumerMaxDeliver      = 20
 )

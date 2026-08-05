@@ -1,5 +1,5 @@
 // Package gdpr subscribes wiki-store-go to the cross-plane GDPR erasure
-// fan-out (velion.gdpr.erasure.requested) and hard-purges this service's
+// fan-out (verevon.gdpr.erasure.requested) and hard-purges this service's
 // org-scoped wiki and Operating Map data when an organization is erased.
 //
 // Producers: org-core publishes this exact subject + payload shape on BOTH
@@ -36,7 +36,7 @@ import (
 // ErasureRequestedSubject mirrors org-core's GDPRErasureFanoutSubject /
 // user-core's GDPRErasureFanoutSubject — the single cross-plane subject both
 // org- and user-scoped erasure fan-out share.
-const ErasureRequestedSubject = "velion.gdpr.erasure.requested"
+const ErasureRequestedSubject = "verevon.gdpr.erasure.requested"
 
 // OrgPurger is the repository slice this consumer needs. *repo.WikiRepo
 // satisfies it via HardPurgeByOrg (internal/repo/org_purge.go).

@@ -2,7 +2,7 @@
 // service. G14: subscribe to Control Session events emitted by the repurposed
 // CP session-core (ADR 0002) and dispatch user-facing notifications.
 //
-// Note: renamed from `subscribers` to `consumers` in U5-2 (ui-ux-velion-gap.md
+// Note: renamed from `subscribers` to `consumers` in U5-2 (ui-ux-verevon-gap.md
 // §10) so the new `subscribers` package can own Novu subscriber identity.
 package consumers
 

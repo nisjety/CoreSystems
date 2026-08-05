@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 
 /**
- * Velion edge middleware — closes velion-gap.md G1.
+ * Verevon edge middleware — closes verevon-gap.md G1.
  *
  * Replaces the dead `src/proxy.ts` (never wired) and the per-page
  * `getServerSession() + redirect()` boilerplate scattered across protected
@@ -93,7 +93,7 @@ const AUTH_SERVICE_URL = (
 //
 // G28 / G28-followup: cache the resolved `userId` + `userEmail` + `userName`
 // alongside the `ok` flag so the edge gate can forward all three to
-// protected pages via `x-velion-user-{id,email,name}` request headers,
+// protected pages via `x-verevon-user-{id,email,name}` request headers,
 // eliminating the per-page `getServerSession()` round-trip that duplicated
 // the work middleware already did. Profile fields are bounded-size (~256 B
 // combined) and well under any sane header-limit (8 KB typical).
@@ -208,9 +208,9 @@ async function isAuthenticated(request: NextRequest): Promise<ValidationResult> 
 // skip their own `getServerSession()` call. Trusted because the edge gate
 // is the only writer (the matcher excludes anything that could be
 // user-controlled reaching the page).
-export const VELION_USER_ID_HEADER = 'x-velion-user-id'
-export const VELION_USER_EMAIL_HEADER = 'x-velion-user-email'
-export const VELION_USER_NAME_HEADER = 'x-velion-user-name'
+export const VEREVON_USER_ID_HEADER = 'x-verevon-user-id'
+export const VEREVON_USER_EMAIL_HEADER = 'x-verevon-user-email'
+export const VEREVON_USER_NAME_HEADER = 'x-verevon-user-name'
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl
@@ -247,9 +247,9 @@ export async function proxy(request: NextRequest) {
   // the legacy `getServerSession()` defence-in-depth check."
   if (isProtected && userId) {
     const forwarded = new Headers(request.headers)
-    forwarded.set(VELION_USER_ID_HEADER, userId)
-    if (userEmail) forwarded.set(VELION_USER_EMAIL_HEADER, userEmail)
-    if (userName) forwarded.set(VELION_USER_NAME_HEADER, userName)
+    forwarded.set(VEREVON_USER_ID_HEADER, userId)
+    if (userEmail) forwarded.set(VEREVON_USER_EMAIL_HEADER, userEmail)
+    if (userName) forwarded.set(VEREVON_USER_NAME_HEADER, userName)
     return NextResponse.next({ request: { headers: forwarded } })
   }
 

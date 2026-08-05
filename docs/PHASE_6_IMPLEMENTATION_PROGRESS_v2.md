@@ -15,7 +15,7 @@ Phase 6 implements the **consuming side** of the event-driven architecture. Afte
 ### What Works ✅
 
 1. **Shared NATS Event Bus** (From Phase 5 - Verified)
-   - Broker: `nats://velion-nats:4222`
+   - Broker: `nats://verevon-nats:4222`
    - Token: `aqencia-shared-nats-token-2026`
    - JetStream Stream: `AQENCIA_CONTROLPLANE`
    - All Control Plane services publishing events successfully

@@ -270,7 +270,7 @@ function buildAssemblyProof(
       items: proofOfConcept?.likelyIntents ?? likelyIntentSignals(state.website?.agentBrief, websites, locale),
     },
     {
-      label: locale === "nb" ? "Neste Velion-jobber" : "Next Velion jobs",
+      label: locale === "nb" ? "Neste Verevon-jobber" : "Next Verevon jobs",
       items: proofOfConcept?.nextActions ?? [
         locale === "nb" ? "Bygg første chatbot-utkast" : "Build the first chatbot draft",
         connectorNames.length > 0
@@ -336,7 +336,7 @@ function AssemblyProofPanel({
       {(proof.proofGroups.length > 0 || proof.expectedOutcomes.length > 0) && (
         <div className="mt-5 border-t border-[#E7E5E4] pt-4">
           <p className="font-inter text-[10px] font-semibold uppercase tracking-[0.16em] text-[#777169]">
-            {locale === "nb" ? "Velion ser allerede" : "Velion already sees"}
+            {locale === "nb" ? "Verevon ser allerede" : "Verevon already sees"}
           </p>
           {proof.proofGroups.length > 0 && (
             <div className="mt-3 grid gap-4 md:grid-cols-3">
@@ -411,21 +411,21 @@ function buildAssemblyOutlook(
 
   return locale === "nb"
     ? {
-        title: `Velion klargjøres for ${orgName}`,
+        title: `Verevon klargjøres for ${orgName}`,
         description: `Vi setter opp ${planName} med ${sourceText}, lager første agentkart og åpner dashboardet med konkrete neste steg.`,
         dashboardTitle: `${orgName} dashboard`,
         headline: `Første agent for ${orgName}`,
-        summary: `${recommendation.summary ?? "Velion bygger et første bilde av scope, kilder og forbedringsmuligheter."}`,
+        summary: `${recommendation.summary ?? "Verevon bygger et første bilde av scope, kilder og forbedringsmuligheter."}`,
         proofPoints,
         opportunities,
         expectedOutcomes,
       }
     : {
-        title: `Preparing Velion for ${orgName}`,
+        title: `Preparing Verevon for ${orgName}`,
         description: `We are setting up ${planName} with ${sourceText}, building the first agent map and opening the dashboard with concrete next steps.`,
         dashboardTitle: `${orgName} dashboard`,
         headline: `First agent for ${orgName}`,
-        summary: `${recommendation.summary ?? "Velion is building the first view of scope, sources and improvement opportunities."}`,
+        summary: `${recommendation.summary ?? "Verevon is building the first view of scope, sources and improvement opportunities."}`,
         proofPoints,
         opportunities,
         expectedOutcomes,

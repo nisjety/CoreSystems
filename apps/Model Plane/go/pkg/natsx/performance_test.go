@@ -43,8 +43,8 @@ func TestPublishRecoveryAfterError(t *testing.T) {
 
 func TestTranslationPerformance(t *testing.T) {
 	subjects := []string{
-		"velion.agent.run.run-1.event",
-		"velion.session.sess-1.command",
+		"verevon.agent.run.run-1.event",
+		"verevon.session.sess-1.command",
 		"aqencia.reasoning.reasoning.started",
 		"aqencia.reasoning.reasoning.completed",
 		"aqencia.reasoning.usage.recorded",

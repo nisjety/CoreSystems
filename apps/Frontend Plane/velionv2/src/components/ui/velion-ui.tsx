@@ -14,23 +14,23 @@ type ButtonSize = "md" | "sm" | "xs";
 type ButtonRadius = "default" | "sm" | "pill";
 
 const buttonVariantClass: Record<ButtonVariant, string> = {
-  primary: "velion-button-primary",
-  secondary: "velion-button-secondary",
+  primary: "verevon-button-primary",
+  secondary: "verevon-button-secondary",
 };
 
 const buttonSizeClass: Record<ButtonSize, string> = {
   md: "",
-  sm: "velion-button-sm",
-  xs: "velion-button-xs",
+  sm: "verevon-button-sm",
+  xs: "verevon-button-xs",
 };
 
 const buttonRadiusClass: Record<ButtonRadius, string> = {
   default: "",
-  sm: "velion-button-radius-sm",
-  pill: "velion-button-pill",
+  sm: "verevon-button-radius-sm",
+  pill: "verevon-button-pill",
 };
 
-export function VelionButton({
+export function VerevonButton({
   className,
   radius = "default",
   ref,
@@ -49,7 +49,7 @@ export function VelionButton({
       ref={ref}
       type={type}
       className={cn(
-        "velion-button velion-ui-focus",
+        "verevon-button verevon-ui-focus",
         buttonVariantClass[variant],
         buttonSizeClass[size],
         buttonRadiusClass[radius],
@@ -65,18 +65,18 @@ type IconButtonRadius = "default" | "sm" | "pill";
 
 const iconButtonSizeClass: Record<IconButtonSize, string> = {
   sm: "",
-  xs: "velion-icon-button-xs",
-  md: "velion-icon-button-md",
-  lg: "velion-icon-button-lg",
+  xs: "verevon-icon-button-xs",
+  md: "verevon-icon-button-md",
+  lg: "verevon-icon-button-lg",
 };
 
 const iconButtonRadiusClass: Record<IconButtonRadius, string> = {
   default: "",
-  sm: "velion-button-radius-sm",
-  pill: "velion-icon-button-pill",
+  sm: "verevon-button-radius-sm",
+  pill: "verevon-icon-button-pill",
 };
 
-export function VelionIconButton({
+export function VerevonIconButton({
   className,
   radius = "default",
   ref,
@@ -93,7 +93,7 @@ export function VelionIconButton({
       ref={ref}
       type={type}
       className={cn(
-        "velion-icon-button velion-ui-focus",
+        "verevon-icon-button verevon-ui-focus",
         iconButtonSizeClass[size],
         iconButtonRadiusClass[radius],
         className,
@@ -106,12 +106,12 @@ export function VelionIconButton({
 type FieldVariant = "default" | "compact" | "settings";
 
 const fieldVariantClass: Record<FieldVariant, string> = {
-  default: "velion-input",
-  compact: "velion-field-compact",
-  settings: "velion-settings-field",
+  default: "verevon-input",
+  compact: "verevon-field-compact",
+  settings: "verevon-settings-field",
 };
 
-export function VelionInput({
+export function VerevonInput({
   className,
   ref,
   variant = "default",
@@ -129,7 +129,7 @@ export function VelionInput({
   );
 }
 
-export function VelionSelect({
+export function VerevonSelect({
   className,
   ref,
   variant = "default",
@@ -150,12 +150,12 @@ export function VelionSelect({
 type TextareaVariant = "default" | "compact" | "settings";
 
 const textareaVariantClass: Record<TextareaVariant, string> = {
-  default: "velion-textarea",
-  compact: "velion-textarea-compact",
-  settings: "velion-settings-field velion-settings-textarea",
+  default: "verevon-textarea",
+  compact: "verevon-textarea-compact",
+  settings: "verevon-settings-field verevon-settings-textarea",
 };
 
-export function VelionTextarea({
+export function VerevonTextarea({
   className,
   ref,
   variant = "default",
@@ -173,19 +173,19 @@ export function VelionTextarea({
   );
 }
 
-export function VelionSegmented({
+export function VerevonSegmented({
   children,
   className,
   ...props
 }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cn("velion-segmented", className)} {...props}>
+    <div className={cn("verevon-segmented", className)} {...props}>
       {children}
     </div>
   );
 }
 
-export function VelionSegmentedButton({
+export function VerevonSegmentedButton({
   className,
   ref,
   type = "button",
@@ -197,13 +197,13 @@ export function VelionSegmentedButton({
     <button
       ref={ref}
       type={type}
-      className={cn("velion-segmented-button velion-ui-focus", className)}
+      className={cn("verevon-segmented-button verevon-ui-focus", className)}
       {...props}
     />
   );
 }
 
-export function VelionModal({
+export function VerevonModal({
   children,
   className,
   compact = false,
@@ -217,51 +217,51 @@ export function VelionModal({
   size?: "sm" | "md" | "search" | "wide";
 }) {
   const sizeClass = {
-    sm: "velion-modal-shell-sm",
-    md: "velion-modal-shell-md",
-    search: "velion-modal-shell-search",
-    wide: "velion-modal-shell-wide",
+    sm: "verevon-modal-shell-sm",
+    md: "verevon-modal-shell-md",
+    search: "verevon-modal-shell-search",
+    wide: "verevon-modal-shell-wide",
   }[size];
 
   return (
     <dialog
       open
-      className={cn("velion-modal-backdrop", compact ? "velion-modal-backdrop-compact" : "")}
+      className={cn("verevon-modal-backdrop", compact ? "verevon-modal-backdrop-compact" : "")}
       aria-label={label}
     >
-      <div className={cn("velion-modal-shell", sizeClass, className)}>
+      <div className={cn("verevon-modal-shell", sizeClass, className)}>
         {children}
       </div>
     </dialog>
   );
 }
 
-export function VelionModalTitle({
+export function VerevonModalTitle({
   children,
   className,
   ...props
 }: HTMLAttributes<HTMLHeadingElement>) {
   return (
-    <h2 className={cn("velion-modal-title", className)} {...props}>
+    <h2 className={cn("verevon-modal-title", className)} {...props}>
       {children}
     </h2>
   );
 }
 
-export function VelionModalClose({
+export function VerevonModalClose({
   children = "Esc",
   className,
   type = "button",
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
-    <button type={type} className={cn("velion-modal-close", className)} {...props}>
+    <button type={type} className={cn("verevon-modal-close", className)} {...props}>
       {children}
     </button>
   );
 }
 
-export function VelionSwitch({
+export function VerevonSwitch({
   checked,
   className,
   label,

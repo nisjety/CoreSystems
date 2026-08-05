@@ -1,6 +1,6 @@
 -- 0008_routing_policy.sql
 --
--- Velion intent layer ("model router") runtime policy.
+-- Verevon intent layer ("model router") runtime policy.
 --
 -- Layout choices:
 --   * Lives in session-core's Postgres because session-core already owns the

@@ -7,7 +7,7 @@ This directory contains the current core-level research notes for the active Ing
 
 ## 2026-07-11 re-verification headline
 
-The user's opening complaint — velion chat can't state a shipping time for Oslo→Trondheim — traced to a live-confirmed **Bring delivery-time parsing defect** in shipping-core (dropped Bring's top-level `expectedDelivery` promise → `transit_days:0` / `0001-01-01`). **Fixed in source this pass** (`internal/carrier/bring/{wire,bring}.go` + 2 new production-shaped tests, full suite green); needs a shipping-core rebuild to go live (Docker rebuild currently blocked). Full detail and the other findings (Quarry unauthenticated control plane, imports-core live DB outage + wrong document-service URL, integration-corev2 has no Visma provider, autocomplete-core can't start) are in `plane-audit-2026-07-11.md`, `../../INGESTION_PLANE_STATUS.md`, and `../../INGESTION_PLANE_ROADMAP.md`. Every app container shows "(unhealthy)" only because the exec-based healthcheck fails under the corrupted containerd store — the processes serve traffic (11/12 endpoints return 200).
+The user's opening complaint — verevon chat can't state a shipping time for Oslo→Trondheim — traced to a live-confirmed **Bring delivery-time parsing defect** in shipping-core (dropped Bring's top-level `expectedDelivery` promise → `transit_days:0` / `0001-01-01`). **Fixed in source this pass** (`internal/carrier/bring/{wire,bring}.go` + 2 new production-shaped tests, full suite green); needs a shipping-core rebuild to go live (Docker rebuild currently blocked). Full detail and the other findings (Quarry unauthenticated control plane, imports-core live DB outage + wrong document-service URL, integration-corev2 has no Visma provider, autocomplete-core can't start) are in `plane-audit-2026-07-11.md`, `../../INGESTION_PLANE_STATUS.md`, and `../../INGESTION_PLANE_ROADMAP.md`. Every app container shows "(unhealthy)" only because the exec-based healthcheck fails under the corrupted containerd store — the processes serve traffic (11/12 endpoints return 200).
 
 Latest plane audit: `plane-audit-2026-07-11.md` (renamed from `-07-02`; retains the 2026-07-02 baseline and 2026-07-10 pass below the new 2026-07-11 synthesis).
 
@@ -29,16 +29,16 @@ The Docker stack was running and was checked with non-mutating HTTP probes on 20
 | Quarry Control | Health passed; unauthenticated `GET /v1/jobs` returned 200 with HMAC enforcement disabled in the dev deployment. | Control must not remain host-exposed in this posture. |
 | Social connector path | Four accounts were visible across connected organizations; three tokens were available and one Meta token was expired. | The connector path is real, but connected status must be separated from token health. No publish was attempted. |
 
-The running images are not revision-labelled. Shipping-core was built on 2026-07-04 and the Velion gateway on 2026-07-08; current source registers shipping reliability and recommendation endpoints that both running images return as 404. Rebuild and revision labelling are required before source status can be treated as deployment status.
+The running images are not revision-labelled. Shipping-core was built on 2026-07-04 and the Verevon gateway on 2026-07-08; current source registers shipping reliability and recommendation endpoints that both running images return as 404. Rebuild and revision labelling are required before source status can be treated as deployment status.
 
 Prominent blockers:
 
-- Shipping-core and the Velion shipping proxy expose carrier and quote endpoints without user/session or tenant enforcement.
+- Shipping-core and the Verevon shipping proxy expose carrier and quote endpoints without user/session or tenant enforcement.
 - Booking, label, tracking, manifest, and audit routes share the same unauthenticated shipping router in current source. Do not exercise them against live carrier credentials until authorization is added.
 - Imports job detail and progress SSE routes have no authorization dependency.
 - Quarry Edge is in dev bearer-bypass mode; Quarry Control has HMAC enforcement disabled and is published on all interfaces.
 - The repository smoke scripts are not a reliable current E2E gate: the Ingestion Makefile uses stale ports, the Integration smoke creates connect sessions, and the Quarry smoke omits auth/ZDR.
 
-Current target: new Velion v3 ingestion work should target `Quarry-v2`. Legacy `Quarry/` references still exist in top-level tooling and are tracked in the audit.
+Current target: new Verevon v3 ingestion work should target `Quarry-v2`. Legacy `Quarry/` references still exist in top-level tooling and are tracked in the audit.
 
 </details>

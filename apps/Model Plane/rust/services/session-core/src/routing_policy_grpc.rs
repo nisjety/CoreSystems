@@ -1,8 +1,8 @@
 //! gRPC handler for the `RoutingPolicy` service.
 //!
-//! Owns the durable store for the Velion intent layer's runtime policy (the
+//! Owns the durable store for the Verevon intent layer's runtime policy (the
 //! "model router"). The intent layer in inference-core resolves the
-//! `velion-budget` / `velion-balance` / `velion-genius` modes to a concrete
+//! `verevon-budget` / `verevon-balance` / `verevon-genius` modes to a concrete
 //! model from request complexity + budget posture; this service makes that
 //! policy editable at runtime instead of via compile-time constants.
 //!
@@ -178,8 +178,8 @@ mod tests {
 
     #[test]
     fn parse_config_passes_through_valid_json() {
-        let v = parse_config(r#"{"mode":"velion-balance"}"#).unwrap();
-        assert_eq!(v, serde_json::json!({"mode": "velion-balance"}));
+        let v = parse_config(r#"{"mode":"verevon-balance"}"#).unwrap();
+        assert_eq!(v, serde_json::json!({"mode": "verevon-balance"}));
     }
 
     #[test]
@@ -192,13 +192,13 @@ mod tests {
     #[test]
     fn row_to_pb_serializes_config_and_copies_scalars() {
         let row = RoutingPolicyRow {
-            config: serde_json::json!({"mode": "velion-genius"}),
+            config: serde_json::json!({"mode": "verevon-genius"}),
             version: 7,
             updated_by: "user-123".to_owned(),
             updated_at: 1_700_000_000,
         };
         let msg = row_to_pb(row);
-        assert_eq!(msg.config_json, r#"{"mode":"velion-genius"}"#);
+        assert_eq!(msg.config_json, r#"{"mode":"verevon-genius"}"#);
         assert_eq!(msg.version, 7);
         assert_eq!(msg.updated_by, "user-123");
         assert_eq!(msg.updated_at, 1_700_000_000);

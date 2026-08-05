@@ -1,7 +1,7 @@
 // Package sanitize implements §16.5.4 — wiki content sanitization.
 //
 // Wiki page bodies arrive as Markdown / Logseq blocks but consumers
-// (Velion `/knowledge/wiki`) render to HTML. Trusting the consumer to
+// (Verevon `/knowledge/wiki`) render to HTML. Trusting the consumer to
 // scrub leaves a whole class of XSS bugs in their court. Instead we
 // scrub server-side using bluemonday's UGC policy and surface the
 // result as `safe_html` alongside the raw `content`.

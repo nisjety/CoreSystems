@@ -102,7 +102,7 @@ Statuses:
    (`grpc/knowledge_svc.rs`), registered alongside the other two services on
    the same gRPC port.
 
-Each numbered group is its own PR so the cascade (proto regen → mp-contracts → Model Plane gateway → velion gen) stays reviewable.
+Each numbered group is its own PR so the cascade (proto regen → mp-contracts → Model Plane gateway → verevon gen) stays reviewable.
 
 ## What landed in this round
 

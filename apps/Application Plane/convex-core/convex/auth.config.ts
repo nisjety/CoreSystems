@@ -7,7 +7,7 @@ const config = {
         'http://localhost:3011/api/convex-auth',
       jwks:
         process.env.CONVEX_AUTH_JWKS_URL ||
-        // `auth-core` is the canonical service name (velion-gap.md G7).
+        // `auth-core` is the canonical service name (verevon-gap.md G7).
         'http://auth-core:3011/api/convex-auth/jwks',
       applicationID:
         process.env.CONVEX_AUTH_AUDIENCE || 'coresystem-convex',

@@ -11,8 +11,8 @@ type Capability struct {
 	Description string   `json:"description"`
 	Scopes      []string `json:"scopes"`
 	Sensitive   bool     `json:"sensitive"`
-	// Direction is the data-flow direction relative to Velion: "read" pulls
-	// data INTO Velion (grounding/signals), "write" pushes actions OUT to the
+	// Direction is the data-flow direction relative to Verevon: "read" pulls
+	// data INTO Verevon (grounding/signals), "write" pushes actions OUT to the
 	// provider (replies, publishing, provisioning). Derived from the capability
 	// key by capabilityDirection so every provider is modelled consistently and
 	// the UI can show read/write both-ways info uniformly.
@@ -231,7 +231,7 @@ func Microsoft() Provider {
 			{
 				Key:         "mail.send",
 				Label:       "Outlook send",
-				Description: "Send replies only after Velion workflow and human-in-the-loop policy allows it.",
+				Description: "Send replies only after Verevon workflow and human-in-the-loop policy allows it.",
 				Scopes:      []string{"Mail.Send"},
 				Sensitive:   true,
 			},
@@ -259,7 +259,7 @@ func Microsoft() Provider {
 			{
 				Key:          "inbox",
 				Label:        "Inbox automation",
-				Description:  "Read and send Outlook mail plus Teams messages through Velion-controlled workflows.",
+				Description:  "Read and send Outlook mail plus Teams messages through Verevon-controlled workflows.",
 				Capabilities: []string{"profile.read", "mail.read", "mail.send", "teams.read", "teams.messages.read"},
 			},
 			{
@@ -330,7 +330,7 @@ func Slack() Provider {
 			{
 				Key:         "messages.write",
 				Label:       "Post messages",
-				Description: "Post Velion-approved replies or workflow messages.",
+				Description: "Post Verevon-approved replies or workflow messages.",
 				Scopes:      []string{"chat:write"},
 				Sensitive:   true,
 			},
@@ -408,7 +408,7 @@ func GoogleWorkspace() Provider {
 			{
 				Key:         "gmail.send",
 				Label:       "Gmail send",
-				Description: "Send replies only after Velion workflow and human-in-the-loop policy allows it.",
+				Description: "Send replies only after Verevon workflow and human-in-the-loop policy allows it.",
 				Scopes:      []string{"https://www.googleapis.com/auth/gmail.send"},
 				Sensitive:   true,
 			},
@@ -453,7 +453,7 @@ func GoogleWorkspace() Provider {
 			{
 				Key:          "inbox",
 				Label:        "Inbox automation",
-				Description:  "Read and send Gmail through Velion-controlled workflows.",
+				Description:  "Read and send Gmail through Verevon-controlled workflows.",
 				Capabilities: []string{"profile.read", "gmail.read", "gmail.send"},
 			},
 			{
@@ -1000,6 +1000,13 @@ func Meta() Provider {
 		DirectOAuthReady: true,
 		Capabilities: []Capability{
 			{
+				Key:         "social.messenger.read",
+				Label:       "Messenger Page access",
+				Description: "List Facebook Pages the operator manages and read the Page metadata needed to select a Messenger inbox.",
+				Scopes:      []string{"pages_show_list", "pages_read_engagement"},
+				Sensitive:   true,
+			},
+			{
 				Key:         "social.profile.read",
 				Label:       "Business & Page metadata",
 				Description: "Read the connected Meta business, Facebook Pages, and linked account identity.",
@@ -1129,6 +1136,12 @@ func Meta() Provider {
 				Capabilities: []string{"social.profile.read", "social.instagram.read", "social.post.write", "social.media.upload"},
 			},
 			{
+				Key:          "messenger",
+				Label:        "Messenger inbox",
+				Description:  "Connect Facebook Pages for Messenger conversations and approved replies only.",
+				Capabilities: []string{"social.messenger.read", "social.messenger.manage"},
+			},
+			{
 				Key:          "inbox",
 				Label:        "Unified inbox",
 				Description:  "Page conversations plus WhatsApp Business messaging.",
@@ -1180,7 +1193,7 @@ func Meta() Provider {
 	}
 }
 
-// Shipping is Velion's OWN freight aggregator (shipping-core in the Ingestion
+// Shipping is Verevon's OWN freight aggregator (shipping-core in the Ingestion
 // Plane): one integration covers the whole carrier fleet — Bring, PostNord,
 // DHL, DSV, Helthjem, Porterbuddy, m.fl. — the nShift/Logistra Cargonizer
 // model, in-house. There is no per-user OAuth: carrier credentials are
@@ -1259,7 +1272,7 @@ func Discord() Provider {
 			{
 				Key:         "messages.read",
 				Label:       "Server messages",
-				Description: "Install the Velion bot into the selected server so channel messages reach the unified inbox via the Gateway (requires the Message Content privileged intent on the Discord app).",
+				Description: "Install the Verevon bot into the selected server so channel messages reach the unified inbox via the Gateway (requires the Message Content privileged intent on the Discord app).",
 				Scopes:      []string{"bot"},
 				Sensitive:   true,
 			},
@@ -1298,10 +1311,24 @@ func Instagram() Provider {
 		SupersededBy:     "meta",
 		Capabilities: []Capability{
 			{
+				Key:         "social.inbox.read",
+				Label:       "Instagram conversations",
+				Description: "Read conversations and comments for a professional account through Instagram Login.",
+				Scopes:      []string{"instagram_business_basic", "instagram_business_manage_comments", "instagram_business_manage_messages"},
+				Sensitive:   true,
+			},
+			{
+				Key:         "social.messenger.manage",
+				Label:       "Instagram replies",
+				Description: "Send approved Instagram replies through Instagram Login.",
+				Scopes:      []string{"instagram_business_manage_messages"},
+				Sensitive:   true,
+			},
+			{
 				Key:         "social.profile.read",
 				Label:       "Business profile metadata",
-				Description: "Read connected Instagram business account identity and publishing readiness.",
-				Scopes:      []string{"instagram_basic", "pages_show_list", "pages_read_engagement"},
+				Description: "Read the connected Instagram professional account identity.",
+				Scopes:      []string{"instagram_business_basic"},
 			},
 			{
 				Key:         "social.post.write",
@@ -1325,6 +1352,12 @@ func Instagram() Provider {
 			},
 		},
 		Bundles: []Bundle{
+			{
+				Key:          "inbox",
+				Label:        "Instagram inbox",
+				Description:  "Read and reply to linked Instagram professional-account conversations.",
+				Capabilities: []string{"social.inbox.read", "social.messenger.manage"},
+			},
 			{
 				Key:          "onboarding",
 				Label:        "Social account preview",

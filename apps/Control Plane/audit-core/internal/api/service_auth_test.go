@@ -17,7 +17,7 @@ const (
 )
 
 func testCredentialRegistry() string {
-	return `[{"principal":"velion-gateway","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"` + testWriterToken + `","scopes":["audit:write"],"planes":["ingestion"]}]`
+	return `[{"principal":"verevon-gateway","audience":"audit-core","token":"` + testGatewayToken + `","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"` + testWriterToken + `","scopes":["audit:write"],"planes":["ingestion"]}]`
 }
 
 func TestParseServiceCredentialRegistryFailsClosed(t *testing.T) {
@@ -44,14 +44,14 @@ func TestParseServiceCredentialRegistryFailsClosed(t *testing.T) {
 }
 
 func TestValidateRequiredServiceCredentialRegistry(t *testing.T) {
-	if err := ValidateRequiredServiceCredentialRegistry(`[{"principal":"velion-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]}]`); err == nil {
+	if err := ValidateRequiredServiceCredentialRegistry(`[{"principal":"verevon-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]}]`); err == nil {
 		t.Fatal("expected missing integration-corev2 principal to fail startup validation")
 	}
-	if err := ValidateRequiredServiceCredentialRegistry(`[{"principal":"velion-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"abcdef0123456789abcdef0123456789","scopes":["audit:write"],"planes":["ingestion","model"]}]`); err == nil {
+	if err := ValidateRequiredServiceCredentialRegistry(`[{"principal":"verevon-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"abcdef0123456789abcdef0123456789","scopes":["audit:write"],"planes":["ingestion","model"]}]`); err == nil {
 		t.Fatal("expected integration-corev2 with authority outside ingestion to fail startup validation")
 	}
 	if err := ValidateRequiredServiceCredentialRegistry(`[{"principal":"gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"abcdef0123456789abcdef0123456789","scopes":["audit:write"],"planes":["ingestion"]}]`); err == nil {
-		t.Fatal("expected missing canonical velion-gateway principal to fail startup validation")
+		t.Fatal("expected missing canonical verevon-gateway principal to fail startup validation")
 	}
 	if err := ValidateRequiredServiceCredentialRegistry(testCredentialRegistry()); err != nil {
 		t.Fatalf("valid required registry rejected: %v", err)
@@ -71,7 +71,7 @@ func TestAuthorizeAuditReadRequiresV3DelegationAndExactTenant(t *testing.T) {
 	if failure != nil {
 		t.Fatalf("valid read delegation rejected: %v", failure)
 	}
-	if authorization.Principal != "velion-gateway" || authorization.Scope != "audit:read:self" || authorization.OrgID != "org-a" {
+	if authorization.Principal != "verevon-gateway" || authorization.Scope != "audit:read:self" || authorization.OrgID != "org-a" {
 		t.Fatalf("authorization = %+v", authorization)
 	}
 
@@ -156,7 +156,7 @@ func signAuditReadRequest(request *http.Request, timestamp time.Time, nonce, org
 }
 
 func signAuditReadRequestAtTimestamp(request *http.Request, timestampValue, nonce, orgID string) {
-	request.Header.Set("X-Service-Id", "velion-gateway")
+	request.Header.Set("X-Service-Id", "verevon-gateway")
 	request.Header.Set("X-Service-Token", testGatewayToken)
 	request.Header.Set("X-User-Id", "user-a")
 	request.Header.Set("X-Org-Id", orgID)
@@ -168,7 +168,7 @@ func signAuditReadRequestAtTimestamp(request *http.Request, timestampValue, nonc
 	bodySHA := base64.RawURLEncoding.EncodeToString(bodyDigest[:])
 	request.Header.Set("X-Delegation-Body-SHA256", bodySHA)
 	canonical := strings.Join([]string{
-		"v3", "velion-gateway", "audit-core", timestampValue, nonce,
+		"v3", "verevon-gateway", "audit-core", timestampValue, nonce,
 		request.Method, request.URL.RequestURI(), "user-a", orgID, "member", bodySHA,
 	}, "\n")
 	mac := hmac.New(sha256.New, []byte(testGatewayToken))

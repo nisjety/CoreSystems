@@ -11,9 +11,9 @@ import (
 // documents) depend on these exact names — a rename is a breaking change.
 func TestGDPRSubjectContract(t *testing.T) {
 	cases := map[string]string{
-		ErasureAuditSubject:      "velion.audit.v2.control.user-core.erasure",
-		DSARExportAuditSubject:   "velion.audit.v2.control.user-core.dsar_export",
-		GDPRErasureFanoutSubject: "velion.gdpr.erasure.requested",
+		ErasureAuditSubject:      "verevon.audit.v2.control.user-core.erasure",
+		DSARExportAuditSubject:   "verevon.audit.v2.control.user-core.dsar_export",
+		GDPRErasureFanoutSubject: "verevon.gdpr.erasure.requested",
 	}
 	for got, want := range cases {
 		if got != want {
@@ -30,8 +30,8 @@ func TestGDPRSubjectContract(t *testing.T) {
 func TestDSARDisclosureVerbatim(t *testing.T) {
 	want := []string{
 		"Control Plane export: profile + org memberships + API key metadata.",
-		"Audit events for this subject are retained by audit-core (velion.audit.v2.control.user-core.*).",
-		"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
+		"Audit events for this subject are retained by audit-core (verevon.audit.v2.control.user-core.*).",
+		"Model Plane run history / conversations and Data Plane documents are purged/exported via the verevon.gdpr.erasure.requested fan-out (follow-up subscribers).",
 	}
 	if len(DSARControlPlaneDisclosure) != len(want) {
 		t.Fatalf("disclosure has %d notes, want %d", len(DSARControlPlaneDisclosure), len(want))

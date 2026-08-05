@@ -61,7 +61,7 @@ func TestHandleLegacyMessage_TranslatesAndRepublishes(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	if err := sub.HandleLegacyMessage(context.Background(), "velion.agent.run.run-123.event", data); err != nil {
+	if err := sub.HandleLegacyMessage(context.Background(), "verevon.agent.run.run-123.event", data); err != nil {
 		t.Fatalf("HandleLegacyMessage: %v", err)
 	}
 
@@ -162,7 +162,7 @@ func TestHandleLegacyMessage_UnmappedSubject_IsNoop(t *testing.T) {
 func TestHandleLegacyMessage_InvalidJSON_ReturnsError(t *testing.T) {
 	sub, pub := newTestSubscriber()
 
-	err := sub.HandleLegacyMessage(context.Background(), "velion.agent.run.r1.event", []byte("{not json"))
+	err := sub.HandleLegacyMessage(context.Background(), "verevon.agent.run.r1.event", []byte("{not json"))
 	if err == nil {
 		t.Fatal("expected parse error, got nil")
 	}
@@ -178,7 +178,7 @@ func TestHandleLegacyMessage_PublishError_Propagates(t *testing.T) {
 	pub.failWith = errors.New("nats down")
 
 	data, _ := json.Marshal(map[string]any{"run_id": "r1"})
-	err := sub.HandleLegacyMessage(context.Background(), "velion.agent.run.r1.event", data)
+	err := sub.HandleLegacyMessage(context.Background(), "verevon.agent.run.r1.event", data)
 	if err == nil || err.Error() != "nats down" {
 		t.Fatalf("err = %v, want nats down", err)
 	}

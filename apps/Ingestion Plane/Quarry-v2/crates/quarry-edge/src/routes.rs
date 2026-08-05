@@ -684,7 +684,7 @@ pub struct InternalRunPageResult {
     pub title: Option<String>,
     /// Output of `quarry_transform::branding_rendered::extract`.
     /// Forwarded by the orchestrator as a `branding_extracted` event so
-    /// consumers polling `/v1/jobs/{id}/events` (e.g. velion's
+    /// consumers polling `/v1/jobs/{id}/events` (e.g. verevon's
     /// onboarding wizard) see real brand signals.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branding: Option<serde_json::Value>,

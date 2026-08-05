@@ -9,7 +9,7 @@ export default function SettingsBillingPage() {
     >
       <SettingsPlaceholderPanel
         title="Billing controls are moving here"
-        copy="Billing is reserved for the first-party Velion workspace settings flow. This panel is ready for plan controls and usage visibility once the billing surface is connected."
+        copy="Billing is reserved for the first-party Verevon workspace settings flow. This panel is ready for plan controls and usage visibility once the billing surface is connected."
       />
     </SettingsSectionFrame>
   )

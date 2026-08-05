@@ -6,7 +6,7 @@
 
 ## Context
 
-Velion talks to multiple CoreSystem planes and external support systems. V2 needs predictable contracts, semantic errors, pagination, and stream resumability so UI surfaces can show retry and stale states instead of failing silently.
+Verevon talks to multiple CoreSystem planes and external support systems. V2 needs predictable contracts, semantic errors, pagination, and stream resumability so UI surfaces can show retry and stale states instead of failing silently.
 
 ## Decision
 
@@ -22,7 +22,7 @@ V2 uses REST-style route handlers with resource-oriented URLs, typed response en
 ### GraphQL gateway first
 - **Pros**: Strong schema and flexible reads.
 - **Cons**: Adds gateway complexity before the v2 frontend boundary is stable.
-- **Why not**: The current CoreSystem plane contracts are HTTP-oriented and Velion's route handlers are the accepted L5 ingress.
+- **Why not**: The current CoreSystem plane contracts are HTTP-oriented and Verevon's route handlers are the accepted L5 ingress.
 
 ## Consequences
 

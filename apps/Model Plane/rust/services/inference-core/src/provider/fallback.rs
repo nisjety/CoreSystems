@@ -73,7 +73,7 @@ pub struct FallbackChain {
     providers: Vec<(String, BoxedProvider)>,
     max_retries: u32,
     cache: Arc<PromptCache>,
-    /// The live Velion routing policy. Seeded from [`RoutingPolicy::default`] and
+    /// The live Verevon routing policy. Seeded from [`RoutingPolicy::default`] and
     /// hot-swapped by the refresh loop / the HTTP PUT write-through. When
     /// `policy.enabled` is false the intent layer is bypassed.
     policy: Arc<ArcSwap<RoutingPolicy>>,
@@ -179,12 +179,12 @@ pub struct EmbeddingResidency {
 }
 
 /// True when the caller didn't pin a model — empty or a "let the gateway pick"
-/// sentinel. Such requests resolve to the per-provider default so "Velion Auto"
+/// sentinel. Such requests resolve to the per-provider default so "Verevon Auto"
 /// works against whatever provider is actually configured.
 fn is_unspecified_model(model: &str) -> bool {
     let m = model.trim().to_ascii_lowercase();
-    // Empty / "default", plus any Velion intent id. The intent layer normally
-    // rewrites a `velion-*` id to a concrete model before the provider loop;
+    // Empty / "default", plus any Verevon intent id. The intent layer normally
+    // rewrites a `verevon-*` id to a concrete model before the provider loop;
     // treating it as unspecified here is the safety net for when the intent
     // layer is disabled — the id resolves to the provider default instead of
     // being sent verbatim (which would 404 the deployment).
@@ -452,11 +452,11 @@ impl FallbackChain {
             .map(Arc::new);
 
         // Seed the live policy from the compile-time default, then let the
-        // bootstrap env config (velion_intent_enabled / budget_usd) override the
+        // bootstrap env config (verevon_intent_enabled / budget_usd) override the
         // seed so the static knobs still work without a session-core store.
         let seed = RoutingPolicy {
-            enabled: cfg.velion_intent_enabled,
-            budget_cap_usd: cfg.velion_intent_budget_usd,
+            enabled: cfg.verevon_intent_enabled,
+            budget_cap_usd: cfg.verevon_intent_budget_usd,
             ..RoutingPolicy::default()
         };
         let policy = Arc::new(ArcSwap::from_pointee(seed));
@@ -482,11 +482,11 @@ impl FallbackChain {
             });
         }
 
-        if cfg.velion_intent_enabled {
+        if cfg.verevon_intent_enabled {
             info!(
                 budget_gate = budget.is_some(),
                 policy_store = policy_client.is_some(),
-                "velion intent layer enabled"
+                "verevon intent layer enabled"
             );
         }
 
@@ -548,7 +548,7 @@ impl FallbackChain {
         }
     }
 
-    /// Toggle the Velion intent layer by flipping `enabled` on the live policy
+    /// Toggle the Verevon intent layer by flipping `enabled` on the live policy
     /// (test/builder helper).
     #[allow(dead_code)]
     #[must_use]
@@ -573,7 +573,7 @@ impl FallbackChain {
         self.policy_client.clone()
     }
 
-    /// Resolve a Velion intent model id (`velion-budget`/`-balance`/`-genius`)
+    /// Resolve a Verevon intent model id (`verevon-budget`/`-balance`/`-genius`)
     /// to a concrete model, returning a rewritten request. Returns `None` when
     /// the intent layer is off or the model is a pinned id (pass through).
     async fn resolve_intent(&self, req: &InferRequest) -> Option<InferRequest> {
@@ -601,7 +601,7 @@ impl FallbackChain {
             complexity = decision.complexity.as_str(),
             posture = ?decision.posture,
             resolved_model = %decision.model,
-            "velion intent resolved"
+            "verevon intent resolved"
         );
         let mut rewritten = req.clone();
         rewritten.model = decision.model;
@@ -631,7 +631,7 @@ impl FallbackChain {
     }
 
     /// Default chat model for a registered provider, used when the request
-    /// leaves the model unspecified ("Velion Auto"). The Azure entries come from
+    /// leaves the model unspecified ("Verevon Auto"). The Azure entries come from
     /// the operator's configured deployment catalog — see [`ProviderDefaults`].
     fn default_model_for(&self, provider_name: &str) -> &str {
         match provider_name {
@@ -660,7 +660,7 @@ impl FallbackChain {
     /// [`MAX_TOOL_LADDER_STEPS`] and pruned of rungs this resource cannot serve.
     ///
     /// Callers must only pass a model the intent layer resolved from a
-    /// `velion-*` mode. Substituting under a caller who pinned a model would
+    /// `verevon-*` mode. Substituting under a caller who pinned a model would
     /// answer with something they did not ask for; "the model I chose was busy"
     /// is their decision to make, not ours to paper over.
     fn tool_ladder(&self, resolved: &str) -> Vec<String> {
@@ -686,7 +686,7 @@ impl FallbackChain {
     ///
     /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
     pub async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        // Velion intent layer: resolve a `velion-*` mode to a concrete model
+        // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
         let intent_req = self.resolve_intent(req).await;
@@ -891,7 +891,7 @@ impl FallbackChain {
 
     /// The request to send for `model` on `provider_name`.
     ///
-    /// An unspecified model ("Velion Auto") becomes that provider's configured
+    /// An unspecified model ("Verevon Auto") becomes that provider's configured
     /// default so an unpinned request works against whatever is deployed; a
     /// ladder rung replaces the model, and `model_used` is then normalized to
     /// this effective id on the way out (see [`Self::infer_one_model`]). Borrows
@@ -925,7 +925,7 @@ impl FallbackChain {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
-        // Velion intent layer — same resolution as the unary path.
+        // Verevon intent layer — same resolution as the unary path.
         let intent_req = self.resolve_intent(req).await;
         let ladder = intent_req
             .as_ref()
@@ -1195,7 +1195,7 @@ mod resolution_tests {
 
     #[test]
     fn detects_unspecified_models() {
-        for m in ["", "   ", "default", "AUTO", "Velion", "velion-auto"] {
+        for m in ["", "   ", "default", "AUTO", "Verevon", "verevon-auto"] {
             assert!(is_unspecified_model(m), "{m:?} should be unspecified");
         }
         for m in ["claude-sonnet-4-20250514", "gpt-4o-mini"] {
@@ -1278,7 +1278,7 @@ mod resolution_tests {
         // Unspecified models pass on every provider (resolve to its default).
         for p in ["anthropic", "azure-anthropic", "openai", "azure-openai"] {
             assert!(provider_serves_model(p, ""));
-            assert!(provider_serves_model(p, "velion-auto"));
+            assert!(provider_serves_model(p, "verevon-auto"));
         }
     }
 
@@ -1399,9 +1399,9 @@ mod resolution_tests {
     }
 
     #[tokio::test]
-    async fn velion_mode_resolves_to_concrete_model_through_the_chain() {
+    async fn verevon_mode_resolves_to_concrete_model_through_the_chain() {
         // Provider registered as azure-openai (serves non-claude models); intent
-        // layer on, no budget client → Unknown posture. velion-budget + a trivial
+        // layer on, no budget client → Unknown posture. verevon-budget + a trivial
         // prompt → Budget/Simple → the current policy table's gpt-5-nano
         // reaches the provider. This assertion must follow the versioned table
         // rather than the older cheap-fallback constant.
@@ -1415,7 +1415,7 @@ mod resolution_tests {
                 .with_intent_enabled(true);
         let req = InferRequest {
             request_id: "r3".to_owned(),
-            model: "velion-budget".to_owned(),
+            model: "verevon-budget".to_owned(),
             messages: vec![crate::provider::ChatMessage {
                 role: "user".to_owned(),
                 content: "hi".to_owned(),
@@ -1429,7 +1429,7 @@ mod resolution_tests {
 
     #[tokio::test]
     async fn intent_disabled_falls_back_to_provider_default() {
-        // With the intent layer off, a leaked velion-* id is still treated as
+        // With the intent layer off, a leaked verevon-* id is still treated as
         // unspecified (is_unspecified_model), so it resolves to the provider
         // default — model-router for azure-openai — rather than being sent
         // verbatim (which would 404 the deployment).
@@ -1443,7 +1443,7 @@ mod resolution_tests {
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);
         let req = InferRequest {
             request_id: "r4".to_owned(),
-            model: "velion-genius".to_owned(),
+            model: "verevon-genius".to_owned(),
             ..Default::default()
         };
         chain.infer(&req).await.unwrap();
@@ -1801,7 +1801,7 @@ mod resolution_tests {
         .with_intent_enabled(true)
     }
 
-    /// A `velion-balance` turn carrying a tool — the shape that floors to
+    /// A `verevon-balance` turn carrying a tool — the shape that floors to
     /// `Complex` and therefore resolves to `claude-sonnet-4-6`.
     fn tool_turn(request_id: &str, model: &str) -> InferRequest {
         InferRequest {
@@ -1930,7 +1930,7 @@ mod resolution_tests {
         let chain = ladder_chain(&asked, vec!["claude-sonnet-4-5"], vec!["gpt-4o-mini"]);
 
         let response = chain
-            .infer(&tool_turn("ladder-1", "velion-balance"))
+            .infer(&tool_turn("ladder-1", "verevon-balance"))
             .await
             .expect("the ladder must find a servable tool-capable model");
 
@@ -1951,7 +1951,7 @@ mod resolution_tests {
         let chain = ladder_chain(&asked, vec![], vec!["gpt-5-mini", "gpt-4o-mini"]);
 
         let response = chain
-            .infer(&tool_turn("ladder-2", "velion-balance"))
+            .infer(&tool_turn("ladder-2", "verevon-balance"))
             .await
             .expect("the OpenAI rung serves once the Claude family is exhausted");
 
@@ -1995,7 +1995,7 @@ mod resolution_tests {
     #[tokio::test]
     async fn a_pinned_model_that_the_intent_layer_is_off_for_is_also_not_substituted() {
         // Belt and braces: with the intent layer disabled nothing is "resolved",
-        // so even a velion-* id must not pick up a ladder. It falls through to
+        // so even a verevon-* id must not pick up a ladder. It falls through to
         // the per-provider default exactly as before.
         let asked = Arc::new(Mutex::new(Vec::new()));
         let claude: BoxedProvider = Arc::new(ThrottlingProvider {
@@ -2007,7 +2007,7 @@ mod resolution_tests {
             FallbackChain::new_with_providers(vec![("azure-anthropic".to_owned(), claude)], 1);
 
         let error = chain
-            .infer(&tool_turn("pinned-2", "velion-balance"))
+            .infer(&tool_turn("pinned-2", "verevon-balance"))
             .await
             .unwrap_err();
 
@@ -2034,7 +2034,7 @@ mod resolution_tests {
         chain.policy.store(Arc::new(policy));
 
         let error = chain
-            .infer(&tool_turn("dedup-1", "velion-balance"))
+            .infer(&tool_turn("dedup-1", "verevon-balance"))
             .await
             .unwrap_err();
 
@@ -2055,7 +2055,7 @@ mod resolution_tests {
         let chain = ladder_chain(&asked, vec![], vec![]);
 
         let error = chain
-            .infer(&tool_turn("throttled-1", "velion-balance"))
+            .infer(&tool_turn("throttled-1", "verevon-balance"))
             .await
             .unwrap_err();
 
@@ -2077,7 +2077,7 @@ mod resolution_tests {
         let chain = ladder_chain(&asked, vec!["claude-sonnet-4-5"], vec!["gpt-4o-mini"]);
 
         chain
-            .infer_stream(&tool_turn("stream-1", "velion-balance"))
+            .infer_stream(&tool_turn("stream-1", "verevon-balance"))
             .await
             .expect("the streaming ladder must find a servable model");
 

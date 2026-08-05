@@ -175,7 +175,7 @@ model-gateway's registry returns for the org — and a repo-wide
 **0 code matches**. There is no Visma MCP server, bridge, token, or tool wired
 anywhere. "Test the Visma MCP" is **not a Model Plane capability today** — it is
 not an exec-core bug. (The `visma_net_mcp` connector and `visma-salgsordre-test`
-skill that exist are assistant-side / claude.ai connectors, not Velion runtime.)
+skill that exist are assistant-side / claude.ai connectors, not Verevon runtime.)
 Sibling docs `bridge-core.md`/`model-gateway.md` corroborate: `bridges/mcp-bridge`
 ships only `fs`+`git` servers and the one `visma mcp` registry record is
 malformed (`transport: stdio` + an HTTPS URL), so discovery fails before any call.

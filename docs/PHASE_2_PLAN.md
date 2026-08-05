@@ -1,6 +1,6 @@
-# Velion — Phase 2 "Complete the Honest Loop + Monetize the Wedge" Execution Plan
+# Verevon — Phase 2 "Complete the Honest Loop + Monetize the Wedge" Execution Plan
 
-> **Status:** Approved 2026-06-19 (recon-grounded incl. live Brreg API probes + hardened by a 6-persona honesty-first council). **Gated on Phase 1 being merged** (Phase 0/IDOR is ALREADY merged at HEAD `ff2a3f59`). Source: `Velion-ai-first.md`, `docs/PHASE_0_PLAN.md`, `docs/PHASE_1_PLAN.md`.
+> **Status:** Approved 2026-06-19 (recon-grounded incl. live Brreg API probes + hardened by a 6-persona honesty-first council). **Gated on Phase 1 being merged** (Phase 0/IDOR is ALREADY merged at HEAD `ff2a3f59`). Source: `Verevon-ai-first.md`, `docs/PHASE_0_PLAN.md`, `docs/PHASE_1_PLAN.md`.
 >
 > ## Headline spine
 > Phase 2 **completes the honest agent-runner loop** — monitor → brief → approve → **ACT** → audit becomes real (approve stops being a no-op; every tool action is in-region auditable) — and rides a **thin, metered Brreg lead-builder** as the monetization companion. It is **NOT** a net-new lead-builder phase. Take **one** net-new engine (W1), not two.
@@ -15,7 +15,7 @@
 > - **Never change the live DB password hex** (`apps/Control Plane/.env`); reconcile drift before any erasure path runs.
 > - Quality gates green per PR: gateway `cargo fmt --check` + `clippy -- -D warnings` + `cargo test`; Go `go test -race ./...`; SPA `pnpm typecheck && pnpm lint && pnpm test && pnpm build`; live smoke through the running gateway.
 
-Paths: gateway = `apps/Frontend Plane/velionv3/apps/gateway`; SPA = `apps/Frontend Plane/velionv3/src` (quote the space).
+Paths: gateway = `apps/Frontend Plane/verevonv3/apps/gateway`; SPA = `apps/Frontend Plane/verevonv3/src` (quote the space).
 
 ---
 
@@ -45,12 +45,12 @@ Paths: gateway = `apps/Frontend Plane/velionv3/apps/gateway`; SPA = `apps/Fronte
 ### `PR-0` — Reconcile Phase-1-B, confirm Phase 1 merged, re-baseline — deps: none (prerequisite)
 - Land/commit the in-flight uncommitted cc-go Track-B work (~+301 lines across `repository.go/service.go/types.go/handlers.go/server.go/service_test.go`) so it isn't clobbered.
 - Confirm Phase 1 Tracks A/B/C/D/E are merged-and-green; re-baseline against `ff2a3f59`.
-- Add a **CI lint** that fails any new gateway domain reading org from a client header (no new `org_id_from_headers`; `x-velion-org-id` stays in `STRIPPED_HEADERS`).
+- Add a **CI lint** that fails any new gateway domain reading org from a client header (no new `org_id_from_headers`; `x-verevon-org-id` stays in `STRIPPED_HEADERS`).
 - Record the **day-15 Phase-1-C go/no-go** date for W2.
 - **DoD:** dirty cc-go work committed (not lost); Phase 1 green on main; the no-client-header-org CI gate is red on a deliberate violation; W2 go/no-go date on record.
 
 ### `PR-1` — W4 ticket.classification executor *(THE SPINE)* — deps: PR-0 (Phase-1 B)
-- In-process **durable JetStream consumer inside conversation-core-go** on `velion.application.conversation.ai_action.reviewed` (filter `kind=ticket.classification` + `decision=approved`) → promote the suggested ticket + apply routing via existing `Service.UpdateTicket`; add `GetAIAction` read; emit `ai_action.executed`.
+- In-process **durable JetStream consumer inside conversation-core-go** on `verevon.application.conversation.ai_action.reviewed` (filter `kind=ticket.classification` + `decision=approved`) → promote the suggested ticket + apply routing via existing `Service.UpdateTicket`; add `GetAIAction` read; emit `ai_action.executed`.
 - **Idempotent** by AIAction id (only promote if not already executed); `-race` test with duplicate delivery.
 - Build the reusable Application-Plane durable-consumer scaffold here (model on `notification-core/internal/consumers/`) — **W3 reuses it**.
 - Flip B3 SPA copy "Decision recorded" → **"Applied" only after** the consumer is live-verified.
@@ -65,7 +65,7 @@ Paths: gateway = `apps/Frontend Plane/velionv3/apps/gateway`; SPA = `apps/Fronte
 
 ### `PR-3` — W3 insight-core Postgres + subscriber + gateway brief *(Preview-gated)* — deps: PR-0 (Phase-1 A) + PR-1 (consumer scaffold) — *first cut if Phase-1 A slips*
 - insight-core Postgres `Repository` (`RecordMetricEvent`/`ListMetricEvents`/`ListConnectorSlots`) + up/down migration mirroring social-core; **drop `replicas:1`**.
-- In-process JetStream subscriber on `velion.application.>` (REUSE the PR-1 scaffold) mapping cc-go inbox/ai-action events to metrics; idempotent.
+- In-process JetStream subscriber on `verevon.application.>` (REUSE the PR-1 scaffold) mapping cc-go inbox/ai-action events to metrics; idempotent.
 - Gateway `briefs.rs` assembler (`authorized_org_id` + `proxy_json`) fan-in over insight rollups + Quarry change + model-gateway summary **with citations**; **refuses-or-labels "Preview" below a real-event threshold** — never renders trends over empty data.
 - **DoD:** insight-core on Postgres with the subscriber mapping real events; brief assembles only from real events with a visible Preview label below threshold; an empty-org test proves it refuses/labels rather than fabricates.
 

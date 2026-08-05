@@ -20,7 +20,7 @@ interface PageBookmark {
   added_at: number;
 }
 
-const BOOKMARK_KEY = 'velion.knowledge.wiki.recent';
+const BOOKMARK_KEY = 'verevon.knowledge.wiki.recent';
 
 function loadBookmarks(): PageBookmark[] {
   if (typeof window === 'undefined') return [];

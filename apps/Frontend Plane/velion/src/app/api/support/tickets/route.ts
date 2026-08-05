@@ -4,7 +4,7 @@ import { z } from 'zod'
 const ZAMMAD_URL = process.env.ZAMMAD_API_URL || 'http://zammad-railsserver:3000'
 const ZAMMAD_TOKEN = process.env.ZAMMAD_API_TOKEN || ''
 
-// U7-2 (ui-ux-velion-gap.md): when Zammad isn't deployed, fail gracefully
+// U7-2 (ui-ux-verevon-gap.md): when Zammad isn't deployed, fail gracefully
 // instead of crashing the /helpdesk page with `getaddrinfo ENOTFOUND
 // zammad-railsserver`. The /helpdesk feature is scaffolded but the Zammad
 // service is not yet part of the local stack. Treat the absence of

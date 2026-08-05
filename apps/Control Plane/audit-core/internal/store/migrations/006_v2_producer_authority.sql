@@ -1,5 +1,5 @@
 -- V2 subjects bind every event to an ACL-scoped producer:
--- velion.<kind>.v2.<plane>.<producer>.<event-or-op>. Logical retries must
+-- verevon.<kind>.v2.<plane>.<producer>.<event-or-op>. Logical retries must
 -- remain idempotent even if the event suffix or JetStream sequence changes.
 -- Historical v1 rows remain nullable because their subject did not identify a
 -- producer and inventing one would create false authority.

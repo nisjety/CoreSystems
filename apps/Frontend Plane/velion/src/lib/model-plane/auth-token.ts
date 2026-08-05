@@ -1,7 +1,7 @@
 /**
  * U2-5 — Model Plane gateway JWT helper.
  *
- * Used by every velion API proxy that talks to the gateway. Mints a real
+ * Used by every verevon API proxy that talks to the gateway. Mints a real
  * RS256 JWT against auth-core's `/api/model-plane/token` endpoint instead
  * of sending the previous unverified `dev-bypass` string.
  *
@@ -19,9 +19,9 @@
  * token and we never serve one tenant's token to another.
  *
  * Dev escape hatch: when `MODEL_GATEWAY_AUTH_DEV_BYPASS=1` is set on the
- * **gateway**, the gateway accepts any non-empty Bearer. Velion still
+ * **gateway**, the gateway accepts any non-empty Bearer. Verevon still
  * sends the literal string `dev-bypass` when both:
- *   1. `MODEL_PLANE_USE_DEV_BYPASS=1` is set in velion's env (off by
+ *   1. `MODEL_PLANE_USE_DEV_BYPASS=1` is set in verevon's env (off by
  *      default — opt-in only).
  *   2. auth-core is unreachable AND we're in dev mode.
  * This preserves the existing local-dev workflow without compromising
@@ -48,7 +48,7 @@ interface CachedToken {
 }
 
 /**
- * W4-4 (ui-ux-velion-gap.md §13): hash + bound the cache.
+ * W4-4 (ui-ux-verevon-gap.md §13): hash + bound the cache.
  *
  *   - Keys are SHA-256 hashes of the cookie / internal-claims tuple. The
  *     raw cookie used to be embedded in the key, which (a) leaked the
@@ -88,7 +88,7 @@ const DEV_BYPASS_TOKEN = 'dev-bypass'
 /**
  * Minimum lifetime we expect to remain on a cached token before treating
  * it as expired. Refreshing 30 seconds early keeps clock-skew between
- * velion and auth-core from causing 401s right at the boundary.
+ * verevon and auth-core from causing 401s right at the boundary.
  */
 const REFRESH_SAFETY_MS = 30_000
 

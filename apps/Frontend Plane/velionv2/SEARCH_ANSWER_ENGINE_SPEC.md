@@ -1,6 +1,6 @@
-# Velion Search — Answer-Engine Spec (north star)
+# Verevon Search — Answer-Engine Spec (north star)
 
-Reference: Dribbble shot (25s, laptop mock). Target = a **Perplexity / Arc-Search-style answer engine** as the core Velion search surface. This is the direction for the dashboard "Søk" experience.
+Reference: Dribbble shot (25s, laptop mock). Target = a **Perplexity / Arc-Search-style answer engine** as the core Verevon search surface. This is the direction for the dashboard "Søk" experience.
 
 ## Observed flow (from the reference video)
 

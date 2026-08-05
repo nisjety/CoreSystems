@@ -53,9 +53,9 @@ func TestCreateCheckoutSessionCreatesHyperswitchPayment(t *testing.T) {
 		OrgID:        "org_123",
 		Plan:         "standard",
 		CustomerID:   "cus_123",
-		SuccessURL:   "https://velion.test/onboarding?checkout=success",
-		CancelURL:    "https://velion.test/onboarding?checkout=cancel",
-		Organization: "Velion Test",
+		SuccessURL:   "https://verevon.test/onboarding?checkout=success",
+		CancelURL:    "https://verevon.test/onboarding?checkout=cancel",
+		Organization: "Verevon Test",
 		Metadata:     map[string]string{"source": "onboarding"},
 	})
 	if err != nil {

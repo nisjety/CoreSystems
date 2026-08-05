@@ -1,6 +1,6 @@
-# velionv2 Auth + Onboarding → Control Plane: Implementation Status
+# verevonv2 Auth + Onboarding → Control Plane: Implementation Status
 
-**Branch:** `feat/velionv2-cp-parity` · **Date:** 2026-05-30
+**Branch:** `feat/verevonv2-cp-parity` · **Date:** 2026-05-30
 **Plan:** `AUTH_ONBOARDING_PARITY_PLAN.md` · **Audit:** `CONTROL_PLANE_PARITY_AUDIT.md`
 **Stack:** Next.js 16.2.6 (App Router, `proxy.ts`, async `cookies/headers/params`) · React 19 · Better Auth 1.6.11
 **Verification:** `tsc --noEmit` = 0 errors · `vitest` = 120/120 pass (66 new) · `next build` = success.
@@ -27,7 +27,7 @@
 - `src/features/onboarding-v2/components/BrregSearch.tsx` (NEW) — debounced BRREG search (AbortController-cancelled), ported from v1.
 - `src/features/onboarding-v2/lib/onboarding-service.ts` (NEW) — `createOrganization` (+ BREG snapshot), `setOrganizationPlan`, `startCheckout`, `updateProfile`, `completeOnboarding`, `isPaidPlan`.
 - `src/app/api/v1/users/me/route.ts` (NEW) — GET/PATCH profile proxy to user-core (same-origin guarded).
-- `VelionOnboardingPage.tsx` (WIRED) — org step does BREG lookup → `createOrganization` (idempotent on `orgId`); website step → `updateProfile`; paywall → free/trial `setOrganizationPlan` or paid `startCheckout` → Stripe redirect; assembly → `completeOnboarding` (guards on `orgId`). Org-create publishes `organization.created` → billing-core auto-provisions free (NATS).
+- `VerevonOnboardingPage.tsx` (WIRED) — org step does BREG lookup → `createOrganization` (idempotent on `orgId`); website step → `updateProfile`; paywall → free/trial `setOrganizationPlan` or paid `startCheckout` → Stripe redirect; assembly → `completeOnboarding` (guards on `orgId`). Org-create publishes `organization.created` → billing-core auto-provisions free (NATS).
 - Review fixes applied: stale-closure on "skip to trial" (CRITICAL), assembly `orgId` guard, no plan clobber, BRREG fetch abort.
 
 ### P3 — Gating + paywall enforcement ✅
@@ -41,7 +41,7 @@
 - Tests: `brreg-service.test.ts`, `onboarding-service.test.ts`, `context-types.test.ts`, `billing-core.test.ts` (66 new, all green).
 
 ### P5 — Production verification + full-core completion ✅
-- **audit-core wired (last unconsumed core)** → velionv2 now consumes **all 6 cores**. `src/lib/integrations/audit-core.ts` (NEW, server client, `/v1/audit`), `src/app/api/v1/audit/route.ts` (NEW — org derived from session-context, not client input), and the settings "Recent security events" panel now renders live audit-core events. `AUDIT_SERVICE_URL` added to `.env.example`.
+- **audit-core wired (last unconsumed core)** → verevonv2 now consumes **all 6 cores**. `src/lib/integrations/audit-core.ts` (NEW, server client, `/v1/audit`), `src/app/api/v1/audit/route.ts` (NEW — org derived from session-context, not client input), and the settings "Recent security events" panel now renders live audit-core events. `AUDIT_SERVICE_URL` added to `.env.example`.
 - **E2E** — `tests/e2e/cp-parity.spec.ts` (NEW): robust proxy-gating tests (run as-is) + a mock-driven onboarding journey (`test.fixme`, validate selectors then enable). Follows the repo's route-mock pattern (`smoke.spec.ts`), runs against `pnpm dev`.
 - **Cutover/verification doc** — `PRODUCTION_CUTOVER.md` (NEW): env matrix, docker-compose service-name alignment, pre-flight assertions, and the live-stack smoke checklist.
 - Verified green again after all P5 changes: tsc 0 · 120 unit tests · `next build` ok.
@@ -49,10 +49,10 @@
 Core coverage now: auth ✅ user ✅ org+BREG ✅ billing ✅ audit ✅ · session-core optional (D4, flag-gated).
 
 ### P6 — Passkey + session-core authority + audit emission ✅ (post-plan, by request)
-- **Passkey (WebAuthn)**: installed `@better-auth/passkey@1.6.12` + `@simplewebauthn/browser`+`/server` (bumped `better-auth` 1.6.11→1.6.12 for peer alignment). `passkeyClient()` in `auth-client.ts`; `passkey()` in standalone `auth.ts` (dev parity); `beginPasskeySignIn` calls `authClient.signIn.passkey()`. auth-core already ships the `passkey()` server plugin. `PASSKEY_RP_ID/RP_NAME/ORIGIN` in `.env.example`. ⚠️ **Version-skew caveat**: velionv2 client is better-auth 1.6.12, auth-core server is 1.3.9 — WebAuthn endpoints are stable but **verify the ceremony against the live stack**. Passkey REGISTRATION UI **added**: `PasskeySecuritySection` (register/list/remove) in the account Security section (`VelionSettingsPage`) + a CDP virtual-authenticator E2E (`tests/e2e/passkey.spec.ts`).
+- **Passkey (WebAuthn)**: installed `@better-auth/passkey@1.6.12` + `@simplewebauthn/browser`+`/server` (bumped `better-auth` 1.6.11→1.6.12 for peer alignment). `passkeyClient()` in `auth-client.ts`; `passkey()` in standalone `auth.ts` (dev parity); `beginPasskeySignIn` calls `authClient.signIn.passkey()`. auth-core already ships the `passkey()` server plugin. `PASSKEY_RP_ID/RP_NAME/ORIGIN` in `.env.example`. ⚠️ **Version-skew caveat**: verevonv2 client is better-auth 1.6.12, auth-core server is 1.3.9 — WebAuthn endpoints are stable but **verify the ceremony against the live stack**. Passkey REGISTRATION UI **added**: `PasskeySecuritySection` (register/list/remove) in the account Security section (`VerevonSettingsPage`) + a CDP virtual-authenticator E2E (`tests/e2e/passkey.spec.ts`).
 - **session-core authority**: `src/lib/integrations/session-core.ts` (`current`/`refresh` + entitlements mapping). `getControlPlaneContext()` uses session-core's single aggregate call when `CONTROL_SESSION_AUTHORITY_ENABLED=true`, else falls back to user-core+billing. session-core's billing shape lacks quotas/credits → default to empty under this path.
-- **audit-core emission (write side)**: added a Go HTTP ingest `POST /v1/audit` to audit-core (internal-key auth, reuses the NATS validate+persist path; go build/vet/test green). velionv2 now EMITS `org.created` + `org.plan.changed` via `emitAuditEvent` in the `/api/org` gateway (fire-and-forget). With the P5 read panel, the audit loop (emit → ingest → read) is complete for velionv2-driven org/plan events. **auth-core now also emits `velion.audit.v1.control.*` over NATS**: 2FA (enable/disable/verify) + session-revoke fire when an active org is set; `sign_out` fires for org-scoped sessions; `sign_in`/`sign_up` no-op pre-org (Better Auth only sets `activeOrganizationId` after org selection, and audit-core requires `org_id`). **better-auth version alignment ASSESSED but NOT applied**: `@better-auth/sso@1.3.9` exact-pins `better-auth@1.3.9` (no 1.4–1.6 release) → bump unresolvable; migration path = replace `@better-auth/sso` with the native OIDC provider plugin, then bump auth-core to 1.6.x.
-- Verified: velionv2 tsc 0 · 120 tests · `next build` ok; audit-core `go build`/`vet`/`test` ok.
+- **audit-core emission (write side)**: added a Go HTTP ingest `POST /v1/audit` to audit-core (internal-key auth, reuses the NATS validate+persist path; go build/vet/test green). verevonv2 now EMITS `org.created` + `org.plan.changed` via `emitAuditEvent` in the `/api/org` gateway (fire-and-forget). With the P5 read panel, the audit loop (emit → ingest → read) is complete for verevonv2-driven org/plan events. **auth-core now also emits `verevon.audit.v1.control.*` over NATS**: 2FA (enable/disable/verify) + session-revoke fire when an active org is set; `sign_out` fires for org-scoped sessions; `sign_in`/`sign_up` no-op pre-org (Better Auth only sets `activeOrganizationId` after org selection, and audit-core requires `org_id`). **better-auth version alignment ASSESSED but NOT applied**: `@better-auth/sso@1.3.9` exact-pins `better-auth@1.3.9` (no 1.4–1.6 release) → bump unresolvable; migration path = replace `@better-auth/sso` with the native OIDC provider plugin, then bump auth-core to 1.6.x.
+- Verified: verevonv2 tsc 0 · 120 tests · `next build` ok; audit-core `go build`/`vet`/`test` ok.
 
 ---
 

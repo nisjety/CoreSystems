@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # start-stack.sh — bring up the full Quarry-v2 dev stack and verify the
-# end-to-end live-crawl path that velion's onboarding wizard depends on.
+# end-to-end live-crawl path that verevon's onboarding wizard depends on.
 #
 # What this does:
 #   1. Sanity-check Docker is running.
@@ -12,8 +12,8 @@
 #      `branding_extracted`) event arriving within the deadline.
 #   5. Report go/no-go with concrete next steps.
 #
-# Why it exists: the chain (velion → control → orchestrator dispatcher
-# → Temporal → edge runtime → control events → velion) has three places
+# Why it exists: the chain (verevon → control → orchestrator dispatcher
+# → Temporal → edge runtime → control events → verevon) has three places
 # where it can quietly drop work — control's auth, edge's auth, and the
 # jobs dispatcher's polling cadence. The smoke probe at the end is what
 # tells you whether all three are wired correctly.
@@ -179,8 +179,8 @@ fi
 
 if [ "$SAW_PAGE" -eq 1 ]; then
     c_green ""
-    c_green "✅ live crawl works. Hit POST $CONTROL_URL/v1/jobs/ from velion to drive the onboarding."
-    c_green "   Velion's QUARRY_API_URL is already set to http://localhost:8081 in .env.local."
+    c_green "✅ live crawl works. Hit POST $CONTROL_URL/v1/jobs/ from verevon to drive the onboarding."
+    c_green "   Verevon's QUARRY_API_URL is already set to http://localhost:8081 in .env.local."
     c_dim "   logs:    docker compose -f $COMPOSE_FILE logs -f"
     c_dim "   stop:    docker compose -f $COMPOSE_FILE down -v"
     if [ "$DO_TAIL" -eq 1 ]; then

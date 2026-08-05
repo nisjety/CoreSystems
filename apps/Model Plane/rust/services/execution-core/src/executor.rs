@@ -307,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn cwd_applies_and_the_inherited_environment_is_replaced() {
         let parent_home = std::env::var("HOME").expect("the test runner has HOME set");
-        let dir = std::env::temp_dir().join(format!("velion-exec-cwd-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("verevon-exec-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create test dir");
         let canonical = std::fs::canonicalize(&dir).expect("canonicalize test dir");
         let out = execute_sandboxed_in_dir(
@@ -315,14 +315,14 @@ mod tests {
             "sh",
             &args(&[
                 "-c",
-                "printf '%s|%s|%s' \"$(pwd -P)\" \"$VELION_EXEC_TEST\" \"${HOME:-absent}\"",
+                "printf '%s|%s|%s' \"$(pwd -P)\" \"$VEREVON_EXEC_TEST\" \"${HOME:-absent}\"",
             ]),
             &dir,
             // PATH must be in the allowlist or `sh` itself could not be resolved
             // — the same reason the code path always passes it through.
             &[
                 ("PATH".to_owned(), std::env::var("PATH").unwrap_or_default()),
-                ("VELION_EXEC_TEST".to_owned(), "injected".to_owned()),
+                ("VEREVON_EXEC_TEST".to_owned(), "injected".to_owned()),
             ],
             Duration::from_secs(10),
         )

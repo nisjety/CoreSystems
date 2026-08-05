@@ -12,7 +12,7 @@ import (
 
 func testRequest() carrier.QuoteRequest {
 	return carrier.QuoteRequest{
-		From:    carrier.Address{Name: "Velion AS", PostalCode: "0150", City: "Oslo", Country: "NO"},
+		From:    carrier.Address{Name: "Verevon AS", PostalCode: "0150", City: "Oslo", Country: "NO"},
 		To:      carrier.Address{Name: "Empfänger GmbH", PostalCode: "10115", City: "Berlin", Country: "DE"},
 		Package: carrier.Package{WeightKg: 5, LengthCm: 30, WidthCm: 20, HeightCm: 15},
 		Segment: carrier.SegmentB2B,
@@ -134,7 +134,7 @@ func testBookingRequest() carrier.BookingRequest {
 	return carrier.BookingRequest{
 		ServiceName: "P",
 		Price:       carrier.Money{AmountCents: 84550, Currency: "NOK"},
-		From:        carrier.Address{Name: "Velion AS", PostalCode: "0150", City: "Oslo", Country: "NO"},
+		From:        carrier.Address{Name: "Verevon AS", PostalCode: "0150", City: "Oslo", Country: "NO"},
 		To:          carrier.Address{Name: "Empfänger GmbH", PostalCode: "10115", City: "Berlin", Country: "DE"},
 		Package:     carrier.Package{WeightKg: 5, LengthCm: 30, WidthCm: 20, HeightCm: 15},
 		Customs: &carrier.CustomsInfo{

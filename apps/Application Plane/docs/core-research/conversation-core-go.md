@@ -14,7 +14,7 @@ here relies on them.
 ## What it is
 
 `conversation-core-go` is THE first-party Inbox / support-conversation backend of
-the Application Plane (Zammad is legacy foundation, not the runtime). Velion v3's
+the Application Plane (Zammad is legacy foundation, not the runtime). Verevon v3's
 Inbox proxies to it through the gateway; if it is down the gateway 502s. It owns
 conversations, messages, tickets and the ticketing workbench (views, macros,
 automation rules, SLA policies, checklists), plus the HITL AI-action review queue.
@@ -36,7 +36,7 @@ a test-injected pool). [source-only]
 
 - `GET /health` → **200** `{"service":"conversation-core-go","status":"ok"}`. `/healthz` → 404 (only `/health` + `/ready` exist). [live-curl]
 - Container `conversation-core-go` and `conversation-ingest-rs` both report `Up 2 days (unhealthy)`. "unhealthy" = the exec-based healthcheck cannot run under the containerd corruption, NOT the service — HTTP health is 200. [inspect]
-- Runtime env: `INTEGRATION_BASE_URL=http://integration-api:3026`, `INTERNAL_API_KEY` set (64-hex, not the `change-me` template default), `VELION_NATS_URL=nats://velion-nats:4222`, `DATABASE_URL=…@application-postgres:5432/application_plane`. On `app-net` + `inter-plane-bus`. [inspect]
+- Runtime env: `INTEGRATION_BASE_URL=http://integration-api:3026`, `INTERNAL_API_KEY` set (64-hex, not the `change-me` template default), `VEREVON_NATS_URL=nats://verevon-nats:4222`, `DATABASE_URL=…@application-postgres:5432/application_plane`. On `app-net` + `inter-plane-bus`. [inspect]
 - Because `INTEGRATION_BASE_URL` + key are both set, `DraftReplySendEnabled()` is TRUE → outbound-send (human replies AND the draft.reply act-leg) is ENABLED at runtime. [inspect]
 
 ### CRITICAL (live, environmental): datastore is down — every DB-backed read 500s
@@ -70,7 +70,7 @@ Internal: `POST /internal/conversation-events` (ingest), `GET /internal/conversa
 and internal mirrors of the ai-actions routes.
 
 Auth: changed source verifies HMAC-v2 delegation bound to service, audience, method, URI,
-body, user, organization, role, timestamp, and nonce. `velion-gateway` may use `/api/v1`
+body, user, organization, role, timestamp, and nonce. `verevon-gateway` may use `/api/v1`
 with reader/agent/admin role gates; `conversation-ingest` may use only its internal event
 route. Scope comes from the verified principal, never query parameters. Body cap is 2 MiB.
 
@@ -105,22 +105,23 @@ route. Scope comes from the verified principal, never query parameters. Body cap
 - **IDOR-clean.** [source-only] Every repository query is `WHERE org_id = $1`; org comes from the
   `x-org-id` header only (never request body). The v3 gateway `inbox.rs` sets that header from the
   **authenticated session's** org (`authorized_org_id`), not a client-supplied header/query/body —
-  closing the `x-velion-org-id` cross-tenant IDOR flagged in the AI-First audit. A foreign action/
+  closing the `x-verevon-org-id` cross-tenant IDOR flagged in the AI-First audit. A foreign action/
   conversation id simply misses `org_id = $auth AND id = $id` → 404.
 
 ## Gateway wiring & the Zammad question [source-only]
 
-`apps/Frontend Plane/velionv3/apps/gateway/src/domains/inbox.rs` is a thin proxy: `/api/v1/inbox/*`
+`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/inbox.rs` is a thin proxy: `/api/v1/inbox/*`
 → conversation-core `/api/v1/conversations|inboxes|ai-actions`, forwarding internal key + session org
-+ actor headers via `proxy_json`. **There is NO `ConversationSummary`→`ZammadTicket` mapping in v3** —
-that was a velionv2-era concept; v3's Inbox is native conversation-core. The only Zammad in the v3
-gateway is a separate optional "support actions" helper (`domains/agents.rs`: agents/groups/macros)
-that returns "not configured" unless `ZAMMAD_API_TOKEN` is set. `zammad-foundation` is legacy.
+
+- actor headers via `proxy_json`. **There is NO `ConversationSummary`→`ZammadTicket` mapping in v3** —
+  that was a verevonv2-era concept; v3's Inbox is native conversation-core. The only Zammad in the v3
+  gateway is a separate optional "support actions" helper (`domains/agents.rs`: agents/groups/macros)
+  that returns "not configured" unless `ZAMMAD_API_TOKEN` is set. `zammad-foundation` is legacy.
 
 ## Inbound bridges [source-only]
 
 - `conversation-ingest-rs` (Rust, `:3161`): Gmail/Outlook (and any normalized email) → `POST /internal/ingest/email` → normalizes → conversation-core `/internal/conversation-events`.
-- `webhook_received_consumer` (Go): integration-corev2 `velion.ingestion.integration.webhook_received` → fetches full payload → normalizes WhatsApp / Messenger / Instagram / Slack inbound messages into stored conversations. Delivery/read/status callbacks and bot echoes are skipped. Composite thread refs (`businessId:recipientId`) carry the reply address for the outbound send op.
+- `webhook_received_consumer` (Go): integration-corev2 `verevon.ingestion.integration.webhook_received` → fetches full payload → normalizes WhatsApp / Messenger / Instagram / Slack inbound messages into stored conversations. Delivery/read/status callbacks and bot echoes are skipped. Composite thread refs (`businessId:recipientId`) carry the reply address for the outbound send op.
 
 ## Storage & migrations [source-only]
 

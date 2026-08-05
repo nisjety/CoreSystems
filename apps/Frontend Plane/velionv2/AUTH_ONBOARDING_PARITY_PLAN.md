@@ -1,8 +1,8 @@
-# Plan: velionv2 Auth + Onboarding → Control Plane (production-ready parity)
+# Plan: verevonv2 Auth + Onboarding → Control Plane (production-ready parity)
 
 **Date:** 2026-05-30 · **Status:** AWAITING CONFIRMATION (no code until approved)
-**Goal:** Turn velionv2's login / sign-in / session / onboarding from an auth-only shell into a true, production-ready system at full parity with the Control Plane — every step wired to real cores (auth, user, org+BREG, billing; session optional).
-**Companion docs:** `CONTROL_PLANE_PARITY_AUDIT.md` (gap analysis), `BACKEND_CONTRACT_CATALOG.md` (endpoint/event contracts), `V1_PORT_INVENTORY.md` (port kit from velion v1).
+**Goal:** Turn verevonv2's login / sign-in / session / onboarding from an auth-only shell into a true, production-ready system at full parity with the Control Plane — every step wired to real cores (auth, user, org+BREG, billing; session optional).
+**Companion docs:** `CONTROL_PLANE_PARITY_AUDIT.md` (gap analysis), `BACKEND_CONTRACT_CATALOG.md` (endpoint/event contracts), `V1_PORT_INVENTORY.md` (port kit from verevon v1).
 
 ---
 
@@ -19,7 +19,7 @@
 ## 2. Target architecture (call paths)
 
 ```
-Browser ──cookie──> velionv2 (Next.js, same-origin)
+Browser ──cookie──> verevonv2 (Next.js, same-origin)
   /api/auth/*        → proxyControlPlaneAuthRequest()      → auth-core :3011  (Better Auth, cookie idknuten.sid)
   /api/org/*  (NEW)  → requireSession + internal headers   → org-core :8080   (orgs, members, roles, BREG)
                        smart fan-out (billing/quota/plan/checkout) → billing-core :3013/3014
@@ -68,7 +68,7 @@ Auth-mode rule: **CP mode is authoritative.** `AUTH_CORE_URL` set ⇒ proxy to a
 
 ### Phase 2 — Onboarding wired end-to-end  *(HIGH — core ask)*  — depends on P1
 - **Port BREG kit** (`V1_PORT_INVENTORY.md` §2): `src/lib/services/brreg-service.ts` (`/api/org/api/v1/brreg/*`) + `BrregSearch.tsx` (300ms debounce, TanStack Query). Reuse as-is.
-- **OrganizationStep** (`VelionOnboardingPage.tsx:342–427`): embed `BrregSearch`; on select capture `org_number` + `brreg_data`; on continue `POST /api/org/orgs {name, slug, plan, org_number, brreg_data}` → store `orgId` in reducer. (org-core emits `organization.created` → billing auto-provisions free.)
+- **OrganizationStep** (`VerevonOnboardingPage.tsx:342–427`): embed `BrregSearch`; on select capture `org_number` + `brreg_data`; on continue `POST /api/org/orgs {name, slug, plan, org_number, brreg_data}` → store `orgId` in reducer. (org-core emits `organization.created` → billing auto-provisions free.)
 - **Profile/website** (`:429–493`): `PATCH /api/v1/users/me`; optional Quarry crawl (non-blocking, flagged).
 - **PaywallStep** (`:666–803`): persist plan — free/trial → `POST /api/org/orgs/:id/plan`; paid → `POST /api/org/orgs/:id/checkout-session` (→ `{id,url}`) → redirect to Stripe, resume on return. Entitlement-aware copy.
 - **AssemblyStep** (`:846–866`): keep `POST /api/v1/users/onboarding/complete` as capstone; require success in prod (drop silent local-only completion); gate on prior steps.
@@ -79,11 +79,11 @@ Auth-mode rule: **CP mode is authoritative.** `AUTH_CORE_URL` set ⇒ proxy to a
 ### Phase 3 — Workspace gating + real paywall enforcement  *(MEDIUM)*  — depends on P1
 - **`middleware.ts`** (new): edge presence-check of session cookie for `(workspace)/*` → redirect unauthenticated → `/login` (coarse/fast).
 - **RSC guard**: insert `requireCompletedOnboarding()` into `src/app/(workspace)/layout.tsx:3` (currently bare `return children`).
-- **Entitlement enforcement**: `requireEntitlement(feature)` server util (billing-core 402) gates premium RSC routes; `useEntitlements()` for UI; replace hardcoded billing/seats/invoice rows in `VelionWorkspaceSettingsPage` with live billing-core reads.
+- **Entitlement enforcement**: `requireEntitlement(feature)` server util (billing-core 402) gates premium RSC routes; `useEntitlements()` for UI; replace hardcoded billing/seats/invoice rows in `VerevonWorkspaceSettingsPage` with live billing-core reads.
 - **DoD**: no unauth access; no onboarding bypass; premium features gated on real entitlements; settings show live billing.
 
 ### Phase 4 — Auth completeness, hardening & tests  *(MEDIUM-HIGH — prod gate)*  — depends on P0–P3
-- **Passkey**: add `passkeyClient` to `auth-client.ts`; wire `beginPasskeySignIn` (`VelionAuthPage.tsx:413–421`) → `authClient.passkey.signIn()` (proxied to auth-core passkey plugin).
+- **Passkey**: add `passkeyClient` to `auth-client.ts`; wire `beginPasskeySignIn` (`VerevonAuthPage.tsx:413–421`) → `authClient.passkey.signIn()` (proxied to auth-core passkey plugin).
 - **Social/SSO**: verify Google/Microsoft callbackURL + `trustedOrigins` end-to-end.
 - **2FA**: confirm enable + backup-codes UI.
 - **Audit**: ensure login / org-create / plan-change produce audit-core events (via cores' NATS; add explicit emit only where frontend-initiated).

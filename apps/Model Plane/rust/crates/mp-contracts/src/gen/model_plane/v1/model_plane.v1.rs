@@ -899,6 +899,22 @@ pub struct ListRunsResponse {
     pub has_more: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListSystemRunsRequest {
+    /// Tenant to list within. Must equal the verified caller's organization; the
+    /// org boundary is never relaxed for system runs.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Filter by status (empty = all).
+    #[prost(string, tag="2")]
+    pub status_filter: ::prost::alloc::string::String,
+    /// Pagination cursor (ULID of last seen run).
+    #[prost(string, tag="3")]
+    pub after_run_id: ::prost::alloc::string::String,
+    /// Maximum results.
+    #[prost(uint32, tag="4")]
+    pub limit: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CancelRunRequest {
     /// Run to cancel.
     #[prost(string, tag="1")]
@@ -2060,7 +2076,7 @@ pub struct RunAgentRequest {
     /// Acting user identifier.
     #[prost(string, tag="5")]
     pub user_id: ::prost::alloc::string::String,
-    /// Requested model (empty / "velion-*" lets inference-core's intent layer
+    /// Requested model (empty / "verevon-*" lets inference-core's intent layer
     /// resolve a concrete model).
     #[prost(string, tag="6")]
     pub model: ::prost::alloc::string::String,
@@ -2100,6 +2116,13 @@ pub struct RunAgentResponse {
     /// Number of agent rounds actually executed.
     #[prost(uint32, tag="3")]
     pub rounds_executed: u32,
+    /// HONESTY_CONTRACT: true when at least one knowledge_search call in this
+    /// run actually returned org knowledge (status "ok"), so the gateway can
+    /// score confidence honestly instead of assuming ungrounded. False for
+    /// "awaiting_approval" (run not finished) and when no knowledge_search
+    /// call succeeded with real results.
+    #[prost(bool, tag="4")]
+    pub grounded: bool,
 }
 /// ExecuteStepRequest — request to execute one step in the agent loop.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -4200,6 +4223,21 @@ pub struct MemoryEntry {
     /// When this entry was last updated.
     #[prost(message, optional, tag="6")]
     pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Owning user, when known. Empty for entries that are not user-scoped
+    /// (e.g. org/workspace/policy facts).
+    #[prost(string, tag="7")]
+    pub user_id: ::prost::alloc::string::String,
+    /// How this memory came to exist, so a person reading "what do you remember
+    /// about me" can tell what they ASKED Verevon to remember from what Verevon
+    /// decided to remember on its own.
+    ///
+    /// Three-valued rather than a bool: "stated" covers both an explicit
+    /// save-memory tool call and a phrase the deterministic matcher recognised
+    /// ("husk at ..."), which are equally the user's own words; "inferred" is a
+    /// model's reading of a conversation; "unknown" is an older row written before
+    /// provenance was recorded, and must not be presented as either.
+    #[prost(enumeration="MemoryProvenance", tag="8")]
+    pub provenance: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexMemoryRequest {
@@ -4215,6 +4253,16 @@ pub struct IndexMemoryRequest {
     /// Tenant context.
     #[prost(string, tag="4")]
     pub org_id: ::prost::alloc::string::String,
+    /// Owning user, when this memory is user-scoped. Empty for org/workspace/
+    /// policy facts that have no single owner.
+    #[prost(string, tag="5")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Caller-supplied identifier to use for this entry. Lets the caller
+    /// correlate the same logical memory across the durable index and the
+    /// semantic backend so a later DeleteMemory(memory_id) removes both. When
+    /// empty the backend assigns its own id.
+    #[prost(string, tag="6")]
+    pub memory_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct IndexMemoryResponse {
@@ -4242,6 +4290,230 @@ pub struct MemoryHealthResponse {
     /// Stable machine-readable semantic memory readiness state.
     #[prost(string, tag="3")]
     pub memory_status: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListMemoryRequest {
+    /// Tenant context.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Owning user. Required — this RPC is never callable without a target
+    /// user, so a caller can never enumerate an entire org's memories.
+    #[prost(string, tag="2")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Maximum results. Server clamps to a sane upper bound.
+    #[prost(uint32, tag="3")]
+    pub limit: u32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListMemoryResponse {
+    /// Matching memory entries, most-recently-updated first.
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<MemoryEntry>,
+    /// True when the semantic backend could not be reached; index-owned
+    /// entries are still returned.
+    #[prost(bool, tag="2")]
+    pub degraded: bool,
+    /// Stable machine-readable reason, empty when nothing is degraded.
+    #[prost(string, tag="3")]
+    pub degradation_reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteMemoryRequest {
+    /// Tenant context.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Owning user. A caller may only delete their own memories.
+    #[prost(string, tag="2")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Identifier of the memory entry to delete.
+    #[prost(string, tag="3")]
+    pub memory_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct DeleteMemoryResponse {
+    /// True when a durable index record was found and removed.
+    #[prost(bool, tag="1")]
+    pub deleted: bool,
+    /// True when the semantic backend delete could not be confirmed. The
+    /// index-owned record is still removed; this only reflects the best-effort
+    /// downstream cleanup.
+    #[prost(bool, tag="2")]
+    pub degraded: bool,
+    /// Stable machine-readable reason, empty when nothing is degraded.
+    #[prost(string, tag="3")]
+    pub degradation_reason: ::prost::alloc::string::String,
+}
+/// MemoryProvenance — who decided a memory was worth keeping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum MemoryProvenance {
+    /// Not recorded. Pre-provenance rows land here; never render these as stated.
+    Unspecified = 0,
+    /// The user said it, or asked for it to be saved.
+    Stated = 1,
+    /// A model inferred it from a conversation. Auto-accepted, but this is the
+    /// class a user is most likely to want to delete.
+    Inferred = 2,
+}
+impl MemoryProvenance {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MEMORY_PROVENANCE_UNSPECIFIED",
+            Self::Stated => "MEMORY_PROVENANCE_STATED",
+            Self::Inferred => "MEMORY_PROVENANCE_INFERRED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MEMORY_PROVENANCE_UNSPECIFIED" => Some(Self::Unspecified),
+            "MEMORY_PROVENANCE_STATED" => Some(Self::Stated),
+            "MEMORY_PROVENANCE_INFERRED" => Some(Self::Inferred),
+            _ => None,
+        }
+    }
+}
+/// One side-effecting action attempted anywhere in Verevon. The generic
+/// envelope a domain-specific "what did we do" record can carry alongside its
+/// own existing fields, rather than inventing a parallel identity.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Effect {
+    /// Stable id for this attempted effect, unique within its owning domain.
+    #[prost(string, tag="1")]
+    pub effect_id: ::prost::alloc::string::String,
+    /// Free-form but conventionally namespaced kind, e.g.
+    /// "tool_call:book_shipment", "browser_action:click",
+    /// "provider_action:pages.post". Not an enum: the set of effect kinds
+    /// spans every domain and grows independently of this shared contract.
+    #[prost(string, tag="2")]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Who or what attempted this effect: a user id, "model", or a service
+    /// identity. Free text by design — domains differ in how they identify
+    /// actors.
+    #[prost(string, tag="5")]
+    pub actor: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="6")]
+    pub attempted_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// What the effect's own boundary (provider API, browser, tool runtime)
+/// reported back. This is the RAW, possibly-misleading claim — exactly the
+/// kind of unverified "success" this whole contract exists to stop treating
+/// as ground truth.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutionReceipt {
+    #[prost(string, tag="1")]
+    pub effect_id: ::prost::alloc::string::String,
+    /// Whether the boundary itself claimed success. This is NOT verification —
+    /// see VerificationResult for the independent judgment.
+    #[prost(bool, tag="2")]
+    pub reported_success: bool,
+    /// Authoritative id from the provider/action boundary, when one exists
+    /// (e.g. a booking id, a post id, a provider message id). Absence of this
+    /// on a claimed success is itself a signal handled by verification.
+    #[prost(string, tag="3")]
+    pub provider_receipt_id: ::prost::alloc::string::String,
+    /// Boundary-specific status string. Bounded and sanitized by the producer —
+    /// never raw provider payload (mirrors approval_continuation_receipts'
+    /// existing content-free design).
+    #[prost(string, tag="4")]
+    pub raw_status: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="5")]
+    pub recorded_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// The independent judgment on an effect's outcome. `method` names how the
+/// judgment was reached so a mechanical check is never confused with a real
+/// postcondition verification later.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct VerificationResult {
+    #[prost(string, tag="1")]
+    pub effect_id: ::prost::alloc::string::String,
+    #[prost(enumeration="VerificationStatus", tag="2")]
+    pub status: i32,
+    /// How this judgment was reached. Today: "structural" (receipt-id
+    /// presence/absence only). Future: "postcondition" (an independent check
+    /// against the provider's own state) — see verevon-roadmap.md §3b P1 item 3.
+    #[prost(string, tag="3")]
+    pub method: ::prost::alloc::string::String,
+    /// Short, human-readable justification. Bounded, never raw provider
+    /// payload.
+    #[prost(string, tag="4")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="5")]
+    pub verified_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+// Verified Outcome Foundation — the shared contract every domain that
+// executes a real-world side effect (tool calls, browser actions, provider
+// writes, memory promotion, human approval) converges on, instead of each
+// inventing its own ad hoc "did it work" shape. Types only: this file
+// defines the shared vocabulary; each domain still owns and persists its own
+// instances (Model Plane's session-core stores the approval-continuation
+// ones; a future Quarry/browser-receipt wiring would store its own in its
+// own database — no cross-plane table, per the platform's no-shared-DB
+// rule).
+//
+// First concrete producer: execution-core's approval_delivery_worker
+// (RecordApprovalContinuationOutcomeRequest.verification). Everything else —
+// postcondition verifiers, simulators, Quarry/browser-receipt adoption, the
+// Agent Quality OS metrics suite — is later, separately scoped work
+// (verevon-roadmap.md §3b, P1 items 2-6). Treat a VERIFIED_SUCCESS from this
+// first producer as a STRUCTURAL check (the provider/action boundary
+// returned an authoritative receipt id), not an independent postcondition
+// verification — the two are deliberately distinguished by `method` below so
+// a future real postcondition check is never confused with today's
+// mechanical one.
+
+/// Independent judgment on whether a claimed outcome actually happened. This
+/// is the whole point of the contract: a boundary *reporting* success
+/// (`ExecutionReceipt.reported_success`) is a different claim from an
+/// outcome being *verified* true, which is why the two are separate messages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum VerificationStatus {
+    Unspecified = 0,
+    /// No verification could be performed or its result was inconclusive.
+    /// Never treated as success by any caller.
+    Unknown = 1,
+    /// Independently judged to have actually happened.
+    VerifiedSuccess = 2,
+    /// Independently judged to have NOT happened, or to have failed.
+    VerifiedFailure = 3,
+    /// Some but not all of the effect's expected consequences were confirmed
+    /// (e.g. a multi-step provider action where only the first step verified).
+    PartiallyVerified = 4,
+}
+impl VerificationStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "VERIFICATION_STATUS_UNSPECIFIED",
+            Self::Unknown => "VERIFICATION_STATUS_UNKNOWN",
+            Self::VerifiedSuccess => "VERIFICATION_STATUS_VERIFIED_SUCCESS",
+            Self::VerifiedFailure => "VERIFICATION_STATUS_VERIFIED_FAILURE",
+            Self::PartiallyVerified => "VERIFICATION_STATUS_PARTIALLY_VERIFIED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "VERIFICATION_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "VERIFICATION_STATUS_UNKNOWN" => Some(Self::Unknown),
+            "VERIFICATION_STATUS_VERIFIED_SUCCESS" => Some(Self::VerifiedSuccess),
+            "VERIFICATION_STATUS_VERIFIED_FAILURE" => Some(Self::VerifiedFailure),
+            "VERIFICATION_STATUS_PARTIALLY_VERIFIED" => Some(Self::PartiallyVerified),
+            _ => None,
+        }
+    }
 }
 // --- Records ---
 
@@ -4565,6 +4837,15 @@ pub struct CreateApprovalRequest {
     /// duplicate durable approval. Empty = no idempotency guard (D-1).
     #[prost(string, tag="10")]
     pub idempotency_key: ::prost::alloc::string::String,
+    /// Optional canonical JSON descriptor for the exact suspended action. It is
+    /// validated, scope-bound, and written once with the approval record; it
+    /// contains no bearer, refresh token, or provider credential. Empty means
+    /// this approval is proposal-only and can never be resumed by a worker.
+    ///
+    /// ZDR callers must leave this empty: retained continuation descriptors are
+    /// intentionally incompatible with zero-data-retention execution.
+    #[prost(string, tag="11")]
+    pub continuation_descriptor_json: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateApprovalResponse {
@@ -4707,6 +4988,87 @@ pub struct ClaimApprovalDeliveriesResponse {
     #[prost(message, repeated, tag="1")]
     pub deliveries: ::prost::alloc::vec::Vec<ApprovalDelivery>,
 }
+/// Service-only, lease-bound continuation lookup. The descriptor remains
+/// unavailable when the active lease does not match, has expired, or was
+/// created before descriptor-backed pausing existed.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetApprovalContinuationRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub delivery_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub lease_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetApprovalContinuationResponse {
+    /// False for a stale/mismatched lease and for a descriptor-free approval.
+    /// These cases remain indistinguishable to avoid leaking durable state.
+    #[prost(bool, tag="1")]
+    pub available: bool,
+    /// Canonical descriptor JSON. Set only when available is true.
+    #[prost(string, tag="2")]
+    pub continuation_descriptor_json: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordApprovalContinuationStartedRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub delivery_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub lease_token: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordApprovalContinuationStartedResponse {
+    /// Stable immutable receipt. A retry returns the original receipt ID.
+    #[prost(string, tag="1")]
+    pub receipt_id: ::prost::alloc::string::String,
+    /// True when an earlier worker already recorded this delivery's start. The
+    /// caller must not execute the descriptor again.
+    #[prost(bool, tag="2")]
+    pub already_started: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordApprovalContinuationOutcomeRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub delivery_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub receipt_id: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub lease_token: ::prost::alloc::string::String,
+    #[prost(enumeration="ApprovalContinuationOutcome", tag="6")]
+    pub outcome: i32,
+    /// Required only for COMPLETED. This must be the bounded authoritative
+    /// receipt returned by the provider/action boundary, never a model claim.
+    #[prost(string, tag="7")]
+    pub provider_receipt_id: ::prost::alloc::string::String,
+    /// Required only for FAILED or CANCELLED; validated against a finite
+    /// allowlist and never stores raw provider diagnostics.
+    #[prost(string, tag="8")]
+    pub failure_code: ::prost::alloc::string::String,
+    /// Optional independent judgment on whether this outcome's claimed result
+    /// actually happened (Verified Outcome Foundation, verevon-roadmap.md §3b).
+    /// Absent from older callers; a missing field is stored as
+    /// VERIFICATION_STATUS_UNSPECIFIED, never inferred from `outcome`.
+    #[prost(message, optional, tag="9")]
+    pub verification: ::core::option::Option<VerificationResult>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordApprovalContinuationOutcomeResponse {
+    #[prost(bool, tag="1")]
+    pub recorded: bool,
+    #[prost(bool, tag="2")]
+    pub already_finalized: bool,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AcknowledgeApprovalDeliveryRequest {
     /// Tenant filter. It must exactly match the verified service identity.
@@ -4718,13 +5080,16 @@ pub struct AcknowledgeApprovalDeliveryRequest {
     /// Exact opaque lease capability returned by ClaimApprovalDeliveries.
     #[prost(string, tag="3")]
     pub lease_token: ::prost::alloc::string::String,
-    /// Retry or terminal. A successful execution acknowledgement is deliberately
-    /// unavailable until a durable continuation receipt exists.
+    /// Retry, terminal, or receipt-backed settled.
     #[prost(enumeration="ApprovalDeliveryAcknowledgement", tag="4")]
     pub acknowledgement: i32,
     /// A bounded allowlisted failure classification, not a free-form error.
     #[prost(string, tag="5")]
     pub failure_code: ::prost::alloc::string::String,
+    /// Required only for SETTLED. Session Core verifies this exact immutable
+    /// receipt has a completed outcome and authoritative provider receipt.
+    #[prost(string, tag="6")]
+    pub continuation_receipt_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AcknowledgeApprovalDeliveryResponse {
@@ -4743,6 +5108,11 @@ pub struct AcknowledgeApprovalDeliveryResponse {
     /// Next eligible retry time. Empty for terminal entries or exact replays.
     #[prost(message, optional, tag="4")]
     pub next_attempt_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// True only for a receipt-backed settled delivery. It means the worker
+    /// finished its continuation protocol, not that a customer received a
+    /// communication.
+    #[prost(bool, tag="5")]
+    pub settled: bool,
 }
 // --- GetSubagentLineage ---
 
@@ -4824,7 +5194,7 @@ pub struct OrchestrationEvent {
     /// browser-specific detail (which action, why it was classified risky) the
     /// generic events don't, so the run timeline shows more than a bare
     /// "risky tool" label.
-    #[prost(oneof="orchestration_event::Event", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22")]
+    #[prost(oneof="orchestration_event::Event", tags="10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23")]
     pub event: ::core::option::Option<orchestration_event::Event>,
 }
 /// Nested message and enum types in `OrchestrationEvent`.
@@ -5034,6 +5404,23 @@ pub mod orchestration_event {
         #[prost(string, tag="6")]
         pub decided_by: ::prost::alloc::string::String,
     }
+    /// Verified Outcome Foundation (verevon-roadmap.md §3b): a resumed
+    /// continuation's independently-judged outcome, live on the run's own event
+    /// stream. `verification` is never absent on this event — the recording
+    /// handler only fires it when one was actually produced.
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+    pub struct ApprovalContinuationVerified {
+        #[prost(string, tag="1")]
+        pub run_id: ::prost::alloc::string::String,
+        #[prost(string, tag="2")]
+        pub delivery_id: ::prost::alloc::string::String,
+        #[prost(string, tag="3")]
+        pub approval_id: ::prost::alloc::string::String,
+        #[prost(string, tag="4")]
+        pub receipt_id: ::prost::alloc::string::String,
+        #[prost(message, optional, tag="5")]
+        pub verification: ::core::option::Option<super::VerificationResult>,
+    }
     /// Event payload. Tags 10-16 align with the original 7-variant Rust enum
     /// order; tags 17-18 are additive browser-agent progress events (B4); tags
     /// 19-20 are additive user-initiated browser-run pause/resume events (Phase 2);
@@ -5074,6 +5461,14 @@ pub mod orchestration_event {
         BrowserActionApprovalRequired(BrowserActionApprovalRequired),
         #[prost(message, tag="22")]
         BrowserActionDecided(BrowserActionDecided),
+        /// Verified Outcome Foundation (verevon-roadmap.md §3b, tag 23 — additive).
+        /// Fired once a resumed continuation's independent VerificationResult is
+        /// durably recorded, so the Agent Run Console can show it live without a
+        /// separate fetch. Only emitted when the recording worker actually sent a
+        /// verification result — an older worker's outcome (no `verification`
+        /// field) never fires this event.
+        #[prost(message, tag="23")]
+        ApprovalContinuationVerified(ApprovalContinuationVerified),
     }
 }
 // --- RecordOrchestrationEvent ---
@@ -5089,6 +5484,55 @@ pub struct RecordOrchestrationEventResponse {
     /// Server-assigned monotonic id of the published event (ULID).
     #[prost(string, tag="1")]
     pub event_id: ::prost::alloc::string::String,
+}
+// --- StartWorkflow ---
+
+/// Request to start one allowlisted durable workflow for a tenant-contained run.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StartWorkflowRequest {
+    /// Canonical workflow type name. Must appear in the server-side allowlist of
+    /// worker-registered workflows (e.g. "InteractiveRunSupervision"). Anything
+    /// else is rejected without reaching Temporal.
+    #[prost(string, tag="1")]
+    pub workflow_type: ::prost::alloc::string::String,
+    /// Tenant that owns the run. It must either be empty or match the verified
+    /// caller's organization exactly; a conflict is denied rather than coerced.
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Acting viewer. Same containment rule as `org_id` for user principals.
+    /// Service principals may leave it empty (system-initiated work).
+    #[prost(string, tag="3")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Run identifier this workflow supervises. It anchors the deterministic
+    /// workflow id and, for run-scoped workflows, is stamped onto the input.
+    /// Must be a single NATS subject token (no '.', ' ', '*' or '>') so the
+    /// run's lifecycle events land on mp.v1.run.<run_id>.event where the
+    /// downstream `mp.v1.run.*.event` consumers can see them.
+    #[prost(string, tag="4")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Workflow-type-specific input. Server-authoritative tenancy fields are
+    /// overwritten after decoding, so supplying them here has no effect.
+    #[prost(message, optional, tag="5")]
+    pub input: ::core::option::Option<::prost_types::Struct>,
+    /// Optional caller-chosen dedup anchor. When set it replaces `run_id` in the
+    /// deterministic workflow id, letting a caller retry a start whose run id is
+    /// assigned by the workflow itself.
+    #[prost(string, tag="6")]
+    pub idempotency_key: ::prost::alloc::string::String,
+}
+/// Identity of the workflow execution that was started or re-attached to.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartWorkflowResponse {
+    /// Deterministic Temporal workflow id that was started or re-attached to.
+    #[prost(string, tag="1")]
+    pub workflow_id: ::prost::alloc::string::String,
+    /// Temporal execution (run) id of the started or existing execution. This is
+    /// Temporal's own identifier and is NOT the Model Plane run_id.
+    #[prost(string, tag="2")]
+    pub temporal_run_id: ::prost::alloc::string::String,
+    /// Canonical workflow type that was started, echoed from the allowlist.
+    #[prost(string, tag="3")]
+    pub workflow_type: ::prost::alloc::string::String,
 }
 // --- Enums ---
 
@@ -5417,6 +5861,38 @@ impl SubagentRole {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
+pub enum ApprovalContinuationOutcome {
+    Unspecified = 0,
+    Completed = 1,
+    Failed = 2,
+    Cancelled = 3,
+}
+impl ApprovalContinuationOutcome {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "APPROVAL_CONTINUATION_OUTCOME_UNSPECIFIED",
+            Self::Completed => "APPROVAL_CONTINUATION_OUTCOME_COMPLETED",
+            Self::Failed => "APPROVAL_CONTINUATION_OUTCOME_FAILED",
+            Self::Cancelled => "APPROVAL_CONTINUATION_OUTCOME_CANCELLED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "APPROVAL_CONTINUATION_OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+            "APPROVAL_CONTINUATION_OUTCOME_COMPLETED" => Some(Self::Completed),
+            "APPROVAL_CONTINUATION_OUTCOME_FAILED" => Some(Self::Failed),
+            "APPROVAL_CONTINUATION_OUTCOME_CANCELLED" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
 pub enum ApprovalDeliveryAcknowledgement {
     /// Unknown acknowledgement; rejected.
     Unspecified = 0,
@@ -5426,6 +5902,10 @@ pub enum ApprovalDeliveryAcknowledgement {
     Retry = 1,
     /// The delivery cannot proceed safely. This never emits a run-resumed event.
     Terminal = 2,
+    /// The exact descriptor-backed action completed and its immutable outcome
+    /// carries an authoritative provider receipt. This settles the outbox only;
+    /// it does not assert customer delivery.
+    Settled = 3,
 }
 impl ApprovalDeliveryAcknowledgement {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -5437,6 +5917,7 @@ impl ApprovalDeliveryAcknowledgement {
             Self::Unspecified => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED",
             Self::Retry => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_RETRY",
             Self::Terminal => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL",
+            Self::Settled => "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_SETTLED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -5445,6 +5926,7 @@ impl ApprovalDeliveryAcknowledgement {
             "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED" => Some(Self::Unspecified),
             "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_RETRY" => Some(Self::Retry),
             "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL" => Some(Self::Terminal),
+            "APPROVAL_DELIVERY_ACKNOWLEDGEMENT_SETTLED" => Some(Self::Settled),
             _ => None,
         }
     }
@@ -5622,6 +6104,117 @@ pub struct StartRunResponse {
     /// Creation timestamp.
     #[prost(message, optional, tag="2")]
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// The owner session-core actually persisted, which is ALWAYS the verified
+    /// caller's own identity and never the requested `user_id`. For a human it is
+    /// their actor id; for a durable workflow with no human it is that workload's
+    /// service principal.
+    ///
+    /// Echoed so the caller can stamp the same actor on the run's lifecycle
+    /// envelopes. Without it a system-initiated run carries one actor string in
+    /// `runs.user_id` and a different, locally-invented one on its NATS events,
+    /// and nothing downstream can join the two.
+    #[prost(string, tag="3")]
+    pub owner_id: ::prost::alloc::string::String,
+}
+/// Starts a run and its durable terminalization obligation in one transaction.
+/// This is additive; StartRun keeps its existing behavior for legacy clients.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartManagedRunRequest {
+    /// Required for ordinary durable runs. A ZDR-authorized caller leaves this
+    /// empty and Session Core creates a fresh metadata-only thread atomically.
+    #[prost(string, tag="1")]
+    pub thread_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub parent_run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub goal: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub mode: ::prost::alloc::string::String,
+    /// Caller-provided identity fields are verified and pinned by Session Core.
+    #[prost(string, tag="6")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="7")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Opaque client operation key. Reuse exactly on an ambiguous start response.
+    /// It must not be derived from prompt or tool content.
+    #[prost(string, tag="8")]
+    pub start_key: ::prost::alloc::string::String,
+    /// The server validates this source and stores the matching canonical step.
+    #[prost(enumeration="ManagedRunSource", tag="9")]
+    pub terminal_source: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartManagedRunResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Server-selected canonical terminal step for the configured source.
+    #[prost(string, tag="3")]
+    pub terminal_step_id: ::prost::alloc::string::String,
+    /// True only when an exact retry returned the original managed run.
+    #[prost(bool, tag="4")]
+    pub already_started: bool,
+    /// The durable thread selected for this run. For a ZDR-managed run this is a
+    /// server-created metadata-only thread; no prompt or message is persisted.
+    #[prost(string, tag="5")]
+    pub thread_id: ::prost::alloc::string::String,
+}
+/// Records an immutable, metadata-only terminal outcome. There are deliberately
+/// no output, error-detail, principal, tenant, tool, prompt, or metadata fields.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordTerminalOutcomeRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(enumeration="ManagedRunSource", tag="2")]
+    pub source: i32,
+    #[prost(enumeration="TerminalOutcome", tag="3")]
+    pub outcome: i32,
+    /// Required only for FAILED and restricted server-side to a fixed allowlist.
+    #[prost(string, tag="4")]
+    pub failure_code: ::prost::alloc::string::String,
+}
+/// A durable terminal receipt. Clients must not expose a terminal result until
+/// this response (or an idempotent replay of it) has been received.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordTerminalOutcomeResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(enumeration="ManagedRunSource", tag="2")]
+    pub source: i32,
+    #[prost(string, tag="3")]
+    pub terminal_step_id: ::prost::alloc::string::String,
+    #[prost(uint32, tag="4")]
+    pub step_index: u32,
+    /// Stable Session Core terminal event/receipt identifier.
+    #[prost(string, tag="5")]
+    pub receipt_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="6")]
+    pub applied_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(bool, tag="7")]
+    pub already_applied: bool,
+    /// True only when recovery recorded the fixed unknown-outcome failure.
+    #[prost(bool, tag="8")]
+    pub reconciliation_required: bool,
+}
+/// Renews a managed run's server-owned liveness deadline. No caller can set a
+/// deadline or attach payload content.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HeartbeatManagedRunRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(enumeration="ManagedRunSource", tag="2")]
+    pub source: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HeartbeatManagedRunResponse {
+    #[prost(message, optional, tag="1")]
+    pub renewed_until: ::core::option::Option<::prost_types::Timestamp>,
+    /// True when the run is already terminal; the heartbeat made no mutation.
+    #[prost(bool, tag="2")]
+    pub already_terminal: bool,
 }
 // --- CompleteStep ---
 
@@ -5810,6 +6403,35 @@ pub struct CompactNowResponse {
 // --- UpsertAgentSkill (G7 learning loop) ---
 
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAgentSkillEnabledRequest {
+    /// Tenant. Must equal the verified caller's organization.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Skill to flip, by id — not by name. A quarantine decision is made about a
+    /// specific row, and names are only unique per org, so an id keeps the sweep
+    /// and the mutation talking about the same thing.
+    #[prost(string, tag="2")]
+    pub skill_id: ::prost::alloc::string::String,
+    /// False pauses injection; true resumes it. Nothing else about the skill
+    /// changes, which is the whole point of this RPC existing.
+    #[prost(bool, tag="3")]
+    pub enabled: bool,
+    /// Why, for the audit trail. The quality sweep records the bound that drove the
+    /// decision so an operator can see it without re-deriving the evidence.
+    #[prost(string, tag="4")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetAgentSkillEnabledResponse {
+    /// False when no such skill exists in this org — reported rather than raised so
+    /// a sweep over slightly stale candidates is not a hard failure.
+    #[prost(bool, tag="1")]
+    pub updated: bool,
+    /// The skill's enabled state after the call.
+    #[prost(bool, tag="2")]
+    pub enabled: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpsertAgentSkillRequest {
     #[prost(string, tag="1")]
     pub org_id: ::prost::alloc::string::String,
@@ -5966,6 +6588,88 @@ pub struct SetRunModeResponse {
     pub run_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub mode: ::prost::alloc::string::String,
+}
+// --- Managed run terminalization ---
+
+/// The producer that is allowed to submit a run's terminal outcome. The server
+/// chooses the terminal step identifier from this source; callers never supply
+/// arbitrary step identifiers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ManagedRunSource {
+    Unspecified = 0,
+    /// Gateway-owned direct inference, including unary Invoke and streaming SSE.
+    GatewayDirect = 1,
+    /// Execution Core owns a governed multi-step agent loop.
+    ExecutionAgent = 2,
+    /// Execution Core owns a standalone governed browser run.
+    ExecutionBrowser = 3,
+    /// Gateway may use this only for a confirmed pre-dispatch rejection of an
+    /// execution-agent run; it can never claim an accepted agent completion.
+    GatewayAgentDispatchRejected = 4,
+    /// Gateway owns the current standalone browser terminal projection only after
+    /// it receives a confirmed Execution Core response. This is distinct from a
+    /// future Execution Core-owned browser terminalizer.
+    GatewayBrowser = 5,
+}
+impl ManagedRunSource {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "MANAGED_RUN_SOURCE_UNSPECIFIED",
+            Self::GatewayDirect => "MANAGED_RUN_SOURCE_GATEWAY_DIRECT",
+            Self::ExecutionAgent => "MANAGED_RUN_SOURCE_EXECUTION_AGENT",
+            Self::ExecutionBrowser => "MANAGED_RUN_SOURCE_EXECUTION_BROWSER",
+            Self::GatewayAgentDispatchRejected => "MANAGED_RUN_SOURCE_GATEWAY_AGENT_DISPATCH_REJECTED",
+            Self::GatewayBrowser => "MANAGED_RUN_SOURCE_GATEWAY_BROWSER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "MANAGED_RUN_SOURCE_UNSPECIFIED" => Some(Self::Unspecified),
+            "MANAGED_RUN_SOURCE_GATEWAY_DIRECT" => Some(Self::GatewayDirect),
+            "MANAGED_RUN_SOURCE_EXECUTION_AGENT" => Some(Self::ExecutionAgent),
+            "MANAGED_RUN_SOURCE_EXECUTION_BROWSER" => Some(Self::ExecutionBrowser),
+            "MANAGED_RUN_SOURCE_GATEWAY_AGENT_DISPATCH_REJECTED" => Some(Self::GatewayAgentDispatchRejected),
+            "MANAGED_RUN_SOURCE_GATEWAY_BROWSER" => Some(Self::GatewayBrowser),
+            _ => None,
+        }
+    }
+}
+/// The only producer-supplied terminal outcomes. A lost producer is represented
+/// internally as an observable reconciliation-required failure, never success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum TerminalOutcome {
+    Unspecified = 0,
+    Completed = 1,
+    Failed = 2,
+}
+impl TerminalOutcome {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "TERMINAL_OUTCOME_UNSPECIFIED",
+            Self::Completed => "TERMINAL_OUTCOME_COMPLETED",
+            Self::Failed => "TERMINAL_OUTCOME_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "TERMINAL_OUTCOME_UNSPECIFIED" => Some(Self::Unspecified),
+            "TERMINAL_OUTCOME_COMPLETED" => Some(Self::Completed),
+            "TERMINAL_OUTCOME_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 include!("model_plane.v1.tonic.rs");
 // @@protoc_insertion_point(module)

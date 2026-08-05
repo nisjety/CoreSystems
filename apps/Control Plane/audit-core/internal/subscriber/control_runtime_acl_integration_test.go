@@ -29,7 +29,7 @@ authorization {
       user: %q
       password: %q
       permissions: {
-        publish: ["service.authenticate", "user.>", "velion.audit.v2.control.user-core.>"]
+        publish: ["service.authenticate", "user.>", "verevon.audit.v2.control.user-core.>"]
         subscribe: ["auth.>", "organization.member.>", "_INBOX.USER_CONTROL.>"]
       }
     }

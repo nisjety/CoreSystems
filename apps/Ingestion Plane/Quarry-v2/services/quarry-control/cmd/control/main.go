@@ -184,12 +184,12 @@ func main() {
 	go janitor.Run(dCtx, db, janitor.OptionsFromEnv(), log.Logger)
 
 	// GDPR cross-plane org-erasure purge consumer — subscribes to
-	// velion.gdpr.erasure.requested (org-core, fanned out over the
+	// verevon.gdpr.erasure.requested (org-core, fanned out over the
 	// control-shared-nats broker) and hard-purges this org's crawl data.
 	// Uses a narrowly-scoped "quarry-control-gdpr" shared-broker identity
 	// (NATS_SHARED_URL/NATS_SHARED_USER/NATS_SHARED_PASSWORD), distinct from
-	// VELION_NATS_URL/VELION_NATS_TOKEN — those names are reserved elsewhere
-	// in this plane for the legacy token-only velion-nats broker, a
+	// VEREVON_NATS_URL/VEREVON_NATS_TOKEN — those names are reserved elsewhere
+	// in this plane for the legacy token-only verevon-nats broker, a
 	// different broker from control-shared-nats. Safe by default: absent
 	// NATS_SHARED_URL the consumer is simply not started, same "off by
 	// default, log why" posture as the retention janitor above and the

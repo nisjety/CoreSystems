@@ -5,8 +5,8 @@ import {
   isWorkspaceSettingsSection,
   workspaceSettingsSectionIds,
 } from "@/features/settings-v2/lib/settings-sections";
-import { VelionWorkspaceSettingsPage } from "@/features/settings-v2/components/VelionWorkspaceSettingsPage";
-import { VelionProductShell } from "@/features/shell-v2/components/VelionProductShell";
+import { VerevonWorkspaceSettingsPage } from "@/features/settings-v2/components/VerevonWorkspaceSettingsPage";
+import { VerevonProductShell } from "@/features/shell-v2/components/VerevonProductShell";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
 type SettingsSectionPageProps = {
@@ -22,13 +22,13 @@ export async function generateMetadata({ params }: SettingsSectionPageProps): Pr
 
   if (!isWorkspaceSettingsSection(section)) {
     return {
-      title: "Settings | Velion v2",
+      title: "Settings | Verevon v2",
     };
   }
 
   const details = getWorkspaceSettingsSection(section);
   return {
-    title: `${details.label} settings | Velion v2`,
+    title: `${details.label} settings | Verevon v2`,
     description: details.description,
   };
 }
@@ -43,8 +43,8 @@ export default async function SettingsSectionPage({ params }: SettingsSectionPag
   }
 
   return (
-    <VelionProductShell activeRoute="/settings" defaultSidebarExpanded>
-      <VelionWorkspaceSettingsPage section={section} />
-    </VelionProductShell>
+    <VerevonProductShell activeRoute="/settings" defaultSidebarExpanded>
+      <VerevonWorkspaceSettingsPage section={section} />
+    </VerevonProductShell>
   );
 }

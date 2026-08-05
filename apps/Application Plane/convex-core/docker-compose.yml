@@ -31,7 +31,7 @@ services:
 
       # Service URLs (cross-plane via inter-plane-bus).
       # `org-core` + `auth-core` are the canonical Control Plane service
-      # names (see velion-gap.md G7). The legacy `org-core-service` /
+      # names (see verevon-gap.md G7). The legacy `org-core-service` /
       # `auth-service` aliases still resolve in docker-compose but are
       # being phased out — do not introduce new references to them.
       AI_CORE_URL: ${AI_CORE_URL:-http://ai-core:8000}
@@ -122,7 +122,7 @@ services:
       CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
       CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
       CONVEX_RECONCILIATION_KEY: ${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}
-    # G49 (velion-gap.md §8.33): mount the host `./convex/` directory so
+    # G49 (verevon-gap.md §8.33): mount the host `./convex/` directory so
     # the dev server (running `npx convex dev` per startup.sh) picks up
     # function changes without requiring an image rebuild. Without this
     # mount the baked-in snapshot at image-build time is what gets

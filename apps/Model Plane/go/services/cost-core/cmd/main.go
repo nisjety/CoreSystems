@@ -155,7 +155,7 @@ func main() {
 	go subscribeUsageEnvelopes(ctx, srv)
 
 	// Cross-plane GDPR erasure fan-out: org-core publishes
-	// velion.gdpr.erasure.requested (explicit hard-delete AND its 30-day
+	// verevon.gdpr.erasure.requested (explicit hard-delete AND its 30-day
 	// auto-purge cron) on the shared Control-Plane bus; this permanently
 	// deletes every cost_entries row cost-core holds for that org. Runs on its
 	// own dedicated shared-broker connection (identity "cost-core-gdpr",

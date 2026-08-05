@@ -7,7 +7,7 @@ import { useRunEvents, type RunEventsState } from '@/lib/hooks/useRunEvents';
 import { resolveAgentProfile, type AgentProfile, type PersistedAgent } from '../types';
 
 /**
- * U3-6 (ui-ux-velion-gap.md §14): playground chat hook.
+ * U3-6 (ui-ux-verevon-gap.md §14): playground chat hook.
  *
  * Drives the right-pane "Test your agent" surface in `AgentWorkspaceView`.
  * Sends the message to the existing `/api/chat/stream` endpoint with the

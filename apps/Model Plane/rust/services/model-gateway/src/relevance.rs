@@ -163,7 +163,7 @@ const MIN_PLATFORM_ALIAS_CHARS: usize = 3;
 /// [`DEFAULT_SOFT_HOST_PENALTY`]; it never blocks, and it does not apply at all
 /// when the question names the platform ([`Question::names_platform`]).
 ///
-/// Override wholesale with `VELION_RELEVANCE_SOFT_HOSTS` as a comma-separated
+/// Override wholesale with `VEREVON_RELEVANCE_SOFT_HOSTS` as a comma-separated
 /// host list (an empty value disables the class entirely). Matching is on the
 /// registrable suffix, so `no.linkedin.com` and `www.linkedin.com` both match
 /// `linkedin.com`.
@@ -369,7 +369,7 @@ macro_rules! cached_ratio {
 
 cached_ratio!(
     keep_threshold,
-    "VELION_RELEVANCE_KEEP_THRESHOLD",
+    "VEREVON_RELEVANCE_KEEP_THRESHOLD",
     DEFAULT_KEEP_THRESHOLD,
     MIN_KEEP_THRESHOLD,
     MAX_KEEP_THRESHOLD,
@@ -377,7 +377,7 @@ cached_ratio!(
 );
 cached_ratio!(
     provider_weight,
-    "VELION_RELEVANCE_PROVIDER_WEIGHT",
+    "VEREVON_RELEVANCE_PROVIDER_WEIGHT",
     DEFAULT_PROVIDER_WEIGHT,
     MIN_PROVIDER_WEIGHT,
     MAX_PROVIDER_WEIGHT,
@@ -385,7 +385,7 @@ cached_ratio!(
 );
 cached_ratio!(
     soft_host_penalty,
-    "VELION_RELEVANCE_SOFT_HOST_PENALTY",
+    "VEREVON_RELEVANCE_SOFT_HOST_PENALTY",
     DEFAULT_SOFT_HOST_PENALTY,
     MIN_SOFT_HOST_PENALTY,
     MAX_SOFT_HOST_PENALTY,
@@ -393,7 +393,7 @@ cached_ratio!(
 );
 cached_ratio!(
     implied_domain_bonus,
-    "VELION_RELEVANCE_IMPLIED_DOMAIN_BONUS",
+    "VEREVON_RELEVANCE_IMPLIED_DOMAIN_BONUS",
     DEFAULT_IMPLIED_DOMAIN_BONUS,
     MIN_IMPLIED_DOMAIN_BONUS,
     MAX_IMPLIED_DOMAIN_BONUS,
@@ -405,7 +405,7 @@ pub fn fallback_keep() -> usize {
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| {
         clamped_usize(
-            std::env::var("VELION_RELEVANCE_FALLBACK_KEEP")
+            std::env::var("VEREVON_RELEVANCE_FALLBACK_KEEP")
                 .ok()
                 .as_deref(),
             DEFAULT_FALLBACK_KEEP,
@@ -418,7 +418,7 @@ pub fn fallback_keep() -> usize {
 /// The soft-demoted host class in effect for this process.
 fn soft_hosts() -> &'static [String] {
     static CACHED: OnceLock<Vec<String>> = OnceLock::new();
-    CACHED.get_or_init(|| match std::env::var("VELION_RELEVANCE_SOFT_HOSTS") {
+    CACHED.get_or_init(|| match std::env::var("VEREVON_RELEVANCE_SOFT_HOSTS") {
         // An explicitly empty override disables the class — that is a supported
         // configuration, not a parse failure to fall back from.
         Ok(raw) => raw
@@ -995,8 +995,8 @@ mod tests {
         let verdict = assess(
             &Question::parse("hvor mange følgere har vi på LinkedIn"),
             &candidate(
-                "https://no.linkedin.com/company/velion/followers",
-                "Velion følgere på LinkedIn",
+                "https://no.linkedin.com/company/verevon/followers",
+                "Verevon følgere på LinkedIn",
                 "Antall følgere.",
             ),
         );

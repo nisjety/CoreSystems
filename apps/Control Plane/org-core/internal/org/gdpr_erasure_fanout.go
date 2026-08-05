@@ -10,7 +10,7 @@ import "time"
 // (PurgeDeletedOrganizations below) — publish this exact subject with an
 // identical payload shape so subscribers never need to special-case which
 // path triggered the erasure.
-const GDPRErasureFanoutSubject = "velion.gdpr.erasure.requested"
+const GDPRErasureFanoutSubject = "verevon.gdpr.erasure.requested"
 
 // gdprPurgeCronActorID is the requested_by value used when the retention
 // cron (not a human/admin caller) triggers the erasure fan-out for an
@@ -26,7 +26,7 @@ const gdprPurgeCronActorID = "system:org-core-purge-cron"
 //
 // Before this method existed, only the explicit HTTP path published the
 // fan-out — an org purged by the cron never told Model Plane / Data Plane to
-// clean up their side. A nil shared publisher (velion-nats disabled) makes
+// clean up their side. A nil shared publisher (verevon-nats disabled) makes
 // this a no-op, matching every other SharedPub() call site in this package.
 func (s *Service) PublishGDPRErasureFanout(orgID, actorID string) {
 	sp := s.SharedPub()

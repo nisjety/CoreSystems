@@ -1,6 +1,6 @@
-# Velion — Per-User Data Ownership & Sharing (Fine-Grained Authorization) Execution Plan
+# Verevon — Per-User Data Ownership & Sharing (Fine-Grained Authorization) Execution Plan
 
-> **Status:** Approved 2026-06-19 (recon-grounded + hardened by a 6-persona honesty-first council). **Gated on Phase 0 (org/tenant isolation) — ALREADY MERGED at `ff2a3f59`.** A distinct foundational phase that runs **in parallel** with Phases 1/2; Phase 1/2 surfaces stay honestly org-scoped and adopt ownership **one at a time, after the documents pilot is proven**. Source: `Velion-ai-first.md`.
+> **Status:** Approved 2026-06-19 (recon-grounded + hardened by a 6-persona honesty-first council). **Gated on Phase 0 (org/tenant isolation) — ALREADY MERGED at `ff2a3f59`.** A distinct foundational phase that runs **in parallel** with Phases 1/2; Phase 1/2 surfaces stay honestly org-scoped and adopt ownership **one at a time, after the documents pilot is proven**. Source: `Verevon-ai-first.md`.
 >
 > ## What this phase is
 > Make workspace data **private to its creator by default**, shared only via explicit per-resource grants (share-with-user, view-only for MVP), **and make the AI agent only ground/retrieve on data the requesting user can see**. This is fine-grained authorization *below* Phase 0's org isolation. **MVP = documents only** — the only resource type whose ACL scaffolding already flows through retrieval, so the only place a privacy claim is enforceable end-to-end today.
@@ -58,11 +58,11 @@
 - **DoD:** Permissive deny-rate reviewed before Strict; revoke effective within one query post-eviction; load test passes; a **written phase-doc honesty statement** records that MVP enforcement is POST-FILTER in canonical Postgres (recall-bounded under skew), that the Qdrant/Quickwit ACL conditions are inert in MVP, and that no surface claims privacy until gate+identity are both merged.
 
 ### `PR-5` — GDPR erasure subscriber + org-admin bypass *(Control Plane + Data Plane)* — deps: PR-1, PR-2
-- `velion.gdpr.erasure.requested` subscriber (owned-resource scope, idempotent): owned docs transfer `owner_id` to org admin (default) or delete per policy; grants `WHERE subject_id=$user` revoked; emit `velion.gdpr.ownership.transferred`. Coordinate with Phase 2's deferred cross-plane erasure (one consumer per plane — this phase owns transfer+revocation; Phase 2 owns byte-purge).
+- `verevon.gdpr.erasure.requested` subscriber (owned-resource scope, idempotent): owned docs transfer `owner_id` to org admin (default) or delete per policy; grants `WHERE subject_id=$user` revoked; emit `verevon.gdpr.ownership.transferred`. Coordinate with Phase 2's deferred cross-plane erasure (one consumer per plane — this phase owns transfer+revocation; Phase 2 owns byte-purge).
 - Org-admin **super-visibility**: a distinct path gated on a discrete `org:data:read_all` capability (NOT generic admin), org-scoped only (never cross-org), every bypass read emits `reason='admin_bypass:read_all'` + an `access_audit_log` row with target doc ids, UI/agent-labelled "admin override", **excluded from default agent grounding**.
 - **DoD:** full erase-and-verify cycle test (owned docs transferred, inbound grants gone, `ownership.transferred` emitted); admin_bypass audit row asserted; test proves an admin cannot silently read private data and that bypass does not extend into default agent grounding.
 
-### `PR-6` — Share UI + badges behind the honesty gate *(velionv3)* — deps: PR-4 (Strict + gate), PR-5 (bypass copy)
+### `PR-6` — Share UI + badges behind the honesty gate *(verevonv3)* — deps: PR-4 (Strict + gate), PR-5 (bypass copy)
 - Private/Org/Shared badges derived from the SAME authority retrieval enforces (`resource_grants` + visibility, never a separate display flag); ShareDialog (single user, role fixed "Can view" for MVP, live grant list with remove); read-only "shared with me" paged off `ListVisible`; Trust Center copy describing only enforced guarantees.
 - **DoD:** automated test confirms **no badge/Private option renders when `CONTROL_PLANE_ENFORCEMENT!=strict` or identity is not live**; reviewer checklist confirms no surface claims a privacy property the retrieval path does not deliver.
 

@@ -31,7 +31,7 @@ export async function sendOnboardingCompletedNotification(
       idempotency_key: `onboarding.completed:${actor.userId}:${input.orgId ?? "no-org"}`,
       recipient_id: actor.userId,
       type: "onboarding.completed",
-      source: input.source ?? "velionv2-onboarding",
+      source: input.source ?? "verevonv2-onboarding",
       payload: {
         org_id: input.orgId,
         plan: input.plan,

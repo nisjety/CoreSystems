@@ -1,9 +1,9 @@
 // Per-org Projects — backs the "Add to project" picker in
-// ChatSettingsModal (velion ui-ux-velion-gap.md §10 / U2-14 follow-up).
+// ChatSettingsModal (verevon ui-ux-verevon-gap.md §10 / U2-14 follow-up).
 //
-// Velion calls these via /api/projects (REST proxy). Pure CRUD, scoped by
+// Verevon calls these via /api/projects (REST proxy). Pure CRUD, scoped by
 // `externalOrgId`. No internal-key gate at the Convex layer — Convex's
-// own admin-key middleware (set when the velion proxy forwards the call)
+// own admin-key middleware (set when the verevon proxy forwards the call)
 // is the access boundary.
 
 import { v } from "convex/values";

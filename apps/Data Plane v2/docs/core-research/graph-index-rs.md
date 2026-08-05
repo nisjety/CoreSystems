@@ -35,11 +35,11 @@ Postgres stays canonical.
 
 The final rebuilt service passed HTTP 401/401/200/403 and all six GraphService
 families in the strict gRPC matrix. Authenticated cross-tenant calls returned the
-exact graph tenant-mismatch guard. The real-authority Velion journey surfaced
+exact graph tenant-mismatch guard. The real-authority Verevon journey surfaced
 only the authorized fixture's GraphRAG nodes, and supported signed graph events
 passed the isolated broker matrix. The shared deployment remains unchanged.
 
-## 2026-07-15 GraphRAG and Velion integration delta
+## 2026-07-15 GraphRAG and Verevon integration delta
 
 - Signed document events now require exact equality between the verified
   envelope tenant and payload tenant. The verified claim supplies the tenant
@@ -57,7 +57,7 @@ passed the isolated broker matrix. The shared deployment remains unchanged.
   the restrictive flag.
 - HTTP store failures now return sanitized 500 responses instead of successful
   payloads containing database errors; a missing entity is 404.
-- Velion's Knowledge and onboarding graph routes derive tenant from the verified
+- Verevon's Knowledge and onboarding graph routes derive tenant from the verified
   session and forward a session-minted Data bearer. The historical onboarding
   query-parameter IDOR and shared-key graph call are removed.
 
@@ -180,7 +180,7 @@ body are redacted.
 
 ## Recommended fix
 
-1. Add a `tower`/`axum` middleware layer to `api::router()` (and a matching `tonic` interceptor for `grpc.rs`) that requires and verifies a Control Plane-issued, signed audience token (the same `data-plane` JWT the v3 gateway already sends as a bearer alongside `x-org-id` — see `apps/Frontend Plane/velionv3/apps/gateway/src/domains/knowledge/shared.rs:60-91`; graph-index-rs currently receives this token on every gateway-originated call and ignores it), and derive `org_id` from the verified token claim rather than trusting the caller-supplied path/query/body value. Cross-check any caller-supplied `org_id` against the token's claim and reject on mismatch, matching the pattern already planned for documents-api's `pkg/authctx` (which is itself not yet implemented — see the plane audit's P0 finding on JWT/JWKS verification).
+1. Add a `tower`/`axum` middleware layer to `api::router()` (and a matching `tonic` interceptor for `grpc.rs`) that requires and verifies a Control Plane-issued, signed audience token (the same `data-plane` JWT the v3 gateway already sends as a bearer alongside `x-org-id` — see `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/shared.rs:60-91`; graph-index-rs currently receives this token on every gateway-originated call and ignores it), and derive `org_id` from the verified token claim rather than trusting the caller-supplied path/query/body value. Cross-check any caller-supplied `org_id` against the token's claim and reject on mismatch, matching the pattern already planned for documents-api's `pkg/authctx` (which is itself not yet implemented — see the plane audit's P0 finding on JWT/JWKS verification).
 2. Apply the same layer to every route in the router, not just `/v1/graphs/{org_id}` — `entities`, `relationships`, `claims`, `contradictions`, `expand`, and `exports` are all currently open.
 3. Add an integration test (`tests/authz.rs`) asserting 401/403 for: no credential, forged credential, and a valid credential for a different org than the one requested — this class of bug has zero test coverage today and a per-route manual review will not catch a regression.
 4. Because the compose port mapping is `0.0.0.0:9203`, also confirm (outside this service's code) whether that host-wide bind is intentional; if graph-index-rs is meant to be reached only from other containers on the compose network, scope the port mapping to loopback or remove the host mapping entirely as defense in depth once the application-layer fix lands. This does not replace the application-layer fix — Docker's internal network already exposes the same gap to every other container regardless of host binding.
@@ -210,7 +210,7 @@ Surface:
 - `graph-index-rs` → Postgres: persists entities, relationships, claims, communities, mappings.
 - `graph-index-rs` → Model Plane inference-core (gRPC): extraction backend, using `internal_api_key` outbound.
 - `retrieval-engine-rs` → `graph-index-rs`: graph retrieval and graph-aware search (`retrieval-engine-rs/src/search/graph.rs`) — this means the unauthenticated read surface also feeds into retrieval-engine's results; retrieval-engine has its own `src/authz/context.rs`, but that only governs retrieval-engine's own entry points, it cannot retroactively make graph-index-rs's direct surface safe.
-- v3 gateway (`apps/Frontend Plane/velionv3/apps/gateway/src/domains/knowledge/workspace.rs:407-429`) → `graph-index-rs`: calls `GET {graph_index_url}/v1/graphs/{org}` directly, attaching `x-org-id` and a `data-plane` bearer token via `shared::fetch_json_bearer` / `internal_request` (`apps/gateway/src/domains/knowledge/shared.rs:60-91`) — both are sent on every call and both are currently discarded by graph-index-rs, so the gateway's defense-in-depth intent is silently ineffective today.
+- v3 gateway (`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/workspace.rs:407-429`) → `graph-index-rs`: calls `GET {graph_index_url}/v1/graphs/{org}` directly, attaching `x-org-id` and a `data-plane` bearer token via `shared::fetch_json_bearer` / `internal_request` (`apps/gateway/src/domains/knowledge/shared.rs:60-91`) — both are sent on every call and both are currently discarded by graph-index-rs, so the gateway's defense-in-depth intent is silently ineffective today.
 
 ## Quality gate (this service specifically)
 

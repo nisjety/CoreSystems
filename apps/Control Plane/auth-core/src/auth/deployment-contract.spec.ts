@@ -227,17 +227,17 @@ describe('Control Plane deployment contract', () => {
     );
   });
 
-  it('advertises the browser-facing Velion origin for auth callbacks and invitation links', () => {
+  it('advertises the browser-facing Verevon origin for auth callbacks and invitation links', () => {
     const compose = readFileSync(
       resolve(process.cwd(), '..', 'docker-compose.yml'),
       'utf8',
     );
 
     expect(compose).toMatch(
-      /BETTER_AUTH_URL:\s*\$\{VELION_PUBLIC_ORIGIN:-http:\/\/localhost:5173\}/,
+      /BETTER_AUTH_URL:\s*\$\{VEREVON_PUBLIC_ORIGIN:-http:\/\/localhost:5173\}/,
     );
     expect(compose).toMatch(
-      /FRONTEND_URL:\s*\$\{VELION_PUBLIC_ORIGIN:-http:\/\/localhost:5173\}/,
+      /FRONTEND_URL:\s*\$\{VEREVON_PUBLIC_ORIGIN:-http:\/\/localhost:5173\}/,
     );
   });
 
@@ -646,7 +646,7 @@ describe('Control Plane deployment contract', () => {
     );
     expect(authConfig).toContain('verifyInvitationAcceptanceInternalMarker');
     expect(authConfig).toContain("'/organization/accept-invitation'");
-    expect(authConfig).toContain("'x-velion-invitation-acceptance'");
+    expect(authConfig).toContain("'x-verevon-invitation-acceptance'");
   });
 
   it('never includes NATS credential material in bootstrap diagnostics', () => {

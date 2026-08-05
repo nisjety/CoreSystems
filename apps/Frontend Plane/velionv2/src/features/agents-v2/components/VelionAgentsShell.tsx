@@ -1,11 +1,11 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { VelionProductShell } from "@/features/shell-v2/components/VelionProductShell";
+import { VerevonProductShell } from "@/features/shell-v2/components/VerevonProductShell";
 import { AgentSelectionInitialProvider } from "@/features/agents-v2/lib/use-agent-selection";
 import { defaultAgentSelectionId, type AgentSelectionId } from "@/features/agents-v2/lib/agent-roles";
 
-export function VelionAgentsShell({
+export function VerevonAgentsShell({
   children,
   initialAgentSelection = defaultAgentSelectionId,
 }: {
@@ -14,18 +14,18 @@ export function VelionAgentsShell({
 }) {
   return (
     <AgentSelectionInitialProvider selection={initialAgentSelection}>
-      <VelionAgentsShellContent>{children}</VelionAgentsShellContent>
+      <VerevonAgentsShellContent>{children}</VerevonAgentsShellContent>
     </AgentSelectionInitialProvider>
   );
 }
 
-function VelionAgentsShellContent({ children }: { children: ReactNode }) {
+function VerevonAgentsShellContent({ children }: { children: ReactNode }) {
   return (
-    <VelionProductShell
+    <VerevonProductShell
       activeRoute="/agents"
       defaultSidebarExpanded
     >
       {children}
-    </VelionProductShell>
+    </VerevonProductShell>
   );
 }

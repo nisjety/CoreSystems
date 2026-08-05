@@ -12,7 +12,7 @@
  * tab/session; a closed tab's in-flight turn is abandoned.
  */
 
-const KEY = 'velion.chat.pendingStream.v1'
+const KEY = 'verevon.chat.pendingStream.v1'
 
 interface PendingMap {
   [sessionId: string]: string // requestId

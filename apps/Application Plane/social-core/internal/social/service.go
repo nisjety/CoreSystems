@@ -411,7 +411,7 @@ func (s *Service) publish(
 	if len(attempts) > 0 {
 		payloadData["attempts"] = attempts
 	}
-	eventType := strings.TrimPrefix(subject, "velion.application.social.")
+	eventType := strings.TrimPrefix(subject, "verevon.application.social.")
 	if err := s.eventPublisher.Publish(ctx, subject, LifecycleEvent{
 		ID:          newID("evt"),
 		Type:        eventType,

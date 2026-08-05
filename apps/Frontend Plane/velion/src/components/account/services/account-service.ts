@@ -59,7 +59,7 @@ class AccountServiceAPI {
 
   // ── Notifications (real, U5-2) ─────────────────────────────────────────────
   //
-  // U5-2 (ui-ux-velion-gap.md §10): wired to notification-core via velion's
+  // U5-2 (ui-ux-verevon-gap.md §10): wired to notification-core via verevon's
   // proxy routes under /api/notifications/*. Previously this was hardcoded
   // mock data returning 5 boolean flags — replaced with a Novu-backed
   // preference matrix served from /preferences (per-user overrides) merged

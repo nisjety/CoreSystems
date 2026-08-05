@@ -40,7 +40,7 @@ There is no active runtime topology under `apps/Channel Plane`.
 
 ## Plane Boundary and Intended Ownership
 
-Based on `docs/vision.md`, the intended future role of Channel Plane is the external-facing runtime and deployment surface for Velion agents.
+Based on `docs/vision.md`, the intended future role of Channel Plane is the external-facing runtime and deployment surface for Verevon agents.
 
 It is intended to own:
 
@@ -100,7 +100,7 @@ Relationship intent is documented, but relationship implementation is absent.
 
 - Control Plane should own governance/configuration.
 - Channel Plane should become the hot path for public visitor/channel runtime.
-- Velion workspace would remain the parent control surface.
+- Verevon workspace would remain the parent control surface.
 
 ### Not mapped in code
 

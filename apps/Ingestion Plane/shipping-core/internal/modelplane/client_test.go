@@ -38,13 +38,13 @@ func TestClient_Invoke_MintsTokenAndCallsGateway(t *testing.T) {
 			t.Errorf("unexpected gateway path %s", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(InvokeResponse{RequestID: "req_1", Content: `{"ok":true}`, ModelUsed: "velion-balance"})
+		_ = json.NewEncoder(w).Encode(InvokeResponse{RequestID: "req_1", Content: `{"ok":true}`, ModelUsed: "verevon-balance"})
 	})
 	defer authCore.Close()
 	defer gateway.Close()
 
 	c := New(Config{AuthCoreURL: authCore.URL, ModelGatewayURL: gateway.URL, InternalAPIKey: "test-key"})
-	resp, err := c.Invoke(context.Background(), InvokeRequest{Content: "compare these quotes", Model: "velion-balance"})
+	resp, err := c.Invoke(context.Background(), InvokeRequest{Content: "compare these quotes", Model: "verevon-balance"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

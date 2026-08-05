@@ -82,8 +82,8 @@ for forbidden in \
   '"org.>"' \
   '"notify.>"' \
   '"mp.v1.>"' \
-  '"velion.agent.>"' \
-  '"velion.session.>"' \
+  '"verevon.agent.>"' \
+  '"verevon.session.>"' \
   '"aqencia.reasoning.>"'; do
   require_absent "$gateway" "$forbidden"
 done
@@ -97,7 +97,7 @@ orchestrator="$(user_block orchestrator-core-runtime)"
 for required in '"mp.v1.run.*.event"' '"mp.v1.orchestration.>"' '"mp.v1.feedback.rated"'; do
   require_contains "$orchestrator" "$required"
 done
-for forbidden in '"velion.agent.>"' '"velion.session.>"' '"aqencia.reasoning.>"'; do
+for forbidden in '"verevon.agent.>"' '"verevon.session.>"' '"aqencia.reasoning.>"'; do
   require_absent "$orchestrator" "$forbidden"
 done
 

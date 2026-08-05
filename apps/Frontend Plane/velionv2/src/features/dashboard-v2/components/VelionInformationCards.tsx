@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { Activity, ArrowUpRight, CloudSun, Newspaper, RefreshCw, Wind } from "lucide-react";
-import { VelionSelect } from "@/components/ui/velion-ui";
+import { VerevonSelect } from "@/components/ui/verevon-ui";
 import type { DashboardCard } from "@/features/dashboard-v2/lib/dashboard-surface";
 import {
   loadDashboardInformationSnapshot,
@@ -401,7 +401,7 @@ export function NewsDashboardCard({
       {loading && !data ? <InformationSkeleton lines={4} /> : null}
       {!loading && error ? <InformationError text={error} /> : null}
       <div className="space-y-1.5">
-        <VelionSelect
+        <VerevonSelect
           aria-label="Filtrer nyheter"
           value={category}
           variant="compact"
@@ -413,7 +413,7 @@ export function NewsDashboardCard({
               {option.label}
             </option>
           ))}
-        </VelionSelect>
+        </VerevonSelect>
 
         {data ? (
           <div className="max-h-[122px] space-y-1.5 overflow-y-auto pr-1">
@@ -449,8 +449,8 @@ export function NewsDashboardCard({
 
 function InformationCardShell({ action, card, children, onPrompt }: PropsWithChildren<InformationCardProps>) {
   return (
-    <div className="velion-dashboard-card group relative h-full overflow-hidden rounded-[18px] bg-white p-2.5 shadow-[0_2px_10px_rgba(0,0,0,0.05)] transition-transform duration-300 hover:-translate-y-0.5 dark:bg-[#141516]">
-      <div className="velion-dashboard-card-label pointer-events-none absolute left-0 top-0 z-30 bg-white px-5 pb-4 pt-5 text-[11px] font-semibold tracking-wide text-[#1A1A1A] dark:bg-[#141516] dark:text-white">
+    <div className="verevon-dashboard-card group relative h-full overflow-hidden rounded-[18px] bg-white p-2.5 shadow-[0_2px_10px_rgba(0,0,0,0.05)] transition-transform duration-300 hover:-translate-y-0.5 dark:bg-[#141516]">
+      <div className="verevon-dashboard-card-label pointer-events-none absolute left-0 top-0 z-30 bg-white px-5 pb-4 pt-5 text-[11px] font-semibold tracking-wide text-[#1A1A1A] dark:bg-[#141516] dark:text-white">
         {card.category}
       </div>
 
@@ -474,7 +474,7 @@ function InformationCardShell({ action, card, children, onPrompt }: PropsWithChi
         title={`Start chat for ${card.title}`}
       >
         <Newspaper className="size-3.5" />
-        Ask Velion
+        Ask Verevon
       </button>
     </div>
   );

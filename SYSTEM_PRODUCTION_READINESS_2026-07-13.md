@@ -39,11 +39,11 @@ After the first pass, the whole fleet was confirmed up (**93 containers, all hea
 
 **RETRACTED / corrected:**
 - ❌ **session-core compaction "100% failing" — WITHDRAWN.** Live `/metrics`: `mp_session_compaction_runs_total{status="ok"} 384`, no error counter, no `checkpoints_run_id_fkey` in logs. The earlier reading does not reproduce; compaction is healthy. *(Was a P1 in the first pass.)*
-- ❌ **velionv3 chat "tool-surfacing gap" — WITHDRAWN.** `buildChatWireBody` (chat-client.ts:250-273) now calls `buildToolSpecs()` on every turn, adds the `tools` feature when any tool is selected and `agentic` in Plan mode. Tools are opt-in per turn (a bare turn with nothing selected correctly sends none) — that is by design, not a missing wire.
+- ❌ **verevonv3 chat "tool-surfacing gap" — WITHDRAWN.** `buildChatWireBody` (chat-client.ts:250-273) now calls `buildToolSpecs()` on every turn, adds the `tools` feature when any tool is selected and `agentic` in Plan mode. Tools are opt-in per turn (a bare turn with nothing selected correctly sends none) — that is by design, not a missing wire.
 - ⚠️ **information-core fabricated metrics — half-corrected.** The FNV fabrication is still real in `internal/traffic/service.go:166`, but `/api/v1/traffic` now returns `401`, so the "exposed unauthenticated" framing is stale. It remains a data-integrity concern (fabricated numbers presented as `operational`) for any authenticated caller.
-- ⚠️ **velion-gateway `graph_preview` IDOR — nuance.** Real in current source (onboarding router has no `require_session`; `org_id` taken from the query with no ownership check). But the **running** binary returns `401` on all onboarding routes — the deployed gateway is *stricter* than HEAD (a stale-binary divergence). The authenticated cross-tenant vector still holds in source.
+- ⚠️ **verevon-gateway `graph_preview` IDOR — nuance.** Real in current source (onboarding router has no `require_session`; `org_id` taken from the query with no ownership check). But the **running** binary returns `401` on all onboarding routes — the deployed gateway is *stricter* than HEAD (a stale-binary divergence). The authenticated cross-tenant vector still holds in source.
 
-**Stack correction:** velionv3 is **Vite + SolidJS**, but **not Tailwind** — no config, no `@tailwind`/`@apply`, not in `package.json` or `node_modules`. Real stack: SolidJS on Vite 8, `@kobalte/core` UI, `@tanstack/solid-query` data, `@tanstack/ai`(+ai-solid/ai-client, AG-UI) for chat, `three`/`3d-force-graph` for the graph, semantic CSS custom properties in a single `src/styles/global.css`. The chat wire is `streamChat` → gateway `/api/v1/chat/stream` → model-gateway `/v1/invoke/stream` (the AG-UI `/api/v1/ag-ui/stream` route exists but is not the default chat transport).
+**Stack correction:** verevonv3 is **Vite + SolidJS**, but **not Tailwind** — no config, no `@tailwind`/`@apply`, not in `package.json` or `node_modules`. Real stack: SolidJS on Vite 8, `@kobalte/core` UI, `@tanstack/solid-query` data, `@tanstack/ai`(+ai-solid/ai-client, AG-UI) for chat, `three`/`3d-force-graph` for the graph, semantic CSS custom properties in a single `src/styles/global.css`. The chat wire is `streamChat` → gateway `/api/v1/chat/stream` → model-gateway `/v1/invoke/stream` (the AG-UI `/api/v1/ag-ui/stream` route exists but is not the default chat transport).
 
 The corrected counts: of the 47 P1s, **1 is withdrawn** (compaction) and **1 partially downgraded** (information-core exposure); of the frontend items, the tool-surfacing gap is **withdrawn**. Everything else in the inventory stands as written.
 
@@ -56,7 +56,7 @@ Two background verification passes, 12 agents total, each producing structured f
 1. **Per-plane deep verification** (6 agents, one per plane) — ran the **real** build/vet/lint/test suites (`nest build` + jest, `go build/vet/test -cover`, `cargo test`, `pnpm typecheck/test`), probed live containers, and analysed wiring correctness, call-chains, duplication, dead code, and perf/reliability/durability. → **96 findings**.
 2. **Cross-cutting analysis** (6 agents, read/grep/reason only — deliberately no compilation, to protect the 99%-full disk) — Docker/host reliability, cross-plane contract wiring, fleet-wide security, performance/benchmark readiness, cross-plane duplication, and reliability/durability patterns. → **55 findings**.
 
-Scope: the six focused planes (`Control`, `Data Plane v2`, `Ingestion`, `Model`, `Application`, `Frontend/velionv3`). Channel Plane remains docs-only and was not in scope.
+Scope: the six focused planes (`Control`, `Data Plane v2`, `Ingestion`, `Model`, `Application`, `Frontend/verevonv3`). Channel Plane remains docs-only and was not in scope.
 
 ---
 
@@ -120,7 +120,7 @@ These are patterns, not one-offs — each spans multiple services/planes and is 
 
 2. **Secret scoping has fleet-wide blast radius.** One static `INTERNAL_API_KEY` (`<INTERNAL_API_KEY-redacted>…`) is shared across **Control + Data + Ingestion** planes (auth/user/org/billing/imports/integration/notification/support-worker); one Azure key backs ~10 Azure AI services across two planes; Anthropic/Google keys are shared 3–4×; two disjoint **symmetric HS256** `JWT_SECRET`s (user-core, convex) are token-*mint* capability at rest. A leak in the lowest-trust plane (Data Plane v2, historically no-cred readable) compromises paid inference and internal impersonation everywhere.
 
-3. **Unauthenticated / IDOR surfaces remain live.** `cost-core` (no inbound auth; ledger read+write IDOR; budget check **fails open** on DB error → unlimited spend), `bridge-core` (attacker-controlled `org_id`), `quarry-edge` (dev-bypass shipped ON with no `ENVIRONMENT` guard → accepts any bearer), velion-gateway `graph_preview` (client `?org_id=` cross-tenant read), `finspo-core` (trusts client `X-Org-ID` behind only the shared key), and HITL that only engages in Plan mode (composer writes un-gated on a normal turn).
+3. **Unauthenticated / IDOR surfaces remain live.** `cost-core` (no inbound auth; ledger read+write IDOR; budget check **fails open** on DB error → unlimited spend), `bridge-core` (attacker-controlled `org_id`), `quarry-edge` (dev-bypass shipped ON with no `ENVIRONMENT` guard → accepts any bearer), verevon-gateway `graph_preview` (client `?org_id=` cross-tenant read), `finspo-core` (trusts client `X-Org-ID` behind only the shared key), and HITL that only engages in Plan mode (composer writes un-gated on a normal turn).
 
 4. **Duplication has already caused divergence (drift = bugs).** JWKS/JWT verification is reimplemented **7×** inside Data Plane alone (four Go copies, three Rust — different md5s, hardening landed in only one); the NATS client is copy-pasted **8+×** (Application-Plane copies have **no reconnect handling**); `shared_publisher.go` is triplicated and diverged; the Ingestion auth-middleware trio diverged (finspo the weak 61-line outlier). A fix in one copy silently doesn't reach the others.
 
@@ -143,7 +143,7 @@ These are patterns, not one-offs — each spans multiple services/planes and is 
 | **Ingestion Plane** | 🟢 builds/tests green (8 shipping quote tests pass) | P0 stale shipping binary; mock carriers win quotes; autocomplete-core dead consumer; quarry-edge dev-bypass ON. |
 | **Model Plane** | 🟢 builds/tests green | **P0** inference `:9092` no-op (live-verified); cost-core IDOR + fail-open budget; bridge-core unauth. *(session-core compaction finding withdrawn — healthy live: 384 ok runs, 0 errors.)* |
 | **Application Plane** | 🟢 builds/tests green; postgres healthy again | convex `onOrganizationMemberRemoved` undefined → 500 on every removal; information-core fabricated metrics; single DB/role, GDPR co-resident. |
-| **Frontend velionv3** | 🟢 typecheck/build/tests green; confirmed off mocks (SolidJS+Vite+Kobalte+TanStack, no Tailwind) | `graph_preview` `?org_id=` IDOR (source; running binary is stricter, 401); HITL only in Plan mode (composer writes un-gated). *(chat tool-surfacing gap withdrawn — `buildChatWireBody` now sends tools/agentic.)* |
+| **Frontend verevonv3** | 🟢 typecheck/build/tests green; confirmed off mocks (SolidJS+Vite+Kobalte+TanStack, no Tailwind) | `graph_preview` `?org_id=` IDOR (source; running binary is stricter, 401); HITL only in Plan mode (composer writes un-gated). *(chat tool-surfacing gap withdrawn — `buildChatWireBody` now sends tools/agentic.)* |
 
 Each plane's own `*_STATUS.md` / `*_ROADMAP.md` (under `apps/<Plane>/`) remain the per-plane source of truth; this document is the system-level roll-up.
 
@@ -155,7 +155,7 @@ Each plane's own `*_STATUS.md` / `*_ROADMAP.md` (under `apps/<Plane>/`) remain t
 - **Secret hygiene in compose is uniformly good** — no `CHANGE_ME`, every secret is `${X:?required}` or a `__FILE` secret; disciplined `127.0.0.1` host-port binding; no cross-stack port collisions.
 - **Honest failure paths exist** — the gateway emits a real SSE `error` instead of faking success when inference is down; legacy unsigned-event consumers are fail-closed behind triple env-guards; audit-core runs a durable JetStream consumer with a DLQ (the model for the rest of the fleet).
 - **auth-core uses a transactional outbox** with revision ordering and leases — the correct pattern that the ephemeral-NATS consumers should adopt on the read side.
-- **velionv3 is genuinely off mocks** and its gateway IDOR surface is mostly closed (`authorized_org_id` helper exists and is used — it just needs to be applied to `graph_preview`).
+- **verevonv3 is genuinely off mocks** and its gateway IDOR surface is mostly closed (`authorized_org_id` helper exists and is used — it just needs to be applied to `graph_preview`).
 
 ---
 

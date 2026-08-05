@@ -21,7 +21,7 @@ const (
 	IssuerConversationCore       = "conversation-core"
 	AudienceIntegrationCore      = "integration-corev2"
 	PresenterConversationCore    = "conversation-core"
-	TypeProviderWriteAttestation = "velion.provider-write-attestation+jwt"
+	TypeProviderWriteAttestation = "verevon.provider-write-attestation+jwt"
 
 	AuthorizationHumanIntent           = "human_intent"
 	AuthorizationHumanApprovedAIAction = "human_approved_ai_action"

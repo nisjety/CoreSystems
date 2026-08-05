@@ -1,9 +1,9 @@
 # Model Plane — Chat Feature-Parity Requirements & Implementation Prompt
 
 > **Purpose.** A single brief describing everything the **Model Plane** must
-> support for the Velion chat to reach feature parity with **ChatGPT**,
+> support for the Verevon chat to reach feature parity with **ChatGPT**,
 > **Claude**, **Manus.ai**, and our **design references** (Dribbble chat
-> inspiration + the velionv2 chat UI). Use it as (a) a planning/audit prompt for
+> inspiration + the verevonv2 chat UI). Use it as (a) a planning/audit prompt for
 > a backend agent, or (b) a product/eng checklist.
 
 ---

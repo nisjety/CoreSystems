@@ -188,7 +188,7 @@ export const listByOrg = query({
 });
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): enable the public embed widget.
+ * Wave 9 (ui-ux-verevon-gap.md §19): enable the public embed widget.
  * Generates a fresh `publicSecret` and flips `publicEnabled=true`.
  * Calling again rotates the secret.
  */

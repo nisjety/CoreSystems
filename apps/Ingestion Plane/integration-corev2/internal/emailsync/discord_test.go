@@ -31,9 +31,9 @@ func newDiscordServer(t *testing.T, wantAfter string) *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/users/@me/guilds"):
 			switch {
 			case strings.HasPrefix(r.Header.Get("Authorization"), "Bearer "):
-				fmt.Fprint(w, `[{"id": "g1", "name": "Velion", "permissions": "32"}]`)
+				fmt.Fprint(w, `[{"id": "g1", "name": "Verevon", "permissions": "32"}]`)
 			case r.Header.Get("Authorization") == "Bot app-bot-token":
-				fmt.Fprint(w, `[{"id": "g1", "name": "Velion"}]`)
+				fmt.Fprint(w, `[{"id": "g1", "name": "Verevon"}]`)
 			default:
 				t.Errorf("Authorization = %q, want OAuth user or app bot token", r.Header.Get("Authorization"))
 				w.WriteHeader(http.StatusUnauthorized)
@@ -56,7 +56,7 @@ func newDiscordServer(t *testing.T, wantAfter string) *httptest.Server {
 			fmt.Fprint(w, `[
 				{"id": "1100", "content": "andre", "timestamp": "2026-07-18T10:05:00.000000+00:00", "author": {"id": "u1", "username": "kari", "global_name": "Kari"}},
 				{"id": "999", "content": "første", "timestamp": "2026-07-18T10:00:00.000000+00:00", "author": {"id": "u1", "username": "kari", "global_name": "Kari"}},
-				{"id": "1050", "content": "bot svar", "timestamp": "2026-07-18T10:02:00.000000+00:00", "author": {"id": "b1", "username": "velion-bot", "bot": true}},
+				{"id": "1050", "content": "bot svar", "timestamp": "2026-07-18T10:02:00.000000+00:00", "author": {"id": "b1", "username": "verevon-bot", "bot": true}},
 				{"id": "1060", "content": "", "timestamp": "2026-07-18T10:03:00.000000+00:00", "author": {"id": "u2", "username": "ola"}}
 			]`)
 		default:

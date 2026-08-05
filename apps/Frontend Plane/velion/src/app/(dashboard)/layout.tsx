@@ -26,7 +26,7 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
   const sidebarWidth = isMinimized ? SIDEBAR_MINIMIZED_WIDTH : SIDEBAR_EXPANDED_WIDTH;
   const dashboardContentHeight = `calc(100dvh - ${DASHBOARD_NAVBAR_HEIGHT}px)`;
 
-  // G44 (velion-gap.md §8.30): pop a sonner toast whenever notification-core
+  // G44 (verevon-gap.md §8.30): pop a sonner toast whenever notification-core
   // delivers a `control_session.entitlements_changed` notification (plan
   // upgrade, org switch, billing webhook ack). The hook is mounted at the
   // layout level so the toast fires regardless of which dashboard sub-page

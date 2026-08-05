@@ -42,8 +42,8 @@ Phase E migration mapping table from old v2 subjects/APIs to new services.
 | Old Path | New Path | Notes |
 |----------|----------|-------|
 | agent-core-v2 Postgres (runs, sessions) | session-core Postgres | Thread/run/checkpoint tables |
-| `velion.session.{id}.command` | `mp.v1.session.{id}.command` | Bridged by the Go compat adapter during cutover |
-| `velion.agent.run.{id}.event` | `mp.v1.run.{id}.event` | Bridged by the Go compat adapter during cutover |
+| `verevon.session.{id}.command` | `mp.v1.session.{id}.command` | Bridged by the Go compat adapter during cutover |
+| `verevon.agent.run.{id}.event` | `mp.v1.run.{id}.event` | Bridged by the Go compat adapter during cutover |
 
 ## Step 4: execution-core owns runtime loop
 
@@ -76,8 +76,8 @@ Phase E migration mapping table from old v2 subjects/APIs to new services.
 
 | Legacy Subject | New Subject | Adapter |
 |---------------|-------------|---------|
-| `velion.agent.run.*.event` | `mp.v1.run.*.event` | `go/pkg/natsx/compat.go` |
-| `velion.session.*.command` | `mp.v1.session.*.command` | `go/pkg/natsx/compat.go` |
+| `verevon.agent.run.*.event` | `mp.v1.run.*.event` | `go/pkg/natsx/compat.go` |
+| `verevon.session.*.command` | `mp.v1.session.*.command` | `go/pkg/natsx/compat.go` |
 | `aqencia.reasoning.reasoning.started` | `mp.v1.ingress.run_started_compat` | `go/pkg/natsx/compat.go` |
 | `aqencia.reasoning.reasoning.completed` | `mp.v1.ingress.run_completed_compat` | `go/pkg/natsx/compat.go` |
 | `aqencia.reasoning.usage.recorded` | `mp.v1.ingress.usage` | `go/pkg/natsx/compat.go` |
@@ -90,7 +90,7 @@ Feature flags: per service path with canary by org/workspace. Compat adapters re
 
 ## Phase 9 Staged Cutover — Foundation → Full Shell
 
-Phase 9 expands the two-core shell (`ai-core` + `agent-core`) into the full capability surface while holding the foundation invariants: canonical `IdemPrefix = blake3("<service>|<event>|<thread>|<request>")` (fixture hash `fbc1d94e94d756ede12c527b3b59e2204f58a623e6bd5a3d679eb03d93f22637`), 4-file package layout, HTTP GET-only with `405 + Allow: GET` on non-GET, `unsafe_code = forbid` in every Rust crate, and legacy `velion.*` / `aqencia.*` compat adapters remaining live until every consumer has migrated.
+Phase 9 expands the two-core shell (`ai-core` + `agent-core`) into the full capability surface while holding the foundation invariants: canonical `IdemPrefix = blake3("<service>|<event>|<thread>|<request>")` (fixture hash `fbc1d94e94d756ede12c527b3b59e2204f58a623e6bd5a3d679eb03d93f22637`), 4-file package layout, HTTP GET-only with `405 + Allow: GET` on non-GET, `unsafe_code = forbid` in every Rust crate, and legacy `verevon.*` / `aqencia.*` compat adapters remaining live until every consumer has migrated.
 
 Scope ladder applies to every step: **run → thread → workspace → user → org (`triodelab`) → global**. Each step rolls forward one rung at a time with per-org canary flags before the next rung opens.
 
@@ -132,7 +132,7 @@ Rollback at any step = revert flag to the prior value; no data migration is requ
 ### Cutover invariants (must hold at every step)
 
 - Idempotency: canonical `IdemPrefix` byte-stable; fixture hash unchanged.
-- Transport: legacy `velion.*` and `aqencia.reasoning.*` → `mp.v1.*` mappings from the table above remain active until Step 6.
+- Transport: legacy `verevon.*` and `aqencia.reasoning.*` → `mp.v1.*` mappings from the table above remain active until Step 6.
 - HTTP contract: non-GET on any `/v1/*` read endpoint returns `405` with `Allow: GET`.
 - Rust safety: `unsafe_code = forbid`, edition 2021, resolver 2 across every crate.
 - Observability: each namespace emits shadow-vs-live diff counters under `mp.cutover.<namespace>.diff{kind="…"}` until Step 6.

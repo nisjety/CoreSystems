@@ -1,10 +1,10 @@
 # insight-core
 
-`insight-core` is the Application Plane backend for Velion-wide workspace insights. It owns human-facing, org-scoped analytics projections across Social, Inbox, Agents, Campaigns, and future external analytics connectors.
+`insight-core` is the Application Plane backend for Verevon-wide workspace insights. It owns human-facing, org-scoped analytics projections across Social, Inbox, Agents, Campaigns, and future external analytics connectors.
 
 ## Plane Decision
 
-Insights belong in the Application Plane because they are workspace projections for Velion operators. Control Plane remains the authority for identity, organization membership, quotas, billing, and audit. `insight-core` must consume Control context through headers or service contracts and must not read Control Plane databases.
+Insights belong in the Application Plane because they are workspace projections for Verevon operators. Control Plane remains the authority for identity, organization membership, quotas, billing, and audit. `insight-core` must consume Control context through headers or service contracts and must not read Control Plane databases.
 
 The first slice uses an in-memory projection repository and an internal metric-event ingest API. Durable storage can be added later inside the Application Plane database only. Cross-plane data must arrive through APIs, events, or token leases, never direct database access.
 

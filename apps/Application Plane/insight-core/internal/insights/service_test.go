@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestOverviewIncludesAllVelionSurfaces(t *testing.T) {
+func TestOverviewIncludesAllVerevonSurfaces(t *testing.T) {
 	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
 	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})), WithNow(func() time.Time {
 		return now

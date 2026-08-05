@@ -18,7 +18,7 @@ const command = process.argv[2];
 const auditStream = "CONTROL_AUTHORITY_AUDIT";
 const auditConfig = {
   name: auditStream,
-  subjects: ["velion.audit.v2.control.auth-core.>"],
+  subjects: ["verevon.audit.v2.control.auth-core.>"],
   retention: RetentionPolicy.Limits,
   storage: StorageType.File,
   discard: DiscardPolicy.Old,
@@ -574,7 +574,7 @@ function assertBoundedAuditConfig(config) {
   if (
     config?.name !== auditStream ||
     config?.subjects?.length !== 1 ||
-    config.subjects[0] !== "velion.audit.v2.control.auth-core.>" ||
+    config.subjects[0] !== "verevon.audit.v2.control.auth-core.>" ||
     config.max_msgs !== auditConfig.max_msgs ||
     config.max_bytes !== auditConfig.max_bytes ||
     config.max_age !== auditConfig.max_age ||
@@ -696,7 +696,7 @@ async function requestWhenDurableAuditReady(url, options) {
 }
 
 async function verifyDurableTokenAudit(token) {
-  const subject = "velion.audit.v2.control.auth-core.plane_service_token_issued";
+  const subject = "verevon.audit.v2.control.auth-core.plane_service_token_issued";
   const expectedEventId = `plane-token:${createHash("sha256")
     .update(token)
     .digest("hex")}`;

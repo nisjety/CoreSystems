@@ -80,10 +80,10 @@ export function LeftPane({
           <p className="font-inter text-xs tracking-[0.02em] text-[#6A655F]">
             {copy.shared.supportPrefix}{' '}
             <a
-              href="mailto:support@velion.com"
+              href="mailto:support@verevon.com"
               className="text-[#3E3A35] transition-colors hover:text-[#1C1C1C]"
             >
-              support@velion.com
+              support@verevon.com
             </a>
           </p>
         </div>

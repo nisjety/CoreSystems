@@ -1,6 +1,6 @@
 # Quarry-v2 — OSS-Parity Implementation Plan
 
-> Source backlog: `docs/OSS_PARITY_BACKLOG.md`. Consumer = **Velion** frontend (no MCP).
+> Source backlog: `docs/OSS_PARITY_BACKLOG.md`. Consumer = **Verevon** frontend (no MCP).
 > Style: compressed. Discipline: **TDD** (RED→GREEN→REFACTOR, ≥80% cov). Gate every PR through
 > **rust-review** + `cargo clippy -D warnings`. Lenses: rust-patterns · golang-pro · api-design ·
 > system-design · agent-harness · code-quality. **No code until user confirms this plan.**
@@ -42,13 +42,13 @@ Scaffold (both paths): `VectorIndex` trait (`knn(org,query,k)->Vec<Hit>`; impl `
 
 ---
 
-## Phase 1 = P0 (Velion-facing)
+## Phase 1 = P0 (Verevon-facing)
 
 ### 1A — Tavily search-param parity + RAG context  ·  M  ·  api-design, search-first
 Files: `quarry-edge/search_routes.rs`, `quarry-core` SearchOptions, `transform/chunks.rs`, OpenAPI + TS SDK.
 Add `SearchRequest` fields: `topic{general,news,finance}`, `time_range`/`days`, `exact_match`, `chunks_per_source`, `include_answer`, `format{results,context}`.
 - `exact_match` → Tantivy phrase query; `topic` → reuse `intent_classifier`; `time_range` → filter by fetched_at.
-- `format=context` → rank chunks (chunks.rs) + token-budget → single context string for Velion RAG.
+- `format=context` → rank chunks (chunks.rs) + token-budget → single context string for Verevon RAG.
 - `include_answer=true` → fuse `/v1/answer` (AnswerPipeline) inline.
 TDD: unit per param (parse+apply); golden test for context token-budget; phrase-query test.
 Deps: none. Quick wins: exact_match, time_range, include_answer flag.
@@ -70,7 +70,7 @@ TDD: RRF unit (RED, P0); DP-retrieval mock (gRPC/wiremock); fused-beats-either; 
 Path B (only if chosen): add `QdrantVectorIndex` (qdrant-client, `quarry_corpus`) + `embed()` on `mp_client.rs` + embed-on-PageRunner. Same trait, swap impl.
 Deps: A1 fork. Risk (A): DP retrieval latency/coupling → cache by query+fingerprint; circuit-break to lexical-only on DP outage.
 
-**Phase 1 exit gate:** `/v1/search` returns hybrid-ranked org-scoped results + context mode; Velion can drive search/answer; default build unaffected (feature off); clippy clean; cov ≥80%.
+**Phase 1 exit gate:** `/v1/search` returns hybrid-ranked org-scoped results + context mode; Verevon can drive search/answer; default build unaffected (feature off); clippy clean; cov ≥80%.
 
 ---
 
@@ -148,14 +148,14 @@ facets deferred — need enriched results carrying those fields.)
 ## ✅ PLAN COMPLETE — all cycles executed
 P0 (1A/1B/1C) · P1 (2A–2E) · P2 (3A–3E) all shipped, each TDD with passing tests + zero warnings.
 Remaining items are explicitly-noted follow-ups: **OpenAPI/TS-SDK regen** (blocked on the
-Velion↔Model-Plane↔Quarry topology decision), **onboarding→Data/Model-plane bridge** (real gap —
+Verevon↔Model-Plane↔Quarry topology decision), **onboarding→Data/Model-plane bridge** (real gap —
 preview path doesn't yet ingest/enrich), Tantivy snapshot/aliases, DOM-for-LLM serialization, live
 benchmark runs needing creds. (AutoscaledPool + fingerprint-rotation are now wired, not deferred.)
 
 ---
 
 ## Cross-cutting (every phase)
-- **API/Velion contract:** update `docs/openapi.yaml` + regen Python/TS SDKs (`sdks/generate.sh`) so Velion has typed clients. golang-pro: any control-plane list views mirror `cycle23.go` Mount pattern.
+- **API/Verevon contract:** update `docs/openapi.yaml` + regen Python/TS SDKs (`sdks/generate.sh`) so Verevon has typed clients. golang-pro: any control-plane list views mirror `cycle23.go` Mount pattern.
 - **context7-mcp:** pull current docs for `tantivy` (phrase/highlight/facet), `pgvector`/`qdrant`, `sysinfo` before coding each.
 - **rust-review** gate + `cargo test --workspace` + clippy `-D warnings` per PR; Go `go test ./... -race`.
 - Keep `gap-quarry.md` / backlog synced as items land.
@@ -193,7 +193,7 @@ P1: 2B (quick) → 2E → 2A → 2C → 2D.  P2: opportunistic; 3E before any ex
   DP-vector concurrently, RRF-fuses, circuit-breaks to lexical-only on DP failure). Wired in
   `main.rs`: wraps the SmartSearchRouter when `data_plane_url` is set → transparent to /v1/search +
   AnswerPipeline. 12 unit tests (RRF math, DP mapping, wiremock retrieve, degrade-on-error).
-- [~] Cross-cutting — docs synced; **OpenAPI + TS SDK regen for Velion still TODO** (run after P0/P1
+- [~] Cross-cutting — docs synced; **OpenAPI + TS SDK regen for Verevon still TODO** (run after P0/P1
   surface settles); no `hybrid-search` feature needed (Path A is dep-free, gated by `data_plane_url`).
 
 **CYCLE 1 (Full P0) COMPLETE** — 624 workspace lib tests pass, 0 failures, 0 warnings (default +

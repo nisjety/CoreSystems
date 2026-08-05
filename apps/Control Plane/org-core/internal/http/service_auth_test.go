@@ -13,7 +13,7 @@ import (
 const orgServiceTestToken = "0123456789abcdef0123456789abcdef"
 
 func orgServiceTestRegistry(scopes ...string) string {
-	raw := `[{"principal":"velion-gateway","audience":"org-core","token":"` + orgServiceTestToken + `","scopes":[`
+	raw := `[{"principal":"verevon-gateway","audience":"org-core","token":"` + orgServiceTestToken + `","scopes":[`
 	for index, scope := range scopes {
 		if index > 0 {
 			raw += ","
@@ -38,7 +38,7 @@ func orgRequiredServiceTestRegistry(gatewayScopes, authScopes []string) string {
 func signOrgDelegation(request *http.Request, body []byte, timestamp time.Time, nonce string) {
 	digest := serviceDelegationBodyDigest(body)
 	claims := serviceDelegationClaims{
-		Principal:  "velion-gateway",
+		Principal:  "verevon-gateway",
 		Audience:   "org-core",
 		Timestamp:  timestamp.UTC().Format(time.RFC3339),
 		Nonce:      nonce,
@@ -90,15 +90,15 @@ func TestParseOrgServiceCredentialsFailsClosed(t *testing.T) {
 	}{
 		{name: "empty", raw: ""},
 		{name: "malformed", raw: "{"},
-		{name: "unknown field", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:self"],"extra":true}]`},
-		{name: "wrong audience", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:self"]}]`},
-		{name: "short token", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"short","scopes":["org:read:self"]}]`},
-		{name: "test token", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"test-generated-secret-value-at-least-32-bytes","scopes":["org:read:self"]}]`},
-		{name: "placeholder token", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"placeholder-generated-secret-at-least-32-bytes","scopes":["org:read:self"]}]`},
-		{name: "change-me token", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"change-me-generated-secret-at-least-32-bytes","scopes":["org:read:self"]}]`},
-		{name: "replace-with token", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"replace-with-generated-secret-at-least-32-bytes","scopes":["org:read:self"]}]`},
-		{name: "unknown scope", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:root"]}]`},
-		{name: "duplicate principal", raw: valid[:len(valid)-1] + `,{"principal":"velion-gateway","audience":"org-core","token":"abcdef0123456789abcdef0123456789","scopes":["org:read:self"]}]`},
+		{name: "unknown field", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:self"],"extra":true}]`},
+		{name: "wrong audience", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:self"]}]`},
+		{name: "short token", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"short","scopes":["org:read:self"]}]`},
+		{name: "test token", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"test-generated-secret-value-at-least-32-bytes","scopes":["org:read:self"]}]`},
+		{name: "placeholder token", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"placeholder-generated-secret-at-least-32-bytes","scopes":["org:read:self"]}]`},
+		{name: "change-me token", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"change-me-generated-secret-at-least-32-bytes","scopes":["org:read:self"]}]`},
+		{name: "replace-with token", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"replace-with-generated-secret-at-least-32-bytes","scopes":["org:read:self"]}]`},
+		{name: "unknown scope", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:root"]}]`},
+		{name: "duplicate principal", raw: valid[:len(valid)-1] + `,{"principal":"verevon-gateway","audience":"org-core","token":"abcdef0123456789abcdef0123456789","scopes":["org:read:self"]}]`},
 		{name: "duplicate token", raw: `[{"principal":"machine-a","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:any"]},{"principal":"machine-b","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:any"]}]`},
 		{name: "duplicate scope", raw: orgServiceTestRegistry("org:read:self", "org:read:self")},
 		{name: "self scope on machine", raw: `[{"principal":"machine-a","audience":"org-core","token":"0123456789abcdef0123456789abcdef","scopes":["org:read:self"]}]`},
@@ -178,6 +178,7 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodDelete, path: "/orgs/org-1/gdpr/soft-delete", want: []string{"org:erase:self"}},
 		{method: http.MethodGet, path: "/api/v1/brreg/search", want: []string{"org:brreg:read"}},
 		{method: http.MethodGet, path: "/api/v1/brreg/123456789", want: []string{"org:brreg:read"}},
+		{method: http.MethodGet, path: "/internal/orgs", want: []string{"org:read:any"}},
 		{method: http.MethodGet, path: "/internal/orgs/by-tenant", want: []string{"org:tenant:read:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/ensure-from-tenant", want: []string{"org:tenant:write:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/org-1/onboarding/state", want: []string{"org:onboarding:write:self", "org:onboarding:write:any"}},
@@ -212,9 +213,9 @@ func TestOrgServiceAuthRejectsLegacyPartialInvalidAndUnscopedCredentials(t *test
 	}{
 		{name: "missing", want: http.StatusUnauthorized},
 		{name: "legacy key", headers: map[string]string{"X-Internal-Api-Key": orgServiceTestToken}, want: http.StatusUnauthorized},
-		{name: "partial", headers: map[string]string{"X-Service-Id": "velion-gateway"}, want: http.StatusUnauthorized},
-		{name: "wrong token", headers: map[string]string{"X-Service-Id": "velion-gateway", "X-Service-Token": "wrong"}, want: http.StatusUnauthorized},
-		{name: "missing route scope", headers: map[string]string{"X-Service-Id": "velion-gateway", "X-Service-Token": orgServiceTestToken}, want: http.StatusForbidden},
+		{name: "partial", headers: map[string]string{"X-Service-Id": "verevon-gateway"}, want: http.StatusUnauthorized},
+		{name: "wrong token", headers: map[string]string{"X-Service-Id": "verevon-gateway", "X-Service-Token": "wrong"}, want: http.StatusUnauthorized},
+		{name: "missing route scope", headers: map[string]string{"X-Service-Id": "verevon-gateway", "X-Service-Token": orgServiceTestToken}, want: http.StatusForbidden},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -339,7 +340,7 @@ func TestOrgServiceDelegationV3CrossLanguageVector(t *testing.T) {
 		t.Fatalf("body digest=%q", bodyDigest)
 	}
 	signature := serviceDelegationSignature(orgServiceTestToken, serviceDelegationClaims{
-		Principal:  "velion-gateway",
+		Principal:  "verevon-gateway",
 		Audience:   "org-core",
 		Timestamp:  "2026-07-14T10:00:00Z",
 		Nonce:      "nonce-0123456789abcdef",

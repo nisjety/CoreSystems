@@ -13,7 +13,7 @@ import (
 )
 
 // SharedPublisher publishes cross-plane domain events to the shared
-// velion-nats broker on the aqencia.controlplane.* subject namespace.
+// verevon-nats broker on the aqencia.controlplane.* subject namespace.
 //
 // Subject convention: aqencia.controlplane.<entity>.<verb>
 //
@@ -36,7 +36,7 @@ type SharedCredentials struct {
 // and consumer topology; this runtime principal can only publish.
 func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientName string) (*SharedPublisher, error) {
 	if sharedURL == "" {
-		log.Println("ℹ️  VELION_NATS_URL not set — cross-plane publishing disabled (billing-core)")
+		log.Println("ℹ️  VEREVON_NATS_URL not set — cross-plane publishing disabled (billing-core)")
 		return nil, nil
 	}
 

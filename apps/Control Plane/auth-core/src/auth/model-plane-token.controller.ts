@@ -11,13 +11,13 @@
  *
  * Two issuance paths:
  *   - **GET /api/model-plane/token**: from the active Better Auth
- *     session cookie. Used by velion's server-side API routes when
+ *     session cookie. Used by verevon's server-side API routes when
  *     they proxy to the gateway on behalf of a logged-in user.
  *   - **POST /api/model-plane/internal-token**: from a registered,
  *     audience/scope/tenant-bound service credential. Request fields may
  *     narrow the deployment allowlist but can never widen it.
  *
- * **Production rollout note** (Phase 2 of U2-5): once velion is fully
+ * **Production rollout note** (Phase 2 of U2-5): once verevon is fully
  * forwarding these tokens, set on the gateway:
  *   AUTH_CORE_JWKS_URL=http://auth-core:3011/api/convex-auth/jwks
  *   AUTH_CORE_AUDIENCE=model-gateway
@@ -156,7 +156,7 @@ export class ModelPlaneTokenController {
       );
     }
 
-    // Wave 7 (velion ui-ux-velion-gap.md §17): owners + admins get the
+    // Wave 7 (verevon ui-ux-verevon-gap.md §17): owners + admins get the
     // `admin` scope embedded in the JWT. The model-gateway's fine-tune
     // routes (and any other admin-gated surface) check this via
     // `claims.has_scope("admin")`. Anyone else gets an empty scopes
@@ -256,7 +256,7 @@ export class ModelPlaneTokenController {
         'model-token',
       );
       await this.directNats.publishAuditDurable(
-        `velion.audit.v2.control.auth-core.${event}`,
+        `verevon.audit.v2.control.auth-core.${event}`,
         {
           occurred_at: auditIdentity.occurredAt,
           event_id: auditIdentity.eventId,

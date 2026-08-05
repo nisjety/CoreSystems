@@ -22,11 +22,11 @@ use std::{sync::Arc, time::Duration};
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-/// NATS subject audit-core subscribes (`velion.audit.v1.>`) for model tool calls.
-pub const SUBJECT_MODEL_TOOL_ACTION: &str = "velion.audit.v2.model.session-core.tool_action";
+/// NATS subject audit-core subscribes (`verevon.audit.v1.>`) for model tool calls.
+pub const SUBJECT_MODEL_TOOL_ACTION: &str = "verevon.audit.v2.model.session-core.tool_action";
 
 /// Subject family carrying Session Core's flat audit-core bodies.
-const AUDIT_SUBJECT_PREFIX: &str = "velion.audit.v2.model.session-core.";
+const AUDIT_SUBJECT_PREFIX: &str = "verevon.audit.v2.model.session-core.";
 
 /// Subject family carrying canonical run-lifecycle `Envelope`s:
 /// `mp.v1.run.<run_id>.event`.
@@ -41,7 +41,7 @@ const RUN_EVENT_SUBJECT_SUFFIX: &str = ".event";
 /// so the authority check is per-route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxRoute<'a> {
-    /// `velion.audit.v2.model.session-core.*` — flat audit-core `AuditEvent`.
+    /// `verevon.audit.v2.model.session-core.*` — flat audit-core `AuditEvent`.
     Audit,
     /// `mp.v1.run.<run_id>.event` — run-lifecycle `Envelope`. Consumed by
     /// capability-core's session review (the skill-learning trigger) over core
@@ -273,7 +273,7 @@ pub async fn publish_tool_action<S: AuditSink>(
 }
 
 /// Thin NATS transport for audit events. Publishes the literal audit subject
-/// directly — the `velion.audit.*` tree is outside `mp.v1.*`, so no subject
+/// directly — the `verevon.audit.*` tree is outside `mp.v1.*`, so no subject
 /// translation applies (unlike the run-event publisher).
 pub struct NatsAuditPublisher {
     jetstream: async_nats::jetstream::Context,
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn outbox_routes_refuse_subjects_outside_session_core_authority() {
         for subject in [
-            "velion.audit.v2.model.model-gateway.tool_action",
+            "verevon.audit.v2.model.model-gateway.tool_action",
             "mp.v1.usage.org-1",
             "mp.v1.run.run-abc.command",
             "mp.v1.run..event",
@@ -785,7 +785,7 @@ mod tests {
         let published = sink.published.lock().unwrap();
         assert_eq!(published.len(), 1, "exactly one audit event published");
         let (subject, body) = &published[0];
-        // Subject matches audit-core's `velion.audit.v1.<plane>.<event>` filter.
+        // Subject matches audit-core's `verevon.audit.v1.<plane>.<event>` filter.
         assert_eq!(subject, SUBJECT_MODEL_TOOL_ACTION);
         // Body matches audit-core's AuditEvent json tags (required: org_id/plane/event).
         assert_eq!(body["org_id"], "org_1");

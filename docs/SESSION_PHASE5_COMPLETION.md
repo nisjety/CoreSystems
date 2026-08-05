@@ -60,7 +60,7 @@ This session successfully completed **Phase 5: Control Plane Events Integration*
 ### 3. Wire-up to Shared NATS (Complete)
 
 **Configuration Applied:**
-- Broker: `nats://velion-nats:4222`
+- Broker: `nats://verevon-nats:4222`
 - Token: `aqencia-shared-nats-token-2026`
 - JetStream Stream: `AQENCIA_CONTROLPLANE`
 - Subject Pattern: `aqencia.controlplane.>`
@@ -69,8 +69,8 @@ This session successfully completed **Phase 5: Control Plane Events Integration*
 ```
 ✅ auth-core: "SharedPublisher initialized (delegates to SharedNatsService)"
 ✅ user-core: "✅ user-core service connected to shared NATS for event publishing"
-✅ org-core: "✅ org-core connected to shared NATS (velion-nats)"
-✅ billing-core: "✅ billing-core connected to shared NATS (velion-nats)"
+✅ org-core: "✅ org-core connected to shared NATS (verevon-nats)"
+✅ billing-core: "✅ billing-core connected to shared NATS (verevon-nats)"
 ```
 
 ### 4. Build & Deploy (Complete)

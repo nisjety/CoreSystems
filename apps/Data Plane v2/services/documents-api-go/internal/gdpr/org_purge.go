@@ -1,6 +1,6 @@
 // org_purge.go implements the Data-Plane half of ORGANIZATION hard-erasure.
 //
-// org-core publishes ErasureRequestedSubject ("velion.gdpr.erasure.requested")
+// org-core publishes ErasureRequestedSubject ("verevon.gdpr.erasure.requested")
 // — the SAME subject subscriber.go's per-user ownership-transfer consumer
 // reads — when an organization is erased, from two trigger paths that share
 // one payload shape (apps/Control Plane/org-core/internal/org/

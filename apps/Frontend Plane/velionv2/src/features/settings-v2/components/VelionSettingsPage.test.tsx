@@ -1,10 +1,10 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { VelionSettingsPage } from "@/features/settings-v2/components/VelionSettingsPage";
+import { VerevonSettingsPage } from "@/features/settings-v2/components/VerevonSettingsPage";
 
-describe("VelionSettingsPage", () => {
+describe("VerevonSettingsPage", () => {
   it("renders profile-only account settings in the widened layout", () => {
-    render(<VelionSettingsPage />);
+    render(<VerevonSettingsPage />);
 
     expect(screen.getByRole("heading", { name: /profile settings/i, level: 1 })).toBeVisible();
     expect(screen.queryByRole("navigation", { name: /settings sections/i })).not.toBeInTheDocument();
@@ -15,7 +15,7 @@ describe("VelionSettingsPage", () => {
     expect(screen.getByRole("textbox", { name: /job title/i })).toHaveValue("Customer support lead");
     expect(screen.getByRole("textbox", { name: /pronouns/i })).toBeVisible();
     expect(screen.getByRole("textbox", { name: /support signature/i })).toHaveValue("Best,\nAuthor");
-    expect(screen.getByRole("textbox", { name: /primary email/i })).toHaveValue("author@velion.ai");
+    expect(screen.getByRole("textbox", { name: /primary email/i })).toHaveValue("author@verevon.ai");
     expect(screen.getByRole("combobox", { name: /^language$/i })).toHaveValue("en");
     expect(screen.getByRole("combobox", { name: /^time zone$/i })).toHaveValue("europe-oslo");
     expect(screen.getByRole("combobox", { name: /^email digest$/i })).toHaveValue("daily");
@@ -31,7 +31,7 @@ describe("VelionSettingsPage", () => {
   });
 
   it("includes sticky scroll fade layers for the settings surface", () => {
-    render(<VelionSettingsPage />);
+    render(<VerevonSettingsPage />);
 
     expect(screen.getByTestId("settings-top-scroll-fade")).toHaveClass("sticky");
     expect(screen.getByTestId("settings-bottom-scroll-fade")).toHaveClass("sticky");

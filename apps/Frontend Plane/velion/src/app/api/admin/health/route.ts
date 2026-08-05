@@ -44,8 +44,8 @@ interface PlaneTarget {
 const PROBE_TIMEOUT_MS = 3_000
 
 /**
- * One row per cross-plane HTTP healthcheck velion cares about. Targets
- * use the `inter-plane-bus` DNS names (the network velion's compose
+ * One row per cross-plane HTTP healthcheck verevon cares about. Targets
+ * use the `inter-plane-bus` DNS names (the network verevon's compose
  * already joins). For services that live on plane-private networks
  * (e.g. Model Plane's `model-gateway`), the probe goes via the
  * host-port mapping documented in `apps/Model Plane/docs/gap-model.md`.

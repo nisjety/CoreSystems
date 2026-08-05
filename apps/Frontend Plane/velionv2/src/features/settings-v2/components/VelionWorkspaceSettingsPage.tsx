@@ -12,12 +12,12 @@ import {
   type SetStateAction,
 } from "react";
 import {
-  VelionButton,
-  VelionIconButton,
-  VelionInput,
-  VelionSelect,
-  VelionSwitch,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonIconButton,
+  VerevonInput,
+  VerevonSelect,
+  VerevonSwitch,
+} from "@/components/ui/verevon-ui";
 import { cn } from "@/lib/utils";
 import {
   useEntitlements,
@@ -176,7 +176,7 @@ const roleRows = [
 const ssoMappingRows = [
   { attribute: "email", source: "primaryEmail", destination: "User email" },
   { attribute: "department", source: "orgUnitPath", destination: "Team" },
-  { attribute: "role", source: "customSchema.velionRole", destination: "Workspace role" },
+  { attribute: "role", source: "customSchema.verevonRole", destination: "Workspace role" },
 ];
 
 type AuditEvent = {
@@ -196,7 +196,7 @@ const webhookRows = [
   { endpoint: "CRM customer upsert", status: "Paused", lastRun: "2 days ago" },
 ];
 
-export function VelionWorkspaceSettingsPage({
+export function VerevonWorkspaceSettingsPage({
   section = "workspace",
 }: {
   section?: WorkspaceSettingsSectionId;
@@ -265,13 +265,13 @@ export function VelionWorkspaceSettingsPage({
           </section>
 
           <div className="relative z-30 mt-10 flex items-center justify-end gap-3 border-t border-[#E8E8EA] pt-6 dark:border-white/10">
-            <VelionButton className="px-5">
+            <VerevonButton className="px-5">
               Cancel
-            </VelionButton>
-            <VelionButton variant="primary" className="px-5">
+            </VerevonButton>
+            <VerevonButton variant="primary" className="px-5">
               <Check className="size-4" strokeWidth={1.8} />
               {details.saveLabel}
-            </VelionButton>
+            </VerevonButton>
           </div>
         </main>
       </div>
@@ -347,7 +347,7 @@ function WorkspaceSection() {
       <SectionHeader title="Workspace basics" description="Shared workspace fields that affect URLs, defaults, and support routing." />
       <div className="grid gap-6 sm:grid-cols-2">
         <SettingsField id="workspace-name" label="Workspace name" defaultValue="aquatiq-as" />
-        <SettingsField id="workspace-url" label="Workspace URL" defaultValue="aquatiq-as.velion.ai" />
+        <SettingsField id="workspace-url" label="Workspace URL" defaultValue="aquatiq-as.verevon.ai" />
         <SettingsField id="primary-domain" label="Primary domain" defaultValue="aquatiq.no" />
         <SettingsSelect
           id="data-region"
@@ -479,9 +479,9 @@ function MembersSection({ orgId }: { orgId: string | null }) {
             </div>
             <span className="text-[13px] font-medium text-[#4D5159] dark:text-[#CACDD4]">{member.role}</span>
             <span className="text-[12px] text-[#737780] dark:text-[#A9ADB6]">{member.status}</span>
-            <VelionIconButton aria-label={`More actions for ${member.name ?? member.email}`} className="text-[#777B84] hover:bg-white dark:hover:bg-white/10">
+            <VerevonIconButton aria-label={`More actions for ${member.name ?? member.email}`} className="text-[#777B84] hover:bg-white dark:hover:bg-white/10">
               <MoreHorizontal className="size-4" strokeWidth={1.7} />
-            </VelionIconButton>
+            </VerevonIconButton>
           </div>
         ))}
       </div>
@@ -617,7 +617,7 @@ function SsoSection() {
         </FeaturePanel>
         <FeaturePanel
           title="Attribute mapping"
-          description="SCIM and SAML attributes mapped into Velion workspace fields."
+          description="SCIM and SAML attributes mapped into Verevon workspace fields."
           actionLabel="Edit mapping"
         >
           <div className="divide-y divide-[#E8E8EA] dark:divide-white/10">
@@ -976,22 +976,22 @@ function IntegrationRowActions({
   }
   if (row.action === "connect") {
     return (
-      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "connect")} className="px-3 text-[12px]">
+      <VerevonButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "connect")} className="px-3 text-[12px]">
         {busy ? "Opening" : "Connect"}
-      </VelionButton>
+      </VerevonButton>
     );
   }
   return (
     <>
-      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "sync")} className="px-3 text-[12px]">
+      <VerevonButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "sync")} className="px-3 text-[12px]">
         Sync
-      </VelionButton>
-      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "reconnect")} className="px-3 text-[12px]">
+      </VerevonButton>
+      <VerevonButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "reconnect")} className="px-3 text-[12px]">
         Reconnect
-      </VelionButton>
-      <VelionButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "disconnect")} className="px-3 text-[12px] text-[#B42318]">
+      </VerevonButton>
+      <VerevonButton size="sm" radius="sm" disabled={busy} onClick={() => onAction(row, "disconnect")} className="px-3 text-[12px] text-[#B42318]">
         Disconnect
-      </VelionButton>
+      </VerevonButton>
     </>
   );
 }
@@ -1019,7 +1019,7 @@ function runSettingsOAuth(session: ConnectSessionResult): Promise<void> {
       const payload = event.data;
       if (!payload || typeof payload !== "object") return;
       const record = payload as Record<string, unknown>;
-      if (record.type !== "velion.integration.connected") return;
+      if (record.type !== "verevon.integration.connected") return;
       if (record.sessionToken !== session.sessionToken) return;
       if (record.status === "success") {
         settle(resolve);
@@ -1135,9 +1135,9 @@ function FeaturePanel({
           <h3 className="text-[15px] font-semibold text-[#111111] dark:text-white">{title}</h3>
           <p className="mt-1 max-w-[520px] text-[12px] leading-5 text-[#737780] dark:text-[#A9ADB6]">{description}</p>
         </div>
-        <VelionButton size="xs" radius="sm" className="shrink-0 px-3 text-[12px]">
+        <VerevonButton size="xs" radius="sm" className="shrink-0 px-3 text-[12px]">
           {actionLabel}
-        </VelionButton>
+        </VerevonButton>
       </div>
       {children}
     </div>
@@ -1200,8 +1200,8 @@ function SettingsField({
 }) {
   return (
     <label htmlFor={id} className="block">
-      <span className="velion-settings-label">{label}</span>
-      <VelionInput
+      <span className="verevon-settings-label">{label}</span>
+      <VerevonInput
         id={id}
         type={type}
         defaultValue={defaultValue}
@@ -1226,9 +1226,9 @@ function SettingsSelect({
 }) {
   return (
     <label htmlFor={id} className="block">
-      <span className="velion-settings-label">{label}</span>
+      <span className="verevon-settings-label">{label}</span>
       <div className="relative -mt-2">
-        <VelionSelect
+        <VerevonSelect
           id={id}
           defaultValue={defaultValue}
           variant="settings"
@@ -1239,7 +1239,7 @@ function SettingsSelect({
               {option.label}
             </option>
           ))}
-        </VelionSelect>
+        </VerevonSelect>
         <ChevronDown
           aria-hidden="true"
           className="pointer-events-none absolute right-5 top-1/2 size-4 -translate-y-1/2 text-[#6F737C]"
@@ -1265,7 +1265,7 @@ function ToggleRow({
         <p className="text-[13px] font-medium text-[#111111] dark:text-white">{title}</p>
         <p className="mt-1 text-[12px] leading-5 text-[#737780] dark:text-[#A9ADB6]">{description}</p>
       </div>
-      <VelionSwitch checked={enabled} label={title} />
+      <VerevonSwitch checked={enabled} label={title} />
     </div>
   );
 }

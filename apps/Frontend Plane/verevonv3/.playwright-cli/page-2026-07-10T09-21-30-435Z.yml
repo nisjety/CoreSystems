@@ -1,0 +1,239 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e6]:
+        - link "Gå til hjem" [ref=f1e7] [cursor=pointer]:
+          - /url: /dashboard
+          - text: V
+        - generic [ref=f1e8]:
+          - button "Gå tilbake" [ref=f1e9] [cursor=pointer]
+          - button "Gå fremover" [ref=f1e12] [cursor=pointer]
+        - generic [ref=f1e15]:
+          - button "Verevon Trial" [ref=f1e142] [cursor=pointer]:
+            - generic [ref=f1e19]: Verevon
+            - strong [ref=f1e20]: Trial
+          - link "Chat" [ref=f1e452] [cursor=pointer]:
+            - /url: /chat
+          - link "Oppgaver" [ref=f1e453] [cursor=pointer]:
+            - /url: /chat
+      - button "Åpne kunnskapssøk" [ref=f1e28] [cursor=pointer]:
+        - generic [ref=f1e32]: Søk i kunnskapsbasen
+        - generic [ref=f1e33]: /
+        - generic [ref=f1e34]: CMD+K
+      - generic [ref=f1e36]:
+        - button "Bytt mørk modus" [ref=f1e38] [cursor=pointer]
+        - button "Bytt til English" [ref=f1e47] [cursor=pointer]:
+          - generic [ref=f1e48]: "NO"
+        - button "Åpne AI-assistent" [ref=f1e55] [cursor=pointer]
+        - button "0 uleste meldinger" [ref=f1e60] [cursor=pointer]
+        - button "0 uleste varsler" [ref=f1e64] [cursor=pointer]
+        - button "Kalender" [ref=f1e68] [cursor=pointer]
+        - button "Åpne profilmeny" [ref=f1e72] [cursor=pointer]:
+          - generic [ref=f1e73]: L
+  - complementary "Primærnavigasjon" [ref=f1e74]:
+    - generic [ref=f1e75]:
+      - generic [ref=f1e76]:
+        - button "Slå sammen sidefelt" [ref=f1e454] [cursor=pointer]
+        - navigation "Arbeidsområdeseksjoner" [ref=f1e82]:
+          - generic [ref=f1e83]:
+            - link "Oversikt" [ref=f1e143] [cursor=pointer]:
+              - /url: /dashboard
+            - link "Chat" [active] [ref=f1e146] [cursor=pointer]:
+              - /url: /chat
+            - link "Studio" [ref=f1e149] [cursor=pointer]:
+              - /url: /studio
+            - link "Innboks" [ref=f1e152] [cursor=pointer]:
+              - /url: /inbox
+            - link "Saker" [ref=f1e156] [cursor=pointer]:
+              - /url: /tickets
+            - link "Sosialt" [ref=f1e160] [cursor=pointer]:
+              - /url: /social
+            - link "Agenter" [ref=f1e163] [cursor=pointer]:
+              - /url: /agents
+            - link "Innhenting" [ref=f1e167] [cursor=pointer]:
+              - /url: /ingestions
+            - link "Kunnskap" [ref=f1e175] [cursor=pointer]:
+              - /url: /knowledge
+            - link "Innsikt" [ref=f1e178] [cursor=pointer]:
+              - /url: /insights
+        - generic [ref=f1e122]:
+          - link "Konto" [ref=f1e124] [cursor=pointer]:
+            - /url: /account
+          - link "Innstillinger" [ref=f1e181] [cursor=pointer]:
+            - /url: /settings
+          - button "Søk" [ref=f1e133] [cursor=pointer]
+      - generic [ref=f1e459]:
+        - link [ref=f1e460] [cursor=pointer]:
+          - /url: /chat
+        - navigation "Chat-samtaler" [ref=f1e464]:
+          - 'button "Read-only task: first call shipping_carriers, then call get_shipping_quotes for a 1 kg non-da... 4m siden" [ref=f1e465] [cursor=pointer]':
+            - 'generic "Read-only task: first call shipping_carriers, then call get_shipping_quotes for a 1 kg non-da..." [ref=f1e466]'
+            - emphasis [ref=f1e467]: 4m siden
+          - 'button "Read-only task: first call shipping_carriers, then call get_shipping_quotes for a 1 kg non-da... 4m siden" [ref=f1e468] [cursor=pointer]':
+            - 'generic "Read-only task: first call shipping_carriers, then call get_shipping_quotes for a 1 kg non-da..." [ref=f1e469]'
+            - emphasis [ref=f1e470]: 4m siden
+          - button "Use the knowledge_search tool exactly once to search our internal knowledge for Verevon system... 5m siden" [ref=f1e471] [cursor=pointer]:
+            - generic "Use the knowledge_search tool exactly once to search our internal knowledge for Verevon system..." [ref=f1e472]
+            - emphasis [ref=f1e473]: 5m siden
+          - button "Find Bring current official delivery-time information for domestic parcels in Norway. Cite ex... 6m siden" [ref=f1e474] [cursor=pointer]:
+            - generic "Find Bring current official delivery-time information for domestic parcels in Norway. Cite ex..." [ref=f1e475]
+            - emphasis [ref=f1e476]: 6m siden
+          - button "Can you check the current shipping time from Oslo to Trondheim for Bring? Use available live... 7m siden" [ref=f1e477] [cursor=pointer]:
+            - generic "Can you check the current shipping time from Oslo to Trondheim for Bring? Use available live..." [ref=f1e478]
+            - emphasis [ref=f1e479]: 7m siden
+          - button "can you check the shiping time from oslo to trondheim 10t siden" [ref=f1e480] [cursor=pointer]:
+            - generic "can you check the shiping time from oslo to trondheim" [ref=f1e481]
+            - emphasis [ref=f1e482]: 10t siden
+          - button "01KX3D6HVTS2H7RWBQSMB4SZPK 21t siden" [ref=f1e483] [cursor=pointer]:
+            - generic "01KX3D6HVTS2H7RWBQSMB4SZPK" [ref=f1e484]
+            - emphasis [ref=f1e485]: 21t siden
+          - button "01KX3D68B5ZMWCM45WYGP1JTSY 21t siden" [ref=f1e486] [cursor=pointer]:
+            - generic "01KX3D68B5ZMWCM45WYGP1JTSY" [ref=f1e487]
+            - emphasis [ref=f1e488]: 21t siden
+          - button "01KX3CTBFKDRAENFRW173M3VP0 21t siden" [ref=f1e489] [cursor=pointer]:
+            - generic "01KX3CTBFKDRAENFRW173M3VP0" [ref=f1e490]
+            - emphasis [ref=f1e491]: 21t siden
+          - button "01KX3CRR78DJ3VVD2JN5CA8S0K 21t siden" [ref=f1e492] [cursor=pointer]:
+            - generic "01KX3CRR78DJ3VVD2JN5CA8S0K" [ref=f1e493]
+            - emphasis [ref=f1e494]: 21t siden
+          - button "01KX3CQ3FSYGCM9MTH31WE77YR 21t siden" [ref=f1e495] [cursor=pointer]:
+            - generic "01KX3CQ3FSYGCM9MTH31WE77YR" [ref=f1e496]
+            - emphasis [ref=f1e497]: 21t siden
+          - button "01KX3CPK1Q99E4SVC4920JZZ7R 21t siden" [ref=f1e498] [cursor=pointer]:
+            - generic "01KX3CPK1Q99E4SVC4920JZZ7R" [ref=f1e499]
+            - emphasis [ref=f1e500]: 21t siden
+          - button "01KX38YVM79HHGFJZTCWPV45JQ 22t siden" [ref=f1e501] [cursor=pointer]:
+            - generic "01KX38YVM79HHGFJZTCWPV45JQ" [ref=f1e502]
+            - emphasis [ref=f1e503]: 22t siden
+          - button "01KX38YN9X8P8TVZE8Z9RZZ4DP 22t siden" [ref=f1e504] [cursor=pointer]:
+            - generic "01KX38YN9X8P8TVZE8Z9RZZ4DP" [ref=f1e505]
+            - emphasis [ref=f1e506]: 22t siden
+          - button "01KX38EQPJ28PV4PBM9SXWYN9D 22t siden" [ref=f1e507] [cursor=pointer]:
+            - generic "01KX38EQPJ28PV4PBM9SXWYN9D" [ref=f1e508]
+            - emphasis [ref=f1e509]: 22t siden
+          - button "01KX38EG630XFEJ8MT5VQGVEGB 22t siden" [ref=f1e510] [cursor=pointer]:
+            - generic "01KX38EG630XFEJ8MT5VQGVEGB" [ref=f1e511]
+            - emphasis [ref=f1e512]: 22t siden
+          - button "01KX38DMXNMC9X3MYZRWJY8D7Z 22t siden" [ref=f1e513] [cursor=pointer]:
+            - generic "01KX38DMXNMC9X3MYZRWJY8D7Z" [ref=f1e514]
+            - emphasis [ref=f1e515]: 22t siden
+          - button "01KX38DDJ045QC6DSJN0G4R43G 22t siden" [ref=f1e516] [cursor=pointer]:
+            - generic "01KX38DDJ045QC6DSJN0G4R43G" [ref=f1e517]
+            - emphasis [ref=f1e518]: 22t siden
+          - button "01KX389PXTZXX09CG1T35YFJRY 22t siden" [ref=f1e519] [cursor=pointer]:
+            - generic "01KX389PXTZXX09CG1T35YFJRY" [ref=f1e520]
+            - emphasis [ref=f1e521]: 22t siden
+          - button "01KX38424F256KBHQG9KA0670N 22t siden" [ref=f1e522] [cursor=pointer]:
+            - generic "01KX38424F256KBHQG9KA0670N" [ref=f1e523]
+            - emphasis [ref=f1e524]: 22t siden
+          - button "01KX380C2JETSXCM35AFTH2EQT 23t siden" [ref=f1e525] [cursor=pointer]:
+            - generic "01KX380C2JETSXCM35AFTH2EQT" [ref=f1e526]
+            - emphasis [ref=f1e527]: 23t siden
+          - button "01KX37R2CX75WBM54Y7J28A1T9 23t siden" [ref=f1e528] [cursor=pointer]:
+            - generic "01KX37R2CX75WBM54Y7J28A1T9" [ref=f1e529]
+            - emphasis [ref=f1e530]: 23t siden
+          - button "01KX37KY7NA83D6953NHAGARQF 23t siden" [ref=f1e531] [cursor=pointer]:
+            - generic "01KX37KY7NA83D6953NHAGARQF" [ref=f1e532]
+            - emphasis [ref=f1e533]: 23t siden
+          - button "01KX37KBDXR8NTN3R6YZYHMJTY 23t siden" [ref=f1e534] [cursor=pointer]:
+            - generic "01KX37KBDXR8NTN3R6YZYHMJTY" [ref=f1e535]
+            - emphasis [ref=f1e536]: 23t siden
+          - button "01KX37DKNKDZ27ZH01DCHP57VQ 23t siden" [ref=f1e537] [cursor=pointer]:
+            - generic "01KX37DKNKDZ27ZH01DCHP57VQ" [ref=f1e538]
+            - emphasis [ref=f1e539]: 23t siden
+          - button "01KX37BM9YZZ2K39683Y25JJNQ 23t siden" [ref=f1e540] [cursor=pointer]:
+            - generic "01KX37BM9YZZ2K39683Y25JJNQ" [ref=f1e541]
+            - emphasis [ref=f1e542]: 23t siden
+          - button "01KX36E87PYBHBS90G7TTMYHJT 23t siden" [ref=f1e543] [cursor=pointer]:
+            - generic "01KX36E87PYBHBS90G7TTMYHJT" [ref=f1e544]
+            - emphasis [ref=f1e545]: 23t siden
+          - button "01KX36C95HMKQ32ZKN6BY23QWD 23t siden" [ref=f1e546] [cursor=pointer]:
+            - generic "01KX36C95HMKQ32ZKN6BY23QWD" [ref=f1e547]
+            - emphasis [ref=f1e548]: 23t siden
+          - button "01KX35XY59SR026RHJBK4W7RST 23t siden" [ref=f1e549] [cursor=pointer]:
+            - generic "01KX35XY59SR026RHJBK4W7RST" [ref=f1e550]
+            - emphasis [ref=f1e551]: 23t siden
+          - button "01KX35VZ0912E5P5M69KQ7VTYW 23t siden" [ref=f1e552] [cursor=pointer]:
+            - generic "01KX35VZ0912E5P5M69KQ7VTYW" [ref=f1e553]
+            - emphasis [ref=f1e554]: 23t siden
+          - button "01KX260E6QDR4FMGP1PAW7YHGK 9. juli" [ref=f1e555] [cursor=pointer]:
+            - generic "01KX260E6QDR4FMGP1PAW7YHGK" [ref=f1e556]
+            - emphasis [ref=f1e557]: 9. juli
+          - button "01KX25TBZEDGCGZ5C2MBK3EA2R 9. juli" [ref=f1e558] [cursor=pointer]:
+            - generic "01KX25TBZEDGCGZ5C2MBK3EA2R" [ref=f1e559]
+            - emphasis [ref=f1e560]: 9. juli
+          - button "01KX25S9FXAY84Y1QMH5VJJTHS 9. juli" [ref=f1e561] [cursor=pointer]:
+            - generic "01KX25S9FXAY84Y1QMH5VJJTHS" [ref=f1e562]
+            - emphasis [ref=f1e563]: 9. juli
+          - button "01KX1TDT0X25H9K5YHPRJYEHWG 8. juli" [ref=f1e564] [cursor=pointer]:
+            - generic "01KX1TDT0X25H9K5YHPRJYEHWG" [ref=f1e565]
+            - emphasis [ref=f1e566]: 8. juli
+          - button "01KX1TCBP5A7RA8KTN4HD7Z0CC 8. juli" [ref=f1e567] [cursor=pointer]:
+            - generic "01KX1TCBP5A7RA8KTN4HD7Z0CC" [ref=f1e568]
+            - emphasis [ref=f1e569]: 8. juli
+          - button "01KX1TC9XQCP0NVDJVAM6T0AJE 8. juli" [ref=f1e570] [cursor=pointer]:
+            - generic "01KX1TC9XQCP0NVDJVAM6T0AJE" [ref=f1e571]
+            - emphasis [ref=f1e572]: 8. juli
+          - button "01KX1T9RS7KBJ3KVM9HWBFDA41 8. juli" [ref=f1e573] [cursor=pointer]:
+            - generic "01KX1T9RS7KBJ3KVM9HWBFDA41" [ref=f1e574]
+            - emphasis [ref=f1e575]: 8. juli
+          - button "01KX1T9QCM3SZ0E38JESHW2WR8 8. juli" [ref=f1e576] [cursor=pointer]:
+            - generic "01KX1T9QCM3SZ0E38JESHW2WR8" [ref=f1e577]
+            - emphasis [ref=f1e578]: 8. juli
+          - button "01KX1T8AGPT7CZ9FR69FJX06VD 8. juli" [ref=f1e579] [cursor=pointer]:
+            - generic "01KX1T8AGPT7CZ9FR69FJX06VD" [ref=f1e580]
+            - emphasis [ref=f1e581]: 8. juli
+          - button "01KX1T880DZ56D4V96ATY9C089 8. juli" [ref=f1e582] [cursor=pointer]:
+            - generic "01KX1T880DZ56D4V96ATY9C089" [ref=f1e583]
+            - emphasis [ref=f1e584]: 8. juli
+        - button "Tøm chathistorikk" [ref=f1e585] [cursor=pointer]
+  - main [ref=f1e137]:
+    - region "Verevon chat workspace" [ref=f1e590]:
+      - generic [ref=f1e592]:
+        - heading "Hva kan jeg hjelpe med?" [level=1] [ref=f1e597]
+        - generic [ref=f1e599]:
+          - generic [ref=f1e600]:
+            - generic [ref=f1e601]:
+              - button "Velg AI-modell" [ref=f1e603] [cursor=pointer]:
+                - generic [ref=f1e606]: Verevon Balance
+              - link "Opprett agent" [ref=f1e609] [cursor=pointer]:
+                - /url: /agents
+            - generic [ref=f1e614]:
+              - button "Planmodus - agenten planlegger og ber om godkjenning før risikable verktøy" [ref=f1e615] [cursor=pointer]
+              - button "Historikk" [ref=f1e620] [cursor=pointer]
+              - button "Innstillinger" [ref=f1e625] [cursor=pointer]
+          - generic [ref=f1e627]:
+            - button "Legg til filer" [ref=f1e628]
+            - generic [ref=f1e629]:
+              - generic [ref=f1e630]:
+                - generic [ref=f1e631]: Meld Verevon
+                - textbox "Meld Verevon" [ref=f1e632]:
+                  - /placeholder: Spør om hva som helst, bruk / for spesialhandlinger.
+              - generic [ref=f1e633]:
+                - generic [ref=f1e634]:
+                  - button "Legg til filer" [ref=f1e635] [cursor=pointer]:
+                    - generic [ref=f1e639]: legg til filer
+                  - button "Forslag" [ref=f1e641] [cursor=pointer]
+                  - button "Dyp research" [ref=f1e644] [cursor=pointer]
+                  - button "Søk på nett" [ref=f1e653] [cursor=pointer]: Søk
+                  - button "Generer bilde" [ref=f1e659] [cursor=pointer]: Bilde
+                - generic [ref=f1e664]:
+                  - generic [ref=f1e665]:
+                    - button "Auto" [pressed] [ref=f1e666] [cursor=pointer]
+                    - button "Raskt svar" [ref=f1e670] [cursor=pointer]
+                    - button "Dyp research" [ref=f1e673] [cursor=pointer]
+                  - button "Stemmemodus" [ref=f1e676] [cursor=pointer]
+                  - button "Stemmeinndata" [ref=f1e679] [cursor=pointer]
+                  - button "Send melding" [disabled] [ref=f1e683]
+        - generic [ref=f1e686]:
+          - 'button "Use quick prompt: Create slides" [ref=f1e687] [cursor=pointer]':
+            - generic [ref=f1e691]: Create slides
+          - 'button "Use quick prompt: Build website" [ref=f1e692] [cursor=pointer]':
+            - generic [ref=f1e697]: Build website
+          - 'button "Use quick prompt: Develop apps" [ref=f1e698] [cursor=pointer]':
+            - generic [ref=f1e701]: Develop apps
+          - 'button "Use quick prompt: Design" [ref=f1e702] [cursor=pointer]':
+            - generic [ref=f1e709]: Design
+          - 'button "Use quick prompt: Write" [ref=f1e710] [cursor=pointer]':
+            - generic [ref=f1e713]: Write
+          - button "More" [ref=f1e715] [cursor=pointer]

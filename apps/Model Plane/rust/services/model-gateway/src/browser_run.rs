@@ -99,7 +99,7 @@ struct BrowserRunStartRequest {
     /// of the tab the run was launched from.
     #[serde(default)]
     start_url: Option<String>,
-    // `Option`, not a bare `Vec`, because callers (the Velion gateway) may
+    // `Option`, not a bare `Vec`, because callers (the Verevon gateway) may
     // send an explicit JSON `null` for "no restriction yet" rather than
     // omitting the key — `Vec<String>` rejects `null` even with
     // `#[serde(default)]` (default only covers a *missing* key), which
@@ -117,7 +117,7 @@ struct BrowserRunStartRequest {
     #[serde(default)]
     max_cost_usd: Option<f64>,
     /// Accepted so a well-formed caller body never 4xxs, but never trusted:
-    /// this endpoint is called by the Velion gateway, which derives `zdr`
+    /// this endpoint is called by the Verevon gateway, which derives `zdr`
     /// server-side from the browser session's own persisted metadata and
     /// never forwards a client-supplied flag. Kept `false`-default here as
     /// the safe fallback for any other caller.
@@ -720,25 +720,6 @@ async fn browser_run_control(
     Ok(Json(json!({ "status": status })))
 }
 
-fn authenticated_session_request<T>(
-    message: T,
-    session_bearer: &VerifiedSessionBearer,
-) -> Result<tonic::Request<T>, ApiError> {
-    let authorization = format!("Bearer {}", session_bearer.as_str())
-        .parse()
-        .map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "invalid session credential" })),
-            )
-        })?;
-    let mut request = tonic::Request::new(message);
-    request
-        .metadata_mut()
-        .insert("authorization", authorization);
-    Ok(request)
-}
-
 fn authenticated_browser_request<T>(
     message: T,
     browser_bearer: &VerifiedBrowserBearer,
@@ -803,10 +784,9 @@ mod tests {
         execution_core_client::ExecutionCoreClient,
         execution_core_server::{ExecutionCore, ExecutionCoreServer},
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
-        CancelRunRequest, CancelRunResponse, CreateThreadRequest, ExecuteStepRequest,
-        ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest,
-        ResumeRunResponse, RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest,
-        RunAgentResponse, ValidateGrantResponse,
+        CancelRunRequest, CancelRunResponse, ExecuteStepRequest, ExecuteStepResponse,
+        PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RevokeGrantRequest,
+        RevokeGrantResponse, RunAgentRequest, RunAgentResponse, ValidateGrantResponse,
     };
     use tonic::{Response, Status};
 
@@ -1023,7 +1003,7 @@ mod tests {
 
     #[test]
     fn start_request_accepts_explicit_null_allowed_domains() {
-        // Regression: the Velion gateway sends an explicit JSON `null` (not a
+        // Regression: the Verevon gateway sends an explicit JSON `null` (not a
         // missing key) when it has no restriction to forward — `Vec<String>`
         // rejects that even with `#[serde(default)]` (a 422 seen live before
         // this field became `Option<Vec<String>>`).
@@ -1145,27 +1125,6 @@ mod tests {
         assert_eq!(non_empty(Some("  run_123  ")), Some("run_123"));
         assert_eq!(non_empty(Some("   ")), None);
         assert_eq!(non_empty(None), None);
-    }
-
-    #[test]
-    fn browser_session_writes_use_only_the_exact_session_audience_credential() {
-        let request = authenticated_session_request(
-            CreateThreadRequest::default(),
-            &VerifiedSessionBearer::for_test("session-core-token"),
-        )
-        .expect("verified session bearer must be forwardable");
-
-        assert_eq!(
-            request
-                .metadata()
-                .get("authorization")
-                .and_then(|value| value.to_str().ok()),
-            Some("Bearer session-core-token")
-        );
-        assert!(request
-            .metadata()
-            .get("x-execution-authorization")
-            .is_none());
     }
 
     #[test]

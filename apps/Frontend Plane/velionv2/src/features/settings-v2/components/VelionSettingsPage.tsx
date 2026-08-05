@@ -1,16 +1,16 @@
 import { Check, ChevronDown } from "lucide-react";
 import {
-  VelionButton,
-  VelionInput,
-  VelionSelect,
-  VelionSwitch,
-  VelionTextarea,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonInput,
+  VerevonSelect,
+  VerevonSwitch,
+  VerevonTextarea,
+} from "@/components/ui/verevon-ui";
 import { cn } from "@/lib/utils";
 import { PasskeySecuritySection } from "@/features/settings-v2/components/PasskeySecuritySection";
 
 const connectedAccounts = [
-  { provider: "Google", detail: "author@velion.ai", status: "Connected" },
+  { provider: "Google", detail: "author@verevon.ai", status: "Connected" },
   { provider: "Microsoft", detail: "Not connected", status: "Connect" },
   { provider: "GitHub", detail: "@author", status: "Connected" },
   { provider: "Slack", detail: "Triodelab workspace", status: "Connected" },
@@ -45,7 +45,7 @@ const supportPreferences = [
   },
 ];
 
-export function VelionSettingsPage() {
+export function VerevonSettingsPage() {
   return (
     <div
       data-account-settings-scroll
@@ -111,7 +111,7 @@ function ProfileSection() {
     <section id="profile" className="scroll-mt-24">
       <SectionHeader
         title="Profile"
-        description="Control how teammates and customers see you across Velion."
+        description="Control how teammates and customers see you across Verevon."
       />
 
       <div className="mb-7 flex flex-col gap-5 sm:flex-row sm:items-center">
@@ -127,12 +127,12 @@ function ProfileSection() {
             Upload a square JPG or PNG profile image. This is visible to teammates and customer-facing chat handoffs.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <VelionButton variant="primary" size="sm" className="px-4">
+            <VerevonButton variant="primary" size="sm" className="px-4">
               Upload photo
-            </VelionButton>
-            <VelionButton size="sm" className="px-4">
+            </VerevonButton>
+            <VerevonButton size="sm" className="px-4">
               Remove
-            </VelionButton>
+            </VerevonButton>
           </div>
         </div>
       </div>
@@ -163,7 +163,7 @@ function ProfileSection() {
           defaultValue="display-name"
           options={[
             { value: "display-name", label: "Author Name" },
-            { value: "team-alias", label: "Velion Support" },
+            { value: "team-alias", label: "Verevon Support" },
             { value: "hidden", label: "Hide personal name" },
           ]}
         />
@@ -198,7 +198,7 @@ function ContactSection() {
           id="email"
           label="Primary email"
           type="email"
-          defaultValue="author@velion.ai"
+          defaultValue="author@verevon.ai"
           helpText="Verified. Used for sign-in and account recovery."
         />
         <SettingsField id="secondary-email" label="Backup email" type="email" placeholder="backup@example.com" />
@@ -214,7 +214,7 @@ function PreferencesSection() {
     <section id="preferences" className="mt-16 scroll-mt-24">
       <SectionHeader
         title="Preferences"
-        description="Personalize how Velion formats dates, language, appearance, and teammate names."
+        description="Personalize how Verevon formats dates, language, appearance, and teammate names."
       />
       <div className="grid gap-6 sm:grid-cols-2">
         <SettingsSelect
@@ -369,9 +369,9 @@ function ConnectedAccountsSection() {
               <p className="text-[13px] font-medium text-[#111111] dark:text-white">{account.provider}</p>
               <p className="mt-1 truncate text-[12px] text-[#737780] dark:text-[#A9ADB6]">{account.detail}</p>
             </div>
-            <VelionButton size="sm" radius="sm" className="shrink-0 px-3 text-[12px]">
+            <VerevonButton size="sm" radius="sm" className="shrink-0 px-3 text-[12px]">
               {account.status}
-            </VelionButton>
+            </VerevonButton>
           </div>
         ))}
       </div>
@@ -409,13 +409,13 @@ function SettingsActions() {
         Your personal profile, preferences, and security (passkeys) are managed here.
       </p>
       <div className="flex items-center justify-end gap-3">
-        <VelionButton className="px-5">
+        <VerevonButton className="px-5">
           Cancel
-        </VelionButton>
-        <VelionButton variant="primary" className="px-5">
+        </VerevonButton>
+        <VerevonButton variant="primary" className="px-5">
           <Check className="size-4" strokeWidth={1.8} />
           Save profile
-        </VelionButton>
+        </VerevonButton>
       </div>
     </div>
   );
@@ -451,14 +451,14 @@ function SettingsField({
 
   return (
     <label htmlFor={id} className="block">
-      <span className="velion-settings-label">{label}</span>
+      <span className="verevon-settings-label">{label}</span>
       <div className="relative -mt-2">
         {prefix ? (
           <span className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 text-[13px] font-medium text-[#858993]">
             {prefix}
           </span>
         ) : null}
-        <VelionInput
+        <VerevonInput
           id={id}
           type={type}
           defaultValue={defaultValue}
@@ -490,8 +490,8 @@ function SettingsTextarea({
 }) {
   return (
     <label htmlFor={id} className="block">
-      <span className="velion-settings-label">{label}</span>
-      <VelionTextarea
+      <span className="verevon-settings-label">{label}</span>
+      <VerevonTextarea
         id={id}
         defaultValue={defaultValue}
         rows={4}
@@ -515,9 +515,9 @@ function SettingsSelect({
 }) {
   return (
     <label htmlFor={id} className="block">
-      <span className="velion-settings-label">{label}</span>
+      <span className="verevon-settings-label">{label}</span>
       <div className="relative -mt-2">
-        <VelionSelect
+        <VerevonSelect
           id={id}
           defaultValue={defaultValue}
           variant="settings"
@@ -528,7 +528,7 @@ function SettingsSelect({
               {option.label}
             </option>
           ))}
-        </VelionSelect>
+        </VerevonSelect>
         <ChevronDown
           aria-hidden="true"
           className="pointer-events-none absolute right-5 top-1/2 size-4 -translate-y-1/2 text-[#6F737C]"
@@ -554,7 +554,7 @@ function ToggleRow({
         <p className="text-[13px] font-medium text-[#111111] dark:text-white">{title}</p>
         <p className="mt-1 text-[12px] leading-5 text-[#737780] dark:text-[#A9ADB6]">{description}</p>
       </div>
-      <VelionSwitch checked={enabled} label={title} />
+      <VerevonSwitch checked={enabled} label={title} />
     </div>
   );
 }

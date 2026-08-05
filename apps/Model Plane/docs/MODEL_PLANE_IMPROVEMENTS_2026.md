@@ -4,20 +4,20 @@
 **Scope:** `apps/Model Plane` and its contracts with Control, Application, Data, and Ingestion planes  
 **Research date:** 2026-08-03  
 **Expanded:** 2026-08-03 — loop/harness engineering, AI runtime efficiency, TOON/JSON, MCP code mode, skills, LLM Wiki, multimodal RAG, A2A, adaptive compute, self-improvement, world state, containment, and eval science  
-**Verified against the running stack:** 2026-08-03 (same day) — every major proposed component cross-checked against actual Rust/Go source with file:line citations. See §1a for the full ledger and three corrections that change how the rest of this document should be read: the approval-continuation work (§14) is ~70% done and one dispatcher away, `cost-core`'s ledger is already durable (an earlier "in-memory" note is stale), and the GraphPlan model (§6) is confirmed 100% greenfield — the single biggest bet in this document. Re-verify before trusting anything below without a citation next to it; this stack changes fast enough that claims documented as "live" have been found completely inert in production before (see `velion-roadmap.md` §1).  
+**Verified against the running stack:** 2026-08-03 (same day) — every major proposed component cross-checked against actual Rust/Go source with file:line citations. See §1a for the full ledger and three corrections that change how the rest of this document should be read: the approval-continuation work (§14) is ~70% done and one dispatcher away, `cost-core`'s ledger is already durable (an earlier "in-memory" note is stale), and the GraphPlan model (§6) is confirmed 100% greenfield — the single biggest bet in this document. Re-verify before trusting anything below without a citation next to it; this stack changes fast enough that claims documented as "live" have been found completely inert in production before (see `verevon-roadmap.md` §1).  
 **Primary rule:** Quarry captures evidence. Data Plane knows. Model Plane reasons. App Shell presents.
 
 ---
 
 ## 1. Purpose
 
-This document defines the next improvements for Velion's Model Plane based on:
+This document defines the next improvements for Verevon's Model Plane based on:
 
 - the current CoreSystem plane ownership model;
 - the existing Rust and Go Model Plane services;
-- the open-source systems and frameworks reviewed for Velion;
+- the open-source systems and frameworks reviewed for Verevon;
 - newer agent-runtime, durable-execution, graph-orchestration, routing, memory, evaluation, context-codec, tool-use, skill, multimodal-RAG, and interoperability patterns available in 2026;
-- the requirement that Velion owns its control plane and does not depend on another product's UI, tenant model, or workflow editor.
+- the requirement that Verevon owns its control plane and does not depend on another product's UI, tenant model, or workflow editor.
 
 This is **not** a replacement architecture. The existing Model Plane already has the correct major building blocks:
 
@@ -56,7 +56,7 @@ be read.**
    The tenant-scoped IDOR requirement in §14.2 is already met:
    `session-core/src/orchestration_store.rs:343-347`'s `decide_approval` runs
    a compare-and-set transaction — `WHERE id = $1 AND org_id = $2 AND status
-   = 'requested' AND ($6::text IS NULL OR user_id = $6)` — with dedicated
+= 'requested' AND ($6::text IS NULL OR user_id = $6)` — with dedicated
    tests (`approval_decision_query_is_tenant_scoped_and_compare_and_set`,
    cross-tenant rejection tests in `orchestration_grpc.rs:1824,1899,2027`).
    Approval grant already atomically writes an identifier-only,
@@ -98,7 +98,7 @@ be read.**
    `evaluator_optimizer.go`, `interactive_run.go`, `feedback_promotion.go`,
    `memory_consolidation.go`, `wide_research.go`, `skill_promotion.go` —
    uses the **identical** vanilla `temporal.RetryPolicy{BackoffCoefficient:
-   2.0, MaximumAttempts: 3}`, copy-pasted, with zero semantic recovery
+2.0, MaximumAttempts: 3}`, copy-pasted, with zero semantic recovery
    levels (no `escalat`/`RecoveryLevel`/`replan`/`alternate_capability`
    anywhere in either service). §6's proposal is real, smart, and the
    correct direction — but do not schedule it as a quick win next to item 1
@@ -107,19 +107,19 @@ be read.**
 **Per-component ledger** (EXISTS / PARTIAL / GREENFIELD), cross-referenced
 inline at each relevant section below rather than only here:
 
-| Doc section | Proposed component | Verified state |
-|---|---|---|
-| §8 | Capability attestation | GREENFIELD — see §8 note |
-| §9 | Step-level model routing + RoutingDecision record | PARTIAL (request-level only) — see §9 note |
-| §13 | Skill promotion / failure learning | PARTIAL, and a real live instance already ships — see §13 note |
-| §14 | Durable approval continuation | PARTIAL, ~70% — see the correction above |
-| §18 | Durable cost ledger | **DONE** — see the correction above |
-| §21 | Loop engineering (goal loop specifically) | The acute pain this would fix is **already fixed**, simpler — see §21 note |
-| §22 | TOON usage | EXISTS, narrower than proposed — see §22 note |
-| §22.6 | Anthropic prompt caching | EXISTS, Anthropic-only — see §22 note |
-| §23.1–23.2 | Progressive MCP disclosure | GREENFIELD — see §23 note |
-| §23.4 | MCP code mode | GREENFIELD, confirmed |
-| §23.9 | Outcome-driven capability ranking | **Real ranking already exists, extend it** — see §23 note |
+| Doc section | Proposed component                                | Verified state                                                             |
+| ----------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
+| §8          | Capability attestation                            | GREENFIELD — see §8 note                                                   |
+| §9          | Step-level model routing + RoutingDecision record | PARTIAL (request-level only) — see §9 note                                 |
+| §13         | Skill promotion / failure learning                | PARTIAL, and a real live instance already ships — see §13 note             |
+| §14         | Durable approval continuation                     | PARTIAL, ~70% — see the correction above                                   |
+| §18         | Durable cost ledger                               | **DONE** — see the correction above                                        |
+| §21         | Loop engineering (goal loop specifically)         | The acute pain this would fix is **already fixed**, simpler — see §21 note |
+| §22         | TOON usage                                        | EXISTS, narrower than proposed — see §22 note                              |
+| §22.6       | Anthropic prompt caching                          | EXISTS, Anthropic-only — see §22 note                                      |
+| §23.1–23.2  | Progressive MCP disclosure                        | GREENFIELD — see §23 note                                                  |
+| §23.4       | MCP code mode                                     | GREENFIELD, confirmed                                                      |
+| §23.9       | Outcome-driven capability ranking                 | **Real ranking already exists, extend it** — see §23 note                  |
 
 ---
 
@@ -176,54 +176,54 @@ It does not own:
 
 Keep the current rule:
 
-| Work type | Preferred runtime |
-|---|---|
-| Latency-sensitive inference, context packing, protocol boundaries, execution loops | Rust |
-| Durable orchestration, registries, policy, resource lifecycle, approvals, budgets | Go |
-| Provider experiments, model research, evals, benchmark adapters | Python |
+| Work type                                                                          | Preferred runtime |
+| ---------------------------------------------------------------------------------- | ----------------- |
+| Latency-sensitive inference, context packing, protocol boundaries, execution loops | Rust              |
+| Durable orchestration, registries, policy, resource lifecycle, approvals, budgets  | Go                |
+| Provider experiments, model research, evals, benchmark adapters                    | Python            |
 
 ### 4.3 Correct infrastructure split
 
-| Dependency | Canonical Model Plane role |
-|---|---|
-| PostgreSQL | Durable sessions, plans, approvals, lineage, capabilities, cost records |
-| Temporal | Long-running workflows, recovery, approvals, schedules, research loops |
-| NATS/JetStream | Events and asynchronous cross-service notifications |
-| MinIO | Large artifacts, execution outputs, snapshots, generated files |
-| Dragonfly | Cache, leases, limits, temporary coordination |
-| Letta | Optional memory adapter only |
-| OpenTelemetry | Neutral tracing and metrics |
+| Dependency     | Canonical Model Plane role                                              |
+| -------------- | ----------------------------------------------------------------------- |
+| PostgreSQL     | Durable sessions, plans, approvals, lineage, capabilities, cost records |
+| Temporal       | Long-running workflows, recovery, approvals, schedules, research loops  |
+| NATS/JetStream | Events and asynchronous cross-service notifications                     |
+| MinIO          | Large artifacts, execution outputs, snapshots, generated files          |
+| Dragonfly      | Cache, leases, limits, temporary coordination                           |
+| Letta          | Optional memory adapter only                                            |
+| OpenTelemetry  | Neutral tracing and metrics                                             |
 
 ---
 
 ## 5. External stack audit and disposition
 
-The correct question is not "Which framework should Velion use?" It is:
+The correct question is not "Which framework should Verevon use?" It is:
 
-> Which implementation ideas should be incorporated into Velion's first-party runtime, and which libraries are useful only in labs or adapters?
+> Which implementation ideas should be incorporated into Verevon's first-party runtime, and which libraries are useful only in labs or adapters?
 
-| Project or technology | Strongest pattern | Velion decision |
-|---|---|---|
-| OpenHands Software Agent SDK | Typed actions/observations, workspaces, condensers, security checks, remote agent server | Learn from and benchmark; do not replace Model Plane |
-| OpenRAG | Packaged ingestion/retrieval contracts, Docling, knowledge MCP | Reuse parser ideas; do not deploy as Model Plane |
-| ECC | Plan-test-review-verify-remember-improve, skills, rules, hooks, security scanning | Implement natively in `capability-core` |
-| OpenWork | `search_capabilities` then `execute_capability` | Implement natively in capability discovery |
-| OpenWorker | Approval inbox, completed deliverables, unattended approval parking | Implement in Model/Application planes |
-| Orca | Parallel attempts, isolated execution, annotated review | Use selectively for high-risk tasks and evals |
-| Buzz | Humans and agents as actors in one event model | Standardize Velion event envelopes and actor identity |
-| OpenAI Agents SDK | Handoffs, tool guardrails, sessions, traces, structured outputs, sandbox-agent concepts | Provider reference adapter and compatibility test suite |
-| Claude Agent SDK | Isolated SDK configuration, hooks, tools, MCP, local process ownership | Provider reference adapter; avoid managed-agent dependency for core execution |
-| Microsoft Agent Framework | Harness, graph workflows, type-safe routing, checkpoints, HITL | Strong reference for GraphPlan and orchestration patterns |
-| Microsoft Conductor | Deterministic YAML/graph orchestration with explicit context flow | Borrow deterministic routing and diffable workflow ideas |
-| Pydantic AI | Typed agents and official Temporal durability integration | Python lab and contract reference only |
-| Mastra | Workspaces, tool permissions, workflow snapshots, suspend/resume | TypeScript reference; borrow workspace capability concepts |
-| LangGraph | Explicit state graphs, interrupts, checkpointing, time travel | Research/reference only; Temporal remains canonical |
-| LangChain / Deep Agents | Fast prototype loops, middleware, HITL patterns | Python lab only |
-| Langflow | Visual prototyping | Optional local profile only; no production authority |
-| Letta | Persistent memory blocks and attach/detach semantics | Optional adapter; Velion owns memory schema and policy |
-| MCP | Tool interoperability | Use protocol SDK; gate through capability-core |
-| ACP | Agent-client interoperability | Add when external agent clients need Model Plane access |
-| GraphLoop pattern | Immutable plan version, explicit nodes, verification, recovery edges | Build as native Model Plane execution model |
+| Project or technology        | Strongest pattern                                                                        | Verevon decision                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| OpenHands Software Agent SDK | Typed actions/observations, workspaces, condensers, security checks, remote agent server | Learn from and benchmark; do not replace Model Plane                          |
+| OpenRAG                      | Packaged ingestion/retrieval contracts, Docling, knowledge MCP                           | Reuse parser ideas; do not deploy as Model Plane                              |
+| ECC                          | Plan-test-review-verify-remember-improve, skills, rules, hooks, security scanning        | Implement natively in `capability-core`                                       |
+| OpenWork                     | `search_capabilities` then `execute_capability`                                          | Implement natively in capability discovery                                    |
+| OpenWorker                   | Approval inbox, completed deliverables, unattended approval parking                      | Implement in Model/Application planes                                         |
+| Orca                         | Parallel attempts, isolated execution, annotated review                                  | Use selectively for high-risk tasks and evals                                 |
+| Buzz                         | Humans and agents as actors in one event model                                           | Standardize Verevon event envelopes and actor identity                        |
+| OpenAI Agents SDK            | Handoffs, tool guardrails, sessions, traces, structured outputs, sandbox-agent concepts  | Provider reference adapter and compatibility test suite                       |
+| Claude Agent SDK             | Isolated SDK configuration, hooks, tools, MCP, local process ownership                   | Provider reference adapter; avoid managed-agent dependency for core execution |
+| Microsoft Agent Framework    | Harness, graph workflows, type-safe routing, checkpoints, HITL                           | Strong reference for GraphPlan and orchestration patterns                     |
+| Microsoft Conductor          | Deterministic YAML/graph orchestration with explicit context flow                        | Borrow deterministic routing and diffable workflow ideas                      |
+| Pydantic AI                  | Typed agents and official Temporal durability integration                                | Python lab and contract reference only                                        |
+| Mastra                       | Workspaces, tool permissions, workflow snapshots, suspend/resume                         | TypeScript reference; borrow workspace capability concepts                    |
+| LangGraph                    | Explicit state graphs, interrupts, checkpointing, time travel                            | Research/reference only; Temporal remains canonical                           |
+| LangChain / Deep Agents      | Fast prototype loops, middleware, HITL patterns                                          | Python lab only                                                               |
+| Langflow                     | Visual prototyping                                                                       | Optional local profile only; no production authority                          |
+| Letta                        | Persistent memory blocks and attach/detach semantics                                     | Optional adapter; Verevon owns memory schema and policy                       |
+| MCP                          | Tool interoperability                                                                    | Use protocol SDK; gate through capability-core                                |
+| ACP                          | Agent-client interoperability                                                            | Add when external agent clients need Model Plane access                       |
+| GraphLoop pattern            | Immutable plan version, explicit nodes, verification, recovery edges                     | Build as native Model Plane execution model                                   |
 
 ---
 
@@ -264,25 +264,25 @@ The key principle:
 
 ```ts
 interface GraphPlan {
-  planId: string;
-  version: number;
-  tenantId: string;
-  runId: string;
+	planId: string;
+	version: number;
+	tenantId: string;
+	runId: string;
 
-  objective: string;
-  successCriteria: SuccessCriterion[];
-  constraints: Constraint[];
+	objective: string;
+	successCriteria: SuccessCriterion[];
+	constraints: Constraint[];
 
-  nodes: GraphNode[];
-  edges: GraphEdge[];
+	nodes: GraphNode[];
+	edges: GraphEdge[];
 
-  createdBy: ActorRef;
-  createdAt: string;
-  supersedesVersion?: number;
+	createdBy: ActorRef;
+	createdAt: string;
+	supersedesVersion?: number;
 
-  policySnapshotId: string;
-  capabilitySnapshotId: string;
-  modelRoutingSnapshotId: string;
+	policySnapshotId: string;
+	capabilitySnapshotId: string;
+	modelRoutingSnapshotId: string;
 }
 ```
 
@@ -292,34 +292,34 @@ A plan version is immutable after execution starts. Replanning creates a new ver
 
 ```ts
 interface GraphNode {
-  nodeId: string;
-  kind:
-    | "reason"
-    | "retrieve"
-    | "tool"
-    | "browser"
-    | "human"
-    | "verify"
-    | "transform"
-    | "subagent"
-    | "join"
-    | "finish";
+	nodeId: string;
+	kind:
+		| "reason"
+		| "retrieve"
+		| "tool"
+		| "browser"
+		| "human"
+		| "verify"
+		| "transform"
+		| "subagent"
+		| "join"
+		| "finish";
 
-  inputSchema: JsonSchema;
-  outputSchema: JsonSchema;
+	inputSchema: JsonSchema;
+	outputSchema: JsonSchema;
 
-  dependencies: string[];
-  capabilityQuery?: CapabilityQuery;
-  selectedCapabilityId?: string;
+	dependencies: string[];
+	capabilityQuery?: CapabilityQuery;
+	selectedCapabilityId?: string;
 
-  riskClass: "none" | "read" | "low" | "medium" | "high";
-  approvalPolicyId?: string;
+	riskClass: "none" | "read" | "low" | "medium" | "high";
+	approvalPolicyId?: string;
 
-  modelPolicy?: ModelPolicy;
-  retryPolicy: RetryPolicy;
-  timeoutPolicy: TimeoutPolicy;
-  verificationPolicy: VerificationPolicy;
-  recoveryPolicy: RecoveryPolicy;
+	modelPolicy?: ModelPolicy;
+	retryPolicy: RetryPolicy;
+	timeoutPolicy: TimeoutPolicy;
+	verificationPolicy: VerificationPolicy;
+	recoveryPolicy: RecoveryPolicy;
 }
 ```
 
@@ -420,7 +420,7 @@ Description, RiskLevel, LazyLoad, Scope, Enabled, IdempotencyKey, OrgID,
 EnabledForScopes, RolloutState, AvailabilityState, ExecutionMode,
 CostClass) and the richer persisted `registry.CapabilityRow`
 (`internal/registry/capabilities_store.go:24-58` — adds SchemaInput/Output
-JSON schemas plus *measured*, not estimated, P95LatencyMS/MeanCostUSD).
+JSON schemas plus _measured_, not estimated, P95LatencyMS/MeanCostUSD).
 `RiskLevel`/`RolloutState`/`AvailabilityState` are rough proxies for this
 proposal's `riskClass`/`readiness`. Genuinely missing: `ownerService`,
 `intents`, `sideEffect`, `reversible`, `requiredScopes`, `residencyClasses`,
@@ -430,31 +430,31 @@ structs rather than introducing a parallel schema.
 
 ```ts
 interface CapabilityDefinition {
-  capabilityId: string;
-  version: number;
-  ownerService: string;
+	capabilityId: string;
+	version: number;
+	ownerService: string;
 
-  description: string;
-  intents: string[];
-  inputSchema: JsonSchema;
-  outputSchema: JsonSchema;
+	description: string;
+	intents: string[];
+	inputSchema: JsonSchema;
+	outputSchema: JsonSchema;
 
-  sideEffect: boolean;
-  reversible: boolean;
-  riskClass: "read" | "low" | "medium" | "high";
+	sideEffect: boolean;
+	reversible: boolean;
+	riskClass: "read" | "low" | "medium" | "high";
 
-  requiredScopes: string[];
-  residencyClasses: string[];
-  privacyClasses: string[];
+	requiredScopes: string[];
+	residencyClasses: string[];
+	privacyClasses: string[];
 
-  estimatedLatencyMs: number;
-  estimatedCost: CostEstimate;
+	estimatedLatencyMs: number;
+	estimatedCost: CostEstimate;
 
-  verificationCapabilityId?: string;
-  approvalPolicyId?: string;
+	verificationCapabilityId?: string;
+	approvalPolicyId?: string;
 
-  readiness: "disabled" | "experimental" | "ready" | "degraded";
-  attestationKeyId: string;
+	readiness: "disabled" | "experimental" | "ready" | "degraded";
+	attestationKeyId: string;
 }
 ```
 
@@ -472,8 +472,8 @@ runtime, per-invocation signed grant. This section's proposal is the
 correct fix for a real gap, not a restatement of something already covered
 by the health-attestation heartbeat (§34's capability-core plan and the
 2026-07-30 code-interpreter/canvas health-attestation work are a different,
-narrower thing: "is this capability's *backend* alive," not "is *this
-specific call* authorized").
+narrower thing: "is this capability's _backend_ alive," not "is _this
+specific call_ authorized").
 
 Before an effectful call, `capability-core` should mint a short-lived, exact attestation bound to:
 
@@ -542,23 +542,23 @@ A planning step, structured extraction step, tool-selection step, browser visual
 
 ```ts
 interface AgentRoutingContext {
-  tenantId: string;
-  runId: string;
-  nodeId: string;
+	tenantId: string;
+	runId: string;
+	nodeId: string;
 
-  taskClass: string;
-  stepClass: string;
-  riskClass: string;
+	taskClass: string;
+	stepClass: string;
+	riskClass: string;
 
-  contextTokens: number;
-  expectedOutputTokens: number;
-  modality: "text" | "vision" | "audio" | "browser" | "code";
+	contextTokens: number;
+	expectedOutputTokens: number;
+	modality: "text" | "vision" | "audio" | "browser" | "code";
 
-  availableModels: ModelProfile[];
-  previousAttempts: AttemptSummary[];
-  currentBudget: BudgetState;
-  latencySloMs: number;
-  privacyPolicy: PrivacyPolicy;
+	availableModels: ModelProfile[];
+	previousAttempts: AttemptSummary[];
+	currentBudget: BudgetState;
+	latencySloMs: number;
+	privacyPolicy: PrivacyPolicy;
 }
 ```
 
@@ -582,14 +582,14 @@ High-risk ensemble:
 
 ```ts
 interface RoutingDecision {
-  modelId: string;
-  fallbackModelIds: string[];
-  reasonCodes: string[];
-  confidence: number;
-  predictedQuality: number;
-  predictedCost: number;
-  predictedLatencyMs: number;
-  requiresIndependentVerifier: boolean;
+	modelId: string;
+	fallbackModelIds: string[];
+	reasonCodes: string[];
+	confidence: number;
+	predictedQuality: number;
+	predictedCost: number;
+	predictedLatencyMs: number;
+	requiresIndependentVerifier: boolean;
 }
 ```
 
@@ -618,19 +618,19 @@ The router should learn from **verified environmental outcomes**, not only model
 
 The runtime should classify decisions by what should control them.
 
-| Decision | Preferred control |
-|---|---|
-| Tenant permission | Deterministic policy |
-| Approval requirement | Deterministic policy |
-| Idempotency and retry | Runtime policy |
-| Known workflow branch | Deterministic graph edge |
-| Capability relevance | Retrieval/ranker with policy filter |
-| Ambiguous plan | LLM planner |
-| Model selection | Router based on task, outcomes, cost |
-| Completion | Deterministic verifier first |
-| Recovery escalation | Bounded runtime policy |
-| Memory promotion | Review workflow, not automatic append |
-| Skill promotion | Eval and approval gate |
+| Decision              | Preferred control                     |
+| --------------------- | ------------------------------------- |
+| Tenant permission     | Deterministic policy                  |
+| Approval requirement  | Deterministic policy                  |
+| Idempotency and retry | Runtime policy                        |
+| Known workflow branch | Deterministic graph edge              |
+| Capability relevance  | Retrieval/ranker with policy filter   |
+| Ambiguous plan        | LLM planner                           |
+| Model selection       | Router based on task, outcomes, cost  |
+| Completion            | Deterministic verifier first          |
+| Recovery escalation   | Bounded runtime policy                |
+| Memory promotion      | Review workflow, not automatic append |
+| Skill promotion       | Eval and approval gate                |
 
 ### 10.1 Decision confidence
 
@@ -703,13 +703,13 @@ Each subagent receives an explicit context packet:
 
 ```ts
 interface SubagentContextPacket {
-  objective: string;
-  allowedCapabilities: string[];
-  evidenceRefs: string[];
-  relevantArtifacts: string[];
-  constraints: string[];
-  outputSchema: JsonSchema;
-  tokenBudget: number;
+	objective: string;
+	allowedCapabilities: string[];
+	evidenceRefs: string[];
+	relevantArtifacts: string[];
+	constraints: string[];
+	outputSchema: JsonSchema;
+	tokenBudget: number;
 }
 ```
 
@@ -721,39 +721,39 @@ Do not share full conversation history by default.
 
 Memory should be split into distinct authorities.
 
-| Memory class | Owner | Purpose |
-|---|---|---|
-| Working memory | `session-core` | Current run state and active context |
-| Conversation memory | `session-core` / Application projection | Multi-turn continuity |
-| Verified company knowledge | Data Plane | Durable facts with provenance |
-| Episodic task memory | Model Plane | Previous runs, outcomes, corrections |
-| Procedural memory | `capability-core` | Skills, workflows, successful procedures |
-| Optional semantic memory backend | `letta-bridge` | Experimental retrieval/compaction adapter |
+| Memory class                     | Owner                                   | Purpose                                   |
+| -------------------------------- | --------------------------------------- | ----------------------------------------- |
+| Working memory                   | `session-core`                          | Current run state and active context      |
+| Conversation memory              | `session-core` / Application projection | Multi-turn continuity                     |
+| Verified company knowledge       | Data Plane                              | Durable facts with provenance             |
+| Episodic task memory             | Model Plane                             | Previous runs, outcomes, corrections      |
+| Procedural memory                | `capability-core`                       | Skills, workflows, successful procedures  |
+| Optional semantic memory backend | `letta-bridge`                          | Experimental retrieval/compaction adapter |
 
 ### 12.1 Memory record
 
 ```ts
 interface AgentMemoryRecord {
-  memoryId: string;
-  tenantId: string;
-  subjectId?: string;
-  agentId?: string;
+	memoryId: string;
+	tenantId: string;
+	subjectId?: string;
+	agentId?: string;
 
-  class: "episodic" | "procedural" | "preference" | "working_summary";
-  content: string;
+	class: "episodic" | "procedural" | "preference" | "working_summary";
+	content: string;
 
-  sourceRefs: string[];
-  runId?: string;
-  confidence: number;
+	sourceRefs: string[];
+	runId?: string;
+	confidence: number;
 
-  status: "proposed" | "verified" | "rejected" | "superseded";
-  validFrom?: string;
-  validUntil?: string;
-  supersedesId?: string;
+	status: "proposed" | "verified" | "rejected" | "superseded";
+	validFrom?: string;
+	validUntil?: string;
+	supersedesId?: string;
 
-  privacyClass: string;
-  retentionClass: string;
-  createdAt: string;
+	privacyClass: string;
+	retentionClass: string;
+	createdAt: string;
 }
 ```
 
@@ -769,7 +769,7 @@ run outcome
     -> promote or reject
 ```
 
-Letta may index or retrieve approved memory, but it must not define the canonical schema or bypass Velion policy.
+Letta may index or retrieve approved memory, but it must not define the canonical schema or bypass Verevon policy.
 
 ---
 
@@ -789,9 +789,9 @@ This is a genuine, narrower, already-running instance of §13.3's "failure
 learning" loop: it does not do the full promotion checklist below
 (regression tests, security scan, tenant/global promotion policy), but it
 is live, catching real signal today, not a proposal. Recommendation: treat
-§13.2's full promotion checklist as the target state for *turning a learned
-behavior into a new active skill*, and treat the quarantine system as the
-already-solved *demoting a bad skill* half of the lifecycle — extend it,
+§13.2's full promotion checklist as the target state for _turning a learned
+behavior into a new active skill_, and treat the quarantine system as the
+already-solved _demoting a bad skill_ half of the lifecycle — extend it,
 do not replace it, and note recovery from quarantine is still deliberately
 manual (the system can't yet distinguish a policy quarantine from a human
 disabling a skill on purpose).
@@ -808,25 +808,25 @@ Implement it as a native skill lifecycle.
 
 ```ts
 interface AgentSkill {
-  skillId: string;
-  version: number;
-  tenantId?: string;
+	skillId: string;
+	version: number;
+	tenantId?: string;
 
-  description: string;
-  triggerExamples: string[];
-  instructions: string;
+	description: string;
+	triggerExamples: string[];
+	instructions: string;
 
-  requiredKnowledge: string[];
-  allowedCapabilities: string[];
+	requiredKnowledge: string[];
+	allowedCapabilities: string[];
 
-  inputSchema: JsonSchema;
-  outputSchema: JsonSchema;
+	inputSchema: JsonSchema;
+	outputSchema: JsonSchema;
 
-  approvalRules: ApprovalRule[];
-  verificationSteps: VerificationStep[];
+	approvalRules: ApprovalRule[];
+	verificationSteps: VerificationStep[];
 
-  evalSuiteId: string;
-  status: "draft" | "candidate" | "active" | "deprecated";
+	evalSuiteId: string;
+	status: "draft" | "candidate" | "active" | "deprecated";
 }
 ```
 
@@ -878,25 +878,25 @@ Do not scope this section as "build durable approvals" — scope it as
 
 ```ts
 interface ApprovalRequest {
-  approvalId: string;
-  tenantId: string;
-  runId: string;
-  graphNodeId: string;
+	approvalId: string;
+	tenantId: string;
+	runId: string;
+	graphNodeId: string;
 
-  actionSummary: string;
-  capabilityId: string;
-  exactArgumentsDigest: string;
-  semanticDiff?: SemanticDiff;
+	actionSummary: string;
+	capabilityId: string;
+	exactArgumentsDigest: string;
+	semanticDiff?: SemanticDiff;
 
-  evidenceRefs: string[];
-  riskClass: string;
-  reversible: boolean;
+	evidenceRefs: string[];
+	riskClass: string;
+	reversible: boolean;
 
-  allowedDecisions: Array<"approve" | "edit" | "reject" | "respond">;
-  requiredRoles: string[];
+	allowedDecisions: Array<"approve" | "edit" | "reject" | "respond">;
+	requiredRoles: string[];
 
-  expiresAt: string;
-  status: "pending" | "approved" | "edited" | "rejected" | "expired";
+	expiresAt: string;
+	status: "pending" | "approved" | "edited" | "rejected" | "expired";
 }
 ```
 
@@ -933,21 +933,21 @@ budget and stop conditions
 
 ```ts
 interface ContextManifest {
-  contextId: string;
-  runId: string;
-  nodeId: string;
+	contextId: string;
+	runId: string;
+	nodeId: string;
 
-  sections: Array<{
-    kind: string;
-    sourceRef: string;
-    tokenCount: number;
-    trustClass: string;
-    retentionClass: string;
-  }>;
+	sections: Array<{
+		kind: string;
+		sourceRef: string;
+		tokenCount: number;
+		trustClass: string;
+		retentionClass: string;
+	}>;
 
-  totalTokens: number;
-  compactionVersion: string;
-  redactionVersion: string;
+	totalTokens: number;
+	compactionVersion: string;
+	redactionVersion: string;
 }
 ```
 
@@ -985,19 +985,19 @@ Workspace
 
 ```ts
 interface SandboxLease {
-  leaseId: string;
-  tenantId: string;
-  runId: string;
-  nodeId: string;
+	leaseId: string;
+	tenantId: string;
+	runId: string;
+	nodeId: string;
 
-  backend: string;
-  capabilities: string[];
-  networkPolicyId: string;
-  secretRefs: string[];
+	backend: string;
+	capabilities: string[];
+	networkPolicyId: string;
+	secretRefs: string[];
 
-  acquiredAt: string;
-  expiresAt: string;
-  snapshotRef?: string;
+	acquiredAt: string;
+	expiresAt: string;
+	snapshotRef?: string;
 }
 ```
 
@@ -1115,11 +1115,11 @@ Do not save money by skipping verification on effectful operations. Reserve veri
 
 ### 19.1 Three eval layers
 
-| Layer | Question |
-|---|---|
-| Component eval | Does one model/tool/retriever work correctly? |
-| Harness eval | Does routing, context, recovery, and verification work? |
-| Product eval | Does the full task satisfy a customer outcome safely? |
+| Layer          | Question                                                |
+| -------------- | ------------------------------------------------------- |
+| Component eval | Does one model/tool/retriever work correctly?           |
+| Harness eval   | Does routing, context, recovery, and verification work? |
+| Product eval   | Does the full task satisfy a customer outcome safely?   |
 
 ### 19.2 Required metrics
 
@@ -1143,7 +1143,7 @@ Do not save money by skipping verification on effectful operations. Reserve veri
 Use provider SDKs and external frameworks as benchmark adapters:
 
 ```text
-Velion native runtime
+Verevon native runtime
 OpenAI Agents SDK adapter
 Claude Agent SDK adapter
 OpenHands SDK adapter
@@ -1249,15 +1249,15 @@ Model Plane should provide a small library of typed loop templates rather than e
 
 ### 21.1 Canonical loop families
 
-| Loop | Purpose | Typical owner |
-|---|---|---|
-| Goal loop *(acute pain already fixed, see note below)* | Move an objective toward verified completion | `execution-core` + Temporal |
-| Research loop | Find gaps, search, assess coverage, and synthesize | `orchestrator-core` |
-| Repair loop | Classify a failure, gather better evidence, and retry safely | `execution-core` |
-| Review loop | Generate, independently evaluate, revise, and re-evaluate | `execution-core` |
-| Knowledge-maintenance loop | Detect changed evidence and update dependent knowledge | Model Plane + Data Plane |
-| Skill-improvement loop | Turn repeated verified corrections into candidate procedures | `capability-core` |
-| Routing-learning loop | Use execution feedback to improve model/tool selection | `inference-core` + `cost-core` |
+| Loop                                                   | Purpose                                                      | Typical owner                  |
+| ------------------------------------------------------ | ------------------------------------------------------------ | ------------------------------ |
+| Goal loop _(acute pain already fixed, see note below)_ | Move an objective toward verified completion                 | `execution-core` + Temporal    |
+| Research loop                                          | Find gaps, search, assess coverage, and synthesize           | `orchestrator-core`            |
+| Repair loop                                            | Classify a failure, gather better evidence, and retry safely | `execution-core`               |
+| Review loop                                            | Generate, independently evaluate, revise, and re-evaluate    | `execution-core`               |
+| Knowledge-maintenance loop                             | Detect changed evidence and update dependent knowledge       | Model Plane + Data Plane       |
+| Skill-improvement loop                                 | Turn repeated verified corrections into candidate procedures | `capability-core`              |
+| Routing-learning loop                                  | Use execution feedback to improve model/tool selection       | `inference-core` + `cost-core` |
 
 **Verified 2026-08-03 — the goal loop's acute failure mode is already
 fixed, and simpler than this section proposes.** `MAX_TOOL_ROUNDS` was 3,
@@ -1268,7 +1268,7 @@ context-assembly reservation, and honest signaling when the tool phase is
 cut short. Live-verified before/after. **This means the full
 `LoopDefinition`/stall-detection apparatus below is not needed to fix the
 problem that most urgently motivated it** — the config/budget fix already
-did that. The apparatus remains genuinely valuable for the *other* loop
+did that. The apparatus remains genuinely valuable for the _other_ loop
 families in the table above (research, repair, review,
 knowledge-maintenance, skill-improvement, routing-learning), none of which
 have anything like it today — size and sequence this section for those,
@@ -1278,28 +1278,28 @@ not as an urgent fix for goal-loop starvation, which is closed.
 
 ```ts
 interface LoopDefinition {
-  loopId: string;
-  version: number;
-  kind:
-    | "goal"
-    | "research"
-    | "repair"
-    | "review"
-    | "knowledge_maintenance"
-    | "skill_improvement"
-    | "routing_learning";
+	loopId: string;
+	version: number;
+	kind:
+		| "goal"
+		| "research"
+		| "repair"
+		| "review"
+		| "knowledge_maintenance"
+		| "skill_improvement"
+		| "routing_learning";
 
-  initialGraphTemplateId: string;
-  progressFunctionId: string;
-  completionPolicyId: string;
-  stallPolicyId: string;
-  escalationPolicyId: string;
+	initialGraphTemplateId: string;
+	progressFunctionId: string;
+	completionPolicyId: string;
+	stallPolicyId: string;
+	escalationPolicyId: string;
 
-  maxIterations: number;
-  maxRepeatedState: number;
-  maxWallClockMs: number;
-  maxCost: number;
-  verificationReserve: number;
+	maxIterations: number;
+	maxRepeatedState: number;
+	maxWallClockMs: number;
+	maxCost: number;
+	verificationReserve: number;
 }
 ```
 
@@ -1320,14 +1320,14 @@ Do not let the model decide progress from prose alone. Track concrete deltas:
 
 ```ts
 interface LoopProgress {
-  iteration: number;
-  newEvidenceCount: number;
-  unresolvedRequirementCount: number;
-  verifiedRequirementCount: number;
-  repeatedStateCount: number;
-  newArtifactCount: number;
-  verifierScoreDelta?: number;
-  estimatedRemainingWork?: number;
+	iteration: number;
+	newEvidenceCount: number;
+	unresolvedRequirementCount: number;
+	verifiedRequirementCount: number;
+	repeatedStateCount: number;
+	newArtifactCount: number;
+	verifierScoreDelta?: number;
+	estimatedRemainingWork?: number;
 }
 ```
 
@@ -1347,20 +1347,20 @@ The harness should be an explicit object, not an implicit collection of prompts 
 
 ```ts
 interface AgentHarness {
-  harnessId: string;
-  version: number;
+	harnessId: string;
+	version: number;
 
-  environment: EnvironmentContract;
-  contextPolicy: ContextPolicy;
-  capabilityView: CapabilityView;
-  skillView: SkillView;
-  memoryView: MemoryView;
-  policySnapshot: PolicySnapshot;
-  workspaceLease?: WorkspaceLease;
-  verifierProfile: VerifierProfile;
-  budget: BudgetState;
-  autonomyLevel: AutonomyLevel;
-  traceContext: TraceContext;
+	environment: EnvironmentContract;
+	contextPolicy: ContextPolicy;
+	capabilityView: CapabilityView;
+	skillView: SkillView;
+	memoryView: MemoryView;
+	policySnapshot: PolicySnapshot;
+	workspaceLease?: WorkspaceLease;
+	verifierProfile: VerifierProfile;
+	budget: BudgetState;
+	autonomyLevel: AutonomyLevel;
+	traceContext: TraceContext;
 }
 ```
 
@@ -1372,15 +1372,15 @@ Store every nontrivial harness component as an explicit assumption:
 
 ```ts
 interface HarnessAssumption {
-  assumptionId: string;
-  statement: string;
-  compensatingComponent: string;
-  evidenceRefs: string[];
-  introducedAt: string;
-  lastValidatedAt: string;
-  modelFamilies: string[];
-  removalEvalSuiteId: string;
-  status: "active" | "challenged" | "obsolete";
+	assumptionId: string;
+	statement: string;
+	compensatingComponent: string;
+	evidenceRefs: string[];
+	introducedAt: string;
+	lastValidatedAt: string;
+	modelFamilies: string[];
+	removalEvalSuiteId: string;
+	status: "active" | "challenged" | "obsolete";
 }
 ```
 
@@ -1419,21 +1419,21 @@ A handoff packet must contain:
 
 ```ts
 interface AgentHandoff {
-  objective: string;
-  planVersion: number;
-  completedNodeIds: string[];
-  activeNodeId?: string;
-  remainingNodeIds: string[];
+	objective: string;
+	planVersion: number;
+	completedNodeIds: string[];
+	activeNodeId?: string;
+	remainingNodeIds: string[];
 
-  decisions: DecisionSummary[];
-  failedApproaches: FailureSummary[];
-  unresolvedQuestions: string[];
+	decisions: DecisionSummary[];
+	failedApproaches: FailureSummary[];
+	unresolvedQuestions: string[];
 
-  evidenceRefs: string[];
-  artifactRefs: string[];
-  verificationState: VerificationState;
-  budgetState: BudgetState;
-  recommendedNextAction: string;
+	evidenceRefs: string[];
+	artifactRefs: string[];
+	verificationState: VerificationState;
+	budgetState: BudgetState;
+	recommendedNextAction: string;
 }
 ```
 
@@ -1466,7 +1466,7 @@ Models and harnesses may change quickly. Execution, authorization, artifact, and
 
 ## 22. AI runtime efficiency and context encoding
 
-Velion should treat context encoding as a routed optimization problem. No single notation is best for every payload.
+Verevon should treat context encoding as a routed optimization problem. No single notation is best for every payload.
 
 ### 22.1 Canonical representation policy
 
@@ -1524,21 +1524,21 @@ Prefer CSV when the payload is purely tabular and no nested structure is needed.
 
 ```ts
 interface EncodingCandidate {
-  encoding: "json" | "compact_json" | "toon" | "csv" | "markdown" | "terse";
-  estimatedTokens: number;
-  encodeLatencyMs: number;
-  expectedAccuracy: number;
-  modelCompatibility: number;
+	encoding: "json" | "compact_json" | "toon" | "csv" | "markdown" | "terse";
+	estimatedTokens: number;
+	encodeLatencyMs: number;
+	expectedAccuracy: number;
+	modelCompatibility: number;
 }
 
 interface EncodingDecision {
-  encoding: EncodingCandidate["encoding"];
-  codecVersion: string;
-  reasonCodes: string[];
-  originalTokenEstimate: number;
-  encodedTokenEstimate: number;
-  expectedSavings: number;
-  schemaHash?: string;
+	encoding: EncodingCandidate["encoding"];
+	codecVersion: string;
+	reasonCodes: string[];
+	originalTokenEstimate: number;
+	encodedTokenEstimate: number;
+	expectedSavings: number;
+	schemaHash?: string;
 }
 ```
 
@@ -1553,7 +1553,7 @@ For each payload class, evaluate:
 - TOON;
 - CSV where valid;
 - Markdown table;
-- Velion terse format.
+- Verevon terse format.
 
 Measure:
 
@@ -1609,13 +1609,13 @@ Design context for provider prompt caching:
 
 ```ts
 interface PromptCacheProfile {
-  provider: string;
-  model: string;
-  stablePrefixHash: string;
-  policyVersion: string;
-  skillVersions: string[];
-  capabilitySchemaHashes: string[];
-  cacheTtlSeconds?: number;
+	provider: string;
+	model: string;
+	stablePrefixHash: string;
+	policyVersion: string;
+	skillVersions: string[];
+	capabilitySchemaHashes: string[];
+	cacheTtlSeconds?: number;
 }
 ```
 
@@ -1662,13 +1662,13 @@ Large results should move by immutable artifact reference:
 
 ```ts
 interface ArtifactHandle {
-  artifactRef: string;
-  mediaType: string;
-  schemaId?: string;
-  contentHash: string;
-  sizeBytes: number;
-  summary: string;
-  accessPolicyId: string;
+	artifactRef: string;
+	mediaType: string;
+	schemaId?: string;
+	contentHash: string;
+	sizeBytes: number;
+	summary: string;
+	accessPolicyId: string;
 }
 ```
 
@@ -1678,7 +1678,7 @@ Models receive summaries and selected projections. Runtime components transfer t
 
 ## 23. Capability intelligence and MCP tool-call optimization
 
-MCP is an interoperability protocol. Velion's canonical capability model remains `capability-core`.
+MCP is an interoperability protocol. Verevon's canonical capability model remains `capability-core`.
 
 ### 23.1 Progressive capability disclosure
 
@@ -1726,13 +1726,13 @@ Task
 
 ```ts
 interface CapabilitySearchRequest {
-  query: string;
-  taskClass: string;
-  desiredEffect: "read" | "write" | "execute";
-  requiredResourceTypes?: string[];
-  maxRiskClass?: string;
-  maxCandidates: number;
-  detailLevel: "summary" | "schema" | "examples";
+	query: string;
+	taskClass: string;
+	desiredEffect: "read" | "write" | "execute";
+	requiredResourceTypes?: string[];
+	maxRiskClass?: string;
+	maxCandidates: number;
+	detailLevel: "summary" | "schema" | "examples";
 }
 ```
 
@@ -1803,15 +1803,15 @@ Generated code must run with:
 
 ```ts
 interface ToolResultHandle {
-  handleId: string;
-  capabilityId: string;
-  artifactRef?: string;
-  schemaId?: string;
-  rowCount?: number;
-  sizeBytes: number;
-  summary: string;
-  projectionHints: string[];
-  expiresAt?: string;
+	handleId: string;
+	capabilityId: string;
+	artifactRef?: string;
+	schemaId?: string;
+	rowCount?: number;
+	sizeBytes: number;
+	summary: string;
+	projectionHints: string[];
+	expiresAt?: string;
 }
 ```
 
@@ -1830,10 +1830,10 @@ When the plan is sufficiently deterministic, compile tool steps into a typed cal
 
 ```ts
 interface ToolCallGraph {
-  nodes: ToolCallNode[];
-  edges: DataDependency[];
-  parallelGroups: string[][];
-  compensationPlan?: CompensationStep[];
+	nodes: ToolCallNode[];
+	edges: DataDependency[];
+	parallelGroups: string[][];
+	compensationPlan?: CompensationStep[];
 }
 ```
 
@@ -1926,24 +1926,24 @@ Research indicates that progressive disclosure becomes valuable as the skill/doc
 
 ```ts
 interface SkillPackage {
-  skillId: string;
-  version: string;
-  publisher: PublisherIdentity;
-  contentHash: string;
-  signature?: string;
+	skillId: string;
+	version: string;
+	publisher: PublisherIdentity;
+	contentHash: string;
+	signature?: string;
 
-  metadata: SkillMetadata;
-  instructionsRef: string;
-  resourceRefs: string[];
-  scriptRefs: string[];
-  graphTemplateRefs: string[];
-  evalSuiteId: string;
+	metadata: SkillMetadata;
+	instructionsRef: string;
+	resourceRefs: string[];
+	scriptRefs: string[];
+	graphTemplateRefs: string[];
+	evalSuiteId: string;
 
-  dependencies: SkillDependency[];
-  conflictsWith: string[];
-  allowedCapabilities: string[];
-  policyRequirements: string[];
-  status: "draft" | "candidate" | "active" | "deprecated" | "revoked";
+	dependencies: SkillDependency[];
+	conflictsWith: string[];
+	allowedCapabilities: string[];
+	policyRequirements: string[];
+	status: "draft" | "candidate" | "active" | "deprecated" | "revoked";
 }
 ```
 
@@ -1970,11 +1970,11 @@ Support typed dependencies rather than copy-pasting instructions.
 
 ```ts
 interface SkillDependency {
-  skillId: string;
-  versionRange: string;
-  required: boolean;
-  inputMapping?: Record<string, string>;
-  outputMapping?: Record<string, string>;
+	skillId: string;
+	versionRange: string;
+	required: boolean;
+	inputMapping?: Record<string, string>;
+	outputMapping?: Record<string, string>;
 }
 ```
 
@@ -2017,7 +2017,7 @@ repeated verified workflow or correction
   -> human/tenant promotion
 ```
 
-Self-evolving-skill research is promising, especially when skill generation and verification co-evolve. Velion should use it in an offline candidate pipeline, never as automatic production publication.
+Self-evolving-skill research is promising, especially when skill generation and verification co-evolve. Verevon should use it in an offline candidate pipeline, never as automatic production publication.
 
 ### 24.7 Skill supply-chain security
 
@@ -2114,23 +2114,23 @@ Purpose and schema
 
 ```ts
 interface WikiPageVersion {
-  pageId: string;
-  version: number;
-  title: string;
-  pageType: string;
-  bodyArtifactRef: string;
+	pageId: string;
+	version: number;
+	title: string;
+	pageType: string;
+	bodyArtifactRef: string;
 
-  sourceRefs: SourceEvidenceRef[];
-  wikilinks: string[];
-  claims: ClaimRecord[];
+	sourceRefs: SourceEvidenceRef[];
+	wikilinks: string[];
+	claims: ClaimRecord[];
 
-  validFrom?: string;
-  validUntil?: string;
-  supersedes?: string[];
+	validFrom?: string;
+	validUntil?: string;
+	supersedes?: string[];
 
-  generatedByRunId?: string;
-  reviewedBy?: string;
-  status: "proposed" | "accepted" | "superseded" | "rejected";
+	generatedByRunId?: string;
+	reviewedBy?: string;
+	status: "proposed" | "accepted" | "superseded" | "rejected";
 }
 ```
 
@@ -2214,14 +2214,14 @@ Visual RAG must preserve:
 
 ```ts
 interface VisualEvidenceRef {
-  documentId: string;
-  sourceVersion: string;
-  pageNumber: number;
-  region?: BoundingBox;
-  artifactRef: string;
-  textSpanIds: string[];
-  visualEmbeddingRef?: string;
-  evidenceType: "page" | "figure" | "chart" | "table" | "diagram" | "slide";
+	documentId: string;
+	sourceVersion: string;
+	pageNumber: number;
+	region?: BoundingBox;
+	artifactRef: string;
+	textSpanIds: string[];
+	visualEmbeddingRef?: string;
+	evidenceType: "page" | "figure" | "chart" | "table" | "diagram" | "slide";
 }
 ```
 
@@ -2247,19 +2247,19 @@ Support four paths:
 
 ```ts
 interface AudioKnowledgeUnit {
-  sourceId: string;
-  sourceVersion: string;
-  audioArtifactRef: string;
-  startMs: number;
-  endMs: number;
+	sourceId: string;
+	sourceVersion: string;
+	audioArtifactRef: string;
+	startMs: number;
+	endMs: number;
 
-  transcript?: string;
-  speakerId?: string;
-  language?: string;
-  textEmbeddingRef?: string;
-  audioEmbeddingRef?: string;
-  soundEvents?: string[];
-  confidence?: number;
+	transcript?: string;
+	speakerId?: string;
+	language?: string;
+	textEmbeddingRef?: string;
+	audioEmbeddingRef?: string;
+	soundEvents?: string[];
+	confidence?: number;
 }
 ```
 
@@ -2349,7 +2349,7 @@ A2A
 ACP/IDE protocols
   interactive agent clients and coding shells where useful
 
-Velion internal RPC/events
+Verevon internal RPC/events
   trusted first-party execution, state, and policy contracts
 ```
 
@@ -2357,7 +2357,7 @@ Velion internal RPC/events
 
 A2A 1.0 provides agent discovery, Agent Cards, task lifecycle, streaming, files, and structured data across JSON-RPC, HTTP+JSON, and gRPC bindings.
 
-Velion should add A2A only as an edge adapter when external or separately governed agents need to collaborate.
+Verevon should add A2A only as an edge adapter when external or separately governed agents need to collaborate.
 
 ### 27.2 Agent Card import
 
@@ -2365,18 +2365,18 @@ Treat an Agent Card as an untrusted capability advertisement.
 
 ```ts
 interface ImportedAgentProfile {
-  agentId: string;
-  provider: string;
-  endpoint: string;
-  protocolVersion: string;
-  skills: ImportedAgentSkill[];
-  inputModes: string[];
-  outputModes: string[];
-  authSchemes: string[];
+	agentId: string;
+	provider: string;
+	endpoint: string;
+	protocolVersion: string;
+	skills: ImportedAgentSkill[];
+	inputModes: string[];
+	outputModes: string[];
+	authSchemes: string[];
 
-  trustState: "unverified" | "verified" | "approved" | "revoked";
-  attestationRef?: string;
-  policyId: string;
+	trustState: "unverified" | "verified" | "approved" | "revoked";
+	attestationRef?: string;
+	policyId: string;
 }
 ```
 
@@ -2395,20 +2395,20 @@ Import into `capability-core`, then apply:
 
 ```ts
 interface AgentDelegationRequest {
-  taskId: string;
-  objective: string;
-  inputArtifactRefs: string[];
-  outputSchema: JsonSchema;
-  allowedEffects: string[];
-  forbiddenEffects: string[];
-  dataPolicy: DataHandlingPolicy;
-  budget: DelegationBudget;
-  deadline: string;
-  verificationRequirements: VerificationRequirement[];
+	taskId: string;
+	objective: string;
+	inputArtifactRefs: string[];
+	outputSchema: JsonSchema;
+	allowedEffects: string[];
+	forbiddenEffects: string[];
+	dataPolicy: DataHandlingPolicy;
+	budget: DelegationBudget;
+	deadline: string;
+	verificationRequirements: VerificationRequirement[];
 }
 ```
 
-Remote agents do not receive Velion internal memory, tools, or credentials unless explicitly projected by policy.
+Remote agents do not receive Verevon internal memory, tools, or credentials unless explicitly projected by policy.
 
 ### 27.4 Internal subagents versus external agents
 
@@ -2426,13 +2426,13 @@ The next performance frontier is not always a larger model. It is deciding **whe
 
 ```ts
 interface TestTimeScalingPolicy {
-  baseRouteId: string;
-  maxExplorations: number;
-  maxParallelAttempts: number;
-  maxVerifierCalls: number;
-  maxCost: number;
-  stopConfidence: number;
-  minimumExpectedValueGain: number;
+	baseRouteId: string;
+	maxExplorations: number;
+	maxParallelAttempts: number;
+	maxVerifierCalls: number;
+	maxCost: number;
+	stopConfidence: number;
+	minimumExpectedValueGain: number;
 }
 ```
 
@@ -2465,16 +2465,16 @@ Long-horizon attempts should be converted into compact, reusable representations
 
 ```ts
 interface TrajectorySummary {
-  taskClass: string;
-  approach: string;
-  keyHypotheses: string[];
-  progress: string[];
-  successfulActions: string[];
-  failureModes: string[];
-  unresolvedIssues: string[];
-  evidenceRefs: string[];
-  verifiedOutcome: string;
-  cost: number;
+	taskClass: string;
+	approach: string;
+	keyHypotheses: string[];
+	progress: string[];
+	successfulActions: string[];
+	failureModes: string[];
+	unresolvedIssues: string[];
+	evidenceRefs: string[];
+	verifiedOutcome: string;
+	cost: number;
 }
 ```
 
@@ -2517,7 +2517,7 @@ Keep this bounded by `cost-core` and policy.
 
 ## 29. Self-improving platform flywheel
 
-Velion should improve from verified use without allowing production agents to silently rewrite themselves.
+Verevon should improve from verified use without allowing production agents to silently rewrite themselves.
 
 ### 29.1 Correction-to-eval loop
 
@@ -2639,16 +2639,16 @@ Agents need a controlled representation of what is known, believed, proposed, au
 
 ```ts
 type EpistemicState =
-  | "observed"
-  | "retrieved"
-  | "inferred"
-  | "assumed"
-  | "proposed"
-  | "approved"
-  | "executed"
-  | "verified"
-  | "disputed"
-  | "superseded";
+	| "observed"
+	| "retrieved"
+	| "inferred"
+	| "assumed"
+	| "proposed"
+	| "approved"
+	| "executed"
+	| "verified"
+	| "disputed"
+	| "superseded";
 ```
 
 Never collapse these into one generic memory record.
@@ -2657,22 +2657,22 @@ Never collapse these into one generic memory record.
 
 ```ts
 interface WorldStateRecord<T> {
-  recordId: string;
-  subject: string;
-  predicate: string;
-  value: T;
-  epistemicState: EpistemicState;
+	recordId: string;
+	subject: string;
+	predicate: string;
+	value: T;
+	epistemicState: EpistemicState;
 
-  evidenceRefs: string[];
-  actorId: string;
-  observedAt?: string;
-  validFrom?: string;
-  validUntil?: string;
-  supersedes?: string[];
+	evidenceRefs: string[];
+	actorId: string;
+	observedAt?: string;
+	validFrom?: string;
+	validUntil?: string;
+	supersedes?: string[];
 
-  confidence?: number;
-  verificationMethod?: string;
-  privacyClass: string;
+	confidence?: number;
+	verificationMethod?: string;
+	privacyClass: string;
 }
 ```
 
@@ -2731,29 +2731,29 @@ Model improvements reduce failure probability but do not automatically limit bla
 
 ```ts
 interface AuthorityBudget {
-  autonomyLevel: 0 | 1 | 2 | 3 | 4 | 5;
-  allowedCapabilities: string[];
-  allowedResourceScopes: string[];
-  maxExternalEffects: number;
-  maxMonetaryValue?: number;
-  maxDataRows?: number;
-  allowedDomains?: string[];
-  egressPolicyId: string;
-  approvalPolicyId: string;
-  expiresAt: string;
+	autonomyLevel: 0 | 1 | 2 | 3 | 4 | 5;
+	allowedCapabilities: string[];
+	allowedResourceScopes: string[];
+	maxExternalEffects: number;
+	maxMonetaryValue?: number;
+	maxDataRows?: number;
+	allowedDomains?: string[];
+	egressPolicyId: string;
+	approvalPolicyId: string;
+	expiresAt: string;
 }
 ```
 
 Suggested levels:
 
-| Level | Meaning |
-|---:|---|
-| 0 | Answer only |
-| 1 | Draft or recommend |
-| 2 | Prepare exact action for approval |
-| 3 | Execute reversible low-risk actions |
-| 4 | Execute specifically approved effects |
-| 5 | Run bounded unattended workflow within an authority budget |
+| Level | Meaning                                                    |
+| ----: | ---------------------------------------------------------- |
+|     0 | Answer only                                                |
+|     1 | Draft or recommend                                         |
+|     2 | Prepare exact action for approval                          |
+|     3 | Execute reversible low-risk actions                        |
+|     4 | Execute specifically approved effects                      |
+|     5 | Run bounded unattended workflow within an authority budget |
 
 ### 31.3 Containment controls
 
@@ -2895,7 +2895,7 @@ Automatically freeze or roll back routes that exceed regression thresholds.
 
 ### 32.7 Unified evaluation adapter
 
-Build a lab interface separating benchmark, harness, and environment so Velion can compare:
+Build a lab interface separating benchmark, harness, and environment so Verevon can compare:
 
 - native Model Plane;
 - provider SDK harnesses;
@@ -2941,7 +2941,7 @@ first** (see §1a); the rest of the original list follows unchanged:
 - add reservation/commit semantics to `cost-core`'s already-durable ledger
   (not "make it durable" — done);
 - implement the harness contract and assumption registry;
-- add TOON/JSON encoding *routing* (the TOON encoder itself already ships
+- add TOON/JSON encoding _routing_ (the TOON encoder itself already ships
   at 3 fixed call sites — this is the dynamic-selection layer on top);
 - implement progressive capability disclosure (confirmed greenfield);
 - add sandboxed MCP code mode and result handles (confirmed greenfield);
@@ -2984,16 +2984,16 @@ first** (see §1a); the rest of the original list follows unchanged:
 
 ### 33.5 Proposed new first-party components
 
-| Component | Responsibility |
-|---|---|
-| `harness-registry` | Version harnesses, assumptions, ablations, and compatibility |
-| `codec-rs` | JSON/TOON/terse encoding, token estimation, codec benchmarks |
-| `tool-code-runtime` | Sandboxed generated code over selected capability wrappers |
-| `skill-compiler` | Compile skill packages to graph/context/policy/verification plans |
-| `optimization-lab-py` | DSPy/GEPA, route and skill optimization experiments |
-| `world-state-core` | Epistemic states, temporal validity, reconciliation |
-| `agent-interoperability` | Optional A2A/ACP edge adapters |
-| `multimodal-context` | Visual/audio/video evidence planning and context assembly |
+| Component                | Responsibility                                                    |
+| ------------------------ | ----------------------------------------------------------------- |
+| `harness-registry`       | Version harnesses, assumptions, ablations, and compatibility      |
+| `codec-rs`               | JSON/TOON/terse encoding, token estimation, codec benchmarks      |
+| `tool-code-runtime`      | Sandboxed generated code over selected capability wrappers        |
+| `skill-compiler`         | Compile skill packages to graph/context/policy/verification plans |
+| `optimization-lab-py`    | DSPy/GEPA, route and skill optimization experiments               |
+| `world-state-core`       | Epistemic states, temporal validity, reconciliation               |
+| `agent-interoperability` | Optional A2A/ACP edge adapters                                    |
+| `multimodal-context`     | Visual/audio/video evidence planning and context assembly         |
 
 These may begin as modules inside existing services. Do not create a microservice unless scaling, isolation, language/runtime, or ownership requires it.
 
@@ -3246,7 +3246,7 @@ down-the-stack security audit (§20).
    item closed).
 8. ~~Make cost records durable~~ — **DONE** (§18): `cost-core` is
    Postgres-backed by default in production. Replace this item with
-   *add reservation/commit semantics to the existing durable ledger*,
+   _add reservation/commit semantics to the existing durable ledger_,
    which is the real remaining gap.
 9. Make provider/capability readiness truthful.
 10. Standardize event envelopes and schema versions.
@@ -3321,7 +3321,7 @@ The Model Plane improvement program is successful when:
 ## 38. Recommended final posture
 
 ```text
-Velion-owned control plane
+Verevon-owned control plane
   - graph execution
   - capability registry
   - policy and approval
@@ -3360,7 +3360,7 @@ The Model Plane should become a **governed agent harness with explicit graph exe
 
 ## 39. Research references
 
-### Velion and reviewed repositories
+### Verevon and reviewed repositories
 
 - OpenHands: https://github.com/OpenHands/OpenHands
 - OpenHands Software Agent SDK: https://github.com/OpenHands/software-agent-sdk
@@ -3437,7 +3437,6 @@ The Model Plane should become a **governed agent harness with explicit graph exe
 - AgentCompass: https://arxiv.org/abs/2607.13705
 - General Agent Evaluation / Exgentic: https://arxiv.org/abs/2602.22953
 - AgentNoiseBench: https://arxiv.org/abs/2602.11348
-
 
 ### Visual, audio, and cross-modal retrieval
 

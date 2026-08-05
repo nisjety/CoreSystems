@@ -1,10 +1,10 @@
 // Package internalkey enforces a boot-time format check on the cluster-wide
 // internal API key.
 //
-// G40 (velion-gap.md §8.29): three production incidents — G30, §8.23, §8.27 —
+// G40 (verevon-gap.md §8.29): three production incidents — G30, §8.23, §8.27 —
 // were caused by a service starting with a placeholder / drifted internal
 // API key, and the mismatch only surfacing on the first request that needed
-// it. Velion closed its side in §8.27; G40 mirrors the gate in CP Go
+// it. Verevon closed its side in §8.27; G40 mirrors the gate in CP Go
 // services so a misconfigured CP container also refuses to start (in release
 // mode) rather than serve a green `/health` and 401 every cross-service
 // call.
@@ -25,7 +25,7 @@ import (
 )
 
 // PlaceholderPrefixes lists the values the helper recognises as
-// placeholders. Matches velion's `scripts/check-internal-api-keys.mjs` and
+// placeholders. Matches verevon's `scripts/check-internal-api-keys.mjs` and
 // `src/lib/server/internal-api-key-assertion.ts` so the cross-language
 // behaviour is consistent.
 var placeholderPrefixes = []string{

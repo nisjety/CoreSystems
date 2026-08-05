@@ -41,7 +41,7 @@
 
 | Service | Port | Auth | Who calls it | Owns |
 |---|---|---|---|---|
-| `quarry-edge-rs` | 8082 | **JWT** (per-tenant audience token; org from `claims.org_id`) + SSRF guards | external clients, the Velion gateway, other planes | execution (`/v1/scrape\|crawl\|extract\|batch\|map\|search\|answer`), browser profiles (`/v1/profiles…`), SSE; **forwards** registry reads/writes to control |
+| `quarry-edge-rs` | 8082 | **JWT** (per-tenant audience token; org from `claims.org_id`) + SSRF guards | external clients, the Verevon gateway, other planes | execution (`/v1/scrape\|crawl\|extract\|batch\|map\|search\|answer`), browser profiles (`/v1/profiles…`), SSE; **forwards** registry reads/writes to control |
 | `quarry-orchestrator-go` | — | internal | edge (durable path) | Temporal workflows, schedule firing, pause/resume/backfill, webhook delivery, retries |
 | `quarry-control-go` | 8081 | **HMAC** (`X-Quarry-Sig*`, `QUARRY_INTERNAL_SECRET`; signer = `crates/quarry-edge/src/internal_auth.rs`) | **edge / orchestrator / runtime only**, on a private network | durable system-of-record (jobs, schedules, sources, snapshots, artifacts, profiles, event log, webhooks) in Postgres + the dispatcher/cron |
 
@@ -51,9 +51,9 @@ Why this matters for callers:
 - **Control does not expose execution or live-profile endpoints.** `/v1/scrape|crawl|extract|batch` and `/v1/profiles/{id}/restore_probe` exist on **edge only**; control holds the durable `/v1/jobs` registry and a different `/v1/restore` shape. Wiring a dashboard/registry consumer to control 404s those calls.
 - **Edge's registry surface is a forwarding proxy.** Edge's `/v1/jobs`, `/v1/schedules`, `/v1/sources`, `/v1/runs/{id}/events` forward to `control_base_url` (default `http://quarry-control:8081`) over HMAC; when `control_base_url` is unset they return empty pages (dev/test). So edge is the contract surface even for "just reading the registry."
 
-Practical consequence: the Velion v3 gateway's `ingestions`, `knowledge`, and `search` domains all target `QUARRY_EDGE_URL` with a minted `quarry` audience token. `quarry-control` is never a gateway/cross-plane upstream — see also `CROSS_PLANE_AUTH.md`.
+Practical consequence: the Verevon v3 gateway's `ingestions`, `knowledge`, and `search` domains all target `QUARRY_EDGE_URL` with a minted `quarry` audience token. `quarry-control` is never a gateway/cross-plane upstream — see also `CROSS_PLANE_AUTH.md`.
 
-The one current exception is velionv3's **onboarding** crawl handlers, which post to control `/v1/jobs/` directly. That path works only because control runs in HMAC **rollout mode** (unsigned requests trusted on the private network); it carries no org scoping and is rejected once `QUARRY_INTERNAL_HMAC_REQUIRED=1`. It is a known wart to migrate onto edge — not a pattern to extend.
+The one current exception is verevonv3's **onboarding** crawl handlers, which post to control `/v1/jobs/` directly. That path works only because control runs in HMAC **rollout mode** (unsigned requests trusted on the private network); it carries no org scoping and is rejected once `QUARRY_INTERNAL_HMAC_REQUIRED=1`. It is a known wart to migrate onto edge — not a pattern to extend.
 
 ## Donor and competitor strategy
 

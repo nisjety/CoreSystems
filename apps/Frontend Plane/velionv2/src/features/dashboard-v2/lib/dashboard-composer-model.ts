@@ -26,7 +26,7 @@ export type ComposerSettings = {
   tone: ComposerTone;
 };
 
-export type DashboardComposerModel = "GPT-4o Mini" | "GPT-4.1" | "Claude Sonnet" | "Velion Reasoner";
+export type DashboardComposerModel = "GPT-4o Mini" | "GPT-4.1" | "Claude Sonnet" | "Verevon Reasoner";
 
 export type DashboardComposerProps = {
   browseWeb: boolean;

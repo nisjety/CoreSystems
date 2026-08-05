@@ -1,6 +1,6 @@
 // Package dataplane pushes factual, non-fabricated evidence into Data
 // Plane v2's documents-api so shipping history becomes discoverable via
-// Velion's knowledge/retrieval surface (citations, chat grounding) — the
+// Verevon's knowledge/retrieval surface (citations, chat grounding) — the
 // "Ingestion Plane persists durable knowledge through Data Plane
 // contracts only" architecture rule. Ports integration-corev2's
 // DataPlaneDocumentsClient (internal/handoff/dataplane.go) verbatim: same

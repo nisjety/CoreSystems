@@ -3,7 +3,7 @@
 //! `org-core`'s `PublishGDPRErasureFanout` (both the explicit immediate
 //! hard-delete path and the 30-day retention cron) and `user-core`'s
 //! per-user erasure saga both publish onto the shared
-//! `velion.gdpr.erasure.requested` fan-out. This module decides which of
+//! `verevon.gdpr.erasure.requested` fan-out. This module decides which of
 //! those events this crate must act on, and performs the actual hard-purge
 //! of every org-scoped row session-core owns: threads/messages,
 //! runs/checkpoints/subagent edges, plans/plan_steps/todos/approvals, the
@@ -38,7 +38,7 @@ use crate::store::Pool;
 
 const MAX_ID_LEN: usize = 255;
 
-/// Wire shape of one `velion.gdpr.erasure.requested` message. Producers
+/// Wire shape of one `verevon.gdpr.erasure.requested` message. Producers
 /// (`org-core`, `user-core`) do not emit the same optional field set, so
 /// only the fields this module reads are required to be present at all —
 /// everything else is optional-and-ignored rather than rejected.
@@ -59,7 +59,7 @@ pub struct OrganizationErasure {
     pub requested_by: String,
 }
 
-/// Failure decoding or validating a `velion.gdpr.erasure.requested`
+/// Failure decoding or validating a `verevon.gdpr.erasure.requested`
 /// message. Every variant is a poison condition — the caller should route
 /// the message to a dead-letter path rather than retry it forever.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

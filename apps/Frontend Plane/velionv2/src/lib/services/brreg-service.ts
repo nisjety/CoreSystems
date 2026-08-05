@@ -1,7 +1,7 @@
 /**
  * Norwegian Enhetsregisteret (Brreg) service.
  * All requests are proxied through /api/org -> org-core -> data.brreg.no.
- * Ported from velion v1 (src/lib/services/brreg-service.ts) for velionv2 parity.
+ * Ported from verevon v1 (src/lib/services/brreg-service.ts) for verevonv2 parity.
  */
 
 export interface BrregAddress {

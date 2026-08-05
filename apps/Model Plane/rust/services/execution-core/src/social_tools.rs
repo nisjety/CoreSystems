@@ -1,4 +1,4 @@
-//! Social publishing tools for the agentic loop — Velion's social workspace.
+//! Social publishing tools for the agentic loop — Verevon's social workspace.
 //!
 //! Backed by `social-core` (Application Plane), the same publish pipeline the
 //! human Social workspace uses — posts created here are REAL workspace posts
@@ -182,7 +182,7 @@ impl SocialToolsClient {
             "approval_required": true,
             "source": {
                 "kind": "agent",
-                "label": "Velion agent run",
+                "label": "Verevon agent run",
                 "metadata": {"run_id": run_id, "requested_by": user_id},
             },
             "ai_context": {"run_id": run_id, "tool": "publish_social_post"},

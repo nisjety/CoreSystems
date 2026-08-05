@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { Agent } from '../types';
 import type { AgentWithMeta } from '../data';
 
-// Wave 8 (ui-ux-velion-gap.md §18): no MOCK_AGENTS fallback.
+// Wave 8 (ui-ux-verevon-gap.md §18): no MOCK_AGENTS fallback.
 // Previously a failing `/api/agents` call silently swapped in the demo
 // fixtures, which made the UI look healthy while the backend was
 // broken — a classic "looks-like-it-works-but-doesn't" gap. Now we

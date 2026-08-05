@@ -3,7 +3,7 @@
 Phase 6 E2E Event System Test
 ==============================
 Tests the complete cross-plane event flow for all 3 event types by:
-    1. Publishing real events to the shared NATS JetStream broker (velion-nats)
+    1. Publishing real events to the shared NATS JetStream broker (verevon-nats)
   2. Waiting for each subscribing plane's handler to execute
   3. Verifying handler execution via container logs
   4. Checking quota state changes via service APIs
@@ -118,7 +118,7 @@ async def run_tests() -> int:
         ("data-retrieval-service","http://localhost:9404/health"),
         ("data-documents-service","http://localhost:9401/health"),
         ("reasoning-ai-core",     "http://localhost:8100/health"),
-        ("velion-nats",           "http://localhost:8240/healthz"),
+        ("verevon-nats",           "http://localhost:8240/healthz"),
     ]
     all_healthy = True
     for name, url in checks:
@@ -144,9 +144,9 @@ async def run_tests() -> int:
             connect_timeout=10,
         )
         js = nc.jetstream()
-        ok("Connected to velion-nats (token auth)", "nats://localhost:4240")
+        ok("Connected to verevon-nats (token auth)", "nats://localhost:4240")
     except Exception as e:
-        fail("Connect to velion-nats", str(e))
+        fail("Connect to verevon-nats", str(e))
         print(f"\n  {RED}Cannot proceed without NATS connection.{RESET}")
         return 1
 

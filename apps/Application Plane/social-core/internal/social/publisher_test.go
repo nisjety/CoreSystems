@@ -15,6 +15,124 @@ import (
 	"testing"
 )
 
+type fakePublishActionExecutor struct {
+	calls  []ActionRequest
+	result *ActionResult
+	err    error
+}
+
+func (f *fakePublishActionExecutor) ExecuteAction(_ context.Context, request ActionRequest) (*ActionResult, error) {
+	f.calls = append(f.calls, request)
+	return f.result, f.err
+}
+
+func TestGovernedPublisherRoutesLinkedInPublishThroughActionExecutor(t *testing.T) {
+	executor := &fakePublishActionExecutor{result: &ActionResult{
+		ProviderKey: "linkedin",
+		Operation:   "linkedin.posts.create",
+		Result:      mustJSONRaw(t, map[string]any{"id": "urn:li:share:123"}),
+	}}
+	publisher := NewGovernedPublisher(executor)
+
+	attempt := publisher.Publish(context.Background(), PublishJob{ID: "job_1", OrgID: "org_1", PostID: "post_1"}, Post{
+		ID:        "post_1",
+		OrgID:     "org_1",
+		Body:      "A governed announcement",
+		Platforms: []string{"linkedin"},
+	}, Account{
+		OrgID:        "org_1",
+		ProviderKey:  "linkedin",
+		ConnectionID: "conn_1",
+		Status:       AccountStatusConnected,
+		Capabilities: []string{"social.post.write"},
+		Metadata:     map[string]any{"author_urn": "urn:li:organization:42"},
+	})
+
+	if attempt.Status != AttemptStatusSucceeded {
+		t.Fatalf("attempt status = %s, want succeeded: %#v", attempt.Status, attempt)
+	}
+	if attempt.ExternalID != "urn:li:share:123" {
+		t.Fatalf("external id = %q", attempt.ExternalID)
+	}
+	if len(executor.calls) != 1 {
+		t.Fatalf("action calls = %d, want 1", len(executor.calls))
+	}
+	call := executor.calls[0]
+	if call.ConnectionID != "conn_1" || call.Operation != "linkedin.posts.create" {
+		t.Fatalf("action call = %#v", call)
+	}
+	if call.Body["author"] != "urn:li:organization:42" || call.Body["commentary"] != "A governed announcement" {
+		t.Fatalf("action body = %#v", call.Body)
+	}
+}
+
+func TestGovernedPublisherBlocksProviderWithoutActionContract(t *testing.T) {
+	executor := &fakePublishActionExecutor{}
+	publisher := NewGovernedPublisher(executor)
+
+	attempt := publisher.Publish(context.Background(), PublishJob{ID: "job_1", OrgID: "org_1", PostID: "post_1"}, Post{
+		ID:        "post_1",
+		OrgID:     "org_1",
+		Body:      "Never lease a raw token",
+		Platforms: []string{"x"},
+	}, Account{
+		OrgID:        "org_1",
+		ProviderKey:  "x",
+		ConnectionID: "conn_1",
+		Status:       AccountStatusConnected,
+		Capabilities: []string{"social.post.write"},
+	})
+
+	if attempt.Status != AttemptStatusBlocked {
+		t.Fatalf("attempt status = %s, want blocked", attempt.Status)
+	}
+	if !strings.Contains(attempt.Message, "governed integration action") {
+		t.Fatalf("attempt message = %q", attempt.Message)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("unsupported provider must not execute an action: %#v", executor.calls)
+	}
+}
+
+func TestGovernedPublisherRoutesMetaPublishSequenceThroughActionExecutor(t *testing.T) {
+	executor := &fakePublishActionExecutor{result: &ActionResult{
+		ProviderKey: "meta",
+		Result:      mustJSONRaw(t, map[string]any{"id": "provider-id"}),
+	}}
+	publisher := NewGovernedPublisher(executor)
+
+	attempt := publisher.Publish(context.Background(), PublishJob{ID: "job_1", OrgID: "org_1", PostID: "post_1"}, Post{
+		ID:        "post_1",
+		OrgID:     "org_1",
+		Body:      "A governed visual announcement",
+		Platforms: []string{"instagram"},
+		Media:     []MediaRef{{Type: "image", URL: "https://cdn.example/post.jpg"}},
+	}, Account{
+		OrgID:        "org_1",
+		ProviderKey:  "meta",
+		ConnectionID: "conn_1",
+		Status:       AccountStatusConnected,
+		Capabilities: []string{"social.post.write"},
+		Metadata:     map[string]any{"instagram_user_id": "ig_123"},
+	})
+
+	if attempt.Status != AttemptStatusSucceeded {
+		t.Fatalf("attempt status = %s, want succeeded: %#v", attempt.Status, attempt)
+	}
+	if len(executor.calls) != 2 {
+		t.Fatalf("action calls = %d, want 2", len(executor.calls))
+	}
+	if executor.calls[0].Operation != "instagram.media.create" || executor.calls[1].Operation != "instagram.media.publish" {
+		t.Fatalf("action sequence = %#v", executor.calls)
+	}
+	if executor.calls[0].Params["igUserId"] != "ig_123" || executor.calls[0].Body["image_url"] != "https://cdn.example/post.jpg" {
+		t.Fatalf("media creation call = %#v", executor.calls[0])
+	}
+	if executor.calls[1].Body["creation_id"] != "provider-id" {
+		t.Fatalf("media publish call = %#v", executor.calls[1])
+	}
+}
+
 // TestHTTPPublisherSnapchatBlockedWhenLiveDisabled is the honest default: with a
 // publish-capable Snapchat account but SNAPCHAT_LIVE_PUBLISHING off, the
 // publisher must NOT attempt a real post — it returns a clear blocked attempt.
@@ -80,7 +198,7 @@ func TestHTTPPublisherSnapchatMissingProfileID(t *testing.T) {
 // against a mock Public Profile API: download media → create encrypted
 // container → multipart ADD → FINALIZE → POST /stories.
 func TestHTTPPublisherSnapchatPostsStoryWhenLive(t *testing.T) {
-	mediaBytes := bytes.Repeat([]byte("velion-snap-media-"), 3)
+	mediaBytes := bytes.Repeat([]byte("verevon-snap-media-"), 3)
 	var (
 		mu             sync.Mutex
 		gotKeyLen      int

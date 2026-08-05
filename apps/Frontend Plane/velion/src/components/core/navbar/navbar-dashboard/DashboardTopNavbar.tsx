@@ -306,7 +306,7 @@ export function DashboardTopNavbar() {
     }
     document.documentElement.classList.toggle(
       'dark',
-      localStorage.getItem('velion-theme') === 'dark',
+      localStorage.getItem('verevon-theme') === 'dark',
     );
   }, []);
 
@@ -444,7 +444,7 @@ export function DashboardTopNavbar() {
                   const root = document.documentElement;
                   const nextIsDark = !root.classList.contains('dark');
                   root.classList.toggle('dark', nextIsDark);
-                  localStorage.setItem('velion-theme', nextIsDark ? 'dark' : 'light');
+                  localStorage.setItem('verevon-theme', nextIsDark ? 'dark' : 'light');
                 }}
               >
                 <MoonStar className="h-[18px] w-[18px]" strokeWidth={1.85} />

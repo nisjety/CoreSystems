@@ -21,7 +21,7 @@
  * The graph layout is deterministic-radial: every node id hashes to
  * its own angle + radius around the org anchor. That's enough for
  * the "feel like Obsidian" effect without dragging in a force-
- * directed library (the velion bundle is already heavy).
+ * directed library (the verevon bundle is already heavy).
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'

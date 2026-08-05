@@ -76,52 +76,52 @@
   --aquatiq-orange-light: #FDEAD8;
   --aquatiq-dark: #333333;
 
-  /* Velion brand palette */
-  --velion-ink: #111111;
-  --velion-ink-soft: #1C1C1C;
-  --velion-charcoal: #2B2B2B;
-  --velion-text: #3A3C44;
-  --velion-text-muted: #66615B;
-  --velion-text-subtle: #8A8D96;
-  --velion-paper: #F4F1EB;
-  --velion-canvas: #EDEBE7;
-  --velion-surface: #EAE6DF;
-  --velion-panel: #FFFFFF;
-  --velion-border: #D8D2C6;
-  --velion-border-strong: #C8C1B3;
-  --velion-coral: #FF2E63;
-  --velion-coral-hover: #FF4D7A;
-  --velion-coral-glow: #FF3B5C;
-  --velion-coral-deep: #8B1E3F;
-  --velion-success: #10B981;
-  --velion-dashboard-sidebar: #F7F7F8;
-  --velion-dashboard-main: #FCFCFD;
-  --velion-dashboard-panel: #FFFFFF;
-  --velion-dashboard-border: #E6E6E8;
-  --velion-dashboard-accent: #5E6AD2;
-  --velion-dashboard-active: #F0F1F5;
-  --velion-dashboard-hover: #F6F7F9;
-  --velion-dashboard-divider: #ECECF1;
-  --velion-dashboard-input-border: #E2E3E9;
-  --velion-sidebar-rail: #111318;
-  --velion-sidebar-icon: #6B6E78;
-  --velion-sidebar-muted: #9B9EA8;
-  --velion-sidebar-placeholder: #B0B3BC;
-  --velion-navbar-divider: #E4E0D8;
-  --velion-navbar-search-text: #5F5A52;
-  --velion-navbar-search-muted: #989286;
-  --velion-navbar-pill-text: #615B52;
-  --velion-info: #3578F6;
-  --velion-info-bg: #E8F1FF;
-  --velion-warning: #DD7A1F;
-  --velion-warning-strong: #B96618;
-  --velion-warning-bg: #FFF1DE;
-  --velion-danger: #C0402A;
-  --velion-tooltip: #1A1A1A;
-  --velion-dark-sidebar: #191A1D;
-  --velion-dark-main: #1F2023;
-  --velion-dark-panel: #202124;
-  --velion-dark-border: #2B2D31;
+  /* Verevon brand palette */
+  --verevon-ink: #111111;
+  --verevon-ink-soft: #1C1C1C;
+  --verevon-charcoal: #2B2B2B;
+  --verevon-text: #3A3C44;
+  --verevon-text-muted: #66615B;
+  --verevon-text-subtle: #8A8D96;
+  --verevon-paper: #F4F1EB;
+  --verevon-canvas: #EDEBE7;
+  --verevon-surface: #EAE6DF;
+  --verevon-panel: #FFFFFF;
+  --verevon-border: #D8D2C6;
+  --verevon-border-strong: #C8C1B3;
+  --verevon-coral: #FF2E63;
+  --verevon-coral-hover: #FF4D7A;
+  --verevon-coral-glow: #FF3B5C;
+  --verevon-coral-deep: #8B1E3F;
+  --verevon-success: #10B981;
+  --verevon-dashboard-sidebar: #F7F7F8;
+  --verevon-dashboard-main: #FCFCFD;
+  --verevon-dashboard-panel: #FFFFFF;
+  --verevon-dashboard-border: #E6E6E8;
+  --verevon-dashboard-accent: #5E6AD2;
+  --verevon-dashboard-active: #F0F1F5;
+  --verevon-dashboard-hover: #F6F7F9;
+  --verevon-dashboard-divider: #ECECF1;
+  --verevon-dashboard-input-border: #E2E3E9;
+  --verevon-sidebar-rail: #111318;
+  --verevon-sidebar-icon: #6B6E78;
+  --verevon-sidebar-muted: #9B9EA8;
+  --verevon-sidebar-placeholder: #B0B3BC;
+  --verevon-navbar-divider: #E4E0D8;
+  --verevon-navbar-search-text: #5F5A52;
+  --verevon-navbar-search-muted: #989286;
+  --verevon-navbar-pill-text: #615B52;
+  --verevon-info: #3578F6;
+  --verevon-info-bg: #E8F1FF;
+  --verevon-warning: #DD7A1F;
+  --verevon-warning-strong: #B96618;
+  --verevon-warning-bg: #FFF1DE;
+  --verevon-danger: #C0402A;
+  --verevon-tooltip: #1A1A1A;
+  --verevon-dark-sidebar: #191A1D;
+  --verevon-dark-main: #1F2023;
+  --verevon-dark-panel: #202124;
+  --verevon-dark-border: #2B2D31;
 
   --blue-50: #eff6ff;
   --blue-100: #dbeafe;
@@ -262,7 +262,7 @@ html body {
   /* Keeping for compatibility */
 }
 
-/* Linear app-shell tokens for Velion dashboard/onboarding surfaces.
+/* Linear app-shell tokens for Verevon dashboard/onboarding surfaces.
  *
  * The local design-system reference (`design-systems/linear.app`) gives
  * Linear's darker brand/marketing palette, but the product shell used in

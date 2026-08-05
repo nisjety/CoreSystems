@@ -1,4 +1,4 @@
-//! Wire contract for one `velion.gdpr.erasure.requested` message and the
+//! Wire contract for one `verevon.gdpr.erasure.requested` message and the
 //! decision on whether this crate must act on it.
 //!
 //! The subject is shared by BOTH organization-level erasure
@@ -18,7 +18,7 @@ use serde::Deserialize;
 
 const MAX_ID_LEN: usize = 255;
 
-/// Wire shape of one `velion.gdpr.erasure.requested` message. Producers
+/// Wire shape of one `verevon.gdpr.erasure.requested` message. Producers
 /// (`org-core`, `user-core`) do not emit the same optional field set, so only
 /// the fields this module reads are required to be present at all — anything
 /// else is optional-and-ignored rather than rejected.
@@ -39,7 +39,7 @@ pub struct OrganizationErasure {
     pub requested_by: String,
 }
 
-/// Failure decoding or validating a `velion.gdpr.erasure.requested` message.
+/// Failure decoding or validating a `verevon.gdpr.erasure.requested` message.
 /// Every variant is a poison condition — the caller should route the message
 /// to a dead-letter path rather than retry it forever.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

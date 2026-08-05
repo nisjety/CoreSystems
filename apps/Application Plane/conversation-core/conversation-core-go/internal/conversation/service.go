@@ -10,6 +10,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/integration"
 )
@@ -28,7 +29,7 @@ type Service struct {
 	sender     OutboundSender
 	now        func() time.Time
 	// feedbackMirrorOrgID is FEEDBACK_MIRROR_ORG_ID (see config.Config), the
-	// Velion-owned monitored org every feedback submission is mirrored into.
+	// Verevon-owned monitored org every feedback submission is mirrored into.
 	// Empty disables mirroring -- see Service.mirrorFeedback.
 	feedbackMirrorOrgID string
 }
@@ -51,7 +52,7 @@ func WithSender(sender OutboundSender) Option {
 	}
 }
 
-// WithFeedbackMirrorOrgID configures the Velion-owned monitored org that
+// WithFeedbackMirrorOrgID configures the Verevon-owned monitored org that
 // every Service.SubmitFeedback submission is mirrored into, in addition to
 // the submitter's own org. Pass the empty string (the zero value, so this
 // option can always be registered unconditionally) to disable mirroring --
@@ -85,6 +86,7 @@ func (s *Service) ListInboxes(ctx context.Context, orgID string) ([]Inbox, error
 func (s *Service) ListConversations(ctx context.Context, filter ListFilter) ([]ConversationSummary, error) {
 	filter.OrgID = strings.TrimSpace(filter.OrgID)
 	filter.InboxID = strings.TrimSpace(filter.InboxID)
+	filter.ConnectionID = strings.TrimSpace(filter.ConnectionID)
 	filter.Status = normalizeStatus(filter.Status)
 	filter.Assigned = strings.TrimSpace(filter.Assigned)
 	filter.Channel = strings.TrimSpace(filter.Channel)
@@ -116,16 +118,49 @@ func (s *Service) IngestEvent(ctx context.Context, event InboundEvent) (*StoredE
 	if err != nil {
 		return nil, fmt.Errorf("store inbound event: %w", err)
 	}
+	if isMachineDeliveryFailureReport(event) {
+		if recorder, ok := s.repository.(interface {
+			RecordEmailDeliveryFailure(context.Context, EmailDeliveryFailureInput) (bool, error)
+		}); ok {
+			if _, receiptErr := recorder.RecordEmailDeliveryFailure(ctx, EmailDeliveryFailureInput{
+				OrgID: event.OrgID, Provider: event.Provider,
+				OutboundIntentID: event.OutboundCorrelationID, OccurredAt: event.OccurredAt,
+			}); receiptErr != nil {
+				return nil, fmt.Errorf("record email delivery failure: %w", receiptErr)
+			}
+		}
+	}
 	if result != nil && result.Created {
 		subject := SubjectMessageReceived
 		if event.Direction == DirectionOutbound {
 			subject = SubjectMessageSent
 		}
-		s.publish(ctx, subject, result.Detail, result.Message, "", map[string]any{
+		data := map[string]any{
 			"provider":            event.Provider,
 			"provider_event_id":   event.ProviderEventID,
 			"provider_message_id": event.ProviderMessageID,
-		})
+		}
+		// Follower ids are a bounded, content-free projection for the
+		// notification consumer. This keeps recipient selection with the
+		// conversation authority while leaving delivery, membership checks,
+		// preferences, and feed rendering in notification-core.
+		if subject == SubjectMessageReceived && result.Detail != nil {
+			// Keep fan-out optional at this generic repository boundary. It
+			// avoids making unrelated lightweight service doubles implement a
+			// notification-only projection, while PGRepository supplies it in
+			// production.
+			if followers, ok := s.repository.(interface {
+				ListConversationFollowerIDs(context.Context, string, string) ([]string, error)
+			}); ok {
+				followerIDs, followerErr := followers.ListConversationFollowerIDs(ctx, result.Detail.OrgID, result.Detail.ID)
+				if followerErr != nil {
+					log.Printf("conversation-core-go: list followers for notification fan-out (org=%s conversation=%s): %v", result.Detail.OrgID, result.Detail.ID, followerErr)
+				} else if len(followerIDs) > 0 {
+					data["follower_user_ids"] = followerIDs
+				}
+			}
+		}
+		s.publish(ctx, subject, result.Detail, result.Message, "", data)
 	}
 	return result, nil
 }
@@ -202,7 +237,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, input FeedbackInput) (*Con
 	return detail, nil
 }
 
-// mirrorFeedback copies a feedback submission into the Velion-owned
+// mirrorFeedback copies a feedback submission into the Verevon-owned
 // FEEDBACK_MIRROR_ORG_ID org, in addition to the submitter's own org.
 // Without this, feedback submitted from inside an external pilot org's own
 // isolated tenant would be invisible to the team: conversation-core-go has no
@@ -332,7 +367,9 @@ func (s *Service) AddMessage(ctx context.Context, input AddMessageInput) (*Messa
 		sendRequest := integration.SendRequest{
 			OrgID: input.OrgID, ActorUserID: input.ActorUserID,
 			Provider: ref.Provider, ConnectionID: ref.ConnectionID, ProviderThreadID: ref.ProviderThreadID,
-			BodyText: input.BodyText, BodyHTML: input.BodyHTML,
+			InReplyTo: ref.ReplyToMessageID, References: ref.ReferencesHeader,
+			OutboundCorrelationID: intentID,
+			BodyText:              input.BodyText, BodyHTML: input.BodyHTML,
 			AuthorizationKind: "human_intent", AuthorizationID: intentID, ActionID: intentID,
 			IdempotencyKey: "conversation:" + input.IdempotencyKey,
 		}
@@ -586,18 +623,28 @@ func (s *Service) RemoveTag(ctx context.Context, orgID, conversationID, tag, act
 	return detail, nil
 }
 
-// aiActionEditableFields is the closed set of fields promote() actually reads
-// from payload.suggested_fields (ai_action_executor.go). Any edited-fields key
-// outside this set is dropped silently -- mirroring the JSON-decode posture
+// aiActionEditableFields is the closed set of review fields the executor can
+// consume: ticket fields live under payload.suggested_fields, while body_text
+// replaces the exact top-level payload sent by draft.reply/internal.note. The
+// status field is deliberately constrained further below to active work states;
+// an AI proposal can never resolve, close, or snooze a ticket. Any other
+// edited-fields key is dropped silently -- mirroring the JSON-decode posture
 // where an unrecognized field is simply never bound, not an error over the
 // whole request.
 var aiActionEditableFields = map[string]bool{
-	"category":  true,
-	"priority":  true,
-	"severity":  true,
-	"intent":    true,
-	"team_id":   true,
-	"team_name": true,
+	"body_text":       true,
+	"category":        true,
+	"priority":        true,
+	"severity":        true,
+	"intent":          true,
+	"work_type":       true,
+	"status":          true,
+	"team_id":         true,
+	"team_name":       true,
+	"title":           true,
+	"customer_impact": true,
+	"summary":         true,
+	"root_cause":      true,
 }
 
 // whitelistAIActionFieldEdits filters a reviewer's edited fields down to the
@@ -614,6 +661,30 @@ func whitelistAIActionFieldEdits(fields map[string]string, decision string) map[
 			continue
 		}
 		value = strings.TrimSpace(value)
+		if key == "work_type" {
+			value = strings.ToLower(value)
+			if !isTicketWorkType(value) {
+				continue
+			}
+		}
+		if key == "severity" && !isTicketSeverity(value) {
+			continue
+		}
+		if key == "status" {
+			value = normalizeTicketStatus(value)
+			if !isAIReviewableTicketStatus(value) {
+				continue
+			}
+		}
+		if key == "title" && utf8.RuneCountInString(value) > 300 {
+			continue
+		}
+		if key == "customer_impact" && utf8.RuneCountInString(value) > 2_000 {
+			continue
+		}
+		if (key == "summary" || key == "root_cause") && utf8.RuneCountInString(value) > 2_000 {
+			continue
+		}
 		if value == "" {
 			continue
 		}
@@ -640,6 +711,14 @@ func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) erro
 	if input.Decision != "approved" && input.Decision != "rejected" {
 		return fmt.Errorf("%w: decision must be 'approved' or 'rejected'", ErrInvalidInput)
 	}
+	if input.Decision == "approved" {
+		if bodyText, ok := input.EditedFields["body_text"]; ok {
+			trimmedBodyText := strings.TrimSpace(bodyText)
+			if trimmedBodyText == "" || utf8.RuneCountInString(trimmedBodyText) > maxConversationDraftRunes {
+				return fmt.Errorf("%w: edited body_text must be between 1 and %d characters", ErrInvalidInput, maxConversationDraftRunes)
+			}
+		}
+	}
 	input.EditedFields = whitelistAIActionFieldEdits(input.EditedFields, input.Decision)
 	if err := s.repository.ReviewAIAction(ctx, input); err != nil {
 		return err
@@ -653,9 +732,50 @@ func (s *Service) ReviewAIAction(ctx context.Context, input AIActionReview) erro
 
 // allowedAIActionKinds is the closed set of kinds a human/hook may propose via
 // CreateAIAction. Keep it explicit so an arbitrary kind can never be queued and
-// later "executed" — only draft.reply is actable through the act-leg today.
+// later "executed" — each kind must have a dedicated, audited act-leg.
 var allowedAIActionKinds = map[string]bool{
-	"draft.reply": true,
+	"draft.reply":     true,
+	"internal.note":   true,
+	"ticket.update":   true,
+	"incident.create": true,
+	"problem.create":  true,
+}
+
+const maxDraftReplyRunes = 8_000
+
+func normalizeProposalGroupID(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if utf8.RuneCountInString(value) > 120 {
+		return "", fmt.Errorf("%w: proposal_group_id exceeds 120 characters", ErrInvalidInput)
+	}
+	for _, char := range value {
+		if !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') && !(char >= '0' && char <= '9') && char != '_' && char != '-' {
+			return "", fmt.Errorf("%w: proposal_group_id is invalid", ErrInvalidInput)
+		}
+	}
+	return value, nil
+}
+
+// normalizeDraftReplyPayload creates a new payload map with the exact plain
+// text the executor may send. Keeping this validation at the service boundary
+// protects every proposer (HTTP, model consumer, or a future worker), rather
+// than relying on a particular gateway client to sanitize content.
+func normalizeAITextPayload(kind string, payload map[string]any) (map[string]any, error) {
+	body, ok := payload["body_text"].(string)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s body_text is required", ErrInvalidInput, kind)
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil, fmt.Errorf("%w: %s body_text is required", ErrInvalidInput, kind)
+	}
+	if utf8.RuneCountInString(body) > maxDraftReplyRunes {
+		return nil, fmt.Errorf("%w: %s body_text exceeds %d characters", ErrInvalidInput, kind, maxDraftReplyRunes)
+	}
+	return map[string]any{"body_text": body}, nil
 }
 
 // CreateAIAction validates and persists a model-proposed action into the HITL
@@ -665,6 +785,10 @@ var allowedAIActionKinds = map[string]bool{
 func (s *Service) CreateAIAction(ctx context.Context, input CreateAIActionInput) (*AIAction, error) {
 	input.OrgID = strings.TrimSpace(input.OrgID)
 	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	groupID, err := normalizeProposalGroupID(input.ProposalGroupID)
+	if err != nil {
+		return nil, err
+	}
 	input.Kind = strings.TrimSpace(input.Kind)
 	input.CreatedBy = strings.TrimSpace(input.CreatedBy)
 	if input.OrgID == "" || input.ConversationID == "" {
@@ -676,10 +800,202 @@ func (s *Service) CreateAIAction(ctx context.Context, input CreateAIActionInput)
 	if !allowedAIActionKinds[input.Kind] {
 		return nil, fmt.Errorf("%w: unsupported action kind %q", ErrInvalidInput, input.Kind)
 	}
-	if input.Payload == nil {
-		input.Payload = map[string]any{}
+	if _, err := s.repository.GetConversation(ctx, input.OrgID, input.ConversationID); err != nil {
+		return nil, err
 	}
-	return s.repository.CreateAIAction(ctx, input)
+	payload, err := normalizeAIActionPayload(ctx, input.Kind, input.OrgID, input.ConversationID, input.Payload, s.repository)
+	if err != nil {
+		return nil, err
+	}
+	return s.repository.CreateAIAction(ctx, CreateAIActionInput{
+		OrgID:           input.OrgID,
+		ConversationID:  input.ConversationID,
+		ProposalGroupID: groupID,
+		Kind:            input.Kind,
+		Payload:         payload,
+		CreatedBy:       input.CreatedBy,
+	})
+}
+
+func normalizeAIActionPayload(ctx context.Context, kind, orgID, conversationID string, payload map[string]any, repository Repository) (map[string]any, error) {
+	if kind == "draft.reply" || kind == "internal.note" {
+		return normalizeAITextPayload(kind, payload)
+	}
+	if kind == "incident.create" {
+		return normalizeIncidentCreatePayload(ctx, orgID, conversationID, payload, repository)
+	}
+	if kind == "problem.create" {
+		return normalizeProblemCreatePayload(payload)
+	}
+	// ticket.update permits taxonomy, urgency, paired team routing, and only the
+	// active operational states that a human can inspect and approve. Terminal
+	// state, snooze, and ownership remain outside this AI proposal contract.
+	ticketID, _ := payload["ticket_id"].(string)
+	ticketID = strings.TrimSpace(ticketID)
+	if ticketID == "" {
+		return nil, fmt.Errorf("%w: ticket.update ticket_id is required", ErrInvalidInput)
+	}
+	ticket, err := repository.GetTicket(ctx, orgID, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	if ticket.ConversationID != conversationID {
+		return nil, ErrNotFound
+	}
+	fields, ok := payload["suggested_fields"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("%w: ticket.update suggested_fields are required", ErrInvalidInput)
+	}
+	allowed := map[string]bool{"category": true, "intent": true, "work_type": true, "priority": true, "severity": true, "status": true, "team_id": true, "team_name": true}
+	normalized := map[string]any{}
+	for key, value := range fields {
+		if !allowed[key] {
+			return nil, fmt.Errorf("%w: ticket.update field %q is unsupported", ErrInvalidInput, key)
+		}
+		text, ok := value.(string)
+		text = strings.TrimSpace(text)
+		maxLength := 120
+		if key == "team_name" {
+			maxLength = 160
+		}
+		if !ok || text == "" || utf8.RuneCountInString(text) > maxLength {
+			return nil, fmt.Errorf("%w: ticket.update field %q is invalid", ErrInvalidInput, key)
+		}
+		if key == "category" && utf8.RuneCountInString(text) > 80 {
+			return nil, fmt.Errorf("%w: ticket.update category exceeds 80 characters", ErrInvalidInput)
+		}
+		if key == "priority" && text != "low" && text != "normal" && text != "high" && text != "urgent" {
+			return nil, fmt.Errorf("%w: ticket.update priority is invalid", ErrInvalidInput)
+		}
+		if key == "severity" && text != "low" && text != "medium" && text != "high" && text != "critical" {
+			return nil, fmt.Errorf("%w: ticket.update severity is invalid", ErrInvalidInput)
+		}
+		if key == "status" {
+			text = normalizeTicketStatus(text)
+			if !isAIReviewableTicketStatus(text) {
+				return nil, fmt.Errorf("%w: ticket.update status is not reviewable", ErrInvalidInput)
+			}
+		}
+		if key == "work_type" {
+			text = strings.ToLower(text)
+			if !isTicketWorkType(text) {
+				return nil, fmt.Errorf("%w: ticket.update work_type is invalid", ErrInvalidInput)
+			}
+		}
+		normalized[key] = text
+	}
+	_, hasTeamID := normalized["team_id"]
+	_, hasTeamName := normalized["team_name"]
+	if hasTeamID != hasTeamName {
+		return nil, fmt.Errorf("%w: ticket.update routing needs both team_id and team_name", ErrInvalidInput)
+	}
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("%w: ticket.update needs at least one field", ErrInvalidInput)
+	}
+	confidence, ok := payload["confidence"].(float64)
+	if !ok || confidence < 0 || confidence > 1 {
+		return nil, fmt.Errorf("%w: ticket.update confidence must be between 0 and 1", ErrInvalidInput)
+	}
+	reason, ok := payload["reason"].(string)
+	reason = strings.TrimSpace(reason)
+	if !ok || reason == "" || utf8.RuneCountInString(reason) > 500 {
+		return nil, fmt.Errorf("%w: ticket.update reason is invalid", ErrInvalidInput)
+	}
+	evidence, ok := payload["evidence_message_ids"].([]any)
+	if !ok || len(evidence) > 25 {
+		return nil, fmt.Errorf("%w: ticket.update evidence_message_ids are invalid", ErrInvalidInput)
+	}
+	normalizedEvidence := make([]string, 0, len(evidence))
+	for _, value := range evidence {
+		id, ok := value.(string)
+		id = strings.TrimSpace(id)
+		if !ok || id == "" || utf8.RuneCountInString(id) > 120 {
+			return nil, fmt.Errorf("%w: ticket.update evidence message identifier is invalid", ErrInvalidInput)
+		}
+		normalizedEvidence = append(normalizedEvidence, id)
+	}
+	return map[string]any{
+		"ticket_id": ticketID, "confidence": confidence, "reason": reason,
+		"evidence_message_ids": normalizedEvidence, "suggested_fields": normalized,
+	}, nil
+}
+
+func normalizeIncidentCreatePayload(ctx context.Context, orgID, conversationID string, payload map[string]any, repository Repository) (map[string]any, error) {
+	ticketID, _ := payload["ticket_id"].(string)
+	title, _ := payload["title"].(string)
+	severity, _ := payload["severity"].(string)
+	impact, _ := payload["customer_impact"].(string)
+	reason, _ := payload["reason"].(string)
+	ticketID, title = strings.TrimSpace(ticketID), strings.TrimSpace(title)
+	severity = strings.ToLower(strings.TrimSpace(severity))
+	impact, reason = strings.TrimSpace(impact), strings.TrimSpace(reason)
+	if ticketID == "" || title == "" || utf8.RuneCountInString(title) > 300 || !isTicketSeverity(severity) || utf8.RuneCountInString(impact) > 2_000 {
+		return nil, fmt.Errorf("%w: incident.create payload is invalid", ErrInvalidInput)
+	}
+	confidence, ok := payload["confidence"].(float64)
+	if !ok || confidence < 0 || confidence > 1 || reason == "" || utf8.RuneCountInString(reason) > 500 {
+		return nil, fmt.Errorf("%w: incident.create confidence or reason is invalid", ErrInvalidInput)
+	}
+	evidence, ok := payload["evidence_message_ids"].([]any)
+	if !ok || len(evidence) > 25 {
+		return nil, fmt.Errorf("%w: incident.create evidence_message_ids are invalid", ErrInvalidInput)
+	}
+	normalizedEvidence := make([]string, 0, len(evidence))
+	for _, value := range evidence {
+		messageID, ok := value.(string)
+		messageID = strings.TrimSpace(messageID)
+		if !ok || messageID == "" || utf8.RuneCountInString(messageID) > 120 {
+			return nil, fmt.Errorf("%w: incident.create evidence message identifier is invalid", ErrInvalidInput)
+		}
+		normalizedEvidence = append(normalizedEvidence, messageID)
+	}
+	ticket, err := repository.GetTicket(ctx, orgID, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	if ticket.ConversationID != conversationID {
+		return nil, ErrNotFound
+	}
+	return map[string]any{
+		"ticket_id": ticketID, "title": title, "severity": severity, "customer_impact": impact,
+		"confidence": confidence, "reason": reason, "evidence_message_ids": normalizedEvidence,
+	}, nil
+}
+
+// normalizeProblemCreatePayload admits a reviewable root-cause candidate, not
+// a lifecycle instruction. It has no Incident/Ticket identifier by design:
+// automatic linking could accidentally assert a causal relationship. The
+// resulting Problem starts investigating under the approving reviewer only.
+func normalizeProblemCreatePayload(payload map[string]any) (map[string]any, error) {
+	title, _ := payload["title"].(string)
+	summary, _ := payload["summary"].(string)
+	rootCause, _ := payload["root_cause"].(string)
+	reason, _ := payload["reason"].(string)
+	title, summary, rootCause, reason = strings.TrimSpace(title), strings.TrimSpace(summary), strings.TrimSpace(rootCause), strings.TrimSpace(reason)
+	if title == "" || utf8.RuneCountInString(title) > 300 || summary == "" || utf8.RuneCountInString(summary) > 2_000 || utf8.RuneCountInString(rootCause) > 2_000 {
+		return nil, fmt.Errorf("%w: problem.create payload is invalid", ErrInvalidInput)
+	}
+	confidence, ok := payload["confidence"].(float64)
+	if !ok || confidence < 0 || confidence > 1 || reason == "" || utf8.RuneCountInString(reason) > 500 {
+		return nil, fmt.Errorf("%w: problem.create confidence or reason is invalid", ErrInvalidInput)
+	}
+	evidence, ok := payload["evidence_message_ids"].([]any)
+	if !ok || len(evidence) > 25 {
+		return nil, fmt.Errorf("%w: problem.create evidence_message_ids are invalid", ErrInvalidInput)
+	}
+	normalizedEvidence := make([]string, 0, len(evidence))
+	for _, value := range evidence {
+		messageID, ok := value.(string)
+		messageID = strings.TrimSpace(messageID)
+		if !ok || messageID == "" || utf8.RuneCountInString(messageID) > 120 {
+			return nil, fmt.Errorf("%w: problem.create evidence message identifier is invalid", ErrInvalidInput)
+		}
+		normalizedEvidence = append(normalizedEvidence, messageID)
+	}
+	return map[string]any{
+		"title": title, "summary": summary, "root_cause": rootCause,
+		"confidence": confidence, "reason": reason, "evidence_message_ids": normalizedEvidence,
+	}, nil
 }
 
 func (s *Service) ListAIActions(ctx context.Context, filter AIActionListFilter) ([]AIAction, error) {
@@ -694,6 +1010,11 @@ func (s *Service) ListAIActions(ctx context.Context, filter AIActionListFilter) 
 	switch strings.ToLower(filter.Status) {
 	case "":
 		filter.Status = "suggested"
+	case "review":
+		// Review is the operator-facing union of both pending ledger states.
+		// Ticket classifications historically use suggest_ticket, while newer
+		// proposal kinds use suggested. Neither is terminal or executable.
+		filter.Status = "review"
 	case "all":
 		filter.Status = ""
 	}
@@ -707,6 +1028,7 @@ func (s *Service) ListTickets(ctx context.Context, filter TicketListFilter) ([]T
 	filter.OrgID = strings.TrimSpace(filter.OrgID)
 	filter.Queue = strings.TrimSpace(filter.Queue)
 	filter.Status = normalizeTicketStatus(filter.Status)
+	filter.WorkType = strings.ToLower(strings.TrimSpace(filter.WorkType))
 	filter.Assigned = strings.TrimSpace(filter.Assigned)
 	filter.TeamID = strings.TrimSpace(filter.TeamID)
 	filter.Label = strings.TrimSpace(filter.Label)
@@ -716,6 +1038,9 @@ func (s *Service) ListTickets(ctx context.Context, filter TicketListFilter) ([]T
 	filter.Query = strings.TrimSpace(filter.Query)
 	if filter.OrgID == "" {
 		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	if filter.WorkType != "" && !isTicketWorkType(filter.WorkType) {
+		return nil, fmt.Errorf("%w: work_type must be customer_case, internal_work, or incident", ErrInvalidInput)
 	}
 	if filter.Limit < 1 || filter.Limit > 100 {
 		filter.Limit = 50
@@ -732,10 +1057,60 @@ func (s *Service) GetTicket(ctx context.Context, orgID, ticketID string) (*Ticke
 	return s.repository.GetTicket(ctx, orgID, ticketID)
 }
 
+// ListTicketActivity returns the most recent bounded ticket audit history.
+// Resolving the ticket first preserves a useful not-found response and ensures
+// an empty history never becomes a way to probe another tenant's ticket ID.
+func (s *Service) ListTicketActivity(ctx context.Context, orgID, ticketID string, limit int) ([]TicketActivity, error) {
+	orgID = strings.TrimSpace(orgID)
+	ticketID = strings.TrimSpace(ticketID)
+	if orgID == "" || ticketID == "" {
+		return nil, fmt.Errorf("%w: org_id and ticket_id are required", ErrInvalidInput)
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	if _, err := s.repository.GetTicket(ctx, orgID, ticketID); err != nil {
+		return nil, err
+	}
+	reader, ok := s.repository.(TicketActivityRepository)
+	if !ok {
+		return nil, fmt.Errorf("ticket activity is unavailable")
+	}
+	return reader.ListTicketActivity(ctx, orgID, ticketID, limit)
+}
+
+// ListConversationActivity returns a bounded timeline for one conversation.
+// Resolving the conversation before reading the audit projection prevents an
+// empty result from becoming an oracle for cross-tenant conversation IDs.
+func (s *Service) ListConversationActivity(ctx context.Context, orgID, conversationID string, limit int) ([]ConversationActivity, error) {
+	orgID = strings.TrimSpace(orgID)
+	conversationID = strings.TrimSpace(conversationID)
+	if orgID == "" || conversationID == "" {
+		return nil, fmt.Errorf("%w: org_id and conversation_id are required", ErrInvalidInput)
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	if _, err := s.repository.GetConversation(ctx, orgID, conversationID); err != nil {
+		return nil, err
+	}
+	reader, ok := s.repository.(ConversationActivityRepository)
+	if !ok {
+		return nil, fmt.Errorf("conversation activity is unavailable")
+	}
+	return reader.ListConversationActivity(ctx, orgID, conversationID, limit)
+}
+
 func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (*Ticket, error) {
 	input = normalizeCreateTicketInput(input)
 	if input.OrgID == "" || input.ConversationID == "" {
 		return nil, fmt.Errorf("%w: org_id and conversation_id are required", ErrInvalidInput)
+	}
+	if !isTicketWorkType(input.WorkType) {
+		return nil, fmt.Errorf("%w: work_type must be customer_case, internal_work, or incident", ErrInvalidInput)
+	}
+	if err := s.canonicalizeCreateTicketTeam(ctx, &input); err != nil {
+		return nil, err
 	}
 	if _, err := s.repository.GetConversation(ctx, input.OrgID, input.ConversationID); err != nil {
 		return nil, err
@@ -760,6 +1135,7 @@ func (s *Service) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*T
 		return nil, fmt.Errorf("%w: org_id and ticket_id are required", ErrInvalidInput)
 	}
 	normalizeStringPtr(input.Status, normalizeTicketStatus)
+	trimStringPtr(input.WorkType)
 	normalizeStringPtr(input.Priority, normalizeTicketPriority)
 	normalizeStringPtr(input.Severity, normalizeTicketSeverity)
 	trimStringPtr(input.Category)
@@ -771,6 +1147,15 @@ func (s *Service) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*T
 	trimStringPtr(input.Source)
 	trimStringPtr(input.AIReason)
 	trimStringPtr(input.SLAPolicyID)
+	if input.WorkType != nil {
+		*input.WorkType = strings.ToLower(*input.WorkType)
+		if !isTicketWorkType(*input.WorkType) {
+			return nil, fmt.Errorf("%w: work_type must be customer_case, internal_work, or incident", ErrInvalidInput)
+		}
+	}
+	if err := s.canonicalizeUpdateTicketTeam(ctx, &input); err != nil {
+		return nil, err
+	}
 	if input.Labels != nil {
 		labels := normalizeLabels(*input.Labels)
 		input.Labels = &labels
@@ -789,6 +1174,15 @@ func (s *Service) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*T
 			}
 		}
 	}
+	// A resolution event is a state transition, not a record of every PATCH
+	// whose desired value happens to be resolved. Reading the canonical ticket
+	// first prevents duplicate downstream quality metrics and future customer
+	// surveys when a UI retry or later metadata edit repeats terminal status.
+	currentTicket, err := s.repository.GetTicket(ctx, input.OrgID, input.TicketID)
+	if err != nil {
+		return nil, err
+	}
+	wasTerminal := currentTicket.Status == "resolved" || currentTicket.Status == "closed"
 	ticket, err := s.repository.UpdateTicket(ctx, input)
 	if err != nil {
 		return nil, err
@@ -797,11 +1191,62 @@ func (s *Service) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*T
 	if input.AssigneeUserID != nil || input.AssigneeName != nil || input.TeamID != nil || input.TeamName != nil {
 		subject = SubjectTicketAssigned
 	}
-	if input.Status != nil && (*input.Status == "resolved" || *input.Status == "closed") {
+	if input.Status != nil && !wasTerminal && (*input.Status == "resolved" || *input.Status == "closed") {
 		subject = SubjectTicketResolved
 	}
 	s.publishTicket(ctx, subject, ticket, input.ActorUserID)
 	return s.evaluateTicketAutomationRules(ctx, "ticket.updated", ticket, input.ActorUserID)
+}
+
+// canonicalizeCreateTicketTeam ensures a durable Ticket never accepts a
+// provider group label as its routing authority. Names are derived from the
+// organization-scoped TicketTeam directory instead of trusting the caller.
+func (s *Service) canonicalizeCreateTicketTeam(ctx context.Context, input *CreateTicketInput) error {
+	if input == nil {
+		return fmt.Errorf("%w: ticket input is required", ErrInvalidInput)
+	}
+	if input.TeamID == "" {
+		if input.TeamName != "" {
+			return fmt.Errorf("%w: team_name requires a canonical team_id", ErrInvalidInput)
+		}
+		return nil
+	}
+	team, err := s.repository.GetTicketTeam(ctx, input.OrgID, input.TeamID)
+	if err != nil {
+		return err
+	}
+	if !team.Active {
+		return fmt.Errorf("%w: ticket team is inactive", ErrInvalidInput)
+	}
+	input.TeamName = team.Name
+	return nil
+}
+
+func (s *Service) canonicalizeUpdateTicketTeam(ctx context.Context, input *UpdateTicketInput) error {
+	if input == nil {
+		return fmt.Errorf("%w: ticket input is required", ErrInvalidInput)
+	}
+	if input.TeamID == nil {
+		if input.TeamName != nil {
+			return fmt.Errorf("%w: team_name requires a canonical team_id", ErrInvalidInput)
+		}
+		return nil
+	}
+	if *input.TeamID == "" {
+		empty := ""
+		input.TeamName = &empty
+		return nil
+	}
+	team, err := s.repository.GetTicketTeam(ctx, input.OrgID, *input.TeamID)
+	if err != nil {
+		return err
+	}
+	if !team.Active {
+		return fmt.Errorf("%w: ticket team is inactive", ErrInvalidInput)
+	}
+	name := team.Name
+	input.TeamName = &name
+	return nil
 }
 
 func (s *Service) LinkTicketResource(ctx context.Context, input LinkTicketResourceInput) (*TicketLinkedResource, error) {
@@ -816,6 +1261,55 @@ func (s *Service) LinkTicketResource(ctx context.Context, input LinkTicketResour
 	if input.OrgID == "" || input.TicketID == "" || input.ResourceKind == "" {
 		return nil, fmt.Errorf("%w: org_id, ticket_id, and resource_kind are required", ErrInvalidInput)
 	}
+	// A conversation source is a first-class support handoff: it must resolve
+	// inside the same organization before an existing ticket can reference it.
+	// Do not accept an arbitrary conversation identifier as generic metadata.
+	if input.ResourceKind == "conversation_source" {
+		if input.ResourceID == "" {
+			return nil, fmt.Errorf("%w: conversation links require a conversation identifier", ErrInvalidInput)
+		}
+		source, err := s.repository.GetConversation(ctx, input.OrgID, input.ResourceID)
+		if err != nil {
+			return nil, err
+		}
+		if source.OrgID != input.OrgID {
+			return nil, ErrNotFound
+		}
+		target, err := s.repository.GetTicket(ctx, input.OrgID, input.TicketID)
+		if err != nil {
+			return nil, err
+		}
+		if target.OrgID != input.OrgID {
+			return nil, ErrNotFound
+		}
+		if target.ConversationID == source.ID {
+			return nil, fmt.Errorf("%w: a ticket already owns that conversation as its primary source", ErrInvalidInput)
+		}
+		if existing, lookupErr := s.repository.GetTicketByConversation(ctx, input.OrgID, source.ID); lookupErr == nil {
+			return nil, fmt.Errorf("%w: conversation is already attached to ticket %s", ErrConflict, existing.ID)
+		} else if !errors.Is(lookupErr, ErrNotFound) {
+			return nil, lookupErr
+		}
+	}
+	// A ticket-to-ticket link is a durable work dependency, not an arbitrary
+	// string reference. Resolve the target through the tenant-scoped repository
+	// before persisting the link so one org cannot encode a foreign ticket id,
+	// and reject self-links which make parent/child/related semantics useless.
+	if input.ResourceKind == "ticket" {
+		if input.ResourceID == "" || input.ResourceID == input.TicketID {
+			return nil, fmt.Errorf("%w: ticket links require a distinct target ticket", ErrInvalidInput)
+		}
+		target, err := s.repository.GetTicket(ctx, input.OrgID, input.ResourceID)
+		if err != nil {
+			return nil, err
+		}
+		// Repositories must scope by org; retain this defensive check at the
+		// service boundary so a faulty implementation cannot create a cross-org
+		// work dependency.
+		if target.OrgID != input.OrgID {
+			return nil, ErrNotFound
+		}
+	}
 	link, err := s.repository.LinkTicketResource(ctx, input)
 	if err != nil {
 		return nil, err
@@ -827,6 +1321,257 @@ func (s *Service) LinkTicketResource(ctx context.Context, input LinkTicketResour
 	return link, nil
 }
 
+func (s *Service) incidentProblemRepository() (IncidentProblemRepository, error) {
+	repository, ok := s.repository.(IncidentProblemRepository)
+	if !ok {
+		return nil, fmt.Errorf("%w: incident and problem management is unavailable", ErrDeliveryUnavailable)
+	}
+	return repository, nil
+}
+
+func (s *Service) ListIncidents(ctx context.Context, orgID string) ([]Incident, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.ListIncidents(ctx, orgID)
+}
+
+func (s *Service) GetIncident(ctx context.Context, orgID, incidentID string) (*Incident, error) {
+	orgID = strings.TrimSpace(orgID)
+	incidentID = strings.TrimSpace(incidentID)
+	if orgID == "" || incidentID == "" {
+		return nil, fmt.Errorf("%w: org_id and incident_id are required", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.GetIncident(ctx, orgID, incidentID)
+}
+
+func (s *Service) CreateIncident(ctx context.Context, input CreateIncidentInput) (*Incident, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.Title = strings.TrimSpace(input.Title)
+	rawSeverity := strings.ToLower(strings.TrimSpace(input.Severity))
+	if rawSeverity != "" && !isTicketSeverity(rawSeverity) {
+		return nil, fmt.Errorf("%w: incident severity is invalid", ErrInvalidInput)
+	}
+	input.Status = normalizeIncidentStatus(input.Status)
+	input.Severity = normalizeTicketSeverity(input.Severity)
+	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
+	input.OwnerName = strings.TrimSpace(input.OwnerName)
+	input.CustomerImpact = strings.TrimSpace(input.CustomerImpact)
+	input.ProblemID = strings.TrimSpace(input.ProblemID)
+	input.DeclaredByUserID = strings.TrimSpace(input.DeclaredByUserID)
+	if input.OrgID == "" || input.Title == "" || len(input.Title) > 300 {
+		return nil, fmt.Errorf("%w: org_id and a title of at most 300 characters are required", ErrInvalidInput)
+	}
+	if !isIncidentStatus(input.Status) || !isTicketSeverity(input.Severity) {
+		return nil, fmt.Errorf("%w: incident status or severity is invalid", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	if input.ProblemID != "" {
+		if _, err := repository.GetProblem(ctx, input.OrgID, input.ProblemID); err != nil {
+			return nil, err
+		}
+	}
+	return repository.CreateIncident(ctx, input)
+}
+
+// CreateIncidentForApprovedAction is the only AI executor path for declaring
+// an Incident. The repository commits the Incident, affected-ticket link, and
+// operational audits in one transaction keyed by AIActionID; an at-least-once
+// review event therefore cannot create duplicate operational work.
+func (s *Service) CreateIncidentForApprovedAction(ctx context.Context, input ApprovedIncidentCreateInput) (*Incident, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	input.AIActionID = strings.TrimSpace(input.AIActionID)
+	input.TicketID = strings.TrimSpace(input.TicketID)
+	input.Title = strings.TrimSpace(input.Title)
+	input.Severity = strings.ToLower(strings.TrimSpace(input.Severity))
+	input.CustomerImpact = strings.TrimSpace(input.CustomerImpact)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.ConversationID == "" || input.AIActionID == "" || input.TicketID == "" || input.Title == "" || len(input.Title) > 300 || !isTicketSeverity(input.Severity) {
+		return nil, fmt.Errorf("%w: approved incident proposal is invalid", ErrInvalidInput)
+	}
+	ticket, err := s.repository.GetTicket(ctx, input.OrgID, input.TicketID)
+	if err != nil {
+		return nil, err
+	}
+	if ticket.ConversationID != input.ConversationID {
+		return nil, ErrNotFound
+	}
+	repository, ok := s.repository.(ApprovedIncidentActionRepository)
+	if !ok {
+		return nil, fmt.Errorf("%w: approved incident execution is unavailable", ErrDeliveryUnavailable)
+	}
+	return repository.CreateIncidentForApprovedAction(ctx, input)
+}
+
+// CreateProblemForApprovedAction is the only executor path for a model's
+// root-cause candidate. The action had already been scoped to an existing
+// conversation when it entered the ledger; this method keeps the final effect
+// idempotent by action ID and deliberately creates no relationship or state
+// transition outside the new Problem record.
+func (s *Service) CreateProblemForApprovedAction(ctx context.Context, input ApprovedProblemCreateInput) (*Problem, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	input.AIActionID = strings.TrimSpace(input.AIActionID)
+	input.Title = strings.TrimSpace(input.Title)
+	input.Summary = strings.TrimSpace(input.Summary)
+	input.RootCause = strings.TrimSpace(input.RootCause)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.ConversationID == "" || input.AIActionID == "" || input.Title == "" || utf8.RuneCountInString(input.Title) > 300 || input.Summary == "" || utf8.RuneCountInString(input.Summary) > 2_000 || utf8.RuneCountInString(input.RootCause) > 2_000 {
+		return nil, fmt.Errorf("%w: approved problem proposal is invalid", ErrInvalidInput)
+	}
+	if _, err := s.repository.GetConversation(ctx, input.OrgID, input.ConversationID); err != nil {
+		return nil, err
+	}
+	repository, ok := s.repository.(ApprovedProblemActionRepository)
+	if !ok {
+		return nil, fmt.Errorf("%w: approved problem execution is unavailable", ErrDeliveryUnavailable)
+	}
+	return repository.CreateProblemForApprovedAction(ctx, input)
+}
+
+func (s *Service) UpdateIncident(ctx context.Context, input UpdateIncidentInput) (*Incident, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.IncidentID = strings.TrimSpace(input.IncidentID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	trimStringPtr(input.Title)
+	normalizeStringPtr(input.Status, normalizeIncidentStatus)
+	if input.Severity != nil && !isTicketSeverity(*input.Severity) {
+		return nil, fmt.Errorf("%w: incident severity is invalid", ErrInvalidInput)
+	}
+	normalizeStringPtr(input.Severity, normalizeTicketSeverity)
+	trimStringPtr(input.OwnerUserID)
+	trimStringPtr(input.OwnerName)
+	trimStringPtr(input.CustomerImpact)
+	trimStringPtr(input.ProblemID)
+	if input.OrgID == "" || input.IncidentID == "" {
+		return nil, fmt.Errorf("%w: org_id and incident_id are required", ErrInvalidInput)
+	}
+	if input.Title != nil && (*input.Title == "" || len(*input.Title) > 300) {
+		return nil, fmt.Errorf("%w: title must be 1 to 300 characters", ErrInvalidInput)
+	}
+	if input.Status != nil && !isIncidentStatus(*input.Status) {
+		return nil, fmt.Errorf("%w: incident status is invalid", ErrInvalidInput)
+	}
+	if input.Severity != nil && !isTicketSeverity(*input.Severity) {
+		return nil, fmt.Errorf("%w: incident severity is invalid", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	if input.ProblemID != nil && *input.ProblemID != "" {
+		if _, err := repository.GetProblem(ctx, input.OrgID, *input.ProblemID); err != nil {
+			return nil, err
+		}
+	}
+	return repository.UpdateIncident(ctx, input)
+}
+
+func (s *Service) LinkIncidentTicket(ctx context.Context, input LinkIncidentTicketInput) (*IncidentTicketLink, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.IncidentID = strings.TrimSpace(input.IncidentID)
+	input.TicketID = strings.TrimSpace(input.TicketID)
+	input.Relationship = normalizeIncidentTicketRelationship(input.Relationship)
+	input.CreatedByUserID = strings.TrimSpace(input.CreatedByUserID)
+	if input.OrgID == "" || input.IncidentID == "" || input.TicketID == "" || !isIncidentTicketRelationship(input.Relationship) {
+		return nil, fmt.Errorf("%w: org_id, incident_id, ticket_id, and a valid relationship are required", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := repository.GetIncident(ctx, input.OrgID, input.IncidentID); err != nil {
+		return nil, err
+	}
+	if _, err := s.repository.GetTicket(ctx, input.OrgID, input.TicketID); err != nil {
+		return nil, err
+	}
+	return repository.LinkIncidentTicket(ctx, input)
+}
+
+func (s *Service) ListProblems(ctx context.Context, orgID string) ([]Problem, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.ListProblems(ctx, orgID)
+}
+
+func (s *Service) GetProblem(ctx context.Context, orgID, problemID string) (*Problem, error) {
+	orgID = strings.TrimSpace(orgID)
+	problemID = strings.TrimSpace(problemID)
+	if orgID == "" || problemID == "" {
+		return nil, fmt.Errorf("%w: org_id and problem_id are required", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.GetProblem(ctx, orgID, problemID)
+}
+
+func (s *Service) CreateProblem(ctx context.Context, input CreateProblemInput) (*Problem, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.Title = strings.TrimSpace(input.Title)
+	input.Status = normalizeProblemStatus(input.Status)
+	input.OwnerUserID = strings.TrimSpace(input.OwnerUserID)
+	input.OwnerName = strings.TrimSpace(input.OwnerName)
+	input.Summary = strings.TrimSpace(input.Summary)
+	input.RootCause = strings.TrimSpace(input.RootCause)
+	input.CreatedByUserID = strings.TrimSpace(input.CreatedByUserID)
+	if input.OrgID == "" || input.Title == "" || len(input.Title) > 300 || !isProblemStatus(input.Status) {
+		return nil, fmt.Errorf("%w: org_id, valid status, and a title of at most 300 characters are required", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.CreateProblem(ctx, input)
+}
+
+func (s *Service) UpdateProblem(ctx context.Context, input UpdateProblemInput) (*Problem, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ProblemID = strings.TrimSpace(input.ProblemID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	trimStringPtr(input.Title)
+	normalizeStringPtr(input.Status, normalizeProblemStatus)
+	trimStringPtr(input.OwnerUserID)
+	trimStringPtr(input.OwnerName)
+	trimStringPtr(input.Summary)
+	trimStringPtr(input.RootCause)
+	if input.OrgID == "" || input.ProblemID == "" {
+		return nil, fmt.Errorf("%w: org_id and problem_id are required", ErrInvalidInput)
+	}
+	if input.Title != nil && (*input.Title == "" || len(*input.Title) > 300) {
+		return nil, fmt.Errorf("%w: title must be 1 to 300 characters", ErrInvalidInput)
+	}
+	if input.Status != nil && !isProblemStatus(*input.Status) {
+		return nil, fmt.Errorf("%w: problem status is invalid", ErrInvalidInput)
+	}
+	repository, err := s.incidentProblemRepository()
+	if err != nil {
+		return nil, err
+	}
+	return repository.UpdateProblem(ctx, input)
+}
+
 func (s *Service) RecordTicketClassification(ctx context.Context, input TicketClassificationInput) (*TicketClassification, error) {
 	input.OrgID = strings.TrimSpace(input.OrgID)
 	input.ConversationID = strings.TrimSpace(input.ConversationID)
@@ -834,6 +1579,18 @@ func (s *Service) RecordTicketClassification(ctx context.Context, input TicketCl
 	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
 	if input.SuggestedFields == nil {
 		input.SuggestedFields = map[string]any{}
+	}
+	if proposedWorkType := stringField(input.SuggestedFields, "work_type"); proposedWorkType != "" {
+		proposedWorkType = strings.ToLower(strings.TrimSpace(proposedWorkType))
+		if !isTicketWorkType(proposedWorkType) {
+			return nil, fmt.Errorf("%w: ticket classification work_type is invalid", ErrInvalidInput)
+		}
+		normalizedFields := make(map[string]any, len(input.SuggestedFields))
+		for key, value := range input.SuggestedFields {
+			normalizedFields[key] = value
+		}
+		normalizedFields["work_type"] = proposedWorkType
+		input.SuggestedFields = normalizedFields
 	}
 	if input.OrgID == "" || input.ConversationID == "" {
 		return nil, fmt.Errorf("%w: org_id and conversation_id are required", ErrInvalidInput)
@@ -867,6 +1624,7 @@ func (s *Service) RecordTicketClassification(ctx context.Context, input TicketCl
 		OrgID:          input.OrgID,
 		ConversationID: input.ConversationID,
 		Status:         status,
+		WorkType:       stringField(input.SuggestedFields, "work_type"),
 		Priority:       stringField(input.SuggestedFields, "priority"),
 		Severity:       stringField(input.SuggestedFields, "severity"),
 		Category:       stringField(input.SuggestedFields, "category"),
@@ -893,6 +1651,40 @@ func (s *Service) RecordTicketClassification(ctx context.Context, input TicketCl
 	}
 	classification.Ticket = ticket
 	return classification, nil
+}
+
+func (s *Service) ListTicketTeams(ctx context.Context, orgID string) ([]TicketTeam, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.ListTicketTeams(ctx, orgID)
+}
+
+func (s *Service) CreateTicketTeam(ctx context.Context, input CreateTicketTeamInput) (*TicketTeam, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.Name == "" {
+		return nil, fmt.Errorf("%w: org_id and team name are required", ErrInvalidInput)
+	}
+	return s.repository.CreateTicketTeam(ctx, input)
+}
+
+func (s *Service) UpdateTicketTeam(ctx context.Context, input UpdateTicketTeamInput) (*TicketTeam, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ID = strings.TrimSpace(input.ID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	trimStringPtr(input.Name)
+	trimStringPtr(input.Description)
+	if input.OrgID == "" || input.ID == "" {
+		return nil, fmt.Errorf("%w: org_id and ticket team id are required", ErrInvalidInput)
+	}
+	if input.Name != nil && *input.Name == "" {
+		return nil, fmt.Errorf("%w: team name is required", ErrInvalidInput)
+	}
+	return s.repository.UpdateTicketTeam(ctx, input)
 }
 
 func (s *Service) ListTicketViews(ctx context.Context, orgID string) ([]TicketView, error) {
@@ -986,6 +1778,7 @@ func (s *Service) RunTicketMacro(ctx context.Context, input TicketMacroRunInput)
 	input.TicketID = strings.TrimSpace(input.TicketID)
 	input.MacroID = strings.TrimSpace(input.MacroID)
 	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	input.ExpectedMacroUpdatedAt = strings.TrimSpace(input.ExpectedMacroUpdatedAt)
 	if input.OrgID == "" || input.TicketID == "" || input.MacroID == "" {
 		return nil, fmt.Errorf("%w: org_id, ticket_id, and macro_id are required", ErrInvalidInput)
 	}
@@ -995,6 +1788,15 @@ func (s *Service) RunTicketMacro(ctx context.Context, input TicketMacroRunInput)
 	}
 	if !macro.Active {
 		return nil, fmt.Errorf("%w: ticket macro is inactive", ErrInvalidInput)
+	}
+	if input.ExpectedMacroUpdatedAt != "" {
+		expected, err := time.Parse(time.RFC3339Nano, input.ExpectedMacroUpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("%w: expected macro revision must be RFC3339", ErrInvalidInput)
+		}
+		if !macro.UpdatedAt.Equal(expected) {
+			return nil, fmt.Errorf("%w: ticket macro changed after review", ErrConflict)
+		}
 	}
 	patch := updateTicketInputFromActions(input.OrgID, input.TicketID, input.ActorUserID, macro.Actions)
 	ticket, err := s.UpdateTicket(ctx, patch)
@@ -1030,7 +1832,15 @@ func (s *Service) CreateTicketAutomationRule(ctx context.Context, input CreateTi
 	if input.OrgID == "" || input.Name == "" || input.EventName == "" {
 		return nil, fmt.Errorf("%w: org_id, name, and event_name are required", ErrInvalidInput)
 	}
-	return s.repository.CreateTicketAutomationRule(ctx, input)
+	if err := normalizeTicketAutomationRule(&input.EventName, &input.Conditions, &input.Actions); err != nil {
+		return nil, err
+	}
+	rule, err := s.repository.CreateTicketAutomationRule(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	s.publish(ctx, SubjectTicketAutomationRuleCreated, &ConversationDetail{ConversationSummary: ConversationSummary{OrgID: rule.OrgID}}, nil, input.ActorUserID, map[string]any{"ticket_automation_rule": rule})
+	return rule, nil
 }
 
 func (s *Service) evaluateTicketAutomationRules(ctx context.Context, eventName string, ticket *Ticket, actorUserID string) (*Ticket, error) {
@@ -1069,7 +1879,17 @@ func (s *Service) UpdateTicketAutomationRule(ctx context.Context, input UpdateTi
 	if input.OrgID == "" || input.ID == "" {
 		return nil, fmt.Errorf("%w: org_id and automation rule id are required", ErrInvalidInput)
 	}
-	return s.repository.UpdateTicketAutomationRule(ctx, input)
+	if input.Conditions != nil || input.Actions != nil || input.EventName != nil {
+		if err := normalizeTicketAutomationRule(input.EventName, input.Conditions, input.Actions); err != nil {
+			return nil, err
+		}
+	}
+	rule, err := s.repository.UpdateTicketAutomationRule(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	s.publish(ctx, SubjectTicketAutomationRuleUpdated, &ConversationDetail{ConversationSummary: ConversationSummary{OrgID: rule.OrgID}}, nil, input.ActorUserID, map[string]any{"ticket_automation_rule": rule})
+	return rule, nil
 }
 
 func (s *Service) ListSLAPolicies(ctx context.Context, orgID string) ([]SLAPolicy, error) {
@@ -1134,9 +1954,55 @@ func (s *Service) UpdateTicketChecklistItem(ctx context.Context, input UpdateTic
 	return s.repository.UpdateTicketChecklistItem(ctx, input)
 }
 
+func (s *Service) CreateTicketSideConversation(ctx context.Context, input CreateTicketSideConversationInput) (*TicketSideConversation, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.TicketID = strings.TrimSpace(input.TicketID)
+	input.Subject = strings.TrimSpace(input.Subject)
+	input.BodyText = strings.TrimSpace(input.BodyText)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.TicketID == "" || input.Subject == "" || input.BodyText == "" || len(input.Subject) > 160 || len(input.BodyText) > 4000 || strings.ContainsAny(input.Subject, "\r\n") {
+		return nil, fmt.Errorf("%w: a bounded ticket, subject, and first internal message are required", ErrInvalidInput)
+	}
+	return s.repository.CreateTicketSideConversation(ctx, input)
+}
+
+func (s *Service) AddTicketSideConversationMessage(ctx context.Context, input AddTicketSideConversationMessageInput) (*TicketSideConversation, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.TicketID = strings.TrimSpace(input.TicketID)
+	input.SideConversationID = strings.TrimSpace(input.SideConversationID)
+	input.BodyText = strings.TrimSpace(input.BodyText)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.TicketID == "" || input.SideConversationID == "" || input.BodyText == "" || len(input.BodyText) > 4000 {
+		return nil, fmt.Errorf("%w: a bounded ticket-side message is required", ErrInvalidInput)
+	}
+	return s.repository.AddTicketSideConversationMessage(ctx, input)
+}
+
+func (s *Service) UpdateTicketSideConversation(ctx context.Context, input UpdateTicketSideConversationInput) (*TicketSideConversation, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.TicketID = strings.TrimSpace(input.TicketID)
+	input.SideConversationID = strings.TrimSpace(input.SideConversationID)
+	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.TicketID == "" || input.SideConversationID == "" || !isTicketSideConversationStatus(input.Status) {
+		return nil, fmt.Errorf("%w: ticket-side conversation and an open or closed status are required", ErrInvalidInput)
+	}
+	return s.repository.UpdateTicketSideConversation(ctx, input)
+}
+
+func (s *Service) RecordTicketChatHandoff(ctx context.Context, input TicketChatHandoffInput) (*Ticket, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.TicketID = strings.TrimSpace(input.TicketID)
+	input.ActorUserID = strings.TrimSpace(input.ActorUserID)
+	if input.OrgID == "" || input.TicketID == "" {
+		return nil, fmt.Errorf("%w: org_id and ticket_id are required", ErrInvalidInput)
+	}
+	return s.repository.RecordTicketChatHandoff(ctx, input)
+}
+
 // HardPurgeByOrg hard-deletes every conversation_* row this service holds for
 // orgID. It is the conversation-core half of the cross-plane GDPR erasure
-// fan-out (velion.gdpr.erasure.requested, consumed by
+// fan-out (verevon.gdpr.erasure.requested, consumed by
 // consumers.OrgErasureConsumer). No lifecycle event is published for it: the
 // org — and everyone who could ever read one — is gone by the time this runs,
 // so there is no audience left to notify.
@@ -1146,6 +2012,17 @@ func (s *Service) HardPurgeByOrg(ctx context.Context, orgID string) error {
 		return fmt.Errorf("%w: org_id is required", ErrInvalidInput)
 	}
 	return s.repository.HardPurgeByOrg(ctx, orgID)
+}
+
+// PurgeConversationDraftsByOrg deletes the personal draft-recovery records
+// for one organization. It is the narrow retention-toggle cleanup consumed
+// from Control Plane; the durable customer-support record is out of scope.
+func (s *Service) PurgeConversationDraftsByOrg(ctx context.Context, orgID string) error {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.PurgeConversationDraftsByOrg(ctx, orgID)
 }
 
 func (s *Service) publishTicket(ctx context.Context, subject string, ticket *Ticket, actorUserID string) {
@@ -1187,7 +2064,7 @@ func (s *Service) publish(ctx context.Context, subject string, detail *Conversat
 	if message != nil {
 		data["message"] = message
 	}
-	eventType := strings.TrimPrefix(subject, "velion.application.conversation.")
+	eventType := strings.TrimPrefix(subject, "verevon.application.conversation.")
 	if err := s.publisher.Publish(ctx, subject, LifecycleEvent{
 		ID:             newID("evt"),
 		Type:           eventType,
@@ -1213,6 +2090,12 @@ func normalizeInboundEvent(event InboundEvent, now func() time.Time) InboundEven
 	event.ProviderEventID = strings.TrimSpace(event.ProviderEventID)
 	event.ProviderMessageID = strings.TrimSpace(event.ProviderMessageID)
 	event.ProviderThreadID = strings.TrimSpace(event.ProviderThreadID)
+	event.MessageIDHeader = sanitizeStorableText(event.MessageIDHeader)
+	event.ReferencesHeader = sanitizeStorableText(event.ReferencesHeader)
+	event.InReplyToHeader = sanitizeStorableText(event.InReplyToHeader)
+	event.AutoSubmitted = strings.ToLower(sanitizeStorableText(event.AutoSubmitted))
+	event.ContentType = strings.ToLower(sanitizeStorableText(event.ContentType))
+	event.OutboundCorrelationID = sanitizeStorableText(event.OutboundCorrelationID)
 	event.Direction = strings.TrimSpace(event.Direction)
 	if event.Direction == "" {
 		event.Direction = DirectionInbound
@@ -1233,6 +2116,19 @@ func normalizeInboundEvent(event InboundEvent, now func() time.Time) InboundEven
 	event.ProviderThreadID = sanitizeStorableText(event.ProviderThreadID)
 	event.From.Name = sanitizeStorableText(event.From.Name)
 	event.From.Email = strings.ToLower(sanitizeStorableText(event.From.Email))
+	if len(event.Attachments) > 0 {
+		attachments := make([]AttachmentInput, 0, len(event.Attachments))
+		for _, attachment := range event.Attachments {
+			attachments = append(attachments, AttachmentInput{
+				Filename:    sanitizeStorableText(attachment.Filename),
+				MimeType:    strings.ToLower(sanitizeStorableText(attachment.MimeType)),
+				SizeBytes:   attachment.SizeBytes,
+				StorageRef:  sanitizeStorableText(attachment.StorageRef),
+				ProviderRef: sanitizeStorableText(attachment.ProviderRef),
+			})
+		}
+		event.Attachments = attachments
+	}
 	if event.OccurredAt.IsZero() {
 		event.OccurredAt = now().UTC()
 	} else {
@@ -1297,7 +2193,49 @@ func validateInboundEvent(event InboundEvent) error {
 	if event.From.Email == "" && event.From.Name == "" {
 		return fmt.Errorf("%w: sender is required", ErrInvalidInput)
 	}
+	if event.OutboundCorrelationID != "" && !validOutboundCorrelationID(event.OutboundCorrelationID) {
+		return fmt.Errorf("%w: outbound_correlation_id is invalid", ErrInvalidInput)
+	}
+	if len(event.Attachments) > 25 {
+		return fmt.Errorf("%w: at most 25 attachments are supported", ErrInvalidInput)
+	}
+	for _, attachment := range event.Attachments {
+		if attachment.Filename == "" || utf8.RuneCountInString(attachment.Filename) > 255 {
+			return fmt.Errorf("%w: attachment filename is invalid", ErrInvalidInput)
+		}
+		if utf8.RuneCountInString(attachment.MimeType) > 127 || attachment.SizeBytes < 0 || attachment.SizeBytes > 100*1024*1024 {
+			return fmt.Errorf("%w: attachment metadata is invalid", ErrInvalidInput)
+		}
+		if utf8.RuneCountInString(attachment.StorageRef) > 2_000 || utf8.RuneCountInString(attachment.ProviderRef) > 2_000 {
+			return fmt.Errorf("%w: attachment reference is invalid", ErrInvalidInput)
+		}
+	}
 	return nil
+}
+
+func validOutboundCorrelationID(value string) bool {
+	if len(value) < 8 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isMachineDeliveryFailureReport(event InboundEvent) bool {
+	if event.Provider != "google" && event.Provider != "microsoft" {
+		return false
+	}
+	if !validOutboundCorrelationID(event.OutboundCorrelationID) {
+		return false
+	}
+	contentType := strings.ToLower(event.ContentType)
+	return strings.HasPrefix(strings.ToLower(event.AutoSubmitted), "auto-replied") &&
+		strings.Contains(contentType, "multipart/report") &&
+		strings.Contains(contentType, "report-type=delivery-status")
 }
 
 func normalizeStatus(status string) string {
@@ -1321,6 +2259,10 @@ func normalizeCreateTicketInput(input CreateTicketInput) CreateTicketInput {
 	input.Status = normalizeTicketStatus(input.Status)
 	if input.Status == "" {
 		input.Status = StatusOpen
+	}
+	input.WorkType = strings.ToLower(strings.TrimSpace(input.WorkType))
+	if input.WorkType == "" {
+		input.WorkType = "customer_case"
 	}
 	input.Priority = normalizeTicketPriority(input.Priority)
 	input.Severity = normalizeTicketSeverity(input.Severity)
@@ -1363,6 +2305,62 @@ func normalizeCreateTicketInput(input CreateTicketInput) CreateTicketInput {
 	return input
 }
 
+func isTicketWorkType(value string) bool {
+	switch value {
+	case "customer_case", "internal_work", "incident":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeIncidentStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "declared"
+	}
+	return value
+}
+
+func isIncidentStatus(value string) bool {
+	switch value {
+	case "declared", "investigating", "monitoring", "resolved":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeProblemStatus(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "investigating"
+	}
+	return value
+}
+
+func isProblemStatus(value string) bool {
+	switch value {
+	case "investigating", "known_error", "resolved":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeIncidentTicketRelationship(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func isIncidentTicketRelationship(value string) bool {
+	switch value {
+	case "affected", "root_cause", "related":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeTicketStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "":
@@ -1385,6 +2383,18 @@ func normalizeTicketStatus(status string) string {
 		return "closed"
 	default:
 		return strings.ToLower(strings.TrimSpace(status))
+	}
+}
+
+// isAIReviewableTicketStatus is intentionally narrower than UpdateTicket's
+// lifecycle model. A reviewed AI proposal may advance ongoing work, but it
+// must never represent a resolution, closure, or snooze decision.
+func isAIReviewableTicketStatus(status string) bool {
+	switch status {
+	case StatusOpen, "waiting_customer", "waiting_team", "escalated":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1420,6 +2430,19 @@ func normalizeTicketSeverity(severity string) string {
 	default:
 		return "medium"
 	}
+}
+
+func isTicketSeverity(severity string) bool {
+	switch strings.ToLower(strings.TrimSpace(severity)) {
+	case "low", "medium", "high", "critical":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTicketSideConversationStatus(value string) bool {
+	return value == TicketSideConversationOpen || value == TicketSideConversationClosed
 }
 
 func normalizeClassificationOutcome(outcome string, confidence float64, fields map[string]any, evidence []string) string {
@@ -1533,6 +2556,88 @@ func normalizeAutomationEventPtr(value *string) {
 	*value = normalizeAutomationEvent(*value)
 }
 
+func normalizeTicketAutomationRule(eventName *string, conditions, actions *map[string]any) error {
+	if eventName != nil && *eventName != "ticket.created" && *eventName != "ticket.updated" {
+		return fmt.Errorf("%w: ticket automation supports ticket.created or ticket.updated", ErrInvalidInput)
+	}
+	if conditions != nil {
+		if len(*conditions) == 0 || len(*conditions) > 4 {
+			return fmt.Errorf("%w: automation rules require 1-4 conditions", ErrInvalidInput)
+		}
+		for key, raw := range *conditions {
+			if key != "status" && key != "priority" && key != "severity" && key != "category" && key != "intent" && key != "label" && key != "work_type" {
+				return fmt.Errorf("%w: unsupported automation condition %q", ErrInvalidInput, key)
+			}
+			if !validAutomationValue(key, raw, key == "label") {
+				return fmt.Errorf("%w: invalid automation condition %q", ErrInvalidInput, key)
+			}
+		}
+	}
+	if actions != nil {
+		if len(*actions) == 0 || len(*actions) > 3 {
+			return fmt.Errorf("%w: automation rules require 1-3 actions", ErrInvalidInput)
+		}
+		for key, raw := range *actions {
+			if key != "status" && key != "priority" && key != "severity" && key != "category" && key != "intent" && key != "labels" {
+				return fmt.Errorf("%w: unsupported automation action %q", ErrInvalidInput, key)
+			}
+			if !validAutomationValue(key, raw, key == "labels") {
+				return fmt.Errorf("%w: invalid automation action %q", ErrInvalidInput, key)
+			}
+		}
+	}
+	return nil
+}
+
+func validAutomationText(raw any, allowList bool) bool {
+	if text, ok := raw.(string); ok {
+		return strings.TrimSpace(text) != "" && len([]rune(strings.TrimSpace(text))) <= 120
+	}
+	if !allowList {
+		return false
+	}
+	items := stringSliceField(map[string]any{"value": raw}, "value")
+	if len(items) == 0 || len(items) > 10 {
+		return false
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item) == "" || len([]rune(strings.TrimSpace(item))) > 80 {
+			return false
+		}
+	}
+	return true
+}
+
+func validAutomationValue(key string, raw any, allowList bool) bool {
+	if key == "labels" {
+		switch raw.(type) {
+		case []string, []any:
+		default:
+			return false
+		}
+	}
+	if !validAutomationText(raw, allowList) {
+		return false
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return true
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch key {
+	case "priority":
+		return value == "low" || value == "normal" || value == "high" || value == "urgent"
+	case "severity":
+		return value == "low" || value == "medium" || value == "high" || value == "critical"
+	case "status":
+		return value == "open" || value == "suggested" || value == "waiting_customer" || value == "waiting_team" || value == "snoozed" || value == "escalated" || value == "resolved" || value == "closed"
+	case "work_type":
+		return isTicketWorkType(value)
+	default:
+		return true
+	}
+}
+
 func updateTicketInputFromActions(orgID, ticketID, actorUserID string, actions map[string]any) UpdateTicketInput {
 	input := UpdateTicketInput{
 		OrgID:       orgID,
@@ -1620,6 +2725,7 @@ func ticketAutomationConditionsMatch(conditions map[string]any, ticket *Ticket) 
 		"sla_state": ticket.SLAState,
 		"assignee":  ticket.AssigneeUserID,
 		"source":    ticket.Source,
+		"work_type": ticket.WorkType,
 	}
 	for key, expected := range conditions {
 		if key == "label" || key == "labels" {

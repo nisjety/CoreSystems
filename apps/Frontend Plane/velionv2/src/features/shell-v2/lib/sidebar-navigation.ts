@@ -14,7 +14,7 @@ import {
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
-import type { VelionRoute } from "@/features/shell-v2/lib/shell-data";
+import type { VerevonRoute } from "@/features/shell-v2/lib/shell-data";
 
 export type SidebarPanelTab = {
   id: string;
@@ -24,7 +24,7 @@ export type SidebarPanelTab = {
 export type SidebarPanelItem = {
   id: string;
   label: string;
-  href: VelionRoute;
+  href: VerevonRoute;
   icon: LucideIcon;
   description: string;
   aliases?: string[];
@@ -32,7 +32,7 @@ export type SidebarPanelItem = {
   subItems?: Array<{
     id: string;
     label: string;
-    href: VelionRoute;
+    href: VerevonRoute;
   }>;
 };
 
@@ -49,7 +49,7 @@ export type SidebarPanelGroup = {
 export type SidebarSection = {
   id: string;
   label: string;
-  href: VelionRoute;
+  href: VerevonRoute;
   icon: LucideIcon;
   description: string;
   pinnedBottom?: boolean;
@@ -79,12 +79,12 @@ export const sidebarSections: SidebarSection[] = [
             label: "Hjem",
             href: "/dashboard",
             icon: Home,
-            description: "Tilbake til Velion Home.",
+            description: "Tilbake til Verevon Home.",
             tabId: "my-account",
           },
           {
             id: "overview-chat",
-            label: "Velion Chat",
+            label: "Verevon Chat",
             href: "/chat",
             icon: MessageSquare,
             description: "Start eller fortsett arbeid med AI.",
@@ -123,7 +123,7 @@ export const sidebarSections: SidebarSection[] = [
     label: "Chat",
     href: "/chat",
     icon: MessageSquare,
-    description: "Velion AI-chat og oppgaver.",
+    description: "Verevon AI-chat og oppgaver.",
     panelGroups: [
       {
         id: "messages-core",
@@ -134,7 +134,7 @@ export const sidebarSections: SidebarSection[] = [
             label: "Ny samtale",
             href: "/chat",
             icon: Sparkles,
-            description: "Åpne Velion AI-arbeidsflaten.",
+            description: "Åpne Verevon AI-arbeidsflaten.",
           },
           {
             id: "messages-inbox",
@@ -201,7 +201,7 @@ export const sidebarSections: SidebarSection[] = [
             label: "AI-samtaler",
             href: "/chat",
             icon: MessageSquare,
-            description: "Velion AI-arbeid som kan bli til kundeoppfølging.",
+            description: "Verevon AI-arbeid som kan bli til kundeoppfølging.",
           },
         ],
       },
@@ -234,7 +234,7 @@ export const sidebarSections: SidebarSection[] = [
           },
           {
             id: "ingestions-chat",
-            label: "Ask Velion",
+            label: "Ask Verevon",
             href: "/chat",
             icon: MessageSquare,
             description: "Planlegg eller trigge ingest-arbeid via chat.",
@@ -266,7 +266,7 @@ export const sidebarSections: SidebarSection[] = [
             label: "Spør kunnskapen",
             href: "/chat",
             icon: Sparkles,
-            description: "Bruk Velion AI mot indeksert innhold.",
+            description: "Bruk Verevon AI mot indeksert innhold.",
           },
         ],
       },
@@ -325,14 +325,14 @@ export const sidebarSearchAction = {
   pinnedBottom: true,
 } as const;
 
-export function isSidebarPathActive(pathname: string, href: VelionRoute, aliases: string[] = []) {
+export function isSidebarPathActive(pathname: string, href: VerevonRoute, aliases: string[] = []) {
   const normalizedPathname = normalizePath(pathname);
   const paths = [href, ...aliases].map(normalizePath);
 
   return paths.some((path) => normalizedPathname === path || normalizedPathname.startsWith(`${path}/`));
 }
 
-export function getSidebarSectionForPath(pathname: string, fallbackRoute: VelionRoute) {
+export function getSidebarSectionForPath(pathname: string, fallbackRoute: VerevonRoute) {
   const normalizedPathname = normalizePath(pathname);
 
   return (

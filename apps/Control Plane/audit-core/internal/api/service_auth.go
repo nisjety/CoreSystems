@@ -141,7 +141,7 @@ func ValidateRequiredServiceCredentialRegistry(raw string) error {
 	ingestionWriterReady := false
 	for _, credential := range credentials {
 		switch credential.Principal {
-		case "velion-gateway":
+		case "verevon-gateway":
 			gatewayReady = credentialHasScope(credential, "audit:read:self")
 		case "integration-corev2":
 			ingestionWriterReady = credentialHasScope(credential, "audit:write") &&
@@ -149,7 +149,7 @@ func ValidateRequiredServiceCredentialRegistry(raw string) error {
 		}
 	}
 	if !gatewayReady {
-		return fmt.Errorf("AUDIT_CORE_SERVICE_CREDENTIALS must contain velion-gateway with audit:read:self")
+		return fmt.Errorf("AUDIT_CORE_SERVICE_CREDENTIALS must contain verevon-gateway with audit:read:self")
 	}
 	if !ingestionWriterReady {
 		return fmt.Errorf("AUDIT_CORE_SERVICE_CREDENTIALS must contain integration-corev2 with audit:write pinned to ingestion")

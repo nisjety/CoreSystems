@@ -174,7 +174,7 @@ subsection "Ingestion Qdrant  :6333"
 check_http "Healthz"     GET "http://localhost:6333/healthz"     "" "passed|ok|check"
 check_http "Collections" GET "http://localhost:6333/collections"  "" "collections|result"
 
-subsection "NATS monitoring  :8222  (velion-nats)"
+subsection "NATS monitoring  :8222  (verevon-nats)"
 check_http "varz"    GET "http://localhost:8222/varz"    "" "server_name|version"
 check_http "healthz" GET "http://localhost:8222/healthz" "" "status|ok"
 

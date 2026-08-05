@@ -1,10 +1,10 @@
-# ADR 0003 — L5 boundary policy: velion's `src/app/api/*` proxies are the canonical L5 surface
+# ADR 0003 — L5 boundary policy: verevon's `src/app/api/*` proxies are the canonical L5 surface
 
 - **Status**: accepted
 - **Date**: 2026-05-09
-- **Closes**: velion-gap.md G17 (decision); follow-up cleanup tracked separately
+- **Closes**: verevon-gap.md G17 (decision); follow-up cleanup tracked separately
 - **Supersedes**: none
-- **Owners**: Frontend Plane (velion), Application Plane (convex-core, convex-gateway, notification-core)
+- **Owners**: Frontend Plane (verevon), Application Plane (convex-core, convex-gateway, notification-core)
 
 ---
 
@@ -22,7 +22,7 @@ strict layering rule:
 
 Reality, verified against running code (2026-05-09):
 
-| velion route | Upstream | Layer hit | Charter says |
+| verevon route | Upstream | Layer hit | Charter says |
 |---|---|---|---|
 | `/api/auth/[...path]` | auth-core `:3011` | L1 | should be L5 |
 | `/api/user/[...path]` | user-core `:3012` | L1 | should be L5 |
@@ -31,7 +31,7 @@ Reality, verified against running code (2026-05-09):
 | `/api/ingestion/[...path]` | Quarry / imports-core | L3 | should be L5 |
 | `/api/external/{zammad,nango,nohu}/[...path]` | externally hosted | (not in pyramid) | n/a |
 
-Zero velion route currently goes through `convex-gateway` for L1–L3 data.
+Zero verevon route currently goes through `convex-gateway` for L1–L3 data.
 Convex is used only for reactive workspace data (Phase 8 of CONNECT_ROADMAP,
 not yet started). The charter and the code disagree.
 
@@ -39,9 +39,9 @@ This ADR resolves the disagreement.
 
 ## Options considered
 
-### Option A — Formalise the bypass: velion's `src/app/api/*` is the L5 surface
+### Option A — Formalise the bypass: verevon's `src/app/api/*` is the L5 surface
 
-Update the charter to acknowledge that velion's Next.js route handlers
+Update the charter to acknowledge that verevon's Next.js route handlers
 **are** the Frontend Plane's L5 ingress. They:
 
 - Validate sessions via `control-plane-auth.ts` (single helper)
@@ -50,7 +50,7 @@ Update the charter to acknowledge that velion's Next.js route handlers
 - Cache session verdicts (post-G1)
 - Echo correlation IDs end-to-end (post-G15)
 
-In exchange, velion accepts that any future second frontend (e.g.
+In exchange, verevon accepts that any future second frontend (e.g.
 mobile, public web, admin console) must replicate this proxy layer or
 share a common helper package.
 
@@ -59,7 +59,7 @@ workspace data only. It does not mediate REST traffic.
 
 **Pros**:
 - Matches reality. No code refactor required.
-- Lowest latency: velion proxies talk directly to L1 over the shared
+- Lowest latency: verevon proxies talk directly to L1 over the shared
   Docker network with no extra hop.
 - All security primitives are already in place (G1, G2, G6, G15, G18,
   G24, G29).
@@ -68,16 +68,16 @@ workspace data only. It does not mediate REST traffic.
 
 **Cons**:
 - Charter doc rewrite required. Future contributors must understand
-  the velion-as-gateway pattern.
+  the verevon-as-gateway pattern.
 - A second frontend (mobile app, admin console) cannot just point at
   `convex-gateway` for L1 data — it must either run its own proxy layer
-  or call the velion routes (cross-frontend coupling).
+  or call the verevon routes (cross-frontend coupling).
 - Operational rate-limiting / audit-logging / DLP must be implemented
-  in velion's proxy layer rather than at one shared ingress.
+  in verevon's proxy layer rather than at one shared ingress.
 
-### Option B — Extend `convex-gateway` to absorb the velion proxies
+### Option B — Extend `convex-gateway` to absorb the verevon proxies
 
-`convex-gateway` becomes the real L5 ingress. velion calls only
+`convex-gateway` becomes the real L5 ingress. verevon calls only
 `convex-gateway`; the gateway forwards to L1–L4 services after
 authentication and session validation.
 
@@ -91,15 +91,15 @@ authentication and session validation.
   the gateway, all clients see it.
 
 **Cons**:
-- ~5–15 ms extra latency per request (velion → gateway → core).
+- ~5–15 ms extra latency per request (verevon → gateway → core).
 - Gateway becomes a SPOF for non-reactive traffic too. Today it's
   WS-only; making it required for REST raises its operational bar.
-- Significant refactor: every velion route (~14 routes) must move into
+- Significant refactor: every verevon route (~14 routes) must move into
   gateway or proxy through gateway. Risk of introducing regressions.
 - Two-language gateway codebase (existing Node.js gateway proxies to
   Rust convex-backend; adding REST proxying complicates the ingress).
 
-### Option C — Hybrid: velion proxies stay for now, but a future second-frontend triggers Option B
+### Option C — Hybrid: verevon proxies stay for now, but a future second-frontend triggers Option B
 
 Codify Option A as the **interim** decision and explicitly schedule a
 revisit when the second frontend appears.
@@ -116,7 +116,7 @@ revisit when the second frontend appears.
 
 ## Decision
 
-**Choose Option A**: formalise the bypass. velion's `src/app/api/*`
+**Choose Option A**: formalise the bypass. verevon's `src/app/api/*`
 route handlers **are** the canonical Frontend Plane L5 ingress. The
 charter is updated to match reality.
 
@@ -126,7 +126,7 @@ This is conditional on three guardrails:
    `src/app/api/_lib/control-plane-auth.ts`. Any new proxy route must
    import `requireSession` and `buildControlPlaneHeaders` rather than
    re-implementing auth forwarding.
-2. **Per-core internal-key middleware** — every L1–L4 core that velion
+2. **Per-core internal-key middleware** — every L1–L4 core that verevon
    talks to must enforce `X-Internal-Api-Key` server-side (already done
    for user/org/billing/session-core post-G15; documents-api-go and
    retrieval-engine-rs already done in the prior session).
@@ -143,11 +143,11 @@ This is conditional on three guardrails:
 
 **Costs**:
 - The charter doc (`docs/ARCHITECTURE_DIAGRAM.md`) must be amended to
-  describe velion's proxy layer as the de-facto L5 surface. Without
+  describe verevon's proxy layer as the de-facto L5 surface. Without
   this, new contributors keep tripping on the false constraint.
 - Operational concerns that *would* live at a shared gateway (rate
   limiting, audit log shipping, DLP scanning) must be implemented per
-  velion route or in a velion-internal middleware. Track each as a
+  verevon route or in a verevon-internal middleware. Track each as a
   separate gap if/when the need arises.
 - A second frontend triggers a re-evaluation. The ADR explicitly
   schedules this revisit.
@@ -171,10 +171,10 @@ The following text replaces section "Cross-Plane Contract Rules" in
 > 3. **Auth cookie only** — Authentication flows through HTTP-only
 >    cookies issued by auth-core. The frontend never stores raw OAuth
 >    tokens (refresh tokens live exclusively in auth-core; see ADR 0002
->    and velion-gap.md §2.1).
+>    and verevon-gap.md §2.1).
 > 4. **Environment-driven URLs** — Backend URLs come from environment
 >    variables. No hard-coded service hosts.
-> 5. **Velion proxy as L5 ingress** — velion's `src/app/api/*` route
+> 5. **Verevon proxy as L5 ingress** — verevon's `src/app/api/*` route
 >    handlers are the canonical L5 ingress for the Frontend Plane.
 >    They validate sessions (`control-plane-auth.ts`), mint internal
 >    auth headers, propagate correlation IDs, and forward to L1–L4
@@ -194,14 +194,14 @@ Outstanding tasks:
 
 1. **Amend `docs/ARCHITECTURE_DIAGRAM.md`** with the charter text in the
    previous section. Cite ADR 0003 inline.
-2. **Update `velion-gap.md` §1**: replace the "Charter rule" callout with
+2. **Update `verevon-gap.md` §1**: replace the "Charter rule" callout with
    a reference to the amended charter. Drop the "highest-impact open
    question" wording.
 3. **Lint**: add an ESLint rule (or grep-based pre-commit) that flags
    any new `src/app/api/*/route.ts` file that imports `fetch` directly
    instead of going through `control-plane-auth.ts`. Prevents drift.
-4. **Track operational gaps** as separate velion-gap.md entries:
-   - rate-limiting at velion proxy layer (TBD, low-priority until
+4. **Track operational gaps** as separate verevon-gap.md entries:
+   - rate-limiting at verevon proxy layer (TBD, low-priority until
      abuse signals appear)
    - audit log shipping for proxy traffic (medium-priority)
    - DLP scanning (out of scope for current product phase)
@@ -212,7 +212,7 @@ Outstanding tasks:
 
 - **What about microfrontends?** If a small standalone widget or
   embedded component is required (e.g. a billing portal), prefer
-  hosting it as another route in velion (`/billing-portal/...`) rather
+  hosting it as another route in verevon (`/billing-portal/...`) rather
   than as a separate app. Same proxy layer, same auth helper, no new
   ingress to operate.
 - **What about server-to-server?** L1–L4 services already talk
@@ -229,8 +229,8 @@ Outstanding tasks:
 
 - `docs/ARCHITECTURE_DIAGRAM.md` (charter to be amended per §"Charter
   amendment" above)
-- `velion-gap.md` G17 entry
-- `velion-gap.md` §5.1 L5 boundary policy (charter vs reality)
+- `verevon-gap.md` G17 entry
+- `verevon-gap.md` §5.1 L5 boundary policy (charter vs reality)
 - `src/app/api/_lib/control-plane-auth.ts` (the shared helper that
   embodies guardrail #1)
 - `apps/Application Plane/APPLICATION_PLANE_ARCHITECTURE.md` (defines

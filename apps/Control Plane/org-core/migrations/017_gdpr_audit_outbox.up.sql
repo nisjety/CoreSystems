@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS organization_gdpr_audit_outbox (
   CONSTRAINT organization_gdpr_audit_outbox_org_id_nonempty
     CHECK (btrim(org_id) <> ''),
   CONSTRAINT organization_gdpr_audit_outbox_subject_authority
-    CHECK (subject = 'velion.audit.v2.control.org-core.erasure'),
+    CHECK (subject = 'verevon.audit.v2.control.org-core.erasure'),
   CONSTRAINT organization_gdpr_audit_outbox_payload_object
     CHECK (jsonb_typeof(payload) = 'object'),
   CONSTRAINT organization_gdpr_audit_outbox_payload_identity

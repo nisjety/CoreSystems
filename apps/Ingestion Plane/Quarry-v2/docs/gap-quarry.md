@@ -442,9 +442,9 @@ The roadmap is complete only when Quarry can demonstrate ALL of:
 
 **Quarry is the evidence engine.** It fetches, renders, executes, observes, transforms, fingerprints, diffs, and records source artifacts. It does not own durable knowledge or reasoning.
 
-## 12. 2026-05-20 — Velion Build Runtime Audit (verified green)
+## 12. 2026-05-20 — Verevon Build Runtime Audit (verified green)
 
-Source: orchestrated build via `apps/Frontend Plane/velion/build-velion-services.sh`. Ingestion Plane is index 1; one-shot `nango-seed` was removed cleanly on exit-0.
+Source: orchestrated build via `apps/Frontend Plane/verevon/build-verevon-services.sh`. Ingestion Plane is index 1; one-shot `nango-seed` was removed cleanly on exit-0.
 
 ### Containers running healthy
 | Service | Container | Host port → Container | Health |
@@ -466,15 +466,15 @@ Source: orchestrated build via `apps/Frontend Plane/velion/build-velion-services
 - `crates/quarry-runtime/build.rs` failed to compile `.proto` because `protoc` couldn't find `google/protobuf/timestamp.proto` and `.../struct.proto` inside the Debian build image (apt-installed `protobuf-compiler` does not vendor WKT at `/usr/include`). **Resolution:** vendored both WKT files into `crates/quarry-runtime/proto/google/protobuf/` so protoc resolves them via the existing `&["proto"]` include path. `build.rs` was also extended to look up an optional `PROTOC_INCLUDE` env var and standard system paths as a defensive fallback.
 
 ### Outstanding (not blocking)
-- ~~`support-worker` is in this compose project but tries to resolve `velion-nats` at startup~~ — **fixed 2026-05-20.** `services/support-worker/src/nats-bridge.ts` now wraps `nats.connect()` in a bounded-exponential retry loop (2s → 30s ceiling, infinite attempts) instead of fatal-exiting. The Temporal worker stays `RUNNING` while waiting for NATS, and the NATS bridge attaches once `velion-nats` comes up. Verified end-to-end: support-worker is `Up (healthy)` after the full build, log shows `[nats-bridge] Connected to nats://velion-nats:4222` and `[nats-bridge] Created durable consumer "support-worker" on stream "VELION_SUPPORT"`.
+- ~~`support-worker` is in this compose project but tries to resolve `verevon-nats` at startup~~ — **fixed 2026-05-20.** `services/support-worker/src/nats-bridge.ts` now wraps `nats.connect()` in a bounded-exponential retry loop (2s → 30s ceiling, infinite attempts) instead of fatal-exiting. The Temporal worker stays `RUNNING` while waiting for NATS, and the NATS bridge attaches once `verevon-nats` comes up. Verified end-to-end: support-worker is `Up (healthy)` after the full build, log shows `[nats-bridge] Connected to nats://verevon-nats:4222` and `[nats-bridge] Created durable consumer "support-worker" on stream "VEREVON_SUPPORT"`.
 
-## 13. 2026-05-20 — Cycle 19: full velion build verified all-green (R15)
+## 13. 2026-05-20 — Cycle 19: full verevon build verified all-green (R15)
 
 ### Schedules reconciler envelope bug (closed)
 `quarry-orchestrator` was emitting `WRN reconcile failed error="fetch desired: decode: json: cannot unmarshal object into Go value of type []schedules.ScheduleSpec"` every 30 seconds. Root cause: quarry-control returns the project-standard envelope `{"data": [...], "meta": {...}, "error": null}` for `GET /v1/schedules`, while `services/quarry-orchestrator/internal/schedules/schedules.go::fetchDesired` decoded into a bare `[]ScheduleSpec`. Patched to decode the envelope and pluck `.data`, with a fallback path that still accepts a bare-array shape (the unit-test fixtures use that form). Verified: no more reconcile warnings after rebuild + recreate of the container.
 
 ### support-worker NATS resilience (closed)
-See "Outstanding" section above. The boot-order race between Ingestion Plane (index 1) and Frontend Plane Velion (index 5) is now invisible to the worker — it retries until velion-nats is reachable, then proceeds.
+See "Outstanding" section above. The boot-order race between Ingestion Plane (index 1) and Frontend Plane Verevon (index 5) is now invisible to the worker — it retries until verevon-nats is reachable, then proceeds.
 
 ### Cross-stack ports verified (no collisions)
 quarry-edge (8082) and quarry-control (8081) initially collided with Model Plane's `inference-core` (8082) and `session-core` (8081). Resolution was on the Model Plane side — those services moved to host ports 18082 and 18081. quarry's host-port assignments remain unchanged.

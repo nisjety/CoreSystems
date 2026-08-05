@@ -7,7 +7,7 @@
 > here was resolved around 2026-07-16/17. Service-port/topology details below
 > were not individually re-verified in this pass.
 
-> **Verified 2026-07-11** (host-curl + source + compose): All service ports below confirmed live (200) — quarry-edge `:8082`, quarry-control `:8081`, imports-api `:3025`, integration-api `:3026`, integration-webhook-normalizer `:3036`, finspo-api `:3130`, and shipping-core `:3156`. Quarry stub claims re-confirmed in source. Corrections applied this pass: **shipping-core** and **integration-email-worker** were missing from the topology and have been added; **support-worker** was wrongly described as "not part of the main compose path" — it is a default (non-profile-gated) compose service and is running. autocomplete-core correctly remains absent from the Ingestion compose (it is referenced by velionv3 on `:3219`). Containers report `(unhealthy)` only because their exec-based healthchecks fail against a corrupted containerd store; the processes serve traffic normally.
+> **Verified 2026-07-11** (host-curl + source + compose): All service ports below confirmed live (200) — quarry-edge `:8082`, quarry-control `:8081`, imports-api `:3025`, integration-api `:3026`, integration-webhook-normalizer `:3036`, finspo-api `:3130`, and shipping-core `:3156`. Quarry stub claims re-confirmed in source. Corrections applied this pass: **shipping-core** and **integration-email-worker** were missing from the topology and have been added; **support-worker** was wrongly described as "not part of the main compose path" — it is a default (non-profile-gated) compose service and is running. autocomplete-core correctly remains absent from the Ingestion compose (it is referenced by verevonv3 on `:3219`). Containers report `(unhealthy)` only because their exec-based healthchecks fail against a corrupted containerd store; the processes serve traffic normally.
 
 ## Executive Summary
 
@@ -50,7 +50,7 @@ Additional runtime surface on disk but **not** part of the Ingestion compose pat
 
 | Service | Role |
 |---|---|
-| `autocomplete-core` | Tenant-scoped typeahead/suggestions API with optional NATS consumer. Not launched by the Ingestion compose; velionv3 references it at `http://autocomplete-core:3219` |
+| `autocomplete-core` | Tenant-scoped typeahead/suggestions API with optional NATS consumer. Not launched by the Ingestion compose; verevonv3 references it at `http://autocomplete-core:3219` |
 
 Legacy or profile-gated compose surfaces:
 
@@ -249,7 +249,7 @@ flowchart TD
 ### Current position
 
 - Exists as a sidecar utility rather than a central ingestion backbone service.
-- README still lists pending work such as Velion proxy routing and title ingestion parity.
+- README still lists pending work such as Verevon proxy routing and title ingestion parity.
 
 ## support-worker
 

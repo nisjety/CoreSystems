@@ -18,23 +18,23 @@ import {
   Zap,
 } from "lucide-react";
 import {
-  VelionButton,
-  VelionIconButton,
-  VelionSelect,
-  VelionTextarea,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonIconButton,
+  VerevonSelect,
+  VerevonTextarea,
+} from "@/components/ui/verevon-ui";
 import type { ChatbotAddOnId } from "@/features/agents-v2/lib/agent-roles";
 import type { SupportIntegrationStatus } from "@/features/agents-v2/lib/use-chatbot-support-status";
-import { ToggleSwitch } from "@/features/agents-v2/components/VelionChatbotStudioCards";
+import { ToggleSwitch } from "@/features/agents-v2/components/VerevonChatbotStudioCards";
 import {
   PlaygroundAccordion,
   SettingInput,
   SettingTextarea,
   SupportIntegrationBanner,
-} from "@/features/agents-v2/components/VelionChatbotStudioPrimitives";
+} from "@/features/agents-v2/components/VerevonChatbotStudioPrimitives";
 import {
   chatbotDisplayName,
-} from "@/features/agents-v2/lib/velion-chatbot-studio-data";
+} from "@/features/agents-v2/lib/verevon-chatbot-studio-data";
 import { cn } from "@/lib/utils";
 
 export function ChatbotPlaygroundSurface({
@@ -56,7 +56,7 @@ export function ChatbotPlaygroundSurface({
   visibleAddOns: Set<ChatbotAddOnId>;
 }) {
   return (
-    <div className="velion-page-surface h-full min-h-0 overflow-y-auto xl:overflow-hidden">
+    <div className="verevon-page-surface h-full min-h-0 overflow-y-auto xl:overflow-hidden">
       <div className="grid min-h-full grid-cols-1 gap-2 p-2 xl:h-full xl:min-h-0 xl:grid-cols-[360px_minmax(0,1fr)]">
         <PlaygroundSettingsPanel
           onAddOnSelect={onAddOnSelect}
@@ -93,7 +93,7 @@ function PlaygroundSettingsPanel({
   const actionEnabled = visibleAddOns.has("subscription-action");
 
   return (
-    <section className="velion-sidebar-type velion-panel flex h-[660px] min-h-0 flex-col overflow-hidden text-[#1D1D1F] xl:h-full dark:text-[#F7F8F8]">
+    <section className="verevon-sidebar-type verevon-panel flex h-[660px] min-h-0 flex-col overflow-hidden text-[#1D1D1F] xl:h-full dark:text-[#F7F8F8]">
       <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-5">
         <h1 className="text-[24px] font-semibold leading-8 tracking-normal text-[#0F1011] dark:text-white">
           Playground
@@ -113,9 +113,9 @@ function PlaygroundSettingsPanel({
             </div>
             <div className="mt-3 flex h-11 items-center justify-between rounded-[9px] border border-[#E8E8EA] bg-white px-3 dark:border-[#2A2C31] dark:bg-[#15161A]">
               <span className="text-[13px] font-medium text-[#67686D] dark:text-[#D7DCE4]">Compare AI models</span>
-              <VelionButton size="xs" radius="sm" className="px-3 text-[12px] font-semibold">
+              <VerevonButton size="xs" radius="sm" className="px-3 text-[12px] font-semibold">
                 Compare
-              </VelionButton>
+              </VerevonButton>
             </div>
           </PlaygroundAccordion>
 
@@ -124,7 +124,7 @@ function PlaygroundSettingsPanel({
               Model
             </label>
             <div className="relative mt-2">
-              <VelionSelect
+              <VerevonSelect
                 id="chatbot-model"
                 defaultValue="gpt-5"
                 variant="compact"
@@ -133,7 +133,7 @@ function PlaygroundSettingsPanel({
                 <option value="gpt-5">GPT-5</option>
                 <option value="gpt-5-mini">GPT-5 mini</option>
                 <option value="gpt-4.1">GPT-4.1</option>
-              </VelionSelect>
+              </VerevonSelect>
               <Sparkles className="pointer-events-none absolute left-4 top-1/2 size-3.5 -translate-y-1/2 text-[#1D1D1F] dark:text-white" />
               <ChevronDown className="pointer-events-none absolute right-4 top-1/2 size-3.5 -translate-y-1/2 text-[#8E949E]" />
             </div>
@@ -190,24 +190,24 @@ function PlaygroundSettingsPanel({
 
           <PlaygroundAccordion defaultOpen Icon={FileText} title="Instructions">
             <div className="flex gap-2">
-              <VelionButton radius="sm" className="min-w-0 flex-1 justify-between px-3 text-[13px] font-medium text-[#202126] dark:text-white">
+              <VerevonButton radius="sm" className="min-w-0 flex-1 justify-between px-3 text-[13px] font-medium text-[#202126] dark:text-white">
                 Base Instructions
                 <ChevronDown className="size-3.5 text-[#9EA3AA]" />
-              </VelionButton>
-              <VelionIconButton size="lg" radius="sm" onClick={onResetCanvas} aria-label="Reset playground instructions" className="shrink-0 border border-[#E1E2E6] bg-white dark:border-[#303238] dark:bg-[#111216]">
+              </VerevonButton>
+              <VerevonIconButton size="lg" radius="sm" onClick={onResetCanvas} aria-label="Reset playground instructions" className="shrink-0 border border-[#E1E2E6] bg-white dark:border-[#303238] dark:bg-[#111216]">
                 <RotateCcw className="size-4" />
-              </VelionIconButton>
+              </VerevonIconButton>
             </div>
-            <VelionTextarea
+            <VerevonTextarea
               aria-label="Instructions system prompt"
-              defaultValue={`Role: You are the Velion Design Concierge, an expert in UI/UX patterns, customer automation, and product strategy. Your mission is to help teams find the exact answer, workflow, or source they need.
+              defaultValue={`Role: You are the Verevon Design Concierge, an expert in UI/UX patterns, customer automation, and product strategy. Your mission is to help teams find the exact answer, workflow, or source they need.
 
 Voice & Tone:
 - Curated & sophisticated: Use clear product language and practical recommendations.
 - Concise first: Start with the answer, then add details when needed.
 - Tool aware: Use enabled tools only after explicit confirmation.`}
               variant="compact"
-              className="velion-textarea-large mt-4"
+              className="verevon-textarea-large mt-4"
             />
           </PlaygroundAccordion>
 
@@ -239,7 +239,7 @@ function PlaygroundBotPanel({
   supportStatus: SupportIntegrationStatus;
 }) {
   return (
-    <section className="velion-panel velion-panel-strong relative flex min-h-[600px] min-w-0 overflow-hidden text-[#111111] xl:min-h-0 dark:text-white">
+    <section className="verevon-panel verevon-panel-strong relative flex min-h-[600px] min-w-0 overflow-hidden text-[#111111] xl:min-h-0 dark:text-white">
       <div
         aria-hidden="true"
         className="absolute inset-0 bg-[radial-gradient(circle_at_2px_2px,rgba(38,42,48,0.11)_1.6px,transparent_0)] [background-size:28px_28px] dark:bg-[radial-gradient(circle_at_2px_2px,rgba(255,255,255,0.11)_1.6px,transparent_0)]"
@@ -299,7 +299,7 @@ function ChatbotDevice({
         </div>
         <div className="mt-auto pb-3 text-center text-[12px] font-medium text-[#B1B3B9]">
           <span className="mr-1 inline-grid size-4 place-items-center rounded-[4px] bg-[#AEB0B7] text-[10px] font-bold text-white">V</span>
-          Powered by Velion
+          Powered by Verevon
         </div>
         <div className="flex h-12 items-center gap-2 rounded-full border border-[#E2E3E8] bg-white px-4 text-[14px] text-[#A1A5AE] shadow-[0_8px_24px_rgba(31,35,42,0.08)] dark:border-[#303238] dark:bg-[#17181C]">
           {placeholder}

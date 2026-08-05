@@ -2,7 +2,7 @@
 
 > **DRAFT — INTERNAL TEMPLATE, NOT LEGAL ADVICE.** Not reviewed by Norwegian
 > privacy counsel. A DPIA is the controller's legal responsibility (GDPR Art. 35);
-> Velion (processor) provides this template and the technical facts to assist.
+> Verevon (processor) provides this template and the technical facts to assist.
 > Must not be relied on externally until counsel-reviewed. See [`README.md`](./README.md).
 
 ---
@@ -30,16 +30,16 @@ processing changes.
 
 ### A.0 Administrative
 - DPIA owner / controller:
-- Processor(s) involved: Velion (AI agent platform) + its subprocessors (see [list](./subprocessor-list.md)).
+- Processor(s) involved: Verevon (AI agent platform) + its subprocessors (see [list](./subprocessor-list.md)).
 - DPO / privacy contact:
 - Date / version:
 - Review date:
 
 ### A.1 — Element (a): Systematic description of the processing and its purposes
 - What processing operations take place (collection, storage, AI inference, agent automation, retrieval, web crawling, deletion)?
-- Purpose(s) of each operation (`purpose_id` in Velion: support, billing, import, retrieval, model execution, etc.).
+- Purpose(s) of each operation (`purpose_id` in Verevon: support, billing, import, retrieval, model execution, etc.).
 - Categories of data subjects (employees, customers, contacts, external subjects).
-- Categories of personal data, mapped to Velion classes (`personal`, `sensitive_personal`, `customer_private`, …).
+- Categories of personal data, mapped to Verevon classes (`personal`, `sensitive_personal`, `customer_private`, …).
 - Recipients and subprocessors; international transfers and their basis.
 - Lawful basis (Art. 6) per purpose; Art. 9 condition if special categories.
 - Retention periods (reference the [Retention Schedule](./retention-schedule.md)).
@@ -78,7 +78,7 @@ and the supplementary measures in the [Transfer Impact Assessment](./transfer-as
 
 ### Use case: *Autonomous AI agent processing customer + company data with human-approval gates*
 
-> Example instance for Velion's flagship use case, first deployed with Design
+> Example instance for Verevon's flagship use case, first deployed with Design
 > Partner **Aquatiq** (food-safety / hygiene B2B). Figures and basis are
 > **illustrative** for the controller to validate, not legal conclusions.
 
@@ -118,7 +118,7 @@ and the supplementary measures in the [Transfer Impact Assessment](./transfer-as
 
 #### (b) Necessity and proportionality
 - The agent only processes data the customer supplies or directs it to retrieve;
-  Velion's design **classifies and can redact/reject** secrets and high-risk
+  Verevon's design **classifies and can redact/reject** secrets and high-risk
   personal data before persistence.
 - **Minimisation:** audit/log layer stores identifiers, hashes, and policy
   decisions — **not** full content, prompts with private content, or document
@@ -148,7 +148,7 @@ and the supplementary measures in the [Transfer Impact Assessment](./transfer-as
 |---|-----------|----------|
 | R1 | **Human Approve/Reject gate** before consequential actions; durable run-history for review; ability to halt a run. | Low-Med |
 | R2 | Per-organisation isolation; org-scoped policy lookup and deletion scope; no cross-tenant retrieval. | Low |
-| R3 | Velion-owned egress broker (Quarry) with per-domain limits, classification before persistence, default `allow_third_party_processing=false`. | Low-Med |
+| R3 | Verevon-owned egress broker (Quarry) with per-domain limits, classification before persistence, default `allow_third_party_processing=false`. | Low-Med |
 | R4 | EU residency + encryption + ZDR + access controls as supplementary measures; CLOUD Act **disclosed** as residual (see [TIA](./transfer-assessment.md)). | **Disclosed residual** |
 | R5 | Default-deny third-party processing for protected classes; provider calls gated by classification + residency + ZDR + processor approval. | Low |
 | R6 | `credential_or_secret` class is vault-only; audit policy forbids logging tokens, cookies, prompts with private content, document bodies. | Low |

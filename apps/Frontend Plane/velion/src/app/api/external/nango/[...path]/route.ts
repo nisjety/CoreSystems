@@ -61,7 +61,7 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
     if (!target) {
       return NextResponse.json(
-        { error: 'Unsupported Nango proxy path. Use the Velion integration APIs.' },
+        { error: 'Unsupported Nango proxy path. Use the Verevon integration APIs.' },
         { status: 404 },
       )
     }

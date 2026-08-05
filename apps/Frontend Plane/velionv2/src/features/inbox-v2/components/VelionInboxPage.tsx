@@ -251,15 +251,15 @@ async function requestTickets(params: URLSearchParams) {
   return Array.isArray(payload) ? payload : payload.tickets ?? [];
 }
 
-export function VelionInboxPage({ routeSlug = EMPTY_ROUTE_SLUG }: { routeSlug?: string[] }) {
+export function VerevonInboxPage({ routeSlug = EMPTY_ROUTE_SLUG }: { routeSlug?: string[] }) {
   return (
     <Suspense fallback={null}>
-      <VelionInboxPageContent routeSlug={routeSlug} />
+      <VerevonInboxPageContent routeSlug={routeSlug} />
     </Suspense>
   );
 }
 
-function VelionInboxPageContent({ routeSlug }: { routeSlug: string[] }) {
+function VerevonInboxPageContent({ routeSlug }: { routeSlug: string[] }) {
   const searchParams = useSearchParams();
   const { agents, groups } = useSupportReferenceData();
   const queryString = searchParams?.toString() ?? "";

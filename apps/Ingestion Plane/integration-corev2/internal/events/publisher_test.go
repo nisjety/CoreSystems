@@ -3,9 +3,9 @@ package events
 import "testing"
 
 func TestNATSPublisherSubjectPrefix(t *testing.T) {
-	publisher := &NATSPublisher{subjectPrefix: "velion.events"}
-	if got := publisher.subject("integration.connected"); got != "velion.events.integration.connected" {
-		t.Fatalf("subject = %q, want velion.events.integration.connected", got)
+	publisher := &NATSPublisher{subjectPrefix: "verevon.events"}
+	if got := publisher.subject("integration.connected"); got != "verevon.events.integration.connected" {
+		t.Fatalf("subject = %q, want verevon.events.integration.connected", got)
 	}
 }
 

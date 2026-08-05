@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { Check } from "lucide-react"
 import { authClient } from "@/lib/auth/auth-client"
-import { VelionButton, VelionInput } from "@/components/ui/velion-ui"
+import { VerevonButton, VerevonInput } from "@/components/ui/verevon-ui"
 
 type Passkey = { id: string; name?: string | null; createdAt?: string | Date | null }
 
@@ -99,20 +99,20 @@ export function PasskeySecuritySection() {
       </div>
 
       <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center">
-        <VelionInput
+        <VerevonInput
           value={name}
           onChange={(event) => setName(event.target.value)}
           placeholder="Passkey name (e.g. MacBook, iPhone)"
           aria-label="Passkey name"
           className="sm:max-w-[320px]"
         />
-        <VelionButton
+        <VerevonButton
           onClick={register}
           disabled={status.type === "working"}
           className="shrink-0"
         >
           {status.type === "working" ? "Waiting for device…" : "Register a passkey"}
-        </VelionButton>
+        </VerevonButton>
       </div>
 
       {status.type === "error" ? (
@@ -149,14 +149,14 @@ export function PasskeySecuritySection() {
                   </p>
                 ) : null}
               </div>
-              <VelionButton
+              <VerevonButton
                 size="sm"
                 radius="sm"
                 onClick={() => remove(passkey.id)}
                 className="shrink-0 px-3 text-[12px]"
               >
                 Remove
-              </VelionButton>
+              </VerevonButton>
             </div>
           ))
         )}

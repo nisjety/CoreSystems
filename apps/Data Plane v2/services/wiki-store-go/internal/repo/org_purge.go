@@ -3,7 +3,7 @@
 // cross-plane fan-out event and calls this method lives in
 // internal/gdpr/org_purge.go; see that file's package doc for the full
 // producer/consumer contract (org-core publishes
-// "velion.gdpr.erasure.requested" from both its explicit hard-delete path
+// "verevon.gdpr.erasure.requested" from both its explicit hard-delete path
 // and its 30-day retention cron).
 //
 // Scope: HardPurgeByOrg hard-deletes (not soft-deletes) every row this

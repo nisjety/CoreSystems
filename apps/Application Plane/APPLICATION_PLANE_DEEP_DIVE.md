@@ -94,7 +94,7 @@ flowchart TD
     FE --> NC["notification-core"]
     FE --> IC["information-core"]
 
-    CS["convex-subscriber"] --> NATS1["velion-nats / model-plane-nats / app-nats"]
+    CS["convex-subscriber"] --> NATS1["verevon-nats / model-plane-nats / app-nats"]
     CS --> CX
 
     CX --> CP["Control Plane"]
@@ -118,7 +118,7 @@ flowchart TD
 
 ## Control membership authority and gateway boundary
 
-Application Plane does not own membership. Changed source adds an exact Auth Core decision for `(user_id, organization_id)`, called through User Core with a dedicated credential and redirect refusal. It accepts only canonical owner/admin/member/viewer roles, rejects ambiguous duplicates, and ships migration 016 with an operator-visible duplicate preflight before the unique index is created. Velion gateway uses the decision before signing tenant/user/role-bound conversation requests; the same fail-closed result must cover every notification/social/leads/knowledge/privacy/action caller rather than trusting a stale `active_org_id`.
+Application Plane does not own membership. Changed source adds an exact Auth Core decision for `(user_id, organization_id)`, called through User Core with a dedicated credential and redirect refusal. It accepts only canonical owner/admin/member/viewer roles, rejects ambiguous duplicates, and ships migration 016 with an operator-visible duplicate preflight before the unique index is created. Verevon gateway uses the decision before signing tenant/user/role-bound conversation requests; the same fail-closed result must cover every notification/social/leads/knowledge/privacy/action caller rather than trusting a stale `active_org_id`.
 
 This is source-only. Auth Core, User Core, gateway, migration 016, and new credentials are not deployed. A successful denial must also remove User Core's stale local projection; authority outages must remain 503 and must never mutate authority state.
 
@@ -439,5 +439,5 @@ These are candidates only. Do not delete until the cross-plane stale-doc registe
 3. Add a durable provider-bound conversation outbound ledger and crash reconciliation.
 4. Give Control membership events transactional delivery, signed issuer identity, event IDs, revisions, and subject ACLs before deploying Convex reconciliation.
 5. Supply a signed/revisioned notification membership writer and scoped removal-first backfill; add delivery/feed outbox, callbacks/reconciliation, and HA replay state. Keep support automation disabled until workflows carry authoritative mappings.
-6. Deploy information-core, Model formatter, and Velion v3 provenance changes together; migrate or retire legacy Velion v2.
+6. Deploy information-core, Model formatter, and Verevon v3 provenance changes together; migrate or retire legacy Verevon v2.
 7. Follow the dated deployment/reconciliation/native-build runbooks under `docs/runbooks/` and preserve immutable rollback evidence.

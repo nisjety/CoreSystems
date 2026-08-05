@@ -18,7 +18,7 @@
 | | retrieval-eval-py | ❌ | ❌ | ❌ | offline lab |
 | | **wiki-store-go** | ✅ | ❌ | ✅ `wiki_v1` | **paper proto** — service exposes HTTP only |
 | **Control Plane** | auth-core | ✅ | ❌ | partial | NestJS; HTTP is the right shape |
-| | audit-core / billing-core / org-core / session-core | ✅ | ❌ | ❌ | HTTP REST for velion proxies |
+| | audit-core / billing-core / org-core / session-core | ✅ | ❌ | ❌ | HTTP REST for verevon proxies |
 | **Application Plane** | affine-core / convex-core / notification-core | ✅ | ❌ | ❌ | HTTP / Convex / WebSocket |
 
 ## 2. Decision matrix — which wire fits
@@ -26,10 +26,10 @@
 | Pattern | Best fit | Why |
 |---------|----------|-----|
 | Model Plane → Data Plane hot path (retrieval, embedding, graph, wiki, documents) | **gRPC** | strongly-typed, streaming, low-latency, service-to-service |
-| velion → Control Plane (auth, org, billing) | **HTTP REST** (status quo) | browser-driven, well-suited to fetch + cookies; gRPC-web adds plumbing for no win |
-| velion → ad-hoc orchestration (read paths) | gRPC where typed (already in place); HTTP proxies for plain reads | mixed today; keep as-is |
+| verevon → Control Plane (auth, org, billing) | **HTTP REST** (status quo) | browser-driven, well-suited to fetch + cookies; gRPC-web adds plumbing for no win |
+| verevon → ad-hoc orchestration (read paths) | gRPC where typed (already in place); HTTP proxies for plain reads | mixed today; keep as-is |
 | **Graph traversal queries** (entity → relationships → claims → contradictions, with selectable depth) | **GraphQL** | flexible field selection + deep nested traversal is exactly its strength; gRPC forces N round-trips or fat responses |
-| **Wiki rendering** (page + version + sources + backlinks in one fetch) | **GraphQL** | classic "fetch what the page needs" pattern; today the velion view does multiple HTTP calls |
+| **Wiki rendering** (page + version + sources + backlinks in one fetch) | **GraphQL** | classic "fetch what the page needs" pattern; today the verevon view does multiple HTTP calls |
 | Run / agent CRUD, plan/todo/approval transitions | gRPC | strongly-typed transitions, server-driven validation |
 
 ## 3. Work plan
@@ -100,13 +100,13 @@ type Query {
 }
 ```
 
-This is where velion would render an entity card with relationships + claims +
+This is where verevon would render an entity card with relationships + claims +
 contradictions in **one** round trip instead of 4 — and a wiki page with its
 version + sources + backlinks in **one** instead of 3+. gRPC stays underneath
 for the Model Plane hot path; GraphQL sits on top for client convenience.
 
 #### E. Control Plane stays HTTP
-No gRPC value-add — velion talks REST, and that's correct. Skip.
+No gRPC value-add — verevon talks REST, and that's correct. Skip.
 
 ## 4. Rule of thumb going forward
 

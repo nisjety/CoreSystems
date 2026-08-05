@@ -2671,7 +2671,7 @@ async fn invoke_stream_uses_context_assembly_segments_before_inference() {
     assert_eq!(messages[0].0, "system");
     assert!(messages[0].1.contains("Today's real date is"));
     assert_eq!(messages[1].0, "system");
-    assert!(messages[1].1.contains("Velion context assembly"));
+    assert!(messages[1].1.contains("Verevon context assembly"));
     assert!(messages[1].1.contains("[thread]"));
     assert!(messages[1].1.contains("Model Plane owns reasoning"));
     assert!(messages[1].1.contains("[episodic]"));
@@ -3204,7 +3204,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "data": {
                 "results": [{
-                    "url": "https://velion.test/model-plane",
+                    "url": "https://verevon.test/model-plane",
                     "title": "Model Plane",
                     "snippet": "Model Plane owns reasoning, sessions, inference, tools, and cost controls.",
                     "source": "mock",
@@ -3246,7 +3246,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     let search_body = to_bytes(search_resp.into_body(), usize::MAX).await.unwrap();
     let search_body = String::from_utf8(search_body.to_vec()).unwrap();
     assert!(search_body.contains("event: citation"));
-    assert!(search_body.contains("https://velion.test/model-plane"));
+    assert!(search_body.contains("https://verevon.test/model-plane"));
 
     let image_req = Request::builder()
         .method("POST")
@@ -3297,7 +3297,7 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
     // reached a later one.
     assert!(
         captured.iter().any(|set| set.iter().any(|(_, content)| {
-            content.contains("Tool results") && content.contains("https://velion.test/model-plane")
+            content.contains("Tool results") && content.contains("https://verevon.test/model-plane")
         })),
         "the forced search results should have reached an inference prompt",
     );

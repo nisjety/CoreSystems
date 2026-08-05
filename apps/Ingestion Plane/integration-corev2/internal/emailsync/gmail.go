@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/triodelab/integration-corev2/internal/store"
 )
 
 // GmailFetcher syncs a Gmail inbox using the documented client-sync model:
@@ -40,13 +42,30 @@ func (f *GmailFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 	return f.incremental(ctx, accessToken, cursor, maxMessages)
 }
 
+// FetchConnection fills a missing mailbox label from Google's profile endpoint
+// while it already has an authorized mailbox token. Failure to enrich the
+// operator label never blocks mail ingestion: the fetch result remains the
+// authoritative sync outcome.
+func (f *GmailFetcher) FetchConnection(ctx context.Context, conn store.Connection, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error) {
+	result, err := f.Fetch(ctx, accessToken, cursor, backfill, maxMessages)
+	if err != nil || !connectionNeedsMailboxAddress(conn) || result.ProviderContextPatch["mailbox_address"] != "" {
+		return result, err
+	}
+	address, profileErr := f.mailboxAddress(ctx, accessToken)
+	if profileErr == nil && address != "" {
+		result.ProviderContextPatch = map[string]string{"mailbox_address": address}
+	}
+	return result, nil
+}
+
 // bootstrap pins the cursor to the mailbox's CURRENT historyId first, then
 // backfills recent inbox messages. Ordering matters: pinning first means any
 // message arriving during the backfill is replayed by the next incremental
 // pass instead of being lost (duplicates are absorbed by ingest idempotency).
 func (f *GmailFetcher) bootstrap(ctx context.Context, accessToken string, backfill time.Duration, maxMessages int) (FetchResult, error) {
 	var profile struct {
-		HistoryID string `json:"historyId"`
+		EmailAddress string `json:"emailAddress"`
+		HistoryID    string `json:"historyId"`
 	}
 	if err := f.getJSON(ctx, accessToken, "/gmail/v1/users/me/profile", &profile); err != nil {
 		return FetchResult{}, fmt.Errorf("gmail profile: %w", err)
@@ -81,7 +100,40 @@ func (f *GmailFetcher) bootstrap(ctx context.Context, accessToken string, backfi
 			messages = append(messages, msg)
 		}
 	}
-	return FetchResult{Messages: messages, NextCursor: profile.HistoryID}, nil
+	return FetchResult{
+		Messages:             messages,
+		NextCursor:           profile.HistoryID,
+		ProviderContextPatch: mailboxAddressPatch(profile.EmailAddress),
+	}, nil
+}
+
+func (f *GmailFetcher) mailboxAddress(ctx context.Context, accessToken string) (string, error) {
+	var profile struct {
+		EmailAddress string `json:"emailAddress"`
+	}
+	if err := f.getJSON(ctx, accessToken, "/gmail/v1/users/me/profile", &profile); err != nil {
+		return "", err
+	}
+	return normalizeMailboxAddress(profile.EmailAddress), nil
+}
+
+func connectionNeedsMailboxAddress(conn store.Connection) bool {
+	return strings.TrimSpace(conn.ProviderContext["mailbox_address"]) == ""
+}
+
+func mailboxAddressPatch(value string) map[string]string {
+	if address := normalizeMailboxAddress(value); address != "" {
+		return map[string]string{"mailbox_address": address}
+	}
+	return nil
+}
+
+func normalizeMailboxAddress(value string) string {
+	address, err := mail.ParseAddress(strings.TrimSpace(value))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(address.Address))
 }
 
 func (f *GmailFetcher) incremental(ctx context.Context, accessToken, cursor string, maxMessages int) (FetchResult, error) {
@@ -185,19 +237,40 @@ func (f *GmailFetcher) fetchMessage(ctx context.Context, accessToken, id string)
 
 	fromName, fromEmail := parseAddress(headers["from"])
 	msg := EmailMessage{
-		ProviderEventID:   raw.ID,
-		ProviderMessageID: raw.ID,
-		ProviderThreadID:  raw.ThreadID,
-		MessageIDHeader:   headers["message-id"],
-		ReferencesHeader:  headers["references"],
-		InReplyToHeader:   headers["in-reply-to"],
-		Subject:           headers["subject"],
-		From:              Participant{Name: fromName, Email: fromEmail},
-		To:                parseAddressList(headers["to"]),
-		OccurredAt:        gmailInternalDate(raw.InternalDate),
+		ProviderEventID:       raw.ID,
+		ProviderMessageID:     raw.ID,
+		ProviderThreadID:      raw.ThreadID,
+		MessageIDHeader:       headers["message-id"],
+		ReferencesHeader:      headers["references"],
+		InReplyToHeader:       headers["in-reply-to"],
+		AutoSubmitted:         headers["auto-submitted"],
+		ContentType:           headers["content-type"],
+		OutboundCorrelationID: findGmailHeader(raw.Payload, "x-verevon-outbound-intent"),
+		Subject:               headers["subject"],
+		From:                  Participant{Name: fromName, Email: fromEmail},
+		To:                    parseAddressList(headers["to"]),
+		OccurredAt:            gmailInternalDate(raw.InternalDate),
 	}
 	msg.BodyText, msg.BodyHTML = extractGmailBodies(raw.Payload)
 	return msg, true, nil
+}
+
+// findGmailHeader searches the complete MIME tree. A delivery-status report
+// commonly encapsulates the original RFC 822 message as a nested part, where
+// Verevon's opaque outbound correlation header resides.
+func findGmailHeader(part gmailPart, name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, header := range part.Headers {
+		if strings.ToLower(strings.TrimSpace(header.Name)) == name {
+			return strings.TrimSpace(header.Value)
+		}
+	}
+	for _, nested := range part.Parts {
+		if value := findGmailHeader(nested, name); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type gmailPart struct {

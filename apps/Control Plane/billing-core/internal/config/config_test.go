@@ -7,7 +7,7 @@ func clearEnv(t *testing.T) {
 	vars := []string{
 		"HTTP_PORT", "GRPC_PORT", "DATABASE_URL",
 		"NATS_URL", "NATS_TOKEN", "NATS_AUTH_TOKEN",
-		"VELION_NATS_URL",
+		"VEREVON_NATS_URL",
 		"NATS_SHARED_URL", "NATS_SHARED_TOKEN",
 		"SERVICE_NAME",
 		"ORG_CORE_SERVICE_TOKEN",
@@ -128,19 +128,19 @@ func TestLoad_GRPCPortFromEnv(t *testing.T) {
 	}
 }
 
-func TestLoad_VelionSharedURLRetainsExplicitTokenFallbackVariable(t *testing.T) {
+func TestLoad_VerevonSharedURLRetainsExplicitTokenFallbackVariable(t *testing.T) {
 	clearEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://localhost/test")
 	t.Setenv("NATS_SHARED_URL", "nats://legacy:4222")
 	t.Setenv("NATS_SHARED_TOKEN", "explicit-fallback-token")
-	t.Setenv("VELION_NATS_URL", "nats://velion-nats:4222")
+	t.Setenv("VEREVON_NATS_URL", "nats://verevon-nats:4222")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if cfg.NATSSharedURL != "nats://velion-nats:4222" {
-		t.Fatalf("NATSSharedURL = %q, want %q", cfg.NATSSharedURL, "nats://velion-nats:4222")
+	if cfg.NATSSharedURL != "nats://verevon-nats:4222" {
+		t.Fatalf("NATSSharedURL = %q, want %q", cfg.NATSSharedURL, "nats://verevon-nats:4222")
 	}
 	if cfg.NATSSharedToken != "explicit-fallback-token" {
 		t.Fatalf("NATSSharedToken = %q, want explicit fallback token", cfg.NATSSharedToken)

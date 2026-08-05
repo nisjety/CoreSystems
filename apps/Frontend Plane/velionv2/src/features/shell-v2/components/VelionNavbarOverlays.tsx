@@ -7,13 +7,13 @@ import { useEffect, useReducer, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Search } from "lucide-react";
 import {
-  VelionButton,
-  VelionInput,
-  VelionModal,
-  VelionModalClose,
-  VelionModalTitle,
-  VelionTextarea,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonInput,
+  VerevonModal,
+  VerevonModalClose,
+  VerevonModalTitle,
+  VerevonTextarea,
+} from "@/components/ui/verevon-ui";
 import {
   searchNavbar,
   submitNavbarSupportRequest,
@@ -59,8 +59,8 @@ export function GlobalSearchDialog({ onClose }: { onClose: () => void }) {
   }, [query]);
 
   return (
-    <VelionModal label="Knowledge search" size="search">
-        <div className="velion-modal-header">
+    <VerevonModal label="Knowledge search" size="search">
+        <div className="verevon-modal-header">
           <Search className="size-4 text-[#989286]" />
           <input
             ref={inputRef}
@@ -72,9 +72,9 @@ export function GlobalSearchDialog({ onClose }: { onClose: () => void }) {
             aria-label="Search the knowledge base"
             className="min-w-0 flex-1 bg-transparent text-[15px] text-[#111111] placeholder:text-[#9A9387] focus:outline-none dark:text-white"
           />
-          <VelionModalClose onClick={onClose} aria-label="Close global search">
+          <VerevonModalClose onClick={onClose} aria-label="Close global search">
             Esc
-          </VelionModalClose>
+          </VerevonModalClose>
         </div>
         <div className="max-h-[420px] overflow-y-auto p-2">
           {loading ? <EmptyPanel text="Searching…" /> : null}
@@ -90,7 +90,7 @@ export function GlobalSearchDialog({ onClose }: { onClose: () => void }) {
             </Link>
           ))}
         </div>
-    </VelionModal>
+    </VerevonModal>
   );
 }
 
@@ -160,16 +160,16 @@ export function AssistantModal({ pathname, onClose }: { pathname: string; onClos
 
   return (
     <DialogPanel title="AI Assistant" onClose={onClose}>
-      <p className="velion-type-body text-[#666] dark:text-[#AEB4C0]">Help with {pathname.split("/").filter(Boolean).pop() ?? "this page"}.</p>
-      <VelionTextarea
+      <p className="verevon-type-body text-[#666] dark:text-[#AEB4C0]">Help with {pathname.split("/").filter(Boolean).pop() ?? "this page"}.</p>
+      <VerevonTextarea
         value={prompt}
         onChange={(event) => setPrompt(event.target.value)}
         rows={4}
-        placeholder="Ask Velion…"
-        aria-label="Ask Velion assistant"
+        placeholder="Ask Verevon…"
+        aria-label="Ask Verevon assistant"
         className="mt-4"
       />
-      <VelionButton
+      <VerevonButton
         onClick={() => {
           push(`/chat?prompt=${encodeURIComponent(prompt)}`);
           onClose();
@@ -179,7 +179,7 @@ export function AssistantModal({ pathname, onClose }: { pathname: string; onClos
         className="mt-3 px-4 disabled:opacity-50"
       >
         Open in chat
-      </VelionButton>
+      </VerevonButton>
     </DialogPanel>
   );
 }
@@ -206,13 +206,13 @@ export function SupportModal({ pathname, onClose }: { pathname: string; onClose:
 
   return (
     <DialogPanel title="Help center" onClose={onClose}>
-      <VelionInput
+      <VerevonInput
         value={subject}
         onChange={(event) => setSubject(event.target.value)}
         placeholder="Subject"
         aria-label="Support request subject"
       />
-      <VelionTextarea
+      <VerevonTextarea
         value={message}
         onChange={(event) => setMessage(event.target.value)}
         rows={5}
@@ -221,14 +221,14 @@ export function SupportModal({ pathname, onClose }: { pathname: string; onClose:
         className="mt-3"
       />
       {error ? <p className="mt-2 text-xs text-[#B42318]">{error}</p> : null}
-      <VelionButton
+      <VerevonButton
         onClick={submit}
         disabled={saving || !subject.trim() || !message.trim()}
         variant="primary"
         className="mt-3 px-4 disabled:opacity-50"
       >
         {saving ? "Saving…" : "Save request"}
-      </VelionButton>
+      </VerevonButton>
     </DialogPanel>
   );
 }
@@ -243,15 +243,15 @@ function DialogPanel({
   children: ReactNode;
 }) {
   return (
-    <VelionModal compact label={title} className="p-4">
+    <VerevonModal compact label={title} className="p-4">
         <div className="mb-4 flex items-center justify-between">
-          <VelionModalTitle>{title}</VelionModalTitle>
-          <VelionModalClose onClick={onClose} aria-label={`Close ${title}`}>
+          <VerevonModalTitle>{title}</VerevonModalTitle>
+          <VerevonModalClose onClick={onClose} aria-label={`Close ${title}`}>
             Esc
-          </VelionModalClose>
+          </VerevonModalClose>
         </div>
         {children}
-    </VelionModal>
+    </VerevonModal>
   );
 }
 

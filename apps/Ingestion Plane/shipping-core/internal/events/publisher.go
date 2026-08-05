@@ -45,7 +45,7 @@ type NoopPublisher struct{}
 
 func (NoopPublisher) Publish(context.Context, Event) error { return nil }
 
-// NATSPublisher publishes onto the shared velion-nats broker.
+// NATSPublisher publishes onto the shared verevon-nats broker.
 type NATSPublisher struct {
 	conn          *nats.Conn
 	subjectPrefix string
@@ -88,7 +88,7 @@ func NewNATSPublisher(cfg Config, serviceName string) (*NATSPublisher, error) {
 		nats.Timeout(5 * time.Second),
 	}
 	if cfg.Token != "" {
-		// The shared velion-nats broker enforces single-token authorization
+		// The shared verevon-nats broker enforces single-token authorization
 		// (nats-shared.conf), not username/password — same as every other
 		// producer on this broker.
 		options = append(options, nats.Token(cfg.Token))

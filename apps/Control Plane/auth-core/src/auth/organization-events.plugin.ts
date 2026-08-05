@@ -806,7 +806,7 @@ export async function flushOrganizationMembershipAuditOutbox(): Promise<number> 
         if (current.length !== 1) return false;
         const audit = current[0];
         const idempotencyKey = membershipAuditIdempotencyKey(audit);
-        await eventPublisher!.publishVelionAudit({
+        await eventPublisher!.publishVerevonAudit({
           occurred_at: audit.occurred_at,
           org_id: audit.organization_id,
           user_id: audit.actor_user_id || undefined,
@@ -906,7 +906,7 @@ export async function flushOrganizationInvitationAuditOutbox(): Promise<number> 
         if (current.length !== 1) return false;
         const audit = current[0];
         const idempotencyKey = `invitation:${audit.invitation_id}:${audit.action}`;
-        await eventPublisher!.publishVelionAudit({
+        await eventPublisher!.publishVerevonAudit({
           occurred_at: audit.occurred_at,
           org_id: audit.organization_id,
           user_id: audit.inviter_user_id,

@@ -124,7 +124,7 @@ func (a *Adapter) CreateCheckoutSession(
 	metadata := map[string]string{
 		"org_id":     params.OrgID,
 		"plan":       strings.ToLower(strings.TrimSpace(params.Plan)),
-		"source":     "velion",
+		"source":     "verevon",
 		"cancel_url": params.CancelURL,
 	}
 	for key, value := range params.Metadata {
@@ -322,14 +322,14 @@ func checkoutPlanAmountNOK(plan string) int64 {
 func checkoutPlanDisplayName(plan string) string {
 	switch strings.ToLower(strings.TrimSpace(plan)) {
 	case "hobby":
-		return "Velion Essential"
+		return "Verevon Essential"
 	case "standard":
-		return "Velion Advanced"
+		return "Verevon Advanced"
 	case "pro":
-		return "Velion Expert"
+		return "Verevon Expert"
 	case "enterprise":
-		return "Velion Custom"
+		return "Verevon Custom"
 	default:
-		return "Velion"
+		return "Verevon"
 	}
 }

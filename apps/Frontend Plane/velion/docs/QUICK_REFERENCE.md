@@ -1,4 +1,4 @@
-# Velion UI Refactoring - Quick Reference Card
+# Verevon UI Refactoring - Quick Reference Card
 
 ## 🚀 Quick Start
 

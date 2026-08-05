@@ -244,7 +244,7 @@ export const inboxSidebarGroups: SidebarGroup[] = [
   },
   {
     id: "inbox-ai-agent",
-    label: "Velion AI Agent",
+    label: "Verevon AI Agent",
     defaultExpanded: true,
     showAddButton: true,
     items: inboxAgentSidebarItems,

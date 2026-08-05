@@ -5,9 +5,9 @@ import { redirect } from 'next/navigation'
 
 import { getServerSession } from './auth-server'
 
-const VELION_USER_ID_HEADER = 'x-velion-user-id'
-const VELION_USER_EMAIL_HEADER = 'x-velion-user-email'
-const VELION_USER_NAME_HEADER = 'x-velion-user-name'
+const VEREVON_USER_ID_HEADER = 'x-verevon-user-id'
+const VEREVON_USER_EMAIL_HEADER = 'x-verevon-user-email'
+const VEREVON_USER_NAME_HEADER = 'x-verevon-user-name'
 
 export interface EdgeUser {
   userId: string
@@ -21,7 +21,7 @@ export interface EdgeUser {
  * The edge gate (`src/proxy.ts`) already validates the session for every
  * matched path and redirects unauthenticated users to `/login`. The gate
  * stamps the resolved user identity onto the forwarded request via three
- * headers (`x-velion-user-{id,email,name}`). Pages can therefore skip the
+ * headers (`x-verevon-user-{id,email,name}`). Pages can therefore skip the
  * per-page `getServerSession()` round-trip whenever those headers are
  * present.
  *
@@ -41,12 +41,12 @@ export async function requireEdgeUser(
   pathForLoginRedirect: string,
 ): Promise<EdgeUser> {
   const hdrs = await headers()
-  const userId = hdrs.get(VELION_USER_ID_HEADER)?.trim()
+  const userId = hdrs.get(VEREVON_USER_ID_HEADER)?.trim()
   if (userId) {
     return {
       userId,
-      email: hdrs.get(VELION_USER_EMAIL_HEADER)?.trim() ?? '',
-      name: hdrs.get(VELION_USER_NAME_HEADER)?.trim() ?? '',
+      email: hdrs.get(VEREVON_USER_EMAIL_HEADER)?.trim() ?? '',
+      name: hdrs.get(VEREVON_USER_NAME_HEADER)?.trim() ?? '',
     }
   }
 
@@ -63,4 +63,4 @@ export async function requireEdgeUser(
   redirect(`/login?redirect=${encodeURIComponent(pathForLoginRedirect)}`)
 }
 
-export { VELION_USER_ID_HEADER, VELION_USER_EMAIL_HEADER, VELION_USER_NAME_HEADER }
+export { VEREVON_USER_ID_HEADER, VEREVON_USER_EMAIL_HEADER, VEREVON_USER_NAME_HEADER }

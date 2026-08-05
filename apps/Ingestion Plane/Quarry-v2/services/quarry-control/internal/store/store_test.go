@@ -122,7 +122,7 @@ func TestMemoryDB_JobsUpdate(t *testing.T) {
 func TestMemoryDB_JobsFindByIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	db := NewMemory()
-	key := "velion-crawl-deadbeef"
+	key := "verevon-crawl-deadbeef"
 	j := Job{
 		ID:             quarrycontracts.NewID(quarrycontracts.KindJob),
 		OrgID:          "org_a",

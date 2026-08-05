@@ -52,7 +52,7 @@ export function KnowledgeDiagnosticsPanel({
         </div>
       </div>
 
-      <div className="velion-panel mt-4 p-5">
+      <div className="verevon-panel mt-4 p-5">
         <div className="flex flex-wrap items-center gap-2">
           <SummaryChip label="Documents" value={`${formatCount(dataPlane.documentCount)} live`} />
           <SummaryChip label="Indexed" value={`${formatCount(dataPlane.indexedCount)} ready`} />

@@ -71,7 +71,7 @@ const defaultAgentFeatureByRole: Record<CoreAgentRoleId, AgentFeatureId> = {
 export const defaultChatbotBuilderSectionId: ChatbotBuilderSectionId = "playground";
 export const defaultChatbotAddOnId: ChatbotAddOnId = "subscription-action";
 export const defaultWorkflowBuilderToolId: WorkflowBuilderToolId = "generate-caption";
-export const agentSelectionEventName = "velion:agent-selection-change";
+export const agentSelectionEventName = "verevon:agent-selection-change";
 
 export const agentRoleOptions: ReadonlyArray<{
   id: AgentSelectionId;

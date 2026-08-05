@@ -1,5 +1,5 @@
 //! `JetStream` pull consumer for the cross-plane GDPR organization-erasure
-//! fan-out (`velion.gdpr.erasure.requested`).
+//! fan-out (`verevon.gdpr.erasure.requested`).
 //!
 //! Mirrors Data Plane v2 siblings `graph-index-rs`'s and
 //! `retrieval-engine-rs`'s `gdpr_nats`/`gdpr::consumer` pattern (itself
@@ -62,7 +62,7 @@ use qdrant_client::Qdrant;
 use crate::gdpr::{parse_erasure_event, purge_organization_data, PurgeCollections};
 
 pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
-pub const SUBJECT: &str = "velion.gdpr.erasure.requested";
+pub const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub const DURABLE_NAME: &str = "embedding-engine-org-erasure";
 
 const INBOX_PREFIX: &str = "_INBOX.EMBEDDING_ENGINE_GDPR";

@@ -35,7 +35,7 @@ type WorkspaceTab =
   | 'embed';
 
 /**
- * U3-5 + U3-12 (ui-ux-velion-gap.md §14): map the URL slug to a workspace tab.
+ * U3-5 + U3-12 (ui-ux-verevon-gap.md §14): map the URL slug to a workspace tab.
  *
  * The route is `/agents/{agentId}/{viewId}` with `viewId` coming from the
  * catch-all slug. The set of valid slugs is intentionally wider than the
@@ -380,7 +380,7 @@ export function AgentWorkspaceView({
  * tool result was.
  *
  * Trace data flows: gateway tool_loop → http_routes InvokeResponse →
- * velion chat-stream metadata → useAgentPlayground message.toolTrace.
+ * verevon chat-stream metadata → useAgentPlayground message.toolTrace.
  */
 function ToolTracePanel({
   trace,
@@ -581,7 +581,7 @@ function AgentPlaygroundPane({ agent, agentName, greeting }: PlaygroundPaneProps
           </div>
           <div className="mt-2 text-center">
             <span className="text-[10px] font-medium text-gray-400">
-              Powered by Velion Model Plane
+              Powered by Verevon Model Plane
             </span>
           </div>
         </form>
@@ -704,7 +704,7 @@ function RunEventSection({
 }
 
 /**
- * U3-9 (ui-ux-velion-gap.md §14): real analytics tab.
+ * U3-9 (ui-ux-verevon-gap.md §14): real analytics tab.
  *
  * Reads from `/api/agents/{agentId}/stats` which aggregates the Convex
  * `agentRuns` mirror (populated by `convex-subscriber` from
@@ -854,7 +854,7 @@ function AnalyticsTab({ agentId }: { agentId: string | undefined }): ReactElemen
 }
 
 /**
- * U3-8 (ui-ux-velion-gap.md §14): Tools tab.
+ * U3-8 (ui-ux-verevon-gap.md §14): Tools tab.
  *
  * Renders the merged catalog of:
  *  - Built-in Model Plane tools (Browse Web, Deep Research, Fetch URL,
@@ -1016,7 +1016,7 @@ function ToolsTab({
 }
 
 /**
- * U3-7 (ui-ux-velion-gap.md §14): Knowledge tab.
+ * U3-7 (ui-ux-verevon-gap.md §14): Knowledge tab.
  *
  * Manages the agent's `knowledgeSources` array. File uploads stream through
  * the existing `/api/chat/upload` proxy (Data Plane documents-api) and the
@@ -1164,7 +1164,7 @@ function KnowledgeTab({
 }
 
 /**
- * U3-12 (ui-ux-velion-gap.md §14): per-agent cron schedules.
+ * U3-12 (ui-ux-verevon-gap.md §14): per-agent cron schedules.
  *
  * Lists existing schedules for the agent, lets the operator add a
  * standard 5-field cron expression + a prompt that gets sent into the
@@ -1320,7 +1320,7 @@ function SchedulesTab({
 }
 
 /**
- * Wave 7 (velion ui-ux-velion-gap.md §17): Fine-tune tab.
+ * Wave 7 (verevon ui-ux-verevon-gap.md §17): Fine-tune tab.
  *
  * Lets an org owner / admin upload a JSONL training dataset, kick off a
  * fine-tune job against the agent's base model, and (when the job
@@ -1605,11 +1605,11 @@ function FinetuneTab({
 }
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): Embed tab.
+ * Wave 9 (ui-ux-verevon-gap.md §19): Embed tab.
  *
  * Lets an operator turn the agent into a public chat bubble that loads
  * on any third-party site via a single `<script>` tag. Widget JS lives
- * at `velion/public/embed.js`; public API at `/api/embed/{agentId}/*`.
+ * at `verevon/public/embed.js`; public API at `/api/embed/{agentId}/*`.
  */
 function EmbedTab({
   agent,

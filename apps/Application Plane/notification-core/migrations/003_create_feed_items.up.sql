@@ -1,7 +1,7 @@
 -- U5-2: local feed item cache.
 --
 -- We keep the canonical delivery state on Novu (Novu Inbox API is the source
--- of truth for what was sent and to whom). But velion's `/notifications`
+-- of truth for what was sent and to whom). But verevon's `/notifications`
 -- page wants fast list + count queries with our own read/unread/archived
 -- semantics, plus the ability to surface notifications that didn't go
 -- through a Novu workflow (e.g. internal admin alerts). We mirror the
@@ -9,7 +9,7 @@
 -- so reads stay snappy.
 --
 -- Wire contract: matches `Notification` type in
--- velion/src/lib/notifications/types.ts (so no client changes needed when
+-- verevon/src/lib/notifications/types.ts (so no client changes needed when
 -- we extend Novu integration further).
 CREATE TABLE IF NOT EXISTS notification_feed_items (
     id                      TEXT        PRIMARY KEY,

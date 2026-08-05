@@ -14,7 +14,7 @@
 //! `INFERENCE_CORE_URL` / `INFERENCE_CORE_ADDR` (default `http://localhost:9092`).
 //!
 //! Cost governance (Phase 5): the planner does NOT pin a concrete model. It
-//! defaults to a **Velion intent mode** (`velion-balance`) so inference-core's
+//! defaults to a **Verevon intent mode** (`verevon-balance`) so inference-core's
 //! Budget/Balance/Genius intent layer picks the model (complexity × the org's
 //! budget posture), and it forwards the run's org as `x-org-id` gRPC metadata so
 //! inference-core's cost-core budget guard counts and caps these calls — instead
@@ -55,15 +55,15 @@ const ACTION_SCHEMA: &str = r#"{
   "required": ["action"]
 }"#;
 
-/// Default planner model — a **Velion intent mode**, NOT a pinned id, so the
+/// Default planner model — a **Verevon intent mode**, NOT a pinned id, so the
 /// browser-agent planner routes through inference-core's Budget/Balance/Genius
 /// intent layer + cost-core budget guard instead of bypassing them.
-const DEFAULT_MODEL: &str = "velion-balance";
+const DEFAULT_MODEL: &str = "verevon-balance";
 const DEFAULT_ADDR: &str = "http://localhost:9092";
 
 /// Resolve the planner model: an explicit non-empty `QUARRY_BROWSER_AGENT_MODEL`
 /// wins (lets ops pin a concrete model when the intent layer is disabled);
-/// otherwise the Velion intent-mode default so the call participates in
+/// otherwise the Verevon intent-mode default so the call participates in
 /// budget-aware model selection.
 fn resolve_planner_model() -> String {
     std::env::var("QUARRY_BROWSER_AGENT_MODEL")
@@ -350,13 +350,13 @@ mod tests {
     }
 
     #[test]
-    fn planner_model_resolution_defaults_to_velion_intent_mode() {
-        // Phase 5: the default must be a Velion intent mode (routes through the
+    fn planner_model_resolution_defaults_to_verevon_intent_mode() {
+        // Phase 5: the default must be a Verevon intent mode (routes through the
         // Budget/Balance/Genius selection + budget guard), NOT a pinned model.
         // Sequential (not two tests) to avoid racing on the shared env var.
         std::env::remove_var("QUARRY_BROWSER_AGENT_MODEL");
-        assert_eq!(resolve_planner_model(), "velion-balance");
-        assert_eq!(DEFAULT_MODEL, "velion-balance");
+        assert_eq!(resolve_planner_model(), "verevon-balance");
+        assert_eq!(DEFAULT_MODEL, "verevon-balance");
 
         // An explicit override is honored (ops pin a model when intent is off).
         std::env::set_var("QUARRY_BROWSER_AGENT_MODEL", "gpt-4o-mini");
@@ -364,7 +364,7 @@ mod tests {
 
         // A blank override falls back to the intent-mode default.
         std::env::set_var("QUARRY_BROWSER_AGENT_MODEL", "   ");
-        assert_eq!(resolve_planner_model(), "velion-balance");
+        assert_eq!(resolve_planner_model(), "verevon-balance");
 
         std::env::remove_var("QUARRY_BROWSER_AGENT_MODEL");
     }

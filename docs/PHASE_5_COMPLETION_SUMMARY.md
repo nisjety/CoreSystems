@@ -45,9 +45,9 @@
 
 ### Test 4: SharedPublisher Initialization ✅
 ```
-✅ user-core: Connected to shared NATS: nats://velion-nats:4222
-✅ org-core: Connected to shared NATS (org-core): nats://velion-nats:4222
-✅ billing-core: Connected to shared NATS (billing-core): nats://velion-nats:4222
+✅ user-core: Connected to shared NATS: nats://verevon-nats:4222
+✅ org-core: Connected to shared NATS (org-core): nats://verevon-nats:4222
+✅ billing-core: Connected to shared NATS (billing-core): nats://verevon-nats:4222
 ✅ auth-core: SharedPublisher initialized (delegates to SharedNatsService)
 ```
 
@@ -165,7 +165,7 @@ aqencia.controlplane.billing.*
 
 ### JetStream Stream Configuration
 - **Stream Name:** AQENCIA_CONTROLPLANE
-- **Broker:** nats://velion-nats:4222
+- **Broker:** nats://verevon-nats:4222
 - **Authentication:** Token: `aqencia-shared-nats-token-2026`
 - **Subject Pattern:** `aqencia.controlplane.>`
 - **Integration:** All 4 Control Plane services connected ✅
@@ -238,7 +238,7 @@ aqencia.controlplane.billing.*
                        │
           ┌────────────▼────────────┐
           │   Shared NATS Broker    │
-          │  velion-nats:4222      │
+          │  verevon-nats:4222      │
           │ AQENCIA_CONTROLPLANE    │
           └────────────┬────────────┘
                        │

@@ -1,6 +1,6 @@
-//! Velion READ actions reachable from the inline chat tool loop.
+//! Verevon READ actions reachable from the inline chat tool loop.
 //!
-//! This is the "AI-first" bridge: data a signed-in Velion user can see in the
+//! This is the "AI-first" bridge: data a signed-in Verevon user can see in the
 //! UI should also be answerable in chat. Each function here maps one question
 //! ("which social accounts are connected?", "what is in our knowledge base?")
 //! onto the SAME upstream the BFF gateway's `domains/*` modules call, so chat

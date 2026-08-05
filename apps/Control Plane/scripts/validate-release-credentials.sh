@@ -39,7 +39,7 @@ credential_names=(
 )
 
 if [[ "${REQUIRE_LEGACY_BRIDGE:-0}" == "1" ]]; then
-  credential_names+=(VELION_NATS_TOKEN)
+  credential_names+=(VEREVON_NATS_TOKEN)
 fi
 
 fingerprints=()
@@ -190,7 +190,7 @@ const hasCurrent = (principal, tokenName, requiredScope) => {
       entry.scopes.includes(requiredScope),
   );
 };
-if (!hasCurrent('velion-gateway', 'GATEWAY_AUTH_GRPC_SERVICE_TOKEN', 'auth:user:read')) {
+if (!hasCurrent('verevon-gateway', 'GATEWAY_AUTH_GRPC_SERVICE_TOKEN', 'auth:user:read')) {
   fail('AUTH_GRPC_SERVICE_CREDENTIALS_FILE', 'omits the current gateway credential');
 }
 if (!hasCurrent('retrieval-engine', 'RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN', 'auth:token:validate')) {

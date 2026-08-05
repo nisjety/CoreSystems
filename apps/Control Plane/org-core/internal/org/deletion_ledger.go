@@ -20,7 +20,7 @@ var ErrOrganizationNotPendingDeletion = errors.New("organization is not pending 
 
 // deletionGracePeriodDays is Flow C's fixed 30-day soft-delete grace window:
 // the HTTP soft-delete handler (DELETE /orgs/:id/gdpr/soft-delete, a separate
-// build stage) publishes velion.org.deletion.pending with
+// build stage) publishes verevon.org.deletion.pending with
 // deadline = now + 30 days. This constant mirrors that fixed contract value
 // for computing reminder thresholds and the returned Deadline. It is
 // deliberately NOT wired to ORG_PURGE_DAYS (cmd/server/main.go's operator-
@@ -38,7 +38,7 @@ const deletionGracePeriodDays = 30
 //
 // notified_at is stamped NOW() here rather than left NULL: ledger creation
 // happens in the same soft-delete request that synchronously publishes the
-// member's initial velion.org.deletion.pending notice, so "row created" and
+// member's initial verevon.org.deletion.pending notice, so "row created" and
 // "member notified of the pending deletion" are the same event. There is no
 // separate MarkNotified method in this contract.
 func (r *Repository) CreateDeletionLedger(ctx context.Context, orgID string, memberUserIDs []string) error {
@@ -190,7 +190,7 @@ ORDER BY user_id ASC`
 // RestoreOrganization clears deleted_at/status back to active for an org
 // currently pending deletion. It touches only the organizations row — the
 // caller is responsible for also calling DeleteDeletionLedger and publishing
-// velion.org.deletion.cancelled (a separate build stage).
+// verevon.org.deletion.cancelled (a separate build stage).
 //
 // Returns ErrOrganizationNotPendingDeletion (no-op, zero rows affected) if
 // the org's deleted_at is already NULL — matching the RowsAffected()==0 ->
@@ -215,7 +215,7 @@ WHERE id = $1 AND deleted_at IS NOT NULL`
 }
 
 // MarkReminderSent stamps the corresponding organizations.deletion_reminder_*
-// column so the reminder sweep never re-fires velion.org.deletion.reminder
+// column so the reminder sweep never re-fires verevon.org.deletion.reminder
 // for the same org. which must be "7d" or "1d".
 func (r *Repository) MarkReminderSent(ctx context.Context, orgID, which string) error {
 	var column string

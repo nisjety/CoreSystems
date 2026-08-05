@@ -30,7 +30,7 @@ type Service struct {
 	paymentAdapter  PaymentAdapter
 	invoiceAdapter  InvoiceAdapter
 	publisher       EventPublisher
-	sharedPublisher SharedEventPublisher // cross-plane events on velion-nats
+	sharedPublisher SharedEventPublisher // cross-plane events on verevon-nats
 	cache           *rediscache.Client   // optional, nil if Redis disabled
 	httpClient      *http.Client
 	orgServiceURL   string

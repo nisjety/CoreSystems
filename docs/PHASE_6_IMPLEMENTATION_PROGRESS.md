@@ -35,7 +35,7 @@ Created a complete event-driven M365 onboarding system that automatically trigge
 ### Service Initialization Logs
 
 ```
-✅ Shared NATS (imports-api): Connected to nats://velion-nats:4222
+✅ Shared NATS (imports-api): Connected to nats://verevon-nats:4222
 ✅ Control Plane Subscriber (imports-api): using token authentication
 ✅ Subscribed to: aqencia.controlplane.user.provider_linked
 ✅ Subscribed to: aqencia.controlplane.org.plan_changed
@@ -122,7 +122,7 @@ Control Plane (auth-core) publishes:
   }
   subject = "aqencia.controlplane.user.provider_linked"
   ↓
-Shared NATS Broker (velion-nats:4222)
+Shared NATS Broker (verevon-nats:4222)
   AQENCIA_CONTROLPLANE stream
   ↓
 Ingestion Plane (imports-api) receives event:
@@ -225,7 +225,7 @@ Verified in live logs:
 4. Wire-up in data-plane service initialization
 
 **Verified working:**
-- NATS shared broker: ✅ nats://velion-nats:4222
+- NATS shared broker: ✅ nats://verevon-nats:4222
 - Event subjects flowing: ✅ All 14+ Control Plane events active
 - Ingestion subscriber: ✅ Listening and ready to handle events
 

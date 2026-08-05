@@ -3,13 +3,13 @@ set -Eeuo pipefail
 
 # connect-microsoft.sh — drive the integration-core connect-session flow to
 # register a `microsoft-graph` connection for an organization, WITHOUT any
-# velion UI. This unblocks finspo end-to-end validation (Phases 2-4).
+# verevon UI. This unblocks finspo end-to-end validation (Phases 2-4).
 #
 # What it does:
 #   1. POSTs /api/v1/providers/<provider>/connect-session to integration-api
 #      using the internal API key (bypasses org-scope; the 'pro' plan guard
 #      still applies — see notes below).
-#   2. Prints the Velion `connectUrl` you open in a browser to complete the
+#   2. Prints the Verevon `connectUrl` you open in a browser to complete the
 #      Microsoft OAuth consent.
 #   3. Optionally polls /api/v1/connections until the connection goes active.
 #
@@ -112,7 +112,7 @@ if [[ "$status" != "201" && "$status" != "200" ]]; then
   printf '%s\n' "$body" >&2
   case "$status" in
     401) err "auth failed — check INTERNAL_API_KEY matches integration-core's internal key" ;;
-    402|403) err "the 'pro' plan guard rejected this org. Either upgrade org '$ORG_ID' to a 'pro' entitlement in billing/org-core, or connect via velion v1's integrations UI (which runs as the logged-in user)." ;;
+    402|403) err "the 'pro' plan guard rejected this org. Either upgrade org '$ORG_ID' to a 'pro' entitlement in billing/org-core, or connect via verevon v1's integrations UI (which runs as the logged-in user)." ;;
     404) err "provider '$PROVIDER' not registered. Confirm AZURE_CLIENT_ID/AZURE_CLIENT_SECRET are set on integration-corev2." ;;
   esac
   exit 1

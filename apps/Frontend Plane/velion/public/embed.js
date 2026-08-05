@@ -1,13 +1,13 @@
 /* eslint-disable */
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): Velion agent embed widget.
+ * Wave 9 (ui-ux-verevon-gap.md §19): Verevon agent embed widget.
  *
  * Usage on a customer site:
  *
  *   <script
- *     src="https://velion.example.com/embed.js"
- *     data-velion-agent="agent_abc123"
- *     data-velion-secret="<publicSecret from agent>"
+ *     src="https://verevon.example.com/embed.js"
+ *     data-verevon-agent="agent_abc123"
+ *     data-verevon-secret="<publicSecret from agent>"
  *     defer
  *   ></script>
  *
@@ -25,7 +25,7 @@
  * request the browser can cache aggressively. Sized to <8KB minified.
  *
  * Visitor identity: random UUID per browser, persisted in
- * localStorage under `velion_visitor_{agentId}`. Survives reload,
+ * localStorage under `verevon_visitor_{agentId}`. Survives reload,
  * scoped per agent so the same browser talking to two different
  * agents keeps two distinct conversation threads.
  */
@@ -40,31 +40,31 @@
     if (
       s.src &&
       (s.src.indexOf('/embed.js') !== -1 || s.src.indexOf('embed.js?') !== -1) &&
-      s.getAttribute('data-velion-agent')
+      s.getAttribute('data-verevon-agent')
     ) {
       selfScript = s;
       break;
     }
   }
   if (!selfScript) {
-    console.warn('[velion] embed.js loaded but no agent attrs found');
+    console.warn('[verevon] embed.js loaded but no agent attrs found');
     return;
   }
 
-  var AGENT_ID = selfScript.getAttribute('data-velion-agent');
-  var SECRET = selfScript.getAttribute('data-velion-secret');
-  // Derive the velion host from the script src so the customer doesn't
+  var AGENT_ID = selfScript.getAttribute('data-verevon-agent');
+  var SECRET = selfScript.getAttribute('data-verevon-secret');
+  // Derive the verevon host from the script src so the customer doesn't
   // also have to set a base URL.
   var SCRIPT_SRC_URL = new URL(selfScript.src, document.baseURI);
   var BASE_URL = SCRIPT_SRC_URL.origin;
 
   if (!AGENT_ID || !SECRET) {
-    console.warn('[velion] embed.js missing data-velion-agent or data-velion-secret');
+    console.warn('[verevon] embed.js missing data-verevon-agent or data-verevon-secret');
     return;
   }
 
   // ── Visitor identity (persisted per agent) ─────────────────────────
-  var VISITOR_KEY = 'velion_visitor_' + AGENT_ID;
+  var VISITOR_KEY = 'verevon_visitor_' + AGENT_ID;
   var visitorId = '';
   try {
     visitorId = localStorage.getItem(VISITOR_KEY) || '';
@@ -94,13 +94,13 @@
       // Silent on the customer's page — the widget is non-essential
       // chrome; we never want to crash their site if the agent is
       // disabled or our backend is down.
-      console.warn('[velion] embed config unavailable:', err && err.message);
+      console.warn('[verevon] embed config unavailable:', err && err.message);
     });
 
   // ── Render bubble + panel inside a shadow DOM ──────────────────────
   function mount(config) {
     var host = document.createElement('div');
-    host.setAttribute('data-velion-embed', AGENT_ID);
+    host.setAttribute('data-verevon-embed', AGENT_ID);
     host.style.cssText = 'all:initial;position:fixed;bottom:24px;right:24px;z-index:2147483647';
     document.body.appendChild(host);
     var root = host.attachShadow({ mode: 'open' });

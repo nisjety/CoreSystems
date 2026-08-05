@@ -54,7 +54,7 @@ func ValidateRequiredServiceCredentialRegistry(raw string) error {
 		return fmt.Errorf("USER_CORE_SERVICE_CREDENTIALS is required")
 	}
 
-	const gatewayPrincipal = "velion-gateway"
+	const gatewayPrincipal = "verevon-gateway"
 	requiredScopes := map[string]bool{
 		"users:read:self":  false,
 		"users:write:self": false,

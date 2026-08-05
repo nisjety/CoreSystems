@@ -385,7 +385,7 @@ function friendlyWarning(
  * BrandStrip. We reject anything that isn't an absolute `http://` /
  * `https://` URL with a public-shaped hostname. Specifically blocked:
  * `data:` (could embed scripts in svgs), `javascript:`, `file:`,
- * `vbscript:`, relative paths (would resolve under velion's own
+ * `vbscript:`, relative paths (would resolve under verevon's own
  * origin), and absolute URLs with empty hostnames.
  *
  * Returns the cleaned URL string, or `undefined` to drop the field.
@@ -406,7 +406,7 @@ function safeBrandingURL(input: string | undefined): string | undefined {
   }
   if (!parsed.hostname) return undefined
   // Belt-and-braces: reject hostnames that look like RFC1918 / loopback
-  // literals so a malicious crawled page can't leak the velion
+  // literals so a malicious crawled page can't leak the verevon
   // server's reachable LAN into the user's browser via an <img>.
   if (
     parsed.hostname === 'localhost' ||
@@ -503,7 +503,7 @@ function SnippetDropFolder({
       <FolderCard count={cards.length} fillPct={fillPct} />
 
       <style>{`
-        @keyframes velion-snippet-drop {
+        @keyframes verevon-snippet-drop {
           0% {
             transform: translate(var(--vx, -50%), -20%) rotate(var(--vrot, 0deg));
             opacity: 0;
@@ -525,7 +525,7 @@ function SnippetCard({ card }: { card: FallingCard }) {
     left: `calc(50% + ${card.xOffsetPct}%)`,
     animationDelay: `${card.delayMs}ms`,
     animationDuration: `${card.durationMs}ms`,
-    animationName: 'velion-snippet-drop',
+    animationName: 'verevon-snippet-drop',
     animationTimingFunction: 'ease-out',
     animationFillMode: 'forwards',
     // Custom property the keyframes pick up via `var(--vx)` so the

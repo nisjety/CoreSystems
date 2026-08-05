@@ -1,4 +1,4 @@
--- U5-2 (velion ui-ux-velion-gap.md): subscriber identity cache.
+-- U5-2 (verevon ui-ux-verevon-gap.md): subscriber identity cache.
 --
 -- One row per known user. `novu_subscriber_id` is the identifier we pass to
 -- Novu when triggering workflows and when listing inbox items. By convention

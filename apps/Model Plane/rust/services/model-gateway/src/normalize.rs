@@ -39,7 +39,7 @@ fn load_allowed_models() -> Option<Vec<String>> {
 /// Load the default model from `DEFAULT_MODEL` env var. Shared with the SSE
 /// stream path so it resolves an unspecified model identically to the unary
 /// path. When unset, returns an EMPTY string on purpose: inference-core's
-/// fallback chain then resolves "Velion Auto" to the configured provider's own
+/// fallback chain then resolves "Verevon Auto" to the configured provider's own
 /// default (per-provider), so chat works against any single provider without an
 /// operator pinning a model. (The previous literal "default" was not a real
 /// model id and made every unpinned request fail provider lookup.)
@@ -196,7 +196,7 @@ mod tests {
         let result = normalize(&req).expect("should succeed");
         // Unspecified model → the gateway's configured default: `DEFAULT_MODEL`
         // env when set, else empty so inference-core resolves a per-provider
-        // default downstream ("Velion Auto"). Deterministic regardless of env.
+        // default downstream ("Verevon Auto"). Deterministic regardless of env.
         assert_eq!(result.model, load_default_model());
     }
 

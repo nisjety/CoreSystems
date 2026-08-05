@@ -13,7 +13,7 @@
  *     a short timeout (3s default) with no retries. A network glitch is
  *     not a key problem.
  *   - **Opt-in in dev, on by default in production.** Set
- *     `VELION_INTERNAL_KEY_HANDSHAKE=skip` to disable, or `=strict` to
+ *     `VEREVON_INTERNAL_KEY_HANDSHAKE=skip` to disable, or `=strict` to
  *     promote dev warnings to throws.
  *   - **Never throws on transport errors.** If `integration-api` is
  *     simply not running (network unreachable / DNS fail), log a
@@ -151,15 +151,15 @@ export async function performInternalApiKeyHandshake(
  * `instrumentation.ts:register()` after the synchronous format assertion.
  *
  * Behaviour matrix:
- *   - `VELION_INTERNAL_KEY_HANDSHAKE=skip`  → no-op
+ *   - `VEREVON_INTERNAL_KEY_HANDSHAKE=skip`  → no-op
  *   - `NODE_ENV=production`                 → fatal on `unauthorized`/`forbidden`
- *   - `VELION_INTERNAL_KEY_HANDSHAKE=strict`→ fatal on `unauthorized`/`forbidden`
+ *   - `VEREVON_INTERNAL_KEY_HANDSHAKE=strict`→ fatal on `unauthorized`/`forbidden`
  *   - Other transport errors / dev mode     → log warn, continue
  */
 export async function assertInternalApiKeyHandshake(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
-  const mode = (env.VELION_INTERNAL_KEY_HANDSHAKE ?? '').toLowerCase()
+  const mode = (env.VEREVON_INTERNAL_KEY_HANDSHAKE ?? '').toLowerCase()
   if (mode === 'skip') {
     return
   }
@@ -167,14 +167,14 @@ export async function assertInternalApiKeyHandshake(
   if (env.NEXT_PHASE === 'phase-production-build') {
     return
   }
-  if (env.NODE_ENV === 'test' && !env.VELION_ASSERT_KEYS_IN_TEST) {
+  if (env.NODE_ENV === 'test' && !env.VEREVON_ASSERT_KEYS_IN_TEST) {
     return
   }
 
   const report = await performInternalApiKeyHandshake(env)
   if (report.ok) {
     // eslint-disable-next-line no-console
-    console.log(`[velion startup] internal API key handshake OK (${report.succeeded.join(', ')})`)
+    console.log(`[verevon startup] internal API key handshake OK (${report.succeeded.join(', ')})`)
     return
   }
 
@@ -191,15 +191,15 @@ export async function assertInternalApiKeyHandshake(
 
   const fatal = strict && hasAuthFailure
   const header = fatal
-    ? `[velion startup] FATAL: internal API key handshake failed (NODE_ENV=${env.NODE_ENV ?? 'unset'}, mode=${mode || 'default'})`
-    : `[velion startup] WARN: internal API key handshake reported problems`
+    ? `[verevon startup] FATAL: internal API key handshake failed (NODE_ENV=${env.NODE_ENV ?? 'unset'}, mode=${mode || 'default'})`
+    : `[verevon startup] WARN: internal API key handshake reported problems`
 
   // eslint-disable-next-line no-console
   console[fatal ? 'error' : 'warn'](`${header}\n${formatted}`)
 
   if (fatal) {
     throw new Error(
-      `velion: refusing to start with mismatched internal API key(s). ${report.problems.length} probe failure(s); ${hasAuthFailure ? 'at least one was a 401/403.' : ''}`,
+      `verevon: refusing to start with mismatched internal API key(s). ${report.problems.length} probe failure(s); ${hasAuthFailure ? 'at least one was a 401/403.' : ''}`,
     )
   }
 }

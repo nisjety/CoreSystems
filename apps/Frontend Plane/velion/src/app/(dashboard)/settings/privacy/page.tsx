@@ -6,7 +6,7 @@ export default function SettingsPrivacyPage() {
     <SettingsSectionFrame
       eyebrow="Access & control"
       title="Privacy"
-      description="Set guardrails for data visibility, retention, and how connected systems are exposed inside Velion."
+      description="Set guardrails for data visibility, retention, and how connected systems are exposed inside Verevon."
     >
       <SettingsPlaceholderPanel
         title="Privacy controls are reserved"

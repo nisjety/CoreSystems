@@ -1,5 +1,5 @@
 /**
- * Onboarding · local plan-recommendation engine (pure, ported from velion v1
+ * Onboarding · local plan-recommendation engine (pure, ported from verevon v1
  * PaywallStep). Renders an instant, offline-safe recommendation from the
  * accumulated onboarding signals. Also used server-side as the deterministic
  * fallback in the recommend-plan BFF route when Model Plane is unavailable.
@@ -121,7 +121,7 @@ export function buildOnboardingContext(
       logoUrl,
       primaryColor: state.brandTheme?.primaryColor ?? resolveBrandThemeColor(branding),
       palette: branding?.palette,
-      themeMode: state.brandTheme?.mode ?? "velion",
+      themeMode: state.brandTheme?.mode ?? "verevon",
       branding: branding
         ? {
             siteName: branding.siteName,

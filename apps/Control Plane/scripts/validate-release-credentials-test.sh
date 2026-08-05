@@ -8,7 +8,7 @@ secure_render="$(docker compose \
   -f "$root/docker-compose.yml" \
   -f "$root/docker-compose.production.yml" \
   config --no-interpolate)"
-if grep -Eq 'control-shared-legacy-bridge|VELION_(LEGACY_)?NATS_TOKEN' \
+if grep -Eq 'control-shared-legacy-bridge|VEREVON_(LEGACY_)?NATS_TOKEN' \
   <<<"$secure_render"; then
   printf 'secure production render contains the legacy bridge or token\n' >&2
   exit 1
@@ -18,12 +18,12 @@ legacy_render="$(docker compose \
   -f "$root/docker-compose.legacy-bridge.yml" \
   config --no-interpolate)"
 grep -q 'control-shared-legacy-bridge' <<<"$legacy_render"
-grep -q 'VELION_LEGACY_NATS_TOKEN' <<<"$legacy_render"
+grep -q 'VEREVON_LEGACY_NATS_TOKEN' <<<"$legacy_render"
 
 names=($(sed -n '/^credential_names=(/,/^)/p' "$preflight" |
   tr ' ' '\n' |
   sed -n 's/^\([A-Z][A-Z0-9_]*\)$/\1/p'))
-names+=(VELION_NATS_TOKEN)
+names+=(VEREVON_NATS_TOKEN)
 
 for required_model_credential in \
   MODEL_NATS_RUNTIME_PASSWORD \
@@ -61,7 +61,7 @@ retired_env=()
 for index in "${!names[@]}"; do
   assignment="${names[$index]}=release-${index}-0123456789abcdef0123456789abcdef"
   base_env+=("$assignment")
-  if [[ "${names[$index]}" != "VELION_NATS_TOKEN" ]]; then
+  if [[ "${names[$index]}" != "VEREVON_NATS_TOKEN" ]]; then
     retired_env+=("$assignment")
   fi
 done
@@ -118,7 +118,7 @@ openssl x509 -req -in "$runtime_dir/wrong-host.csr" \
   -CAcreateserial -sha256 -days 1 -copy_extensions copy \
   -out "$runtime_dir/wrong-host.pem" >/dev/null 2>&1
 printf '%s' \
-  '[{"credentialId":"velion-gateway-primary","principal":"velion-gateway","audience":"auth-core","token":"'"$gateway_auth_token"'","scopes":["auth:token:validate","auth:user:read"]},{"credentialId":"retrieval-engine-primary","principal":"retrieval-engine","audience":"auth-core","token":"'"$retrieval_auth_token"'","scopes":["auth:token:validate"]}]' \
+  '[{"credentialId":"verevon-gateway-primary","principal":"verevon-gateway","audience":"auth-core","token":"'"$gateway_auth_token"'","scopes":["auth:token:validate","auth:user:read"]},{"credentialId":"retrieval-engine-primary","principal":"retrieval-engine","audience":"auth-core","token":"'"$retrieval_auth_token"'","scopes":["auth:token:validate"]}]' \
   >"$runtime_dir/auth-grpc-credentials.json"
 printf '%s' \
   '[{"credentialId":"user-core-primary","principal":"user-core","audience":"auth-core-internal","token":"'"$user_auth_internal_token"'","scopes":["oauth:token:read","oauth:token:refresh","nats:authenticate","auth:admin"]},{"credentialId":"quarry-control-primary","principal":"quarry-control","audience":"auth-core-internal","token":"'"$quarry_auth_internal_token"'","scopes":["agent:provision"]}]' \

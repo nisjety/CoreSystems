@@ -16,8 +16,8 @@ import (
 const (
 	controlSharedStream     = "AQENCIA_CONTROLPLANE"
 	durableConsumerName     = "documents-api-gdpr-erasure-v1"
-	durableDeliverySubject  = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
-	erasureDLQSubject       = "velion.gdpr.erasure.dlq.documents-api"
+	durableDeliverySubject  = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
+	erasureDLQSubject       = "verevon.gdpr.erasure.dlq.documents-api"
 	terminalDeliveryAttempt = uint64(10)
 	consumerMaxDeliver      = 20
 )

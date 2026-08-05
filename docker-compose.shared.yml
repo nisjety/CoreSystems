@@ -1,30 +1,30 @@
 name: shared-infra
 
-# Legacy compatibility only. The canonical shared Velion NATS server is owned
-# by apps/Frontend Plane/velionv3/docker-compose.yml. Enable this profile only
+# Legacy compatibility only. The canonical shared Verevon NATS server is owned
+# by apps/Frontend Plane/verevonv3/docker-compose.yml. Enable this profile only
 # when deliberately running an older frontend stack, never alongside v3.
 
 services:
-  velion-nats:
+  verevon-nats:
     profiles: ["legacy-shared-nats"]
     image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
-    container_name: velion-nats
+    container_name: verevon-nats
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        test -n "$${VELION_NATS_TOKEN}" || { echo "VELION_NATS_TOKEN is required" >&2; exit 78; }
+        test -n "$${VEREVON_NATS_TOKEN}" || { echo "VEREVON_NATS_TOKEN is required" >&2; exit 78; }
         exec nats-server -c /etc/nats/nats.conf
     ports:
       - "127.0.0.1:4222:4222"
       - "127.0.0.1:8222:8222"
       - "127.0.0.1:6222:6222"
     volumes:
-      - ./apps/Frontend Plane/velion/nats-shared.conf:/etc/nats/nats.conf:ro
-      - velion_nats_data:/data
+      - ./apps/Frontend Plane/verevon/nats-shared.conf:/etc/nats/nats.conf:ro
+      - verevon_nats_data:/data
     environment:
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:-}
     networks:
-      - velion-net
+      - verevon-net
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
@@ -34,9 +34,9 @@ services:
       start_period: 15s
 
 networks:
-  velion-net:
-    name: velion-net
+  verevon-net:
+    name: verevon-net
     driver: bridge
 
 volumes:
-  velion_nats_data:
+  verevon_nats_data:

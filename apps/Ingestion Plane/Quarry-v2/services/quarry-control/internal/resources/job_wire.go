@@ -37,7 +37,7 @@ var validJobResourceKinds = map[string]bool{
 // orchestrator dispatches the job) and is required: GET
 // /v1/runs/:id/events only accepts a run id, never a job id, so any
 // consumer of this list that wants a run's event history needs it here.
-// Its previous omission meant velion's Ingestions evidence panel always
+// Its previous omission meant verevon's Ingestions evidence panel always
 // fell back to the job id and 400'd against quarry-edge.
 type jobWire struct {
 	JobID     string  `json:"job_id"`

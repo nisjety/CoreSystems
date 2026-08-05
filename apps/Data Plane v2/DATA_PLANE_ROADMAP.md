@@ -5,7 +5,7 @@ Updated: 2026-07-16. Read `DATA_PLANE_STATUS.md` first.
 Only the secure MVP is active. The enterprise phase remains explicitly unopened until criteria A–L are all proven on rebuilt, deployed images.
 
 Current checkpoint: the latest disposable source build is green for the real
-Auth/User/Control Velion journey, strict HTTP/gRPC matrices, supported signed
+Auth/User/Control Verevon journey, strict HTTP/gRPC matrices, supported signed
 broker flows, and the six-store ZDR final-state comparison. Any older note below
 that says Docker was unavailable or those final isolated reruns were pending is
 retained as chronology and superseded by this checkpoint. Remaining work is
@@ -143,8 +143,8 @@ post-provisioning step.
      lifecycle passed. Destructive clear remains 501 until Quickwit completion can
      be proven safely.
 
-10. **Velion/GraphRAG identity wiring**
-   - Velion derives Data tenant/user from verified session membership, mints an
+10. **Verevon/GraphRAG identity wiring**
+   - Verevon derives Data tenant/user from verified session membership, mints an
      exact Data bearer for documents/retrieval/wiki/graph/source requests, and
      fails closed without a shared-key fallback.
    - Retrieval HTTP requires a strict verified bearer. Retrieval and graph mint
@@ -233,7 +233,7 @@ Rollback: reject restrictive requests rather than risk persistence.
 1. Rotate the locally surfaced Model shared credential and retrieval
    Control-policy service credential before any deployment.
 2. Preserve the completed disposable build/runtime harnesses. They now cover
-   real Auth/User/Control plus Velion, HTTP/gRPC authorization, signed broker
+   real Auth/User/Control plus Verevon, HTTP/gRPC authorization, signed broker
    delivery, and the six-store ZDR comparison with random projects and cleanup.
 3. Add the strict mutation telemetry described above and retain the exact
    cross-tenant/body/header/service-principal matrices.

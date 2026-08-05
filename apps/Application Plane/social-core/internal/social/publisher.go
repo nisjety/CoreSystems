@@ -479,7 +479,7 @@ func (p *HTTPPublisher) publishSnapchat(ctx context.Context, attempt PublishAtte
 	// 1. Create the media container (carries the base64 key/iv Snapchat needs to decrypt).
 	createBody := map[string]any{
 		"type": mediaType,
-		"name": fallback(post.Title, "velion-media"),
+		"name": fallback(post.Title, "verevon-media"),
 		"key":  base64.StdEncoding.EncodeToString(key),
 		"iv":   base64.StdEncoding.EncodeToString(iv),
 	}

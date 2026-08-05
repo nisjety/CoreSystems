@@ -7,19 +7,19 @@
 ## 2026-07-12 implementation update
 
 - The six canonical runtime stacks are now the plane-level Compose files for
-  Data v2, Control, Ingestion, Model, Application, and Frontend Velion v3.
+  Data v2, Control, Ingestion, Model, Application, and Frontend Verevon v3.
 - The root monolith is quarantined behind the explicit `legacy-monolith`
   profile. Its floating images and embedded development credentials were
   removed; it is not part of the production bootstrap path.
 - Root Zammad and unverified Nohu duplicates were removed. Zammad is owned by
   the Application Plane overlay; active connector ownership is Ingestion
   `integration-corev2`.
-- Shared NATS ownership is Frontend Plane Velion v3. The broker and every
+- Shared NATS ownership is Frontend Plane Verevon v3. The broker and every
   canonical plane-local NATS instance require authentication.
 - Production overrides remove internal host publications and harden first-party
   processes with non-root users, dropped capabilities, immutable roots where
   compatible, bounded scratch space, init handling, and graceful shutdowns.
-- Velion v3 now has separate `dev` and `production` image targets. Production
+- Verevon v3 now has separate `dev` and `production` image targets. Production
   serves a prebuilt SPA through digest-pinned unprivileged nginx; the Rust BFF
   remains internal.
 - Compose dependency order is Data → Control → Ingestion → Model → Application
@@ -39,7 +39,7 @@ pre-cleanup layout.
 The CoreSystem uses **8 docker-compose files** spread across 7 planes plus a legacy root file. Analysis reveals:
 
 - **6 critical host-port conflicts** that prevent simultaneous plane operation
-- **2 velion-net internal port collisions** between Data Plane and Model Plane v2
+- **2 verevon-net internal port collisions** between Data Plane and Model Plane v2
 - **4 cross-plane reference issues** (v1-only hardcoded addresses)
 - **1 legacy root compose** (`docker-compose.yml`) that predates the plane architecture and uses an incompatible network (`aquatiq-local`)
 
@@ -53,7 +53,7 @@ The CoreSystem uses **8 docker-compose files** spread across 7 planes plus a leg
 | 4 | `apps/Model Plane/docker-compose.yml` | `model-plane` | model-plane-net | ai-core v1, agent-core v1 |
 | 5 | `apps/Model Plane v2/docker-compose.yml` | `model-plane-v2` | reasoning-net | agent-core-v2, execution-core-v2, capability-core-v2, llm-worker, ai-core v2 gateway |
 | 6 | `apps/Application Plane/docker-compose.yml` | `application-plane` | app-net | convex-backend, convex-dashboard, convex-gateway, convex-subscriber, notification-core, AFFiNE |
-| 7 | `apps/Frontend Plane/velion/docker-compose.yml` | `frontend-plane-agencia` | _(none — velion-net only)_ | frontend |
+| 7 | `apps/Frontend Plane/verevon/docker-compose.yml` | `frontend-plane-agencia` | _(none — verevon-net only)_ | frontend |
 | 8 | `docker-compose.yml` (root) | _(default)_ | _(none)_ | **LEGACY** — duplicates many plane services on aquatiq-local network |
 
 ---
@@ -64,7 +64,7 @@ The CoreSystem uses **8 docker-compose files** spread across 7 planes plus a leg
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    velion-net (external, shared)          │
+│                    verevon-net (external, shared)          │
 │  All planes connect here for cross-plane communication   │
 └──────────────────────────────────────────────────────────┘
        │            │            │           │          │
@@ -77,7 +77,7 @@ The CoreSystem uses **8 docker-compose files** spread across 7 planes plus a leg
   └─────────┘  └─────────┘  └───────┘  └───────┘  └─────┘
 ```
 
-Frontend Plane has **no private network** — it connects only to velion-net.
+Frontend Plane has **no private network** — it connects only to verevon-net.
 
 ### Legacy Network (Root Compose)
 
@@ -148,9 +148,9 @@ Frontend Plane has **no private network** — it connects only to velion-net.
 
 ---
 
-## 3. Velion-net Internal Port Collisions
+## 3. Verevon-net Internal Port Collisions
 
-When services from different planes join `velion-net`, their **container ports** must be unique across the entire shared network. Two collisions exist:
+When services from different planes join `verevon-net`, their **container ports** must be unique across the entire shared network. Two collisions exist:
 
 ### 3a. Container Port 8001
 
@@ -211,7 +211,7 @@ RETRIEVAL_SERVICE_URL: "http://retrieval-service:8004"
 QUARRY_URL: "http://quarry-api:8090"
 ```
 
-**Fix:** Deprecated with root compose — Frontend Plane's compose already uses proper velion-net references.
+**Fix:** Deprecated with root compose — Frontend Plane's compose already uses proper verevon-net references.
 
 ### 4d. Root Compose Notification Core → Legacy Infrastructure
 
@@ -338,7 +338,7 @@ REDIS_URL: "redis://aquatiq-redis-local:6379"
 
 ## 6. Root Compose Deprecation Plan
 
-The root `docker-compose.yml` is a **legacy monolith** that predates the plane-based architecture. It uses the `aquatiq-local` network (not `velion-net`) and duplicates services from Control, Application, and Frontend planes with **different port mappings and configurations**.
+The root `docker-compose.yml` is a **legacy monolith** that predates the plane-based architecture. It uses the `aquatiq-local` network (not `verevon-net`) and duplicates services from Control, Application, and Frontend planes with **different port mappings and configurations**.
 
 **2026-07-12 safety update:** every root service is quarantined behind the
 explicit `legacy-monolith` profile. A normal root-level `docker compose up`
@@ -372,8 +372,8 @@ Both Model Plane v1 and v2 are designed to run simultaneously with canary routin
 | Check | Status | Notes |
 |-------|--------|-------|
 | Host port 8101 conflict resolved | ❌ | v1 agent-core → 8106 |
-| velion-net port 8001 collision resolved | ❌ | v2 ai-core gateway → 8011 |
-| velion-net port 8004 collision resolved | ❌ | v2 capability-core → 8014 |
+| verevon-net port 8001 collision resolved | ❌ | v2 ai-core gateway → 8011 |
+| verevon-net port 8004 collision resolved | ❌ | v2 capability-core → 8014 |
 | Separate Postgres instances | ✅ | v1: 55432, v2: 55433 |
 | Separate Redis instances | ✅ | v1: 6389, v2: 6390 |
 | Separate NATS instances | ✅ | v1: 4225, v2: 4227 |
@@ -402,16 +402,16 @@ Both Model Plane v1 and v2 are designed to run simultaneously with canary routin
 #   agent-core: 8101:8001 → 8106:8001
 ```
 
-### Phase 2 — Velion-net Collision Fixes (Requires Container Rebuilds)
+### Phase 2 — Verevon-net Collision Fixes (Requires Container Rebuilds)
 
 ```bash
-# 3. Model Plane v2 — resolve velion-net port 8001
+# 3. Model Plane v2 — resolve verevon-net port 8001
 # File: apps/Model Plane v2/docker-compose.yml
 # Change ai-core gateway container port: 8001 → 8011
 # Update: host mapping 8101:8001 → 8101:8011
 # Update: all internal references to ai-core:8001 → ai-core:8011
 
-# 4. Model Plane v2 — resolve velion-net port 8004
+# 4. Model Plane v2 — resolve verevon-net port 8004
 # File: apps/Model Plane v2/docker-compose.yml
 # Change capability-core-v2 container port: 8004 → 8014
 # Update: host mapping 8104:8004 → 8104:8014

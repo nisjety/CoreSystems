@@ -534,7 +534,7 @@ function OrganizationEvidencePanel({
   const palette = validPalette(branding);
   const logoUrl = brandLogoUrl(branding);
   const displayName = displayOrganizationName(name || branding?.siteName || websiteHost(website?.url ?? ""));
-  const activeMode = brandTheme?.mode ?? "velion";
+  const activeMode = brandTheme?.mode ?? "verevon";
   const activeAccent = activeMode === "brand" ? brandColor : DEFAULT_ONBOARDING_ACCENT;
   return (
     <div
@@ -586,10 +586,10 @@ function OrganizationEvidencePanel({
           <p className="font-inter text-[10px] font-semibold uppercase tracking-[0.16em] text-[#A09890]">{copy.themeTitle}</p>
           <div className="mt-3 grid grid-cols-2 gap-2">
             <ThemeChoice
-              active={activeMode === "velion"}
-              label="Velion"
+              active={activeMode === "verevon"}
+              label="Verevon"
               color={DEFAULT_ONBOARDING_ACCENT}
-              onClick={() => void onTheme("velion")}
+              onClick={() => void onTheme("verevon")}
             />
             <ThemeChoice
               active={activeMode === "brand"}

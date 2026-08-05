@@ -33,7 +33,7 @@ export interface OrganizationPayload {
   id?: string
   name: string
   slug?: string
-  /** Selected Velion plan card from the paywall step. */
+  /** Selected Verevon plan card from the paywall step. */
   plan?: OnboardingPlanId
   size?: 'solo' | 'small' | 'medium' | 'large' | 'enterprise'
   brregOrgNumber?: string
@@ -123,7 +123,7 @@ export const INITIAL_STATE: OnboardingState = {
  * localStorage key. Bumped when the wire shape changes so stale state
  * from older clients gets thrown away cleanly.
  */
-export const STORAGE_KEY = 'velion.onboarding.v1'
+export const STORAGE_KEY = 'verevon.onboarding.v1'
 
 /**
  * Map legacy `/onboarding/<slug>/page.tsx` slugs to the new step ids.

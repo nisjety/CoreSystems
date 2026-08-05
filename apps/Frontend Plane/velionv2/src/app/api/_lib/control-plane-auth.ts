@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 
 /**
- * Server-side Control Plane session + header helpers for velionv2 API route
- * handlers (the /api/org gateway and friends). Ported/adapted from velion v1
+ * Server-side Control Plane session + header helpers for verevonv2 API route
+ * handlers (the /api/org gateway and friends). Ported/adapted from verevon v1
  * (src/app/api/_lib/control-plane-auth.ts).
  *
- * Env precedence is aligned with velionv2 conventions: *_CORE_URL preferred,
+ * Env precedence is aligned with verevonv2 conventions: *_CORE_URL preferred,
  * *_SERVICE_URL accepted as a fallback for docker-compose parity.
  */
 
@@ -75,7 +75,7 @@ export const getUserServiceUrl = () =>
 /**
  * The repurposed CP session-core (ADR 0002) hosts the Control Session
  * aggregator at /api/v1/sessions/current. Enabled when
- * CONTROL_SESSION_AUTHORITY_ENABLED=true; otherwise velionv2 falls back to
+ * CONTROL_SESSION_AUTHORITY_ENABLED=true; otherwise verevonv2 falls back to
  * user-core's narrower /api/v1/me/session-context. Deferred by default (D4).
  */
 export const getSessionServiceUrl = () =>

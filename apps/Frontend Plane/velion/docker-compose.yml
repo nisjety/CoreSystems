@@ -1,7 +1,7 @@
-name: frontend-plane-velion
-# Frontend Plane: Velion application
+name: frontend-plane-verevon
+# Frontend Plane: Verevon application
 # This compose file is the current application entrypoint, not the future
-# Triodelab marketing site. Velion consumes the shared application-level NATS
+# Triodelab marketing site. Verevon consumes the shared application-level NATS
 # bus provisioned by the shared-infra compose.
 
 services:
@@ -19,11 +19,11 @@ services:
       WATCHPACK_POLLING: "true"
       CHOKIDAR_USEPOLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
-      # W4-3 / U2-5 (ui-ux-velion-gap.md §13 + §10): dev opt-in. When set,
+      # W4-3 / U2-5 (ui-ux-verevon-gap.md §13 + §10): dev opt-in. When set,
       # `getModelPlaneTokenFromSession` falls back to the literal `dev-bypass`
       # bearer (accepted by the gateway when MODEL_GATEWAY_AUTH_DEV_BYPASS=1)
       # for callers that don't carry a Better Auth session cookie — useful
-      # for curl smokes, cron-style internal tasks, and the velion frontend
+      # for curl smokes, cron-style internal tasks, and the verevon frontend
       # in dev when the user isn't logged in yet. Production MUST leave this
       # unset so every gateway call mints a real JWT against auth-core.
       MODEL_PLANE_USE_DEV_BYPASS: "1"
@@ -60,13 +60,13 @@ services:
 
   nats:
     image: nats:2-alpine
-    container_name: velion-nats
+    container_name: verevon-nats
     restart: unless-stopped
     command: ["-js", "-m", "8222", "-sd", "/data"]
     networks:
       - inter-plane-bus
     volumes:
-      - velion-nats-data:/data
+      - verevon-nats-data:/data
     deploy:
       resources:
         limits:
@@ -91,5 +91,5 @@ networks:
 
 volumes:
   agencia_node_modules:
-  velion-nats-data:
+  verevon-nats-data:
     driver: local

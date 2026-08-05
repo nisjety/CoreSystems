@@ -1,7 +1,7 @@
 -- Allow run-lifecycle projections in the audit outbox.
 --
 -- session_audit_outbox was created for audit events only, so its subject CHECK
--- accepted just `velion.audit.v2.model.session-core.%`. When RUN_COMPLETED
+-- accepted just `verevon.audit.v2.model.session-core.%`. When RUN_COMPLETED
 -- learning events started being enqueued through the same outbox (so they commit
 -- in the SAME transaction as the terminal event, which is the entire point of an
 -- outbox), every insert was rejected:
@@ -29,6 +29,6 @@ ALTER TABLE session_audit_outbox
 ALTER TABLE session_audit_outbox
     ADD CONSTRAINT session_audit_outbox_subject_check
     CHECK (
-        subject LIKE 'velion.audit.v2.model.session-core.%'
+        subject LIKE 'verevon.audit.v2.model.session-core.%'
         OR subject LIKE 'mp.v1.run.%.event'
     );

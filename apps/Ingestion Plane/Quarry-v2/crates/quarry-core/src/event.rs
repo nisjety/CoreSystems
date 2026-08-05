@@ -61,7 +61,7 @@ pub enum EventType {
     /// with the output of `quarry_transform::branding_rendered::extract`
     /// (favicon, theme color, palette, logo candidate, font family,
     /// site name, og:image). Lets downstream consumers — most notably
-    /// the velion onboarding wizard — render real brand colors and the
+    /// the verevon onboarding wizard — render real brand colors and the
     /// detected logo immediately, instead of waiting for downstream
     /// model-plane interpretation.
     BrandingExtracted,

@@ -183,14 +183,14 @@ func stripePlanAmountNOK(plan string) int64 {
 func stripePlanDisplayName(plan string) string {
 	switch billablePlan(plan) {
 	case "hobby":
-		return "Velion Essential"
+		return "Verevon Essential"
 	case "standard":
-		return "Velion Advanced"
+		return "Verevon Advanced"
 	case "pro":
-		return "Velion Expert"
+		return "Verevon Expert"
 	case "enterprise":
-		return "Velion Custom"
+		return "Verevon Custom"
 	default:
-		return "Velion Free"
+		return "Verevon Free"
 	}
 }

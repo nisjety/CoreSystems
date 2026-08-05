@@ -1,7 +1,7 @@
 /**
  * Model Plane harness client.
  *
- * One place for the cross-cutting concerns every velion → model-gateway proxy
+ * One place for the cross-cutting concerns every verevon → model-gateway proxy
  * was reinventing: bearer-token minting, correlation-id propagation, retry with
  * backoff, timeouts, telemetry, and typed errors. See
  * `apps/Model Plane/docs/HARNESS_PHASE1.md` §5.

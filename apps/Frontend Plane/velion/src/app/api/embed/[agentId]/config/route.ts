@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { convexQuery } from '@/app/api/_lib/convex-client'
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): public embed widget config endpoint.
+ * Wave 9 (ui-ux-verevon-gap.md §19): public embed widget config endpoint.
  *
  * Called by the public `embed.js` bundle when the script tag first
  * mounts on a customer site. Returns the minimal info the bubble needs:

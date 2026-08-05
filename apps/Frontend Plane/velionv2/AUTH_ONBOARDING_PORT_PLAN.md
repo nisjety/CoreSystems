@@ -1,10 +1,10 @@
-# Velion 1 → Velion 2: Auth + Onboarding faithful port
+# Verevon 1 → Verevon 2: Auth + Onboarding faithful port
 
 Goal: make the V2 auth page and onboarding flow an **almost copy‑paste of V1**
 (correct UI/UX + real backend), add the missing auth capabilities, and wire
 **full NO/EN i18n** across both surfaces.
 
-Source of truth (V1): `../velion/src/components/auth/**`
+Source of truth (V1): `../verevon/src/components/auth/**`
 Target (V2): `src/features/auth/**`, `src/features/onboarding-v2/**`, `src/lib/i18n/**`, `src/app/api/**`
 
 ---
@@ -62,12 +62,12 @@ Existing V2 routes reused as-is: `/api/org/orgs`, `/api/org/orgs/:id/plan`,
      components/steps/{PostSignIn,Organization,Website,Connect,SocialProof,Paywall,Assembly}Step.tsx
      components/BrregSearch.tsx     (KEEP)
    ```
-   `VelionOnboardingPage.tsx` becomes a thin host that builds the machine and
+   `VerevonOnboardingPage.tsx` becomes a thin host that builds the machine and
    renders `<OnboardingFrame machine={…} />`.
 
 2. **Shared i18n provider** `src/lib/i18n/locale-context.tsx` exposing
    `LocaleProvider`, `useLocale()`, `useLanguageSwitch()` (cookie-persisted
-   `velion_locale`, NO default). Both the auth page and onboarding read from it,
+   `verevon_locale`, NO default). Both the auth page and onboarding read from it,
    replacing the cosmetic switcher. Mounted in `src/app/providers.tsx`.
 
 3. **Graceful degradation** preserved exactly as V1: every networked step
@@ -93,7 +93,7 @@ Existing V2 routes reused as-is: `/api/org/orgs`, `/api/org/orgs/:id/plan`,
 **Phase 2 — Onboarding shell + light steps:**
 - `onboarding-shared.tsx`, `OnboardingFrame.tsx`
 - `PostSignInStep`, `SocialProofStep`, `AssemblyStep`
-- rewrite `VelionOnboardingPage.tsx` as host
+- rewrite `VerevonOnboardingPage.tsx` as host
 
 **Phase 3 — Onboarding interactive steps:**
 - `OrganizationStep` (BRREG), `WebsiteStep` (SSE), `ConnectStep` (Nango + graph),

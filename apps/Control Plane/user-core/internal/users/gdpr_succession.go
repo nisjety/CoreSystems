@@ -84,7 +84,7 @@ func (s *Service) SoleAdminOrgs(ctx context.Context, userID string) ([]SoleAdmin
 // Returns *ErrSuccessorRequired when no successor was supplied at all,
 // *ErrSuccessorInvalid when the supplied successor fails validation for a
 // specific org, or nil once every sole-admin org has been handed off. The
-// SAME successorID is used for every affected org — Velion's one-org-per-user
+// SAME successorID is used for every affected org — Verevon's one-org-per-user
 // model makes more than one sole-admin org a rare edge case, but when it
 // happens the caller must nominate someone who is an active member of ALL of
 // them.

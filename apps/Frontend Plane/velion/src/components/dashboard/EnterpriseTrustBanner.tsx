@@ -7,7 +7,7 @@
 // verify it on first dashboard load. Required by the zero-input roadmap for
 // SOC2 transparency.
 //
-// G43 (velion-gap.md §8.30): the banner now subscribes reactively to
+// G43 (verevon-gap.md §8.30): the banner now subscribes reactively to
 // `api.controlSessions.byUser` on Convex. CP session-core publishes a fresh
 // snapshot whenever the Control Session aggregate changes (plan upgrade,
 // org switch, entitlement change) via the `upsertControlSession` HTTP
@@ -59,7 +59,7 @@ interface ControlSessionsRow {
   fetchedAt?: number
 }
 
-const DISMISS_KEY = 'velion.enterprise-trust-banner.dismissed'
+const DISMISS_KEY = 'verevon.enterprise-trust-banner.dismissed'
 
 function readOrganizationView(payload: ControlSessionResponse | null | undefined): OrganizationView | null {
   if (!payload) return null

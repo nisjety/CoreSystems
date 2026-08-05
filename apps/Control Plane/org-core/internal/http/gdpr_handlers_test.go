@@ -23,11 +23,11 @@ func readRepoSource(t *testing.T, path string) string {
 // deliberate.
 func TestErasureFanoutSubjects(t *testing.T) {
 	audit, fanout := erasureFanoutSubjects()
-	if audit != "velion.audit.v2.control.org-core.erasure" {
-		t.Errorf("audit subject = %q, want velion.audit.v2.control.org-core.erasure", audit)
+	if audit != "verevon.audit.v2.control.org-core.erasure" {
+		t.Errorf("audit subject = %q, want verevon.audit.v2.control.org-core.erasure", audit)
 	}
-	if fanout != "velion.gdpr.erasure.requested" {
-		t.Errorf("fan-out subject = %q, want velion.gdpr.erasure.requested", fanout)
+	if fanout != "verevon.gdpr.erasure.requested" {
+		t.Errorf("fan-out subject = %q, want verevon.gdpr.erasure.requested", fanout)
 	}
 }
 

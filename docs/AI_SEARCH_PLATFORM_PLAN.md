@@ -1,7 +1,7 @@
 # AI Search & Answer Platform — Cross-Plane Implementation Plan
 
 Status: **DRAFT — awaiting confirmation**
-Owner: Velion / Quarry-v2
+Owner: Verevon / Quarry-v2
 Scope: Turn the search box into a whole-system AI answer engine: web + own-corpus
 retrieval → grounded LLM answer → follow-up chat → metered, org-scoped, persisted,
 and auditable across all planes.
@@ -37,7 +37,7 @@ and auditable across all planes.
   container sets `QUARRY_EDGE__MODEL_PLANE_BASE_URL` / `_BEARER_TOKEN` /
   `_DATA_PLANE_RETRIEVAL_BASE_URL`, but `EdgeConfig` reads `model_plane_url` /
   `model_plane_token` (+ the retrieval field). Result: web-only, blank answer card.
-- **velionv2 BFF** already routes to every plane (envs present): `QUARRY_EDGE_URL`,
+- **verevonv2 BFF** already routes to every plane (envs present): `QUARRY_EDGE_URL`,
   `MODEL_PLANE_URL`, `AUTH_CORE_URL`, `USER_CORE_URL`, `ORG_CORE_URL`,
   `BILLING_CORE_URL`, `SESSION_CORE_URL`, `INTEGRATION_CORE_URL`, `GRAPH_INDEX_URL`,
   `DATA_PLANE_DOCUMENTS_URL`, `NOTIFICATION_CORE_URL`. `SearchAnswerView` (1126 LoC)
@@ -50,7 +50,7 @@ and auditable across all planes.
 ## 3. Target architecture (whole-system flow)
 
 ```
-                         ┌────────────── velionv2 (Frontend Plane) ──────────────┐
+                         ┌────────────── verevonv2 (Frontend Plane) ──────────────┐
   user query ──▶ SearchAnswerView ──▶ BFF /api/v1/search/web (SSE)               │
                          │  ▲  follow-up thread ──▶ /api/chat/stream (SSE)        │
                          │  │  browser query cache (SWR, 30–60s)                  │
@@ -91,8 +91,8 @@ Goal: AI answer + hybrid live, end to end.
 - Extend Redis cache: **org-scoped SERP cache** + **answer cache**; intent-driven TTL
   (news 2–5 min, default 15 min, evergreen 6–24 h, answer 1–6 h); stale-while-revalidate;
   negative caching (~30 s); **ZDR gating** (skip durable cache when ZDR on).
-- Browser query cache (SWR/React Query, staleTime 30–60 s) in velionv2 search hooks.
-- Files: `cache.rs`, `search_routes.rs`, `answer_routes.rs`, `config.rs`, velionv2
+- Browser query cache (SWR/React Query, staleTime 30–60 s) in verevonv2 search hooks.
+- Files: `cache.rs`, `search_routes.rs`, `answer_routes.rs`, `config.rs`, verevonv2
   `search-v2` hooks.
 
 ### Phase 2 — Data-Plane-first RAG + richer grounding
@@ -134,13 +134,13 @@ Goal: AI answer + hybrid live, end to end.
 
 ### Phase 6 — Observability, scale, prod
 - Metrics/traces via the model-plane otel-collector; latency budgets; reuse circuit
-  breakers + `AutoscaledPool`. Optional velionv2 prod mode for zero compile latency.
+  breakers + `AutoscaledPool`. Optional verevonv2 prod mode for zero compile latency.
 
 ## 5. Cross-plane integration matrix
 
 | Plane | Service(s) | Role in the answer engine |
 |---|---|---|
-| Frontend | velionv2 | UI, BFF, browser cache, streaming |
+| Frontend | verevonv2 | UI, BFF, browser cache, streaming |
 | Ingestion | quarry-edge/runtime | search, scrape, hybrid, answer pipeline, Redis cache |
 | Model | model-gateway | LLM synthesis, follow-up chat, intent classify |
 | Data | dpv2-retrieval/qdrant/documents/embeddings | own-corpus retrieval + durable ingest |
@@ -168,7 +168,7 @@ Goal: AI answer + hybrid live, end to end.
 ## 8. Open questions (resolve in Phase 0)
 1. Exact `EdgeConfig` field names for model-plane + DP retrieval (env reconciliation).
 2. Correct Model Plane endpoint/path + model name for synthesis.
-3. Does velionv2 already use Convex for chat-v2 persistence, or is it net-new here?
+3. Does verevonv2 already use Convex for chat-v2 persistence, or is it net-new here?
 4. What does integration-api currently ingest, and into which Data-Plane API?
 
 ## 9. Complexity (rough)

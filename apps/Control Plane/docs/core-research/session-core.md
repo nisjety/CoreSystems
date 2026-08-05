@@ -19,7 +19,7 @@ Session's fail-closed browser and signed Gateway delegation contracts remain unc
 
 ## 2026-07-14 live re-verification (historical deployment evidence)
 
-The Docker incident described in the older addendum is no longer active. Session Core and the rebuilt Velion gateway are healthy and their signed delegation pair is live. Missing browser auth and `Bearer garbage` combined with forged `X-User-Id`, `X-Org-Id`, and `X-User-Role: admin` return 401 both through the gateway `/api/v1/session/bootstrap` endpoint and directly from Session Core's `/api/v1/sessions/current` aggregate; no user aggregate is returned. The broader automated regressions below continue to cover malformed, expired, wrong-issuer, wrong-audience, wrong-signature, and header-impersonation cases.
+The Docker incident described in the older addendum is no longer active. Session Core and the rebuilt Verevon gateway are healthy and their signed delegation pair is live. Missing browser auth and `Bearer garbage` combined with forged `X-User-Id`, `X-Org-Id`, and `X-User-Role: admin` return 401 both through the gateway `/api/v1/session/bootstrap` endpoint and directly from Session Core's `/api/v1/sessions/current` aggregate; no user aggregate is returned. The broader automated regressions below continue to cover malformed, expired, wrong-issuer, wrong-audience, wrong-signature, and header-impersonation cases.
 
 ## 2026-07-11 production-readiness addendum (historical)
 
@@ -27,7 +27,7 @@ The critical bearer/header impersonation described below is fixed, covered, depl
 
 The final review also found Session's **inbound** gateway path still accepted a scoped static token plus caller-selected `X-User-Id`. A failing regression reproduced the 200 response. Session now verifies a 30-second HMAC envelope bound to configured principal/audience, timestamp, method, URI, body digest, and user/profile claims before setting identity. Unsigned delegation returns 403 in tests; Go and Rust share the fixed vector. The Session image was recreated, but the matching gateway build failed on Docker/BuildKit storage I/O and Session became unhealthy when Docker lost consistent Postgres metadata. Treat this pair as source-complete but not live-accepted.
 
-Live results on `/api/v1/sessions/current`: missing bearer plus caller identity headers -> 401; `Bearer garbage` plus real `X-User-Id`, forged `X-Org-Id`, and asserted admin -> 401; forged JWT -> 401. No denial body contained the fixture identity. The Velion gateway bootstrap route returns the same 401 behavior. Automated regressions cover missing, malformed, expired, wrong issuer/audience/signature, and header impersonation cases.
+Live results on `/api/v1/sessions/current`: missing bearer plus caller identity headers -> 401; `Bearer garbage` plus real `X-User-Id`, forged `X-Org-Id`, and asserted admin -> 401; forged JWT -> 401. No denial body contained the fixture identity. The Verevon gateway bootstrap route returns the same 401 behavior. Automated regressions cover missing, malformed, expired, wrong issuer/audience/signature, and header impersonation cases.
 
 `go test ./...` and `go vet ./...` pass. Measured whole-service coverage is 20.2%; `internal/internalkey` is 100% and the HTTP package 38.0%. The remaining legacy command ownership cases and broader HTTP coverage must be proven before MVP acceptance.
 
@@ -36,7 +36,7 @@ Live results on `/api/v1/sessions/current`: missing bearer plus caller identity 
 - Container confirmed healthy: `session-core-service` up 13h, ports `0.0.0.0:3017->3017`, `0.0.0.0:50017->50017`.
 - No uncommitted working-tree changes exist under `apps/Control Plane/session-core` (`git status --porcelain` and `git diff --stat` both empty). The large in-flight WIP diff currently in the tree (auth-core `organization-events.plugin.ts`, org-core/user-core/billing-core changes) does **not** touch this service.
 - TODO/FIXME/mock/stub/fake/placeholder grep: no live mocks, stubs, or fakes in non-test source. All hits are either (a) historical "G36-cutover" decommission comments about the removed plans/todos/lineage surface, (b) the `Todo*` domain enum/struct names left over from that removed surface, or (c) the *legitimate* placeholder-secret detector in `internal/internalkey/assert.go` (its job is to detect placeholder keys, so `placeholder` appearing there is expected, not a code smell). `app/{api,clients,models,services}` is a set of four empty leftover directories (0 files) — worth deleting for hygiene but not a functional issue.
-- **The prior audit's flagged item — "invalid bearer/header impersonation behavior in session-core" — is CONFIRMED LIVE as a CRITICAL authentication-bypass vulnerability.** See "Live Security Verification" below for exact requests/responses. It is not a hypothetical: a forged, unverified `Authorization: Bearer` value combined with a self-asserted `X-User-Id` header is sufficient to authenticate as **any** user, including on the Control Session snapshot endpoint that Velion v3's frontend depends on for session bootstrap (user profile, entitlements, onboarding status).
+- **The prior audit's flagged item — "invalid bearer/header impersonation behavior in session-core" — is CONFIRMED LIVE as a CRITICAL authentication-bypass vulnerability.** See "Live Security Verification" below for exact requests/responses. It is not a hypothetical: a forged, unverified `Authorization: Bearer` value combined with a self-asserted `X-User-Id` header is sufficient to authenticate as **any** user, including on the Control Session snapshot endpoint that Verevon v3's frontend depends on for session bootstrap (user profile, entitlements, onboarding status).
 - No automated test exists anywhere in the service (`tests/` directory is empty, `scripts/smoke_test_api.sh` doesn't cover auth) to catch or prevent this. This is a real, unguarded gap, not a regression risk that CI would catch today.
 
 ## Live Security Verification (2026-07-10)
@@ -140,12 +140,12 @@ HTTP/1.1 401 Unauthorized
 
 $ curl -i http://localhost:3017/api/v1/sessions/current \
     -H "Authorization: Bearer totally-forged-not-a-real-jwt" \
-    -H "X-User-Id: velion-v3-local-user" \
-    -H "X-User-Email: local@velion.dev"
+    -H "X-User-Id: verevon-v3-local-user" \
+    -H "X-User-Email: local@verevon.dev"
 HTTP/1.1 200 OK
-{"user":{"id":"velion-v3-local-user","email":"user-velion-v3-local-user@placeholder.local","name":"User","onboardingComplete":false},"entitlements":[],"onboardingStatus":"CREATED","fetchedAt":"2026-07-10T09:58:58.645709962Z"}
+{"user":{"id":"verevon-v3-local-user","email":"user-verevon-v3-local-user@placeholder.local","name":"User","onboardingComplete":false},"entitlements":[],"onboardingStatus":"CREATED","fetchedAt":"2026-07-10T09:58:58.645709962Z"}
 ```
-**This is the clean, fully-successful exploit.** `getControlSessionCurrent` (`internal/http/control_session_handlers.go`) has no additional resource-ownership check beyond `userIDFromContext(c)` — it trusts whatever `user_id` the middleware set, then calls `s.controlSessionService.Get(ctx, userID)` and returns a full `200 OK` snapshot. A forged bearer token plus a guessed/known `X-User-Id` value is sufficient, on its own, to pull another user's aggregated Control Session profile (user record, entitlements, onboarding status) with zero token verification anywhere in the path. `velion-v3-local-user` is the known dev/superadmin identity (see `MEMORY.md` "Velion super-admin"), used here only as a non-destructive read-only proof value already documented as existing in this environment.
+**This is the clean, fully-successful exploit.** `getControlSessionCurrent` (`internal/http/control_session_handlers.go`) has no additional resource-ownership check beyond `userIDFromContext(c)` — it trusts whatever `user_id` the middleware set, then calls `s.controlSessionService.Get(ctx, userID)` and returns a full `200 OK` snapshot. A forged bearer token plus a guessed/known `X-User-Id` value is sufficient, on its own, to pull another user's aggregated Control Session profile (user record, entitlements, onboarding status) with zero token verification anywhere in the path. `verevon-v3-local-user` is the known dev/superadmin identity (see `MEMORY.md` "Verevon super-admin"), used here only as a non-destructive read-only proof value already documented as existing in this environment.
 
 ### Verdict
 

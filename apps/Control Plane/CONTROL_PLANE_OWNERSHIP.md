@@ -472,19 +472,19 @@ second pool via `AUTH_DATABASE_URL` (disabled with a clear error when unset).
 
 ### Audit (durable, via the shared bus → audit-core)
 
-Every erasure/DSAR op emits a `velion.audit.v1.control.*` event (mirrors
-auth-core's `publishVelionAudit` shape: `occurred_at, org_id, user_id,
+Every erasure/DSAR op emits a `verevon.audit.v1.control.*` event (mirrors
+auth-core's `publishVerevonAudit` shape: `occurred_at, org_id, user_id,
 actor_role, plane:"control", event, subject, resource_id, outcome, details`):
 
-- `velion.audit.v1.control.erasure` — user/org hard erase + anonymize + org soft-delete
-- `velion.audit.v1.control.dsar_export` — DSAR export (read)
+- `verevon.audit.v1.control.erasure` — user/org hard erase + anonymize + org soft-delete
+- `verevon.audit.v1.control.dsar_export` — DSAR export (read)
 
 ### Cross-plane erasure fan-out (emit-only MVP)
 
 On an irreversible user/org erasure, the originating core publishes:
 
 ```
-subject: velion.gdpr.erasure.requested
+subject: verevon.gdpr.erasure.requested
 payload: { subject_type, subject_id, org_id, requested_by, ts }
           subject_type ∈ { "user", "organization" }
 ```

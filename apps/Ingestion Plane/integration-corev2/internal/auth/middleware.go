@@ -16,9 +16,9 @@ const (
 )
 
 const (
-	principalLocal  = "velion.principal"
-	internalLocal   = "velion.internal_call"
-	planLocal       = "velion.org_plan"
+	principalLocal  = "verevon.principal"
+	internalLocal   = "verevon.internal_call"
+	planLocal       = "verevon.org_plan"
 	defaultRole     = "member"
 	internalUserID  = "internal-service"
 	internalRole    = "service"

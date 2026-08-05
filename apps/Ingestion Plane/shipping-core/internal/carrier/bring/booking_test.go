@@ -16,7 +16,7 @@ func bookingRequestFixture() carrier.BookingRequest {
 		QuoteRef:    "q1",
 		ServiceName: "SERVICEPAKKE",
 		Price:       carrier.Money{AmountCents: 18500, Currency: "NOK"},
-		From:        carrier.Address{Name: "Velion AS", Street: "Storgata 1", PostalCode: "0150", City: "Oslo", Country: "NO", IsBusiness: true},
+		From:        carrier.Address{Name: "Verevon AS", Street: "Storgata 1", PostalCode: "0150", City: "Oslo", Country: "NO", IsBusiness: true},
 		To:          carrier.Address{Name: "Kari Nordmann", Street: "Munkegata 2", PostalCode: "7010", City: "Trondheim", Country: "NO"},
 		Package:     carrier.Package{WeightKg: 8, LengthCm: 40, WidthCm: 30, HeightCm: 20},
 		BookedBy:    "test",
@@ -44,13 +44,13 @@ func TestBookSendsTestIndicatorAndAuthAndMapsConfirmation(t *testing.T) {
 
 	// ClientURL left unset — must fall back to the package default rather
 	// than sending an empty header.
-	a := New(Config{APIUID: "uid@velion.no", APIKey: "key123", CustomerNumber: "12345", BookingBaseURL: srv.URL})
+	a := New(Config{APIUID: "uid@verevon.no", APIKey: "key123", CustomerNumber: "12345", BookingBaseURL: srv.URL})
 	booked, err := a.Book(context.Background(), bookingRequestFixture())
 	if err != nil {
 		t.Fatalf("Book: %v", err)
 	}
 
-	if gotUID != "uid@velion.no" || gotKey != "key123" {
+	if gotUID != "uid@verevon.no" || gotKey != "key123" {
 		t.Fatalf("Mybring auth headers missing: uid=%q key=%q", gotUID, gotKey)
 	}
 	if gotClientURL == "" {
@@ -75,6 +75,57 @@ func TestBookSendsTestIndicatorAndAuthAndMapsConfirmation(t *testing.T) {
 	}
 	if label.ContentType != "application/pdf" || len(label.Data) == 0 {
 		t.Fatalf("label = %q (%d bytes)", label.ContentType, len(label.Data))
+	}
+}
+
+func TestBookSendsRecipientContactWhenAddressHasPhoneOrEmail(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		_, _ = w.Write([]byte(`{"consignments":[{"confirmation":{"consignmentNumber":"1","links":{},"packages":[{"packageNumber":"1"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	a := New(Config{APIUID: "u", APIKey: "k", CustomerNumber: "1", BookingBaseURL: srv.URL})
+	req := bookingRequestFixture()
+	req.To.Phone = "+4712345678"
+	req.To.Email = "kari@example.no"
+	if _, err := a.Book(context.Background(), req); err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+
+	consignments, _ := gotBody["consignments"].([]any)
+	parties, _ := consignments[0].(map[string]any)["parties"].(map[string]any)
+	recipient, _ := parties["recipient"].(map[string]any)
+	contact, _ := recipient["contact"].(map[string]any)
+	if contact["email"] != "kari@example.no" || contact["phoneNumber"] != "+4712345678" {
+		t.Fatalf("recipient.contact = %+v, want email/phoneNumber populated", contact)
+	}
+	if contact["name"] != "Kari Nordmann" {
+		t.Fatalf("recipient.contact.name = %v, want the party name", contact["name"])
+	}
+}
+
+func TestBookOmitsContactWhenAddressHasNeitherPhoneNorEmail(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		_, _ = w.Write([]byte(`{"consignments":[{"confirmation":{"consignmentNumber":"1","links":{},"packages":[{"packageNumber":"1"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	a := New(Config{APIUID: "u", APIKey: "k", CustomerNumber: "1", BookingBaseURL: srv.URL})
+	if _, err := a.Book(context.Background(), bookingRequestFixture()); err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+
+	consignments, _ := gotBody["consignments"].([]any)
+	parties, _ := consignments[0].(map[string]any)["parties"].(map[string]any)
+	recipient, _ := parties["recipient"].(map[string]any)
+	if _, present := recipient["contact"]; present {
+		t.Fatalf("recipient.contact = %v, want omitted when the address has no phone/email", recipient["contact"])
 	}
 }
 

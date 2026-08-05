@@ -1,29 +1,32 @@
-# ✅ Velion Frontend — Third-Party Service Integrations
+# ✅ Verevon Frontend — Third-Party Service Integrations
 
-> **Scope:** this document covers velion's integration with **externally-hosted**
+> **Scope:** this document covers verevon's integration with **externally-hosted**
 > third-party services only: **Zammad** (ticketing), **Nango** (API connectors),
 > and **Nohu** (workflows). For Control Plane / Application Plane integration
 > (auth-core, user-core, org-core, billing-core, session-core, notification-core,
-> convex-core, the L5 ingress policy) see **[`velion-gap.md`](./velion-gap.md)** —
+> convex-core, the L5 ingress policy) see **[`verevon-gap.md`](./verevon-gap.md)** —
 > the living gap log + architecture reference. The file was previously named
-> `VELION_INTEGRATION.md`; renamed 2026-05-11 per G22 to stop new contributors
+> `VEREVON_INTEGRATION.md`; renamed 2026-05-11 per G22 to stop new contributors
 > assuming Control Plane wiring lives here.
 
-Successfully integrated **Zammad** (ticketing), **Nango** (API connectors), and **Nohu** (workflows) with Velion.
+Successfully integrated **Zammad** (ticketing), **Nango** (API connectors), and **Nohu** (workflows) with Verevon.
 
 ## 📦 What Was Created
 
 ### Client Libraries (3 files)
+
 - **zammad-client.ts** - Customer support ticketing API
 - **nango-client.ts** - Universal API connector platform
 - **nohu-client.ts** - Workflow orchestration engine
 
 ### React Hooks (3 files)
+
 - **useZammad.ts** - Zammad integration in components
 - **useNango.ts** - Nango OAuth and connectors
 - **useNohu.ts** - Workflow execution with auto-polling
 
 ### API Proxy Routes (3 files)
+
 - **/api/external/zammad/[...path]** - Secure Zammad proxy
 - **/api/external/nango/[...path]** - Secure Nango proxy
 - **/api/external/nohu/[...path]** - Secure Nohu proxy
@@ -31,6 +34,7 @@ Successfully integrated **Zammad** (ticketing), **Nango** (API connectors), and 
 ## 🚀 Quick Start
 
 ### 1. Add Credentials to .env
+
 ```bash
 # Server-side (Docker hostnames)
 EXTERNAL_ZAMMAD_API_URL=http://zammad-api:3012/api/v1
@@ -44,32 +48,36 @@ EXTERNAL_NOHU_API_KEY=<key>
 ```
 
 ### 2. Use in Components
+
 ```tsx
-'use client'
-import { useZammadTickets } from '@/lib/hooks/useZammad'
+"use client";
+import { useZammadTickets } from "@/lib/hooks/useZammad";
 
 export default function Dashboard() {
-  const { tickets, loading } = useZammadTickets()
-  
-  if (loading) return <div>Loading...</div>
-  return <div>{tickets.length} tickets</div>
+	const { tickets, loading } = useZammadTickets();
+
+	if (loading) return <div>Loading...</div>;
+	return <div>{tickets.length} tickets</div>;
 }
 ```
 
 ## 📚 API Reference
 
 ### Zammad
+
 - `useZammadTickets()` - List tickets
 - `useCreateZammadTicket()` - Create ticket
 - `useZammadHealth()` - Health check
 
 ### Nango
+
 - `useNangoIntegrations()` - List 500+ integrations
 - `useNangoConnections()` - Manage connections
 - `useNangoOAuth()` - OAuth flows
 - `useNangoHealth()` - Health check
 
 ### Nohu
+
 - `useNohuWorkflows()` - List workflows
 - `useExecuteWorkflow()` - Run workflow
 - `useNohuExecution()` - Monitor execution (auto-polls)
@@ -85,7 +93,7 @@ export default function Dashboard() {
 ## 📄 Files Structure
 
 ```
-velion/
+verevon/
 ├── src/lib/
 │   ├── clients/
 │   │   ├── zammad-client.ts (2.6K)
@@ -99,92 +107,103 @@ velion/
 │   ├── zammad/[...path]/route.ts
 │   ├── nango/[...path]/route.ts
 │   └── nohu/[...path]/route.ts
-└── VELION_THIRD_PARTY_INTEGRATIONS.md (this file)
+└── VEREVON_THIRD_PARTY_INTEGRATIONS.md (this file)
 ```
 
 ## 🧪 Testing
 
 ### Health Checks
+
 ```tsx
-const { healthy } = useZammadHealth()
-const { healthy: nangoOk } = useNangoHealth()
-const { healthy: nohuOk } = useNohuHealth()
+const { healthy } = useZammadHealth();
+const { healthy: nangoOk } = useNangoHealth();
+const { healthy: nohuOk } = useNohuHealth();
 ```
 
 ### Fetch Resources
+
 ```tsx
-const { tickets } = useZammadTickets()
-const { integrations } = useNangoIntegrations()
-const { workflows } = useNohuWorkflows()
+const { tickets } = useZammadTickets();
+const { integrations } = useNangoIntegrations();
+const { workflows } = useNohuWorkflows();
 ```
 
 ### Create Resources
+
 ```tsx
-const { create } = useCreateZammadTicket()
-await create({ title: 'Bug', group: 'support', customer_email: 'user@example.com' })
+const { create } = useCreateZammadTicket();
+await create({
+	title: "Bug",
+	group: "support",
+	customer_email: "user@example.com",
+});
 ```
 
 ## 📝 Environment Variables
 
-| Variable | Server-side | Client-side | Purpose |
-|----------|------------|------------|---------|
-| EXTERNAL_ZAMMAD_API_URL | Docker hostname | localhost | Zammad base URL |
-| EXTERNAL_ZAMMAD_TOKEN | (secret) | (localStorage) | Authentication |
-| EXTERNAL_NANGO_API_URL | Docker hostname | localhost | Nango base URL |
-| EXTERNAL_NANGO_API_KEY | (secret) | (localStorage) | Authentication |
-| EXTERNAL_NOHU_API_URL | Docker hostname | localhost | Nohu base URL |
-| EXTERNAL_NOHU_API_KEY | (secret) | (localStorage) | Authentication |
+| Variable                | Server-side     | Client-side    | Purpose         |
+| ----------------------- | --------------- | -------------- | --------------- |
+| EXTERNAL_ZAMMAD_API_URL | Docker hostname | localhost      | Zammad base URL |
+| EXTERNAL_ZAMMAD_TOKEN   | (secret)        | (localStorage) | Authentication  |
+| EXTERNAL_NANGO_API_URL  | Docker hostname | localhost      | Nango base URL  |
+| EXTERNAL_NANGO_API_KEY  | (secret)        | (localStorage) | Authentication  |
+| EXTERNAL_NOHU_API_URL   | Docker hostname | localhost      | Nohu base URL   |
+| EXTERNAL_NOHU_API_KEY   | (secret)        | (localStorage) | Authentication  |
 
 ## 🔧 Advanced Usage
 
 ### Custom Client Initialization
-```tsx
-import { ZammadClient } from '@/lib/clients/zammad-client'
 
-const client = new ZammadClient('http://custom-host:3012', 'token')
-const tickets = await client.getTickets()
+```tsx
+import { ZammadClient } from "@/lib/clients/zammad-client";
+
+const client = new ZammadClient("http://custom-host:3012", "token");
+const tickets = await client.getTickets();
 ```
 
 ### OAuth Flow with Nango
+
 ```tsx
-const { initiateOAuth } = useNangoOAuth()
+const { initiateOAuth } = useNangoOAuth();
 
 const handleConnect = async () => {
-  const url = await initiateOAuth(
-    'github',
-    `${window.location.origin}/auth/callback`
-  )
-  window.location.href = url
-}
+	const url = await initiateOAuth(
+		"github",
+		`${window.location.origin}/auth/callback`,
+	);
+	window.location.href = url;
+};
 ```
 
 ### Workflow Monitoring
+
 ```tsx
-const { execute } = useExecuteWorkflow()
-const { execution } = useNohuExecution(executionId)
+const { execute } = useExecuteWorkflow();
+const { execution } = useNohuExecution(executionId);
 
 // useNohuExecution auto-polls every 2 seconds while running
-if (execution?.status === 'completed') {
-  console.log('Done:', execution.output)
+if (execution?.status === "completed") {
+	console.log("Done:", execution.output);
 }
 ```
 
 ## 🐛 Troubleshooting
 
-| Issue | Solution |
-|-------|----------|
-| "API key not found" | Check .env has EXTERNAL_*_TOKEN/API_KEY |
-| CORS errors | Ensure requests use /api/external/* routes |
-| Connection refused | Verify services on 3012/3013/3014 |
-| 404 on health | Ensure client initialized with baseUrl |
+| Issue               | Solution                                   |
+| ------------------- | ------------------------------------------ |
+| "API key not found" | Check .env has EXTERNAL_*_TOKEN/API_KEY    |
+| CORS errors         | Ensure requests use /api/external/* routes |
+| Connection refused  | Verify services on 3012/3013/3014          |
+| 404 on health       | Ensure client initialized with baseUrl     |
 
 ## ✅ Integration Complete
 
 All components ready for production use with:
+
 - ✅ Full TypeScript support
 - ✅ Error handling
 - ✅ Loading states
 - ✅ Auto-refresh capabilities
 - ✅ Security best practices
 
-See `/memories/repo/VELION_INTEGRATION_SUMMARY.md` for full documentation.
+See `/memories/repo/VEREVON_INTEGRATION_SUMMARY.md` for full documentation.

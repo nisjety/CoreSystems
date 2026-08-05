@@ -1,5 +1,5 @@
 //! NATS `JetStream` consumer for the cross-plane GDPR organization-erasure
-//! fan-out (`velion.gdpr.erasure.requested`).
+//! fan-out (`verevon.gdpr.erasure.requested`).
 //!
 //! Mirrors `nats.rs`'s and `orchestration_nats.rs`'s established pattern for
 //! this crate: the stream and this consumer's durable name/filter are
@@ -52,7 +52,7 @@ use crate::gdpr::{parse_erasure_event, purge_organization_data};
 use crate::store::Pool;
 
 const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
-const SUBJECT: &str = "velion.gdpr.erasure.requested";
+const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 const DURABLE_NAME: &str = "session-core-gdpr-erasure-v1";
 
 /// Run the GDPR erasure consumer until the connection is lost.

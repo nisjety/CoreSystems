@@ -1,0 +1,38 @@
+# Production override for the canonical Verevon v3 frontend stack.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --build
+# Docker Compose v2.24.4+ is required for !reset.
+x-build-metadata-required:
+    SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+    BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+
+services:
+    gateway:
+        ports: !reset []
+        environment:
+            APP_ENV: production
+            CONTROL_PLANE_ENFORCEMENT: strict
+            ALLOW_DEV_AUTH_BYPASS: "0"
+            ALLOW_INSECURE_DEV_DEFAULTS: "0"
+            MODEL_GATEWAY_DEV_BEARER: ""
+            VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}
+
+    frontend:
+        build:
+            target: production
+        volumes: !reset []
+        ports: !override
+            - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:${VEREVONV3_HOST_PORT:-5173}:8080"
+        environment: !reset {}
+        read_only: true
+        tmpfs:
+            - /tmp:rw,noexec,nosuid,size=32m
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://127.0.0.1:8080/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 5s

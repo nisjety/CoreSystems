@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Onboarding · state machine + shapes (ported from velion v1
+ * Onboarding · state machine + shapes (ported from verevon v1
  * `components/auth/onboarding/state/{types,useOnboardingMachine}.ts`).
  *
  * The wizard runs as a state machine. The current step + every collected
@@ -42,7 +42,7 @@ export interface OrganizationPayload {
   id?: string;
   name: string;
   slug?: string;
-  /** Selected Velion plan card from the paywall step. */
+  /** Selected Verevon plan card from the paywall step. */
   plan?: OnboardingPlanId;
   size?: OrganizationSize;
   brregOrgNumber?: string;
@@ -130,7 +130,7 @@ export interface ConnectorPick {
 }
 
 export interface OnboardingBrandTheme {
-  mode: "velion" | "brand";
+  mode: "verevon" | "brand";
   primaryColor: string;
   selectedAt: string;
   saveStatus?: "idle" | "saving" | "saved" | "failed";
@@ -143,11 +143,11 @@ export interface PlanRecommendation {
   reason: string;
   /** Quick sales-engineer summary rendered on the paywall. */
   summary?: string;
-  /** Concrete signals Velion used when making the recommendation. */
+  /** Concrete signals Verevon used when making the recommendation. */
   proofPoints?: string[];
   /** Short scope bullets derived from the website, integrations and graph. */
   scopeSignals?: string[];
-  /** Likely first improvements Velion can make for this organization. */
+  /** Likely first improvements Verevon can make for this organization. */
   opportunities?: string[];
   /** Rough, non-guaranteed launch outcomes shown as a proof of concept. */
   expectedOutcomes?: Array<{ label: string; value: string; detail?: string }>;
@@ -191,7 +191,7 @@ function createInitialState(): OnboardingState {
 }
 
 /** localStorage key. Bumped when the wire shape changes so stale state is dropped. */
-export const STORAGE_KEY = "velion.onboarding.v1";
+export const STORAGE_KEY = "verevon.onboarding.v1";
 
 function readStored(): OnboardingState | null {
   if (typeof window === "undefined") return null;

@@ -11,7 +11,7 @@
 
 Phase 6 successfully implements **real-time cross-plane event consumption** across all four architectural planes. The Aqencia system now has a unified event-driven architecture with:
 
-- ✅ **Shared NATS broker** (`nats://velion-nats:4222`) connecting all planes
+- ✅ **Shared NATS broker** (`nats://verevon-nats:4222`) connecting all planes
 - ✅ **8 active event subscriptions** across 3 consumer planes
 - ✅ **Four synchronized event handlers** for business logic reactions
 - ✅ **Production-ready** event processing with graceful error handling
@@ -25,7 +25,7 @@ Phase 6 successfully implements **real-time cross-plane event consumption** acro
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                   Shared NATS Broker                        │
-│               (velion-nats:4222 - JetStream)               │
+│               (verevon-nats:4222 - JetStream)               │
 │          Token Auth: aqencia-shared-nats-token-2026         │
 └────────────────────┬────────────────────────────────────────┘
                      │
@@ -131,7 +131,7 @@ Phase 6 successfully implements **real-time cross-plane event consumption** acro
 | Data Plane (retrieval) Subscription | ✅ ACTIVE | `✅ Control Plane Subscriber (retrieval-service): listening for events` |
 | Data Plane (documents) Subscription | ✅ ACTIVE | `✅ Control Plane Subscriber (documents-service): listening for events` |
 | Reasoning Plane Subscription | ✅ ACTIVE | `✅ Control Plane Subscriber (ai-core): listening for events` |
-| Shared NATS Broker | ✅ HEALTHY | velion-nats running, JetStream streams operational |
+| Shared NATS Broker | ✅ HEALTHY | verevon-nats running, JetStream streams operational |
 | Token Authentication | ✅ WORKING | All planes successfully authenticate with shared token |
 | Network Connectivity | ✅ VERIFIED | All containers on triodelab-net can reach broker |
 | Event Queue Groups | ✅ CONFIGURED | Load balancing ready for multi-instance deployments |
@@ -271,7 +271,7 @@ docker logs {service} 2>&1 | grep "Subscribed to:"
 
 **Check NATS stream health:**
 ```bash
-docker exec velion-nats ls /data/jetstream/AQENCIA_CONTROLPLANE
+docker exec verevon-nats ls /data/jetstream/AQENCIA_CONTROLPLANE
 ```
 
 ---
@@ -297,7 +297,7 @@ docker exec velion-nats ls /data/jetstream/AQENCIA_CONTROLPLANE
 
 ## Deployment Checklist
 
-- [x] Shared NATS broker (velion-nats) running
+- [x] Shared NATS broker (verevon-nats) running
 - [x] Token auth configured in nats-shared.conf
 - [x] All containers on triodelab-net
 - [x] NATS_SHARED_URL & NATS_SHARED_TOKEN env vars set
@@ -349,7 +349,7 @@ docker exec velion-nats ls /data/jetstream/AQENCIA_CONTROLPLANE
                      ▼
         ┌────────────────────────────────┐
         │   Shared NATS Broker           │
-        │    (velion-nats:4222)         │
+        │    (verevon-nats:4222)         │
         │                                │
         │  ✅ JetStream Enabled          │
         │  ✅ Token Auth Enabled         │

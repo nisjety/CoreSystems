@@ -14,7 +14,7 @@ import (
 
 // MemoryConsolidationModel is the model that consolidates a thread's memory.
 //
-// A CONCRETE model id, deliberately not a `velion-*` intent tier. Those tiers are
+// A CONCRETE model id, deliberately not a `verevon-*` intent tier. Those tiers are
 // re-routed by prompt size, and a fixed-token micro-call like this one lands on a
 // reasoning model that answers HTTP 200 with an empty body — the failure looks
 // like "the model had nothing to say" rather than a routing mistake. Overridable

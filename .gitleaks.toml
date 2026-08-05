@@ -1,11 +1,11 @@
-# Velion CoreSystem — gitleaks configuration
+# Verevon CoreSystem — gitleaks configuration
 # Purpose (Phase 3 PR-0a): prevent NEW secrets from being committed/pushed.
 # Scope decision: we do NOT scrub history or fail on the pre-existing tracked
 # findings (those are rotated at push time, per the maintainer). The CI gate
 # (.github/workflows/secret-scan.yml) scans only the commits in a push/PR, so
 # this config governs what counts as a finding in NEW changes.
 
-title = "Velion CoreSystem secret-scan"
+title = "Verevon CoreSystem secret-scan"
 
 [extend]
 # Start from gitleaks' built-in rule set (AWS, Azure, GCP, generic-api-key,

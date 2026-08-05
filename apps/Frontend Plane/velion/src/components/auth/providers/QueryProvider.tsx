@@ -61,9 +61,9 @@ function makeQueryClient() {
 let browserQueryClient: QueryClient | undefined = undefined;
 
 const LEGACY_PERSISTED_QUERY_CACHE_KEYS = [
-  'velion.tanstack-query.cache.v1',
+  'verevon.tanstack-query.cache.v1',
 ];
-const PERSISTED_QUERY_CACHE_KEY = 'velion.tanstack-query.cache.v2';
+const PERSISTED_QUERY_CACHE_KEY = 'verevon.tanstack-query.cache.v2';
 const PERSISTED_QUERY_CACHE_MAX_AGE = 24 * 60 * 60 * 1000;
 const PERSISTED_QUERY_ROOT_KEYS = new Set([
   'knowledge',

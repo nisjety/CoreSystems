@@ -56,19 +56,19 @@ Legend: `[x]` closed · `[~]` primitive shipped, wire-up pending · `[ ]` open
 
 ### Cross-language NATS subject parity (Go ⇄ Rust)
 
-Legacy `velion.*` subject constants and helpers are mirrored byte-for-byte between Go `pkg/natsx` and Rust `mp_events::subjects`.
+Legacy `verevon.*` subject constants and helpers are mirrored byte-for-byte between Go `pkg/natsx` and Rust `mp_events::subjects`.
 
 **Go (`apps/Model Plane/go/pkg/natsx`)**
-- `LegacyRunEventsWildcard = "velion.agent.run.*.event"`
-- `LegacySessionCommandWildcard = "velion.session.*.command"`
-- `LegacyRunEventSubject(runID) → "velion.agent.run.{runID}.event"`
-- `LegacySessionCommandSubject(sessionKey) → "velion.session.{sessionKey}.command"`
+- `LegacyRunEventsWildcard = "verevon.agent.run.*.event"`
+- `LegacySessionCommandWildcard = "verevon.session.*.command"`
+- `LegacyRunEventSubject(runID) → "verevon.agent.run.{runID}.event"`
+- `LegacySessionCommandSubject(sessionKey) → "verevon.session.{sessionKey}.command"`
 
 **Rust (`rust/crates/mp-events/src/subjects.rs`)**
-- `LEGACY_RUN_EVENTS_WILDCARD = "velion.agent.run.*.event"`
-- `LEGACY_SESSION_COMMAND_WILDCARD = "velion.session.*.command"`
-- `legacy_run_event_subject(run_id) → "velion.agent.run.{run_id}.event"`
-- `legacy_session_command_subject(session_key) → "velion.session.{session_key}.command"`
+- `LEGACY_RUN_EVENTS_WILDCARD = "verevon.agent.run.*.event"`
+- `LEGACY_SESSION_COMMAND_WILDCARD = "verevon.session.*.command"`
+- `legacy_run_event_subject(run_id) → "verevon.agent.run.{run_id}.event"`
+- `legacy_session_command_subject(session_key) → "verevon.session.{session_key}.command"`
 
 ### Test evidence
 
@@ -84,9 +84,9 @@ Subject tests in `mp-events`:
 **Go** (`pkg/natsx`): all tests green (per-module `go test`)
 
 Subject translation tests in `compat_test.go`:
-- `TestTranslateLegacySubject` — covers `velion.agent.run.*.event` and `velion.session.*.command` → `mp.v1.*` mapping
+- `TestTranslateLegacySubject` — covers `verevon.agent.run.*.event` and `verevon.session.*.command` → `mp.v1.*` mapping
 - `TestTranslateNewToLegacy` — reverse mapping
-- `TestRoundTripVelion` — `velion → mp.v1 → velion` round-trip for both legacy forms
+- `TestRoundTripVerevon` — `verevon → mp.v1 → verevon` round-trip for both legacy forms
 
 ### Legacy aqencia.* subject parity (Go ⇄ Rust)
 
@@ -427,7 +427,7 @@ Golden invariant across all gates: canonical idempotency remains `blake3("<servi
 **Invariants preserved**:
 - IdemPrefix derivation unchanged; golden hash test remains authoritative.
 - HTTP methods: read endpoints GET-only with `Allow: GET` on 405.
-- NATS subject compat adapter (`go/pkg/natsx/compat.go`) stays in force for all legacy `velion.*` / `aqencia.reasoning.*` subjects until downstream cutover.
+- NATS subject compat adapter (`go/pkg/natsx/compat.go`) stays in force for all legacy `verevon.*` / `aqencia.reasoning.*` subjects until downstream cutover.
 - Proto wire compatibility for `execution.proto` checkpoint/scrub flow.
 
 ### Lint evidence

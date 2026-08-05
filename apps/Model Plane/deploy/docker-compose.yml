@@ -181,19 +181,22 @@ services:
       MP_COMPAT_MODE: v1_only
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
-      # Empty by default = "Velion Auto": inference-core resolves an unpinned
+      # Empty by default = "Verevon Auto": inference-core resolves an unpinned
       # request to the configured provider's own default (per-provider), so chat
       # works with whichever provider key is set (Anthropic-only, OpenAI-only,
       # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
       DEFAULT_MODEL: ${DEFAULT_MODEL:-}
       RATE_LIMIT_RPM: "100"
       # Local-dev auth bypass is defined in ../.env, but compose was not
-      # forwarding it, so Velion's `dev-bypass` bearer was rejected before
+      # forwarding it, so Verevon's `dev-bypass` bearer was rejected before
       # inference. Production should leave this empty and configure JWKS.
       MODEL_GATEWAY_AUTH_DEV_BYPASS: ${MODEL_GATEWAY_AUTH_DEV_BYPASS:-}
       ALLOW_INSECURE_DEV_DEFAULTS: ${ALLOW_INSECURE_DEV_DEFAULTS:-}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-}
+      # Keep the local Docker default aligned with Auth Core's canonical
+      # issuer. Production overlays must still provide AUTH_CORE_ISSUER
+      # explicitly rather than relying on this development default.
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-model-gateway}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
@@ -207,8 +210,16 @@ services:
       FINETUNE_ENABLED: ${FINETUNE_ENABLED:-0}
       FINETUNE_ORG_BUDGET_USD: ${FINETUNE_ORG_BUDGET_USD:-50}
       FINETUNE_PER_JOB_BUDGET_USD: ${FINETUNE_PER_JOB_BUDGET_USD:-20}
+      # Dedicated finetune-poller session-core credential — NOT
+      # MODEL_GATEWAY_SERVICE_API_KEY above, which is registered
+      # retentionByAudience=zdr for terminalize/heartbeat. Optional like the
+      # Azure creds above: finetune_poller::spawn() soft-fails (poller idles,
+      # logs, never crashes the gateway) when unset, matching FINETUNE_ENABLED
+      # defaulting off.
+      FINETUNE_POLLER_SERVICE_ID: ${FINETUNE_POLLER_SERVICE_ID:-model-gateway-finetune-poller}
+      FINETUNE_POLLER_SERVICE_API_KEY: ${FINETUNE_POLLER_SERVICE_API_KEY:-}
       # Use explicit Model Plane aliases here. The gateway also joins the
-      # shared inter-plane bus for Velion, where names like `session-core`
+      # shared inter-plane bus for Verevon, where names like `session-core`
       # can resolve to Control Plane services instead.
       SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
       INFERENCE_CORE_ADDR: http://model-plane-inference-core-1:9092
@@ -326,7 +337,7 @@ services:
       #   into search phrases is a rewrite task the user never reads, so it uses
       #   the intent layer's cheapest mode; the REPORT is written by the turn's
       #   own model, never this one.
-      DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-velion-budget}
+      DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
       # Local semantic-response cache (Dragonfly exact-match). Default ON,
       # pointing at the Model Plane Dragonfly; set empty to disable. If the
       # managed Redis LangCache (LANGCACHE_URL/_CACHE_ID/_API_KEY) is configured
@@ -359,7 +370,7 @@ services:
       # model-gateway's own, NOT a duplicate of those.
       INFORMATION_CORE_URL: ${INFORMATION_CORE_URL:-http://information-core:3190}
       INFORMATION_CORE_INTERNAL_KEY: ${INFORMATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
-      # Velion workspace READ tools — the "AI-first" bridge: data the signed-in
+      # Verevon workspace READ tools — the "AI-first" bridge: data the signed-in
       # user can see in the UI is answerable in plain chat. Both cores join
       # inter-plane-bus, same as information-core above, so the service-name
       # defaults resolve in-network without host port mapping.
@@ -375,12 +386,12 @@ services:
       INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
       SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
       APPLICATION_CORE_INTERNAL_KEY: ${APPLICATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
-      # Velion's own public origin, as seen by a user's browser through the
-      # velionv3 gateway. Used only to build the OAuth redirect_uri for MCP
+      # Verevon's own public origin, as seen by a user's browser through the
+      # verevonv3 gateway. Used only to build the OAuth redirect_uri for MCP
       # server connections (e.g. Visma Net) — an external authorization
       # server must redirect back to a URL the browser can actually reach,
       # never this container's internal address.
-      VELION_PUBLIC_ORIGIN: ${VELION_PUBLIC_ORIGIN:-http://localhost:5173}
+      VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
       # Shared Model-Plane-local secret authenticating this gateway's
       # GET .../oauth-token call to capability-core when resolving an
       # OAuth-connected MCP server's token at tools/call dispatch time (no
@@ -506,17 +517,17 @@ services:
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
-      # Velion intent layer — turns the velion-budget/-balance/-genius modes into
+      # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
       # a concrete model from request complexity + the org's cost-core budget,
       # with model-router as the cheap fallback (see provider/intent.rs). The
       # budget gate is best-effort: COST_CORE_URL points at cost-core's HTTP API;
       # org/user scope arrives via gRPC metadata (x-org-id/x-user-id) and degrades
       # to an Unknown posture when absent.
-      VELION_INTENT_ENABLED: ${VELION_INTENT_ENABLED:-1}
+      VEREVON_INTENT_ENABLED: ${VEREVON_INTENT_ENABLED:-1}
       COST_CORE_URL: ${COST_CORE_URL:-http://model-plane-cost-core-1:8089}
-      VELION_INTENT_BUDGET_USD: ${VELION_INTENT_BUDGET_USD:-50}
+      VEREVON_INTENT_BUDGET_USD: ${VEREVON_INTENT_BUDGET_USD:-50}
       # Runtime RoutingPolicy store: inference-core polls session-core's
-      # RoutingPolicy gRPC for the live intent-routing policy (the Velion
+      # RoutingPolicy gRPC for the live intent-routing policy (the Verevon
       # "model router" tuning), refreshing every ROUTER_POLICY_REFRESH_SECS.
       # Unset → the chain runs on the built-in RoutingPolicy::default.
       # Both services join inter-plane-bus, where the generic `session-core`
@@ -676,7 +687,7 @@ services:
       # execution mutation. Data Plane credentials arrive separately through
       # x-data-plane-authorization and are never accepted as local authority.
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
       EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
       EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
@@ -710,6 +721,41 @@ services:
       # of forwarding a shared internal key or caller-selected tenant headers.
       INGESTION_SERVICE_ID: ${INGESTION_SERVICE_ID:-model-execution}
       INGESTION_SERVICE_API_KEY: ${MODEL_EXECUTION_SERVICE_API_KEY:?MODEL_EXECUTION_SERVICE_API_KEY is required}
+      # user-core (Control Plane) — GetUser/GetUserProfile only, to fill in
+      # book_shipment's recipient contact (Bring and other carriers reject a
+      # booking outright without one) when the model didn't supply any.
+      # Reachable over inter-plane-bus, the network Model Plane and Control
+      # Plane share; user-core's gRPC listener has no published host port.
+      USER_CORE_GRPC_ADDR: ${USER_CORE_GRPC_ADDR:-http://user-service:50012}
+      USER_CORE_GRPC_CREDENTIAL_ID: ${USER_CORE_GRPC_CREDENTIAL_ID:-execution-core-primary}
+      USER_CORE_GRPC_PRINCIPAL: ${USER_CORE_GRPC_PRINCIPAL:-execution-core}
+      USER_CORE_GRPC_SERVICE_AUTH: ${EXECUTION_CORE_USER_CORE_GRPC_TOKEN:?EXECUTION_CORE_USER_CORE_GRPC_TOKEN is required}
+      # Signs the provider-write attestation integration-corev2 requires on a
+      # write action (see IntegrationActionsClient::execute_action). Public
+      # half is registered under issuer "model-execution" in integration-corev2's
+      # INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON. Absent → writes fail
+      # closed with an honest tool error rather than reaching integration-corev2
+      # unattested.
+      EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:-}
+      EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID:-}
+      # Post-approval continuation dispatcher (approval_delivery_worker):
+      # auto-discovers every organization via org-core's internal directory
+      # (org:read:any) by default. EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS is
+      # an explicit override for staged rollout, not the normal path — see
+      # org_directory's module doc.
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      # Shared with org-core's ORG_CORE_SERVICE_CREDENTIALS (Control Plane
+      # docker-compose.yml) under principal "execution-core", scope
+      # org:read:any — the same scope session-core/integration-corev2/
+      # billing-core already hold for this class of read. Generated
+      # independently in each plane's local secrets store today (same as
+      # its siblings SESSION_ORG_CORE_SERVICE_TOKEN/
+      # INTEGRATION_ORG_CORE_SERVICE_TOKEN): the two sides must be
+      # reconciled to the same value manually until the credential-rollout
+      # ritual (verevon-roadmap.md) runs — not a gap unique to this token.
+      EXECUTION_ORG_CORE_SERVICE_TOKEN: ${EXECUTION_ORG_CORE_SERVICE_TOKEN:-}
+      EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_ORG_IDS:-}
+      EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS: ${EXECUTION_CORE_APPROVAL_DELIVERY_POLL_SECONDS:-15}
     depends_on:
       postgres:
         condition: service_healthy
@@ -835,7 +881,7 @@ services:
       NATS_USER: capability-core-runtime
       NATS_PASSWORD: ${MODEL_CAPABILITY_CORE_NATS_PASSWORD:?MODEL_CAPABILITY_CORE_NATS_PASSWORD is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
@@ -1111,7 +1157,7 @@ services:
       - "127.0.0.1:9098:9098"   # gRPC
     environment:
       LOG_LEVEL: info
-      # cost-core joins the inter-plane bus (so the Velion gateway can reach its
+      # cost-core joins the inter-plane bus (so the Verevon gateway can reach its
       # HTTP API). `model-nats` is a plane-unique network alias; Postgres remains
       # private to the default Model network. This avoids generated container
       # names and prevents accidental resolution to another plane's NATS.
@@ -1135,7 +1181,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: cost-core
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       # CSV. `inference-core` is accepted so the intent layer's budget check —
       # which forwards the caller's own delegated aud=inference-core token —
       # verifies here (see cost-core cmd/main.go for why this is read-only in
@@ -1151,7 +1197,7 @@ services:
         condition: service_healthy
     networks:
       # Stay on the Model Plane network (postgres/nats) AND join the shared
-      # inter-plane-bus so the Velion gateway's cost/usage dashboard (Phase 7
+      # inter-plane-bus so the Verevon gateway's cost/usage dashboard (Phase 7
       # B5) can reach the ledger HTTP API by its alias.
       default: {}
       inter-plane-bus:

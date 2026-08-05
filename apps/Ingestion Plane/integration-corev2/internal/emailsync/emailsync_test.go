@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -22,6 +23,8 @@ type fakeStore struct {
 	connections      []store.Connection
 	states           map[string]store.EmailSyncState
 	upserts          []store.EmailSyncState
+	syncStatuses     map[string]string
+	syncStatusErr    error
 	contextUpdates   []map[string]string
 	contextUpdateErr error
 }
@@ -49,6 +52,17 @@ func (f *fakeStore) UpsertEmailSyncState(_ context.Context, state store.EmailSyn
 	}
 	f.states[state.ConnectionID] = state
 	f.upserts = append(f.upserts, state)
+	return nil
+}
+
+func (f *fakeStore) UpdateConnectionSyncStatus(_ context.Context, connectionID, status string) error {
+	if f.syncStatusErr != nil {
+		return f.syncStatusErr
+	}
+	if f.syncStatuses == nil {
+		f.syncStatuses = map[string]string{}
+	}
+	f.syncStatuses[connectionID] = status
 	return nil
 }
 
@@ -86,6 +100,27 @@ func (f fakeTokens) AccessTokenForConnection(_ context.Context, connectionID str
 		return oauth.AccessTokenResult{}, f.err
 	}
 	return oauth.AccessTokenResult{ConnectionID: connectionID, AccessToken: "tok-" + connectionID}, nil
+}
+
+type fakeInboxSyncJobs struct {
+	claimRequests    []handoff.SyncClaimRequest
+	jobs             []store.SyncJob
+	progressRequests []handoff.SyncProgressRequest
+}
+
+func (f *fakeInboxSyncJobs) ClaimSyncJob(_ context.Context, request handoff.SyncClaimRequest) (store.SyncJob, error) {
+	f.claimRequests = append(f.claimRequests, request)
+	if len(f.jobs) == 0 {
+		return store.SyncJob{}, &handoff.ServiceHTTPError{Service: "integration-core", StatusCode: http.StatusNotFound}
+	}
+	job := f.jobs[0]
+	f.jobs = f.jobs[1:]
+	return job, nil
+}
+
+func (f *fakeInboxSyncJobs) UpdateSyncProgress(_ context.Context, _ string, request handoff.SyncProgressRequest) (store.SyncJob, error) {
+	f.progressRequests = append(f.progressRequests, request)
+	return store.SyncJob{Status: request.Status}, nil
 }
 
 type fakeFetcher struct {
@@ -194,6 +229,69 @@ func TestRunOnce_IngestsAndAdvancesCursor(t *testing.T) {
 	state := st.states["conn_1"]
 	if state.Cursor != "hist-100" || state.LastError != "" || state.FailureCount != 0 {
 		t.Fatalf("state not advanced cleanly: %+v", state)
+	}
+}
+
+func TestRunManualInboxJobsClaimsAndCompletesProviderFetch(t *testing.T) {
+	st := &fakeStore{connections: []store.Connection{googleConnection("conn_1")}}
+	fetcher := &fakeFetcher{results: map[string]FetchResult{
+		"": {Messages: []EmailMessage{{ProviderEventID: "m1", From: Participant{Email: "customer@example.com"}}}, NextCursor: "hist-1"},
+	}}
+	jobs := &fakeInboxSyncJobs{jobs: []store.SyncJob{{
+		ID: "sync-inbox-1", ConnectionID: "conn_1", ProviderKey: "google", OrganizationID: "org_1",
+		Metadata: map[string]any{"inboxChannel": "email"},
+	}}}
+	w := Worker{Store: st, Tokens: fakeTokens{}, Ingest: &fakeIngestor{}, Gmail: fetcher, Integration: jobs}
+
+	ingested, err := w.RunManualInboxJobs(t.Context())
+	if err != nil {
+		t.Fatalf("RunManualInboxJobs: %v", err)
+	}
+	if ingested != 1 {
+		t.Fatalf("ingested = %d, want 1", ingested)
+	}
+	if len(jobs.claimRequests) != 2 || jobs.claimRequests[0].Consumer != emailWorkerConsumer || jobs.claimRequests[0].Target != emailWorkerConsumer {
+		t.Fatalf("claim requests = %#v, want one email-worker claim plus an empty-queue check", jobs.claimRequests)
+	}
+	if len(jobs.progressRequests) != 1 || jobs.progressRequests[0].Status != "completed" {
+		t.Fatalf("progress requests = %#v, want one completed job", jobs.progressRequests)
+	}
+	if jobs.progressRequests[0].Metadata["messagesIngested"] != 1 {
+		t.Fatalf("completion metadata = %#v, want content-free message count", jobs.progressRequests[0].Metadata)
+	}
+}
+
+func TestRunManualInboxJobsContinuesAfterRecordedProviderFailure(t *testing.T) {
+	failedConnection := store.Connection{
+		ID: "conn-failed", ProviderKey: "microsoft", OrganizationID: "org_1",
+		Status: "active", Capabilities: []string{"mail.read"},
+	}
+	st := &fakeStore{connections: []store.Connection{failedConnection, googleConnection("conn-success")}}
+	jobs := &fakeInboxSyncJobs{jobs: []store.SyncJob{
+		{ID: "sync-failed", ConnectionID: "conn-failed", ProviderKey: "microsoft", OrganizationID: "org_1", Metadata: map[string]any{"inboxChannel": "email"}},
+		{ID: "sync-success", ConnectionID: "conn-success", ProviderKey: "google", OrganizationID: "org_1", Metadata: map[string]any{"inboxChannel": "email"}},
+	}}
+	w := Worker{
+		Store:       st,
+		Tokens:      fakeTokens{},
+		Ingest:      &fakeIngestor{},
+		Graph:       &fakeFetcher{errs: map[string]error{"": errors.New("graph unavailable")}},
+		Gmail:       &fakeFetcher{results: map[string]FetchResult{"": {Messages: []EmailMessage{{ProviderEventID: "m1", From: Participant{Email: "customer@example.com"}}}, NextCursor: "hist-1"}}},
+		Integration: jobs,
+	}
+
+	ingested, err := w.RunManualInboxJobs(t.Context())
+	if err != nil {
+		t.Fatalf("RunManualInboxJobs: %v", err)
+	}
+	if ingested != 1 {
+		t.Fatalf("ingested = %d, want 1 from the job after the failure", ingested)
+	}
+	if len(jobs.claimRequests) != 3 {
+		t.Fatalf("claim requests = %#v, want two jobs plus an empty-queue check", jobs.claimRequests)
+	}
+	if len(jobs.progressRequests) != 2 || jobs.progressRequests[0].Status != "failed" || jobs.progressRequests[1].Status != "completed" {
+		t.Fatalf("progress requests = %#v, want failed then completed", jobs.progressRequests)
 	}
 }
 
@@ -415,6 +513,35 @@ func TestRunOnce_TokenFailureIsRecordedAndIsolated(t *testing.T) {
 	if state.FailureCount != 1 || state.LastError == "" {
 		t.Fatalf("token failure not recorded on state: %+v", state)
 	}
+	if got := st.syncStatuses["conn_1"]; got != "failed" {
+		t.Fatalf("connection sync status = %q, want failed", got)
+	}
+}
+
+func TestRunOnce_ProjectsSuccessfulSyncStatus(t *testing.T) {
+	st := &fakeStore{connections: []store.Connection{googleConnection("conn_1")}}
+	w := Worker{
+		Store:  st,
+		Tokens: fakeTokens{},
+		Ingest: &fakeIngestor{},
+		Gmail:  &fakeFetcher{results: map[string]FetchResult{"": {NextCursor: "history-1"}}},
+		Graph:  &fakeFetcher{},
+	}
+
+	if _, err := w.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if got := st.syncStatuses["conn_1"]; got != "synced" {
+		t.Fatalf("connection sync status = %q, want synced", got)
+	}
+}
+
+func TestConnectionEligibleSkipsConnectionsThatNeedReconnect(t *testing.T) {
+	connection := googleConnection("conn-needs-refresh")
+	connection.Status = "needs_refresh"
+	if connectionEligible(connection, "gmail.read", "https://www.googleapis.com/auth/gmail.readonly") {
+		t.Fatal("needs_refresh connection was eligible for email sync")
+	}
 }
 
 // ── ingest client tests ──────────────────────────────────────────────────────
@@ -455,7 +582,7 @@ func TestIngestClient_PostsBridgeShape(t *testing.T) {
 		MessageIDHeader:   "<m@x>",
 		Subject:           "Hei",
 		From:              Participant{Name: "Kari", Email: "kari@x.no"},
-		To:                []Participant{{Email: "support@velion.no"}},
+		To:                []Participant{{Email: "support@verevon.no"}},
 		BodyText:          "Trenger hjelp",
 		OccurredAt:        time.Date(2026, 7, 8, 10, 0, 0, 0, time.UTC),
 	}

@@ -1,7 +1,7 @@
 //! ZDR (Zero Data Retention) behavior tests for Quarry-edge's own HTTP
-//! surface, independent of the Velion gateway's `effective_profile_scope`
+//! surface, independent of the Verevon gateway's `effective_profile_scope`
 //! guard (`fix(gateway): close ZDR bypass via explicit ephemeral scope
-//! claim`, `apps/Frontend Plane/velionv3/apps/gateway/src/domains/browser.rs`).
+//! claim`, `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs`).
 //!
 //! That gateway fix is a *proxy-side* guard: it rejects a client-supplied
 //! `{zdr: true, profileId: "<real>", scope: "ephemeral"}` combination before
@@ -154,7 +154,7 @@ async fn zdr_run_with_persist_profile_flag_is_rejected_even_without_a_profile_id
 /// profile must still be refused for a ZDR run — the guard must not be
 /// satisfied merely because the profile "looks" ephemeral or the caller
 /// only supplies one of the two conflicting signals. This mirrors
-/// `apps/Frontend Plane/velionv3/apps/gateway/src/domains/browser.rs`'s
+/// `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs`'s
 /// `zdr_session_is_rejected_despite_explicit_ephemeral_scope_claim_over_real_profile_id`
 /// but proves the same class of conflicting-signal payload is refused one
 /// layer deeper, independent of the gateway ever running at all.

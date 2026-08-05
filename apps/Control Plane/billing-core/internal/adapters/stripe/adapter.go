@@ -262,14 +262,14 @@ func checkoutPlanAmountNOK(plan string) int64 {
 func checkoutPlanDisplayName(plan string) string {
 	switch strings.ToLower(strings.TrimSpace(plan)) {
 	case "hobby":
-		return "Velion Essential"
+		return "Verevon Essential"
 	case "standard":
-		return "Velion Advanced"
+		return "Verevon Advanced"
 	case "pro":
-		return "Velion Expert"
+		return "Verevon Expert"
 	case "enterprise":
-		return "Velion Custom"
+		return "Verevon Custom"
 	default:
-		return "Velion"
+		return "Verevon"
 	}
 }

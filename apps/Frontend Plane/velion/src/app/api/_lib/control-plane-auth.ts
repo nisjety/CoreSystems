@@ -57,7 +57,7 @@ export const getUserServiceUrl = () =>
 
 // G10: the repurposed CP session-core (ADR 0002) hosts the Control Session
 // aggregator at /api/v1/sessions/current. Enabled when
-// CONTROL_SESSION_AUTHORITY_ENABLED=true; otherwise velion falls back to
+// CONTROL_SESSION_AUTHORITY_ENABLED=true; otherwise verevon falls back to
 // user-core's narrower /api/v1/me/session-context.
 export const getSessionServiceUrl = () =>
   trimRightSlash(process.env.SESSION_SERVICE_URL || 'http://session-core-service:3017')

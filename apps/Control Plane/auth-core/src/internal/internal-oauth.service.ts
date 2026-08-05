@@ -313,7 +313,7 @@ export class InternalOAuthService {
       refresh_token: refreshToken,
     });
     if (scope) {
-      // G47 (velion-gap.md §8.33): Better Auth stores granted scopes as a
+      // G47 (verevon-gap.md §8.33): Better Auth stores granted scopes as a
       // comma-separated string in `account.scope` (e.g.
       // `email,openid,profile,User.Read`), but RFC 6749 §3.3 requires the
       // OAuth scope parameter to be space-separated. Sending the raw

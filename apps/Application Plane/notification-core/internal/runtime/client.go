@@ -11,8 +11,8 @@
 //   - req.RecipientID must match an existing Novu subscriber ID (or be upserted
 //     before the trigger — see Novu docs on subscriber identification).
 //   - req.Payload is forwarded verbatim plus two correlation fields:
-//     _velion_request_id  — our internal request ID
-//     _velion_source      — source service (when non-empty)
+//     _verevon_request_id  — our internal request ID
+//     _verevon_source      — source service (when non-empty)
 //
 // EU region: set NOVU_BASE_URL=https://eu.api.novu.co
 package runtime
@@ -99,7 +99,7 @@ func NewNovuAdapter(cfg Config) (*NovuAdapter, error) {
 //	req.Type        → Novu WorkflowID  (must match a workflow in your dashboard)
 //	req.ProviderRecipientID → Novu SubscriberID resolved from an active org membership
 //	req.RequestID   → Novu idempotency key  (Novu deduplicates on this)
-//	req.Payload     → Novu trigger payload  (+ _velion_* correlation fields)
+//	req.Payload     → Novu trigger payload  (+ _verevon_* correlation fields)
 func (a *NovuAdapter) Dispatch(ctx context.Context, req notification.DeliveryRequest) (*notification.DispatchResult, error) {
 	if a == nil || a.mode == DeliveryModeDisabled {
 		return nil, ErrDeliveryDisabled
@@ -113,10 +113,10 @@ func (a *NovuAdapter) Dispatch(ctx context.Context, req notification.DeliveryReq
 	for k, v := range req.Payload {
 		payload[k] = v
 	}
-	payload["_velion_request_id"] = req.RequestID
-	payload["_velion_organization_id"] = req.OrganizationID
+	payload["_verevon_request_id"] = req.RequestID
+	payload["_verevon_organization_id"] = req.OrganizationID
 	if req.Source != "" {
-		payload["_velion_source"] = req.Source
+		payload["_verevon_source"] = req.Source
 	}
 
 	// req.RequestID doubles as the Novu idempotency key so that retries
@@ -153,7 +153,7 @@ func (a *NovuAdapter) Dispatch(ctx context.Context, req notification.DeliveryReq
 // U5-2 — subscriber + preference + inbox extensions.
 //
 // These extend NovuAdapter beyond the original Dispatch-only surface to
-// cover the full /profile/notifications surface velion needs. Each method
+// cover the full /profile/notifications surface verevon needs. Each method
 // is a thin wrapper over a typed novu-go/v3 SDK call. In stub mode (client
 // is nil, no NOVU_SECRET_KEY) every method is a no-op — local development
 // still works without a Novu account.

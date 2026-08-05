@@ -22,7 +22,7 @@ V2 treats performance patterns as baseline architecture: virtualize conversation
 ### Use animation-heavy product demos
 - **Pros**: Strong initial visual impression.
 - **Cons**: Adds layout and bundle pressure to repeated support workflows.
-- **Why not**: Velion is an operational control room; clarity and latency matter more than spectacle.
+- **Why not**: Verevon is an operational control room; clarity and latency matter more than spectacle.
 
 ## Consequences
 

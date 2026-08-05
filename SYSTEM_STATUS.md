@@ -39,30 +39,30 @@
 
 ## Six-plane audit — complete (2026-07-11/12)
 
-A full pyramid audit ran Control → Data → Ingestion → Model → Application → Frontend/velionv3, each with parallel live-verification + source review, per-service `docs/core-research/*.md` rewrites, and a dated `plane-audit-2026-07-11.md` + `*_STATUS.md` + `*_ROADMAP.md` per plane.
+A full pyramid audit ran Control → Data → Ingestion → Model → Application → Frontend/verevonv3, each with parallel live-verification + source review, per-service `docs/core-research/*.md` rewrites, and a dated `plane-audit-2026-07-11.md` + `*_STATUS.md` + `*_ROADMAP.md` per plane.
 
 **The user's two headline questions, answered:**
 - **"Chat can't reach its tools (shipping, etc.)"** — the Model Plane tool loop is real and non-mocked. Plain chat is intentionally tool-free; explicit selected tools, Browse, Plan, and Agent Run Console are different modes owned by Frontend presentation policy. Inference gRPC is now live locally, but all currently enabled capabilities derive unavailable until a trusted reporter attests dependency health. Frontend still owns intentional ordinary-chat tool UX.
-- **"Add the Visma MCP via the UI and it did nothing"** — no Velion Visma runtime integration exists. The lone live record is malformed (`stdio` + HTTPS + empty allowlist), discovers nothing, and the MCP bridge is not deployed. Current source rejects that shape and quarantines unowned legacy records, but a real outcome still requires a separately deployable Visma MCP server, secret-reference/auth onboarding, exact allowlist, health/discovery, and end-to-end invocation. The operator's Codex/Claude connector is a separate system.
+- **"Add the Visma MCP via the UI and it did nothing"** — no Verevon Visma runtime integration exists. The lone live record is malformed (`stdio` + HTTPS + empty allowlist), discovers nothing, and the MCP bridge is not deployed. Current source rejects that shape and quarantines unowned legacy records, but a real outcome still requires a separately deployable Visma MCP server, secret-reference/auth onboarding, exact allowlist, health/discovery, and end-to-end invocation. The operator's Codex/Claude connector is a separate system.
 
 **Fixes landed in source this audit** (verified via build/test; most NOT yet deployed — Docker rebuild gated):
 - Control Plane session-core: forged-bearer auth bypass **fixed + live-verified** (this one deployed).
 - Ingestion shipping-core: Bring delivery-time parsing **fixed** (+ 2 production-shaped tests).
-- velionv3: MCP-add transport/URL validation **fixed** (typecheck green, hot-reloads live).
+- verevonv3: MCP-add transport/URL validation **fixed** (typecheck green, hot-reloads live).
 - Data Plane v2: the parallel "Secure-MVP" remediation hardened the zero-credential data-exposure findings across graph-index/data-quality/data-orchestrator/quickwit/documents-api.
 
 **The dominant operational blocker:** Docker's **containerd content store is corrupted** (blob I/O errors) — it breaks `docker exec`, image rebuild, and `docker logs` fleet-wide, and has now **corrupted the `application-postgres` data volume** (SQLSTATE 58030), so every DB-backed Application service (Inbox, notifications, insights, social, leads) returns 500 on real reads despite healthy `/health`. Their code is correct; they recover once the volume is restored. An operator-approved Docker maintenance window (restart + clean rebuilds + volume restore) is what lets essentially every source fix above go live. **Almost nothing from Phases 2–6 can be deployed until that maintenance runs.**
 
 **Top open items across planes** (see each plane's `*_ROADMAP.md`):
 1. CRITICAL release gate — Model Plane gRPC is restored in the local integration stack, but the dirty-tree images are not an immutable production candidate or rollback target. Do not promote until caller compatibility, signed artifacts, managed runtime config, verified tenant delegation for dynamic workload tokens, and rollback gates pass.
-2. HIGH — new velionv3 `onboarding/graph-preview` cross-tenant IDOR (client query-param `org_id`).
+2. HIGH — new verevonv3 `onboarding/graph-preview` cross-tenant IDOR (client query-param `org_id`).
 3. HIGH — capability semantics are not yet proven consistent across plain chat,
    selected tools, Browse, Plan, gateway, capability-core, and execution. Live
    authorization negatives and mandatory execution policy now fail closed, but
    no health-attested allow path or safe exact-effect approval continuation is
    enabled. Inline MCP bypass is fixed in source only.
 4. HIGH — Model cost-core now rejects unauthenticated and forged-scope reads in live local probes; a legitimate valid scoped live read remains outstanding. The prior “session compaction 100% failing” claim is withdrawn: current historical metrics showed 479 successes and 0 observed errors, but a current release-shaped compaction proof is still required.
-5. MEDIUM — information-core relays fabricated traffic metrics as real; residual fabricated settings rows in velionv3.
+5. MEDIUM — information-core relays fabricated traffic metrics as real; residual fabricated settings rows in verevonv3.
 
 Everything below the line is retained as prior/historical context. The dated plane audits under `apps/*/docs/core-research/plane-audit-2026-07-11.md` (Data Plane: `-07-10`) plus each plane's `*_STATUS.md`/`*_ROADMAP.md` are the current source of truth.
 
@@ -120,7 +120,7 @@ Implemented real-time, event-driven communication across all 5 planes via a shar
 | **Data** | retrieval-service | org.plan_changed, billing.quota_exceeded | ✅ Listening |
 | **Data** | documents-service | org.plan_changed, billing.quota_exceeded | ✅ Listening |
 | **Reasoning** | ai-core | billing.quota_exceeded | ✅ Listening |
-| **Shared NATS** | velion-nats | 8 total active subscriptions across AQENCIA_CONTROLPLANE stream | ✅ Healthy |
+| **Shared NATS** | verevon-nats | 8 total active subscriptions across AQENCIA_CONTROLPLANE stream | ✅ Healthy |
 
 ### E2E Validation Results
 
@@ -140,7 +140,7 @@ Production Readiness: ✅ CONFIRMED
 ### Critical Fixes Applied
 
 **NATS Token Authentication (Fixed this session):**
-- Issue: ai-core failing with "Authorization Violation" when connecting to velion-nats
+- Issue: ai-core failing with "Authorization Violation" when connecting to verevon-nats
 - Root cause: Invalid token auth syntax in nats-shared.conf
 - Fix: Corrected token format in `/apps/frontend/nats-shared.conf`
 - Result: All planes now authenticating successfully
@@ -350,7 +350,7 @@ Owns the pipeline for ingesting external content at scale: web scraping (Quarry)
 
 **Status:** 🟢 **OPERATIONAL** | **Location:** Frontend (triodelab-net) | **Port:** 4240 (NATS), 8240 (monitoring)
 
-The **velion-nats** service is the central nervous system of the Aqencia architecture. It enables real-time, event-driven communication across all 5 planes without direct HTTP coupling.
+The **verevon-nats** service is the central nervous system of the Aqencia architecture. It enables real-time, event-driven communication across all 5 planes without direct HTTP coupling.
 
 ### Design Principles
 
@@ -416,7 +416,7 @@ Complete reference of all host-side port bindings:
 | **3211** | convex-backend HTTP Actions | HTTP |
 | **4223** | controlplane-nats | NATS |
 | **4232** | reasoning-nats | NATS |
-| **4240** | velion-nats (shared cross-plane) | NATS |
+| **4240** | verevon-nats (shared cross-plane) | NATS |
 | **5433** | controlplane-postgres | PostgreSQL |
 | **6333** | dataplane-qdrant | HTTP |
 | **6334** | dataplane-qdrant | gRPC |
@@ -433,7 +433,7 @@ Complete reference of all host-side port bindings:
 | **8101** | reasoning-core | HTTP |
 | **8223** | controlplane-nats monitoring | HTTP |
 | **8232** | reasoning-nats monitoring | HTTP |
-| **8240** | velion-nats monitoring (cross-plane) | HTTP |
+| **8240** | verevon-nats monitoring (cross-plane) | HTTP |
 | **9025** | imports-api | HTTP |
 | **9081** | ingestion-temporal UI | HTTP |
 | **9090** | quarry-api | HTTP |

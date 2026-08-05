@@ -138,7 +138,7 @@ pub struct ToolOutcome {
 /// the loop rewrites these outcomes into a compact summary after harvesting the
 /// events (see [`tool_artifact_events`]). This key marks an output that must be
 /// rewritten rather than shown to the model verbatim.
-const ARTIFACT_ENVELOPE_KEY: &str = "__velion_artifact";
+const ARTIFACT_ENVELOPE_KEY: &str = "__verevon_artifact";
 
 fn arg_value(args_json: &str, key: &str) -> Option<Value> {
     serde_json::from_str::<Value>(args_json)
@@ -1372,14 +1372,14 @@ async fn dispatch_shipping_quotes_tool(
     }
 }
 
-/// Frame a [`crate::velion_actions`] read as a [`ToolOutcome`].
+/// Frame a [`crate::verevon_actions`] read as a [`ToolOutcome`].
 ///
 /// The summariser already row-caps and text-truncates, but the truncation here
 /// is still load-bearing: it is the single ceiling that holds no matter what an
 /// upstream returns, and every round re-sends the whole accumulated history.
 /// `Err` becomes an honest `err_outcome` naming the cause — never an empty
 /// success the model would read as "the organization has no data".
-fn velion_read_outcome(call: &ToolCall, result: Result<String, String>) -> ToolOutcome {
+fn verevon_read_outcome(call: &ToolCall, result: Result<String, String>) -> ToolOutcome {
     match result {
         Ok(output) => ToolOutcome {
             call_id: call.id.clone(),
@@ -1943,22 +1943,22 @@ pub async fn dispatch_tool(
         "shipping_get_quotes" | "shipping.get_quotes" => {
             dispatch_shipping_quotes_tool(state, ingestion_bearer, call).await
         }
-        // ---- Velion READ actions (see velion_actions.rs) ----------------
+        // ---- Verevon READ actions (see verevon_actions.rs) ----------------
         // Every arm passes `org_id` — the VERIFIED request org — and no arm
         // reads an org from `call.arguments_json`, so the model cannot express
         // a cross-tenant read. Underscore names are what we advertise (Anthropic
         // rejects '.' in tool names); the dotted forms are accepted so the Agent
         // Console's explicit action ids resolve to the same handler.
         "insights_overview" | "insights.overview" => {
-            velion_read_outcome(call, crate::velion_actions::insights_overview(state, org_id).await)
+            verevon_read_outcome(call, crate::verevon_actions::insights_overview(state, org_id).await)
         }
-        "social_list_accounts" | "social.list_accounts" => velion_read_outcome(
+        "social_list_accounts" | "social.list_accounts" => verevon_read_outcome(
             call,
-            crate::velion_actions::social_list_accounts(state, org_id).await,
+            crate::verevon_actions::social_list_accounts(state, org_id).await,
         ),
-        "social_list_posts" | "social.list_posts" => velion_read_outcome(
+        "social_list_posts" | "social.list_posts" => verevon_read_outcome(
             call,
-            crate::velion_actions::social_list_posts(
+            crate::verevon_actions::social_list_posts(
                 state,
                 org_id,
                 &arg_str(&call.arguments_json, "status"),
@@ -1967,9 +1967,9 @@ pub async fn dispatch_tool(
             )
             .await,
         ),
-        "social_list_campaigns" | "social.list_campaigns" => velion_read_outcome(
+        "social_list_campaigns" | "social.list_campaigns" => verevon_read_outcome(
             call,
-            crate::velion_actions::social_list_campaigns(
+            crate::verevon_actions::social_list_campaigns(
                 state,
                 org_id,
                 &arg_str(&call.arguments_json, "status"),
@@ -1984,9 +1984,9 @@ pub async fn dispatch_tool(
                     "knowledge.list_documents requires a verified user bearer",
                 );
             };
-            velion_read_outcome(
+            verevon_read_outcome(
                 call,
-                crate::velion_actions::knowledge_list_documents(
+                crate::verevon_actions::knowledge_list_documents(
                     state,
                     org_id,
                     bearer,
@@ -2206,8 +2206,8 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             description: "Compare live shipping quotes across the connected carrier fleet (Bring, DHL, UPS, FedEx) for a given origin, destination, and package. Returns cheapest-first pricing and transit days.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"from":{"type":"object","description":"Origin address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","description":"Destination address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"package":{"type":"object","properties":{"weight_kg":{"type":"number"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"}},"required":["weight_kg","length_cm","width_cm","height_cm"]},"segment":{"type":"string","enum":["b2b","b2c"],"description":"Required by shipping-core; use b2b unless the recipient is a private individual"}},"required":["from","to","package","segment"]}"#.to_owned(),
         },
-        // --- Velion workspace READ tools ------------------------------------
-        // These make the signed-in user's OWN Velion data answerable in chat.
+        // --- Verevon workspace READ tools ------------------------------------
+        // These make the signed-in user's OWN Verevon data answerable in chat.
         // None takes an org/tenant argument: the organization is taken from the
         // verified request context, so there is nothing for the model to supply
         // (and nothing it can spoof). All are read-only — the matching write
@@ -3143,7 +3143,7 @@ mod tests {
             assert!(
                 !error.contains("unknown tool"),
                 "advertised tool '{}' has no dispatch arm in dispatch_tool — it would fail on \
-                 every call with \"unknown tool\". Add an arm (see velion_read_outcome for the \
+                 every call with \"unknown tool\". Add an arm (see verevon_read_outcome for the \
                  read-tool pattern). Got: {error}",
                 def.name
             );
@@ -3161,13 +3161,13 @@ mod tests {
     /// action (publishing a post, toggling a policy) with no one confirming it —
     /// the governed agentic path (`mode: "ask"`) exists for exactly that.
     #[test]
-    fn no_write_class_velion_action_is_advertised_to_the_inline_loop() {
+    fn no_write_class_verevon_action_is_advertised_to_the_inline_loop() {
         let advertised: BTreeSet<String> = builtin_tool_defs()
             .into_iter()
             .map(|def| def.name)
             .collect();
         // Every requiresApproval:true / reversible:false action in
-        // velionv3's src/shared/actions/action-registry.ts, plus the
+        // verevonv3's src/shared/actions/action-registry.ts, plus the
         // side-effecting medium-risk ones.
         for write_action in [
             "tickets_create",
@@ -3227,7 +3227,7 @@ mod tests {
     }
 
     #[test]
-    fn velion_read_tools_are_advertised_and_inline_allowed() {
+    fn verevon_read_tools_are_advertised_and_inline_allowed() {
         let defs = builtin_tool_defs();
         for name in [
             "knowledge_list_documents",
@@ -3253,7 +3253,7 @@ mod tests {
     }
 
     #[test]
-    fn velion_read_tools_accept_both_the_dotted_action_id_and_the_advertised_name() {
+    fn verevon_read_tools_accept_both_the_dotted_action_id_and_the_advertised_name() {
         // Anthropic's tools[].custom.name rejects '.', so we advertise the
         // underscore form; the Agent Console dispatches action-registry ids
         // verbatim. Both must resolve, and neither may be treated as unknown.
@@ -3272,7 +3272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn velion_read_tools_report_an_honest_cause_instead_of_empty_data() {
+    async fn verevon_read_tools_report_an_honest_cause_instead_of_empty_data() {
         // With no internal API key configured, an Application Plane read must
         // say so. The failure mode we must never ship is a plausible-looking
         // empty success the model reports as "you have no social accounts".
@@ -3303,10 +3303,10 @@ mod tests {
     }
 
     #[test]
-    fn velion_read_outcome_truncates_output_and_preserves_call_identity() {
+    fn verevon_read_outcome_truncates_output_and_preserves_call_identity() {
         let call = tool_call("insights_overview", "{}");
         let long = "y".repeat(MAX_TOOL_OUTPUT_CHARS + 500);
-        let outcome = velion_read_outcome(&call, Ok(long));
+        let outcome = verevon_read_outcome(&call, Ok(long));
         assert_eq!(outcome.call_id, call.id);
         assert_eq!(outcome.name, "insights_overview");
         assert!(outcome.error.is_none());
@@ -3316,7 +3316,7 @@ mod tests {
             "capped at MAX_TOOL_OUTPUT_CHARS plus the ellipsis"
         );
 
-        let outcome = velion_read_outcome(&call, Err("insight-core returned HTTP 503".to_owned()));
+        let outcome = verevon_read_outcome(&call, Err("insight-core returned HTTP 503".to_owned()));
         assert_eq!(
             outcome.error.as_deref(),
             Some("insight-core returned HTTP 503")
@@ -3514,7 +3514,7 @@ mod tests {
         // Regression guard: the answer call re-resolved from scratch with tools
         // withheld, so a 14-tool-call Visma turn classified as trivial, landed on
         // the cheapest tier, and that model — never having seen the tools — told
-        // the user Velion had no Visma access.
+        // the user Verevon had no Visma access.
         let rounds = ToolRounds {
             messages: vec![],
             events: vec![],
@@ -3678,7 +3678,7 @@ mod tests {
         let messages = vec![
             ChatMessage {
                 role: "system".to_owned(),
-                content: "Velion context assembly.\n\n[thread]\nuser: mitt navn er ima".to_owned(),
+                content: "Verevon context assembly.\n\n[thread]\nuser: mitt navn er ima".to_owned(),
                 name: String::new(),
             },
             ChatMessage {
@@ -3738,7 +3738,7 @@ mod tests {
         assert!(should_force_web_search("AAPL stock right now"));
         assert!(should_force_web_search("who won the election this week"));
         // Norwegian recency / live-data signals.
-        assert!(should_force_web_search("hva er nyeste nytt om Velion"));
+        assert!(should_force_web_search("hva er nyeste nytt om Verevon"));
         assert!(should_force_web_search("hva er været i dag"));
         assert!(should_force_web_search("aksjekurs for Equinor akkurat nå"));
         // A recent 4-digit year — computed relative to the real clock, not a
@@ -3842,7 +3842,7 @@ mod tests {
         for query in [
             "hvor mange innbyggere er det i Oslo?", // the original Oslo-population bug
             "what is the latest news on AI",
-            "hva er siste nytt om Velion",
+            "hva er siste nytt om Verevon",
             "current price of bitcoin",
             "AAPL share price right now",
             "who won the election this week",
@@ -4514,4 +4514,5 @@ mod tests {
             outcome.output
         );
     }
+
 }

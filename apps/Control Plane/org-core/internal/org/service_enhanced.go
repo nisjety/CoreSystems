@@ -35,6 +35,7 @@ type SharedPublisher interface {
 	PublishOrgUpdated(ctx context.Context, orgID string, changes map[string]any)
 	PublishOrgDeleted(ctx context.Context, orgID, name string)
 	PublishPlanChanged(ctx context.Context, orgID, orgName, previousPlan, newPlan, changedBy, reason string, revision int64) error
+	PublishInteractiveRetentionEnabled(ctx context.Context, orgID string, eventID int64) error
 	PublishMemberAdded(ctx context.Context, orgID, orgName, userID, userEmail, role string)
 	PublishMemberRemoved(ctx context.Context, orgID, userID string)
 	PublishPlain(subject string, payload map[string]any)
@@ -43,7 +44,7 @@ type SharedPublisher interface {
 // AuditPublisher emits raw audit events over CORE NATS on the control-plane
 // bus (controlplane-nats), where audit-core's primary QueueSubscribe listens.
 // Satisfied by *nats.Client. Defined here (not importing nats) to avoid an
-// import cycle. Kept separate from the cross-plane SharedPublisher (velion-nats)
+// import cycle. Kept separate from the cross-plane SharedPublisher (verevon-nats)
 // so audit stays CP-local and never depends on the shared bus being up.
 type AuditPublisher interface {
 	PublishAudit(ctx context.Context, subject, eventID string, payload map[string]any) error
@@ -53,8 +54,8 @@ type AuditPublisher interface {
 type Service struct {
 	repo            *Repository
 	publisher       Publisher
-	sharedPublisher SharedPublisher    // cross-plane events on velion-nats
-	auditPublisher  AuditPublisher     // durable velion.audit.v2.* dispatch on local controlplane-nats
+	sharedPublisher SharedPublisher    // cross-plane events on verevon-nats
+	auditPublisher  AuditPublisher     // durable verevon.audit.v2.* dispatch on local controlplane-nats
 	cache           *rediscache.Client // optional, nil if Redis disabled
 }
 
@@ -177,9 +178,12 @@ func (s *Service) GetEntitlements(ctx context.Context, id string) ([]Entitlement
 	return ents, nil
 }
 
-func (s *Service) ListOrganizations(ctx context.Context) ([]Organization, error) {
-	// Default to first 100 orgs; callers can add explicit pagination if needed
-	return s.repo.ListOrganizations(ctx, 100, 0)
+// ListOrganizations returns a page of non-deleted organizations, ordered by
+// creation time descending. Repository.ListOrganizations clamps limit to
+// [1, 500]; callers wanting the full set should page with offset until a
+// page shorter than the requested limit is returned.
+func (s *Service) ListOrganizations(ctx context.Context, limit, offset int) ([]Organization, error) {
+	return s.repo.ListOrganizations(ctx, limit, offset)
 }
 
 func (s *Service) ListUserOrganizations(ctx context.Context, userID string) ([]Organization, error) {
@@ -521,11 +525,72 @@ func (s *Service) SetInteractiveRetention(ctx context.Context, orgID string, zdr
 			return nil, ErrPlanUpgradeRequired
 		}
 	}
-	if err := s.repo.SetInteractiveRetention(ctx, orgID, zdr, changedBy); err != nil {
+	enqueued, err := s.repo.SetInteractiveRetention(ctx, orgID, zdr, changedBy)
+	if err != nil {
 		return nil, err
 	}
 	if s.cache != nil {
 		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+	}
+	if enqueued {
+		if _, err := s.FlushInteractiveRetentionOutbox(ctx, 100); err != nil {
+			return nil, err
+		}
+	}
+	return s.repo.GetOrganization(ctx, orgID)
+}
+
+// FlushInteractiveRetentionOutbox publishes committed false-to-true ZDR
+// transitions to the scoped Control Plane stream. A failed publish remains
+// pending for a later retry; a duplicate delivery is safe because its sole
+// subscriber uses an org-scoped DELETE of personal drafts.
+func (s *Service) FlushInteractiveRetentionOutbox(ctx context.Context, limit int) (int, error) {
+	if limit < 1 || limit > 1000 {
+		return 0, fmt.Errorf("interactive retention outbox limit must be between 1 and 1000")
+	}
+	if s.sharedPublisher == nil {
+		return 0, fmt.Errorf("interactive retention shared event publisher is unavailable")
+	}
+	if s.repo == nil || s.repo.pool == nil {
+		return 0, fmt.Errorf("interactive retention outbox repository is unavailable")
+	}
+	rows, err := s.repo.ClaimInteractiveRetentionOutbox(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	published := 0
+	var publishErrors error
+	for _, row := range rows {
+		if err := s.sharedPublisher.PublishInteractiveRetentionEnabled(ctx, row.OrgID, row.EventID); err != nil {
+			if markErr := s.repo.MarkInteractiveRetentionPublishFailed(ctx, row.EventID, err); markErr != nil {
+				publishErrors = errors.Join(publishErrors, err, markErr)
+			} else {
+				publishErrors = errors.Join(publishErrors, err)
+			}
+			continue
+		}
+		if err := s.repo.MarkInteractiveRetentionPublished(ctx, row.EventID); err != nil {
+			publishErrors = errors.Join(publishErrors, err)
+			continue
+		}
+		published++
+	}
+	return published, publishErrors
+}
+
+func (s *Service) SetSupportAIMode(ctx context.Context, orgID, mode, changedBy string) (*Organization, error) {
+	if strings.TrimSpace(orgID) == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "off" && mode != "assist" && mode != "review" {
+		return nil, fmt.Errorf("invalid support AI mode")
+	}
+	if err := s.repo.SetSupportAIMode(ctx, orgID, mode, changedBy); err != nil {
+		return nil, err
+	}
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID)
 	}
 	return s.repo.GetOrganization(ctx, orgID)
 }
@@ -656,7 +721,7 @@ func (s *Service) HardDelete(ctx context.Context, orgID, actorID, actorRole stri
 // SoftDelete atomically marks an organization deleted and records its
 // durable audit intent, then opens the 30-day Flow C grace window: it
 // records one org_deletion_members ledger row per currently-active member
-// and publishes velion.org.deletion.pending so notification-core can tell
+// and publishes verevon.org.deletion.pending so notification-core can tell
 // them. orgName is the caller-supplied "type the org name to confirm" value
 // — it is validated here against the organization's real, server-fetched
 // name (case-sensitive, exact match) BEFORE anything is deleted; a mismatch
@@ -730,14 +795,14 @@ func (s *Service) SoftDelete(ctx context.Context, orgID, orgName, actorID, actor
 	return receipt, nil
 }
 
-// publishDeletionPending emits velion.org.deletion.pending. A nil shared
-// publisher (velion-nats disabled) makes this a no-op.
+// publishDeletionPending emits verevon.org.deletion.pending. A nil shared
+// publisher (verevon-nats disabled) makes this a no-op.
 func (s *Service) publishDeletionPending(orgID, orgName, requestedBy string, deadline time.Time, memberUserIDs []string) {
 	sp := s.SharedPub()
 	if sp == nil {
 		return
 	}
-	sp.PublishPlain("velion.org.deletion.pending", map[string]any{
+	sp.PublishPlain("verevon.org.deletion.pending", map[string]any{
 		"org_id":          orgID,
 		"org_name":        orgName,
 		"requested_by":    requestedBy,
@@ -774,7 +839,7 @@ type gdprPurgeReceipt struct {
 // daysThreshold days ago by invoking purge_old_deleted_organizations (param).
 // Used by the retention cron. For every organization the sweep actually
 // purged, it also publishes GDPRErasureFanoutSubject
-// ("velion.gdpr.erasure.requested") — the same cross-plane contract the
+// ("verevon.gdpr.erasure.requested") — the same cross-plane contract the
 // explicit HTTP hard-delete path emits — so Model Plane / Data Plane purge
 // their side regardless of which path triggered the erasure. Returns the
 // proc's JSONB receipt verbatim (unchanged from before this fan-out existed).

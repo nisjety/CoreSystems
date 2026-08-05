@@ -8,13 +8,13 @@
 > `norway-data-sources-completion-2026-07-21.md`. Do not infer provider access
 > from this historical brainstorming note.
 
-Brainstorm notes from a 2026-07-20 strategy discussion about extending Velion's
+Brainstorm notes from a 2026-07-20 strategy discussion about extending Verevon's
 grounding to Norway's public open-data commons. Not a committed spec — a
 working map of where each new source should live, so the next person who
 picks this up doesn't have to re-derive it.
 
 **Standing rule (confirmed, matches this service's own design rule above):**
-extend Velion's existing cores — no new Plane, no new consumer products
+extend Verevon's existing cores — no new Plane, no new consumer products
 (Hjemla-clone, mittanbud-clone, a public "ChatGPT for Norway") right now. This
 service is a candidate landing spot for new sources; not every source
 belongs here — see "Doesn't fit here" below.
@@ -105,7 +105,7 @@ like any other knowledge source), not as a microservice core or an
 
 ### Folkeregisteret / Skatteetaten (personal data)
 
-Deliberately left out. Rather than building any integration, Velion should
+Deliberately left out. Rather than building any integration, Verevon should
 refer users to the official source directly when this comes up — cleaner,
 and consistent with the data-minimization stance already in the Trust
 Center's data classification. Revisit only if a real legal-basis case

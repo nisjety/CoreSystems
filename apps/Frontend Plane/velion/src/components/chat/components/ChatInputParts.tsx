@@ -63,7 +63,7 @@ export const SLASH_COMMANDS: SlashCmd[] = [
     meta: 'slash',
   },
   {
-    // U2-15 closed (velion ui-ux-velion-gap.md §10): real image generation
+    // U2-15 closed (verevon ui-ux-verevon-gap.md §10): real image generation
     // via Azure `gpt-image-1`. The chat input intercepts a message that
     // starts with `/image ` (or selects the slash command), calls
     // /api/ai/images, and inserts the resulting PNG into the conversation.
@@ -442,7 +442,7 @@ export const InputToolbar: React.FC<InputToolbarProps> = ({
       </Tooltip>
 
       {/*
-        U2-7 + U2-8 closed (ui-ux-velion-gap.md §10 + §12):
+        U2-7 + U2-8 closed (ui-ux-verevon-gap.md §10 + §12):
         Both Deep Search and Browse Web now flow real flags into the
         Rust gateway. Deep Search routes to `/v1/research` (multi-step
         plan→fetch→synthesize loop). Browse Web injects Brave search
@@ -513,7 +513,7 @@ export const InputToolbar: React.FC<InputToolbarProps> = ({
         ))}
       </div>
 
-      {/* U2-15 follow-up (ui-ux-velion-gap.md §10): Voice mode opens a real
+      {/* U2-15 follow-up (ui-ux-verevon-gap.md §10): Voice mode opens a real
           WebSocket session to model-gateway's /v1/ai/realtime — turn-based
           STT → chat → TTS conversation. The neighbouring mic button is a
           one-shot voice-to-text shortcut and remains unchanged. */}

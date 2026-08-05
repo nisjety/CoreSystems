@@ -1,4 +1,4 @@
-import type { ComposerToolId } from "@/features/chat-v2/components/VelionComposer";
+import type { ComposerToolId } from "@/features/chat-v2/components/VerevonComposer";
 
 export const toolLabels: Record<ComposerToolId, string> = {
   search: "Search",

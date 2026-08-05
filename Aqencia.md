@@ -1,4 +1,4 @@
-# Aqencia: AI Company Intelligence Platform(renamed to velion)
+# Aqencia: AI Company Intelligence Platform(renamed to verevon)
 
 **Status:** 🚧 Active Development  
 **Phase:** Product 1 — Foundation Platform  
@@ -72,7 +72,7 @@ Aqencia runs on **CoreSystem**, a five-plane distributed architecture:
 | App | Role | Shared App NATS |
 |-----|------|------------------|
 | **Triodelab Website** | Marketing site, brand surface, public pages | None |
-| **Aqencia** | Workspace app: dashboard, settings, integrations, inbox, chat | `velion-nats` |
+| **Aqencia** | Workspace app: dashboard, settings, integrations, inbox, chat | `verevon-nats` |
 | **Quarry App** | Future dedicated Quarry product UI | `quarryapp-nats` (future) |
 | **ChatGate App** | Future dedicated ChatGate product UI | `chatgateapp-nats` (future) |
 
@@ -152,7 +152,7 @@ Aqencia runs on **CoreSystem**, a five-plane distributed architecture:
 #### App-Level Event Composition
 
 - **Plane-local events stay in-plane**: Control, Data, Ingestion, Reasoning, and Application each keep their own NATS broker for internal choreography
-- **Frontend-plane events compose applications**: Aqencia currently uses `velion-nats` as the shared app-level event backbone
+- **Frontend-plane events compose applications**: Aqencia currently uses `verevon-nats` as the shared app-level event backbone
 - **Shared NATS is app-scoped, not global-by-default**: future frontend applications like Quarry App and ChatGate App should get their own shared app broker
 - **Marketing stays separate**: the public Triodelab website should remain a plain marketing surface without the application-level NATS broker
 

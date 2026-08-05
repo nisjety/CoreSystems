@@ -70,7 +70,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     showSuggestions, isRecording, attachments, acState, acIndex, entities,
   } = state;
 
-  // U2-15 follow-up (ui-ux-velion-gap.md §10): controls the RealtimeVoiceModal
+  // U2-15 follow-up (ui-ux-verevon-gap.md §10): controls the RealtimeVoiceModal
   // (live STT → chat → TTS conversation). The existing mic button is the
   // one-shot voice-to-text shortcut and stays independent of this flag.
   const [voiceModeOpen, setVoiceModeOpen] = useState(false);

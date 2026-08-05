@@ -45,6 +45,7 @@ use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     session_core_client::SessionCoreClient,
 };
+use serde_json::{Value as JsonValue, json};
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
@@ -61,7 +62,7 @@ use crate::session_terminal_auth::ManagedRunTokenProvider;
 /// generic "I cannot post on your behalf" refusal and drafted copy-paste
 /// text instead of calling the tool, even with a genuinely connected
 /// account (observed 2026-07-08 calibrating the eval harness's HITL case).
-const AGENT_PREAMBLE: &str = "You are Velion, a concise and helpful assistant for a Norwegian \
+const AGENT_PREAMBLE: &str = "You are Verevon, a concise and helpful assistant for a Norwegian \
 business. You have two kinds of tools: READ tools to gather facts (weather, traffic, news, \
 shipment tracking, the Brønnøysund company registry, the organization's own knowledge base, and \
 the public web), and ACTION tools that take REAL effect for this organization — booking a \
@@ -340,7 +341,7 @@ async fn run_agent_with_tools(
 
     // Autonomous, tool-using runs need a tool-following model. A weak chat-tier
     // model (e.g. gpt-4o-mini) under-elects tools unless the prompt is forceful,
-    // so `EXECUTION_AGENT_MODEL` (e.g. "velion-balance") lets the deployment
+    // so `EXECUTION_AGENT_MODEL` (e.g. "verevon-balance") lets the deployment
     // route the agentic loop through inference-core's intent layer, which
     // upgrades the model when tools are offered. Empty env → honor the
     // requested model unchanged (no behaviour change).
@@ -415,6 +416,91 @@ async fn run_agent_with_tools(
     .await
 }
 
+/// How many matched skills to inject per run — mirrors model-gateway's own
+/// `MAX_INJECTED_SKILLS` (kept as an independent constant rather than a shared
+/// one: the two loops live in separate crates/binaries and this number is a
+/// tuning knob, not a cross-service contract).
+const MAX_INJECTED_SKILLS: usize = 3;
+
+/// Fetch this org's enabled learned skills (session-core's `agent_skills`,
+/// `ListAgentSkills`) and return the ones whose name/keywords/content overlap
+/// with `goal`, formatted as `format_skill_block`-shaped system-context
+/// strings — execution-core's `RunAgent` equivalent of model-gateway's
+/// `skills::fetch_skill_context`/`handle_match_skills` (same keyword-overlap
+/// scoring, reimplemented locally rather than shared: the two live in
+/// separate crates and the scoring is ~10 lines).
+///
+/// Deliberately uncached, unlike the gateway's per-org TTL cache: `RunAgent`'s
+/// call volume is orders of magnitude below a chat SSE turn, so a fresh
+/// `ListAgentSkills` per run is simpler and can never serve a skill an
+/// operator just edited or deleted. Advisory — any failure (no bearer, no
+/// org, RPC error) yields an empty Vec so the run proceeds unaffected, exactly
+/// like the gateway path.
+async fn fetch_skill_context(
+    session_channel: &Channel,
+    bearer: Option<&str>,
+    org_id: &str,
+    goal: &str,
+) -> Vec<String> {
+    let Some(bearer) = bearer else {
+        return Vec::new();
+    };
+    if org_id.trim().is_empty() {
+        return Vec::new();
+    }
+    let query_terms: Vec<String> = goal
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| t.len() >= 3)
+        .map(str::to_owned)
+        .collect();
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut request = tonic::Request::new(pb::ListAgentSkillsRequest {
+        org_id: org_id.to_owned(),
+        enabled_only: true,
+    });
+    let Ok(header) = format!("Bearer {bearer}").parse() else {
+        return Vec::new();
+    };
+    request.metadata_mut().insert("authorization", header);
+    let Ok(response) = SessionCoreClient::new(session_channel.clone())
+        .list_agent_skills(request)
+        .await
+    else {
+        return Vec::new();
+    };
+
+    let mut scored: Vec<(f32, pb::AgentSkill)> = response
+        .into_inner()
+        .skills
+        .into_iter()
+        .filter(|s| !s.content.trim().is_empty())
+        .map(|s| {
+            let haystack =
+                format!("{} {} {}", s.name, s.trigger_keywords.join(" "), s.content)
+                    .to_lowercase();
+            let hits = query_terms
+                .iter()
+                .filter(|t| haystack.contains(t.as_str()))
+                .count();
+            // reason: keyword-overlap ratio; small counts lose no meaningful precision in f32.
+            #[allow(clippy::cast_precision_loss)]
+            let overlap = hits as f32 / query_terms.len() as f32;
+            (overlap, s)
+        })
+        .filter(|(overlap, _)| *overlap > 0.0)
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(MAX_INJECTED_SKILLS);
+    scored
+        .into_iter()
+        .map(|(_, s)| format!("## Skill: {}\n{}", s.name, s.content))
+        .collect()
+}
+
 /// The governed ReAct-style round loop: offer tools → `Infer` → dispatch requested
 /// tool calls through the gated [`runtime_loop::execute_step_with_subagent`]
 /// path → feed the outcomes back → re-infer, until the model answers or the
@@ -457,6 +543,28 @@ async fn run_rounds(
             name: String::new(),
         },
     ];
+
+    // Skills: the same "does the model already know how to use this tool"
+    // steering the inline chat loop gets (model-gateway's `fetch_skill_context`)
+    // — arguably more load-bearing here, since RunAgent is where the
+    // approval-gated, real-world-effect tools (book_shipment,
+    // execute_provider_action, browser_agent, ...) actually run. Injected once
+    // per run (not per round) as a single system message right after the
+    // preamble, mirroring the inline loop's insertion point exactly.
+    let skill_blocks = fetch_skill_context(ctx.session_channel, ctx.session_bearer, &req.org_id, goal).await;
+    if !skill_blocks.is_empty() {
+        messages.insert(
+            1,
+            pb::ChatMessage {
+                role: "system".to_owned(),
+                content: format!(
+                    "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{}",
+                    skill_blocks.join("\n\n")
+                ),
+                name: String::new(),
+            },
+        );
+    }
 
     let mut inference = InferenceCoreClient::new(ctx.inference_channel.clone());
     let mut answer: Option<String> = None;
@@ -609,6 +717,8 @@ async fn run_rounds(
                         req,
                         &step_id,
                         &call.name,
+                        &call.arguments_json,
+                        ctx.permission_wire,
                         rounds_executed.saturating_add(delegated_rounds),
                         ctx.session_bearer,
                     )
@@ -872,7 +982,7 @@ async fn run_subagent(
 
 /// Resolve the model the agentic loop drives. Autonomous, tool-using runs need
 /// a tool-following model; a weak chat-tier model under-elects tools. When
-/// `EXECUTION_AGENT_MODEL` is set (e.g. "velion-balance"), it becomes the
+/// `EXECUTION_AGENT_MODEL` is set (e.g. "verevon-balance"), it becomes the
 /// agentic run's model so inference-core's intent layer picks a tool-capable
 /// model (the classifier upgrades complexity when tools are offered). Empty /
 /// unset → the requested model is honored unchanged.
@@ -985,27 +1095,27 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         },
         pb::ToolDefinition {
             name: "get_shipping_quotes".to_owned(),
-            description: "Compare shipping/freight quotes from Velion's carrier aggregator (Bring, PostNord, DHL, Helthjem, Porterbuddy, m.fl.). Returns options sorted cheapest-first with price, transit time and features, plus any carriers that failed. Read-only comparison — it does NOT book anything. Ask the user for sender address, recipient address and package weight/dimensions before calling; never guess them.".to_owned(),
+            description: "Compare shipping/freight quotes from Verevon's carrier aggregator (Bring, PostNord, DHL, Helthjem, Porterbuddy, m.fl.). Returns options sorted cheapest-first with price, transit time and features, plus any carriers that failed. Read-only comparison — it does NOT book anything. Ask the user for sender address, recipient address and package weight/dimensions before calling; never guess them.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"from":{"type":"object","description":"Sender address","properties":{"name":{"type":"string"},"street":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"},"is_business":{"type":"boolean"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","description":"Recipient address","properties":{"name":{"type":"string"},"street":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2"},"is_business":{"type":"boolean"}},"required":["name","postal_code","city","country"]},"weight_kg":{"type":"number","description":"Package weight in kg"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"},"dangerous_good":{"type":"boolean","description":"Default false"},"segment":{"type":"string","enum":["b2b","b2c"],"description":"b2b when the RECIPIENT is a business, else b2c"}},"required":["from","to","weight_kg","length_cm","width_cm","height_cm","segment"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "shipping_carriers".to_owned(),
-            description: "List the carriers registered in Velion's shipping aggregator and whether each runs on demo prices or live agreement prices.".to_owned(),
+            description: "List the carriers registered in Verevon's shipping aggregator and whether each runs on demo prices or live agreement prices.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{},"required":[]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "book_shipment".to_owned(),
-            description: "BOOK a shipment with a carrier from Velion's shipping aggregator — this places a REAL freight order (costs money; a courier will collect the parcel) and always requires human approval. Only call it after get_shipping_quotes, with the exact carrier_code/service_name/price from the quote the user chose. Cross-border shipments (from.country != to.country) REQUIRE a customs object; the server rejects them otherwise. Returns the booking id, carrier reference, and tracking number.".to_owned(),
+            description: "BOOK a shipment with a carrier from Verevon's shipping aggregator — this places a REAL freight order (costs money; a courier will collect the parcel) and always requires human approval. Only call it after get_shipping_quotes, with the exact carrier_code/service_name/price from the quote the user chose. Cross-border shipments (from.country != to.country) REQUIRE a customs object; the server rejects them otherwise. Returns the booking id, carrier reference, and tracking number.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"quote_ref":{"type":"string","description":"Reference of the chosen quote"},"carrier_code":{"type":"string","description":"carrier_code from the chosen quote"},"service_name":{"type":"string","description":"service_name from the chosen quote"},"price_amount_cents":{"type":"integer","description":"Quoted price in minor units"},"price_currency":{"type":"string","description":"ISO 4217, e.g. NOK"},"from":{"type":"object","properties":{"name":{"type":"string"},"street":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"is_business":{"type":"boolean"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","properties":{"name":{"type":"string"},"street":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"is_business":{"type":"boolean"}},"required":["name","postal_code","city","country"]},"weight_kg":{"type":"number"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"},"dangerous_good":{"type":"boolean"},"customs":{"type":"object","description":"Required cross-border: {contents_type: merchandise|gift|documents|sample|return, items:[{description,quantity,value_cents,currency,weight_kg,hs_code,origin_country}], incoterms?}"}},"required":["carrier_code","service_name","price_amount_cents","price_currency","from","to","weight_kg","length_cm","width_cm","height_cm"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "list_social_accounts".to_owned(),
-            description: "List the organization's connected SOCIAL MEDIA accounts (Meta/Facebook, Instagram, LinkedIn, TikTok, X, Snapchat) with status and capabilities. Read-only discovery — call this FIRST when the user asks to post/publish on social media, to learn which platforms are actually connected. Velion CAN publish social posts: draft with publish_social_post after checking here.".to_owned(),
+            description: "List the organization's connected SOCIAL MEDIA accounts (Meta/Facebook, Instagram, LinkedIn, TikTok, X, Snapchat) with status and capabilities. Read-only discovery — call this FIRST when the user asks to post/publish on social media, to learn which platforms are actually connected. Verevon CAN publish social posts: draft with publish_social_post after checking here.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{},"required":[]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "publish_social_post".to_owned(),
-            description: "Create a social media post in Velion's Social workspace and request its publish to the chosen platforms. This is a REAL outbound action and always requires human approval — first in this run, and the post then waits for workspace approval under Social → Approvals before anything goes live (report that honestly; never claim content is already published). Use platform keys from list_social_accounts. Optional scheduled_at (RFC 3339) schedules instead of publishing immediately.".to_owned(),
+            description: "Create a social media post in Verevon's Social workspace and request its publish to the chosen platforms. This is a REAL outbound action and always requires human approval — first in this run, and the post then waits for workspace approval under Social → Approvals before anything goes live (report that honestly; never claim content is already published). Use platform keys from list_social_accounts. Optional scheduled_at (RFC 3339) schedules instead of publishing immediately.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Optional internal title for the workspace"},"body":{"type":"string","description":"The post text"},"platforms":{"type":"array","items":{"type":"string"},"description":"Platform keys from list_social_accounts, e.g. ["linkedin","meta"]"},"scheduled_at":{"type":"string","description":"Optional RFC 3339 publish time"},"media":{"type":"array","items":{"type":"object"},"description":"Optional media refs, e.g. [{"type":"image","url":"https://…"}]"}},"required":["body","platforms"]}"#.to_owned(),
         },
         pb::ToolDefinition {
@@ -1020,7 +1130,7 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         },
         pb::ToolDefinition {
             name: "execute_provider_action".to_owned(),
-            description: "Run ONE operation on a connected provider through Velion's integration gateway — e.g. publish a Facebook Page post, send a WhatsApp/Messenger message, list ad campaigns, create a GitHub issue. Use connection_id and operation exactly as returned by list_provider_actions (call that first). params/body are the operation-specific arguments described there. Write/outbound operations place REAL actions and always require human approval before they run.".to_owned(),
+            description: "Run ONE operation on a connected provider through Verevon's integration gateway — e.g. publish a Facebook Page post, send a WhatsApp/Messenger message, list ad campaigns, create a GitHub issue. Use connection_id and operation exactly as returned by list_provider_actions (call that first). params/body are the operation-specific arguments described there. Write/outbound operations place REAL actions and always require human approval before they run.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"connection_id":{"type":"string","description":"Connection id from list_provider_actions"},"operation":{"type":"string","description":"Operation name from list_provider_actions, e.g. pages.post, whatsapp.messages.send, ads.campaigns"},"params":{"type":"object","description":"Operation path/query arguments, e.g. {\"pageId\":\"123\"} or {\"adAccountId\":\"act_123\"}"},"body":{"type":"object","description":"Operation request body, e.g. {\"message\":\"Hei!\"} for pages.post"}},"required":["connection_id","operation"]}"#.to_owned(),
         },
         pb::ToolDefinition {
@@ -1177,9 +1287,13 @@ async fn pause_for_approval(
     req: &pb::RunAgentRequest,
     step_id: &str,
     tool_name: &str,
+    tool_input: &str,
+    permission_mode: &str,
     rounds_executed: u32,
     bearer: Option<&str>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
+    let continuation_descriptor_json =
+        continuation_descriptor(req, step_id, tool_name, tool_input, permission_mode).await?;
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             run_id: req.run_id.clone(),
@@ -1196,6 +1310,7 @@ async fn pause_for_approval(
             // collapses onto the existing durable approval instead of creating
             // a duplicate via the (org_id, idempotency_key) ON CONFLICT guard.
             idempotency_key: format!("{}:{step_id}", req.run_id),
+            continuation_descriptor_json,
         },
         bearer,
     );
@@ -1228,6 +1343,116 @@ async fn pause_for_approval(
         rounds_executed,
         grounded: false,
     })
+}
+
+/// Build the immutable, credential-free description of the exact tool call
+/// that was paused. This is action data, never reusable authority: a later
+/// delivery worker must still obtain its own narrowly scoped one-time
+/// continuation capability before it may execute it.
+async fn continuation_descriptor(
+    req: &pb::RunAgentRequest,
+    step_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    permission_mode: &str,
+) -> Result<String, tonic::Status> {
+    if req.zdr {
+        return Err(tonic::Status::failed_precondition(
+            "ZDR runs cannot persist an approval continuation descriptor",
+        ));
+    }
+    let mut input: JsonValue = serde_json::from_str(tool_input).map_err(|_| {
+        tonic::Status::invalid_argument(
+            "approval-gated tool input must be valid JSON before it can be persisted",
+        )
+    })?;
+    // `book_shipment`'s `booked_by` is never a model-supplied argument — it is
+    // the run's own acting user, injected the same way `execute_book_shipment`
+    // injects it for the live/same-session path. The cold-resume path
+    // (`approval_delivery_worker`) deserializes THIS persisted descriptor
+    // directly into `BookInput`, whose `booked_by` field is required, so it
+    // must be captured here too or every book_shipment continuation fails
+    // closed with `invalid_continuation`.
+    if tool_name == "book_shipment" {
+        if let Some(object) = input.as_object_mut() {
+            let has_booked_by = object
+                .get("booked_by")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|value| !value.trim().is_empty());
+            if !has_booked_by {
+                object.insert("booked_by".to_owned(), json!(req.user_id));
+            }
+        }
+        enrich_shipment_recipient_contact(&mut input, &req.user_id).await;
+    }
+    let scope = json!({
+        "version": 1,
+        "run_id": req.run_id,
+        "org_id": req.org_id,
+        "user_id": req.user_id,
+        "step_id": step_id,
+        "action_kind": "tool_call",
+        "tool_name": tool_name,
+        "input": input.clone(),
+        "permission_mode": permission_mode,
+    });
+    let canonical = serde_json::to_string(&scope)
+        .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))?;
+    let action_fingerprint = blake3::hash(canonical.as_bytes()).to_hex().to_string();
+    serde_json::to_string(&json!({
+        "version": 1,
+        "run_id": req.run_id,
+        "org_id": req.org_id,
+        "user_id": req.user_id,
+        "step_id": step_id,
+        "action_kind": "tool_call",
+        "tool_name": tool_name,
+        "input": input,
+        "permission_mode": permission_mode,
+        "action_fingerprint": action_fingerprint,
+    }))
+    .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))
+}
+
+/// Fills in `input.to`'s carrier-notification contact for `book_shipment`
+/// when the model supplied neither phone nor email — some carriers (Bring
+/// included) reject a booking outright without one on the recipient, and
+/// the model has no reason to know either for a recipient it has never
+/// met. Falls back to the RUN'S OWN acting user's contact from user-core:
+/// correct for this system's actual use today (the acting user is the
+/// real recipient for every booking this integration places) and,
+/// pragmatically, the only contact this system can vouch for without
+/// inventing one. Best-effort throughout — a missing client or a failed
+/// lookup leaves the input exactly as it was; it never blocks the pause
+/// on this alone.
+async fn enrich_shipment_recipient_contact(input: &mut JsonValue, user_id: &str) {
+    let Some(to) = input.get_mut("to").and_then(JsonValue::as_object_mut) else {
+        return;
+    };
+    let has_contact = ["phone", "email"].iter().any(|field| {
+        to.get(*field)
+            .and_then(JsonValue::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    if has_contact {
+        return;
+    }
+    let Some(client) = crate::user_core_client::UserCoreClient::from_env() else {
+        return;
+    };
+    match client.get_contact(user_id).await {
+        Ok(contact) => {
+            if let Some(email) = contact.email {
+                to.insert("email".to_owned(), json!(email));
+            }
+            if let Some(phone) = contact.phone {
+                to.insert("phone".to_owned(), json!(phone));
+            }
+        }
+        Err(error) => {
+            warn!(%error, "book_shipment: could not enrich recipient contact from user-core");
+        }
+    }
 }
 
 /// Renew the server-owned terminalization deadline before another agent round.
@@ -1514,9 +1739,101 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{
-        transport::{Endpoint, Server},
         Request, Response, Status,
+        transport::{Endpoint, Server},
     };
+
+    #[tokio::test]
+    async fn continuation_descriptor_binds_the_exact_action_and_refuses_zdr() {
+        let request = pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let raw = continuation_descriptor(
+            &request,
+            "step-1",
+            "execute_provider_action",
+            r#"{"operation":"reply","message":"Hei"}"#,
+            "ask",
+        )
+        .await
+        .expect("retained run descriptor");
+        let descriptor: serde_json::Value = serde_json::from_str(&raw).expect("descriptor json");
+        assert_eq!(descriptor["run_id"], "run-1");
+        assert_eq!(descriptor["org_id"], "org-1");
+        assert_eq!(descriptor["user_id"], "user-1");
+        assert_eq!(descriptor["tool_name"], "execute_provider_action");
+        assert_eq!(descriptor["input"]["operation"], "reply");
+        assert_eq!(
+            descriptor["action_fingerprint"].as_str().map(str::len),
+            Some(64)
+        );
+
+        let zdr = pb::RunAgentRequest {
+            zdr: true,
+            ..request
+        };
+        assert_eq!(
+            continuation_descriptor(&zdr, "step-1", "tool", "{}", "ask")
+                .await
+                .expect_err("ZDR cannot persist a continuation")
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    /// `booked_by` is never a model-supplied argument (the model has no
+    /// reason to know its own run's acting user id), so the persisted
+    /// descriptor must inject it from `req.user_id` itself — otherwise the
+    /// cold-resume path (`approval_delivery_worker::parse_resumable_action`,
+    /// which deserializes this exact JSON into `BookInput`, a struct where
+    /// `booked_by` is a required field) fails closed with
+    /// `invalid_continuation` even though the live/same-session resume path
+    /// works fine (it injects `booked_by` separately, in-memory, in
+    /// `execute_book_shipment`).
+    #[tokio::test]
+    async fn book_shipment_descriptor_injects_booked_by_from_the_run_user() {
+        let request = pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let raw = continuation_descriptor(
+            &request,
+            "step-1",
+            "book_shipment",
+            r#"{"carrier_code":"bring","service_name":"Standard","price_amount_cents":1000,"price_currency":"NOK","from":{"name":"A","postal_code":"0001","city":"Oslo","country":"NO"},"to":{"name":"B","postal_code":"7010","city":"Trondheim","country":"NO"},"weight_kg":1.0,"length_cm":10.0,"width_cm":10.0,"height_cm":10.0}"#,
+            "ask",
+        )
+        .await
+        .expect("retained run descriptor");
+        let descriptor: serde_json::Value = serde_json::from_str(&raw).expect("descriptor json");
+        assert_eq!(descriptor["input"]["booked_by"], "user-1");
+    }
+
+    #[tokio::test]
+    async fn book_shipment_descriptor_preserves_an_explicit_booked_by() {
+        let request = pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let raw = continuation_descriptor(
+            &request,
+            "step-1",
+            "book_shipment",
+            r#"{"carrier_code":"bring","service_name":"Standard","price_amount_cents":1000,"price_currency":"NOK","from":{"name":"A","postal_code":"0001","city":"Oslo","country":"NO"},"to":{"name":"B","postal_code":"7010","city":"Trondheim","country":"NO"},"weight_kg":1.0,"length_cm":10.0,"width_cm":10.0,"height_cm":10.0,"booked_by":"someone-else"}"#,
+            "ask",
+        )
+        .await
+        .expect("retained run descriptor");
+        let descriptor: serde_json::Value = serde_json::from_str(&raw).expect("descriptor json");
+        assert_eq!(descriptor["input"]["booked_by"], "someone-else");
+    }
 
     #[test]
     fn canonical_retrieval_signature_detects_exact_duplicate_queries() {
@@ -1606,6 +1923,9 @@ mod tests {
         plan_transitions: Vec<(i32, i32)>,                          // (from, to)
         approvals: Vec<(String, String)>,                           // (step_id, reason)
         decisions: Vec<(String, i32)>, // (approval_id, decision) — DecideApproval
+        /// Fixture for `MockSession::list_agent_skills`; empty unless a
+        /// `fetch_skill_context` test populates it.
+        agent_skills: Vec<pb::AgentSkill>,
     }
 
     type SharedRecorder = Arc<Mutex<Recorder>>;
@@ -1964,6 +2284,13 @@ mod tests {
             Err(Status::unimplemented("compact_now not used"))
         }
 
+        async fn set_agent_skill_enabled(
+            &self,
+            _: Request<pb::SetAgentSkillEnabledRequest>,
+        ) -> Result<Response<pb::SetAgentSkillEnabledResponse>, Status> {
+            Err(Status::unimplemented("set_agent_skill_enabled not used"))
+        }
+
         async fn upsert_agent_skill(
             &self,
             _: Request<pb::UpsertAgentSkillRequest>,
@@ -1975,7 +2302,9 @@ mod tests {
             &self,
             _: Request<pb::ListAgentSkillsRequest>,
         ) -> Result<Response<pb::ListAgentSkillsResponse>, Status> {
-            Err(Status::unimplemented("list_agent_skills not used"))
+            Ok(Response::new(pb::ListAgentSkillsResponse {
+                skills: self.rec.lock().unwrap().agent_skills.clone(),
+            }))
         }
 
         async fn list_conversation(
@@ -2230,6 +2559,31 @@ mod tests {
             Err(Status::unimplemented("claim_approval_deliveries not used"))
         }
 
+        async fn get_approval_continuation(
+            &self,
+            _: Request<pb::GetApprovalContinuationRequest>,
+        ) -> Result<Response<pb::GetApprovalContinuationResponse>, Status> {
+            Err(Status::unimplemented("get_approval_continuation not used"))
+        }
+
+        async fn record_approval_continuation_started(
+            &self,
+            _: Request<pb::RecordApprovalContinuationStartedRequest>,
+        ) -> Result<Response<pb::RecordApprovalContinuationStartedResponse>, Status> {
+            Err(Status::unimplemented(
+                "record_approval_continuation_started not used",
+            ))
+        }
+
+        async fn record_approval_continuation_outcome(
+            &self,
+            _: Request<pb::RecordApprovalContinuationOutcomeRequest>,
+        ) -> Result<Response<pb::RecordApprovalContinuationOutcomeResponse>, Status> {
+            Err(Status::unimplemented(
+                "record_approval_continuation_outcome not used",
+            ))
+        }
+
         async fn acknowledge_approval_delivery(
             &self,
             _: Request<pb::AcknowledgeApprovalDeliveryRequest>,
@@ -2369,6 +2723,72 @@ mod tests {
             zdr: false,
             tools: Vec::new(),
         }
+    }
+
+    fn sample_agent_skill(name: &str, keywords: &[&str], content: &str) -> pb::AgentSkill {
+        pb::AgentSkill {
+            id: format!("sk-{name}"),
+            name: name.to_owned(),
+            description: String::new(),
+            content: content.to_owned(),
+            trigger_keywords: keywords.iter().map(std::string::ToString::to_string).collect(),
+            trigger_file_patterns: Vec::new(),
+            tool_restrictions: Vec::new(),
+            enabled: true,
+            origin: "background_review".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_skill_context_injects_a_keyword_matched_skill() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().agent_skills = vec![sample_agent_skill(
+            "Shipment booking",
+            &["shipment", "shipping"],
+            "Always call get_shipping_quotes before book_shipment.",
+        )];
+        let session_channel = spawn_session_channel(rec).await;
+
+        let blocks = fetch_skill_context(
+            &session_channel,
+            Some("test-bearer"),
+            "org_test",
+            "please book a shipment to Oslo",
+        )
+        .await;
+
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].contains("## Skill: Shipment booking"));
+        assert!(blocks[0].contains("get_shipping_quotes before book_shipment"));
+    }
+
+    #[tokio::test]
+    async fn fetch_skill_context_is_empty_without_a_bearer() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().agent_skills =
+            vec![sample_agent_skill("Shipment booking", &["shipment"], "body")];
+        let session_channel = spawn_session_channel(rec).await;
+
+        let blocks =
+            fetch_skill_context(&session_channel, None, "org_test", "book a shipment").await;
+
+        assert!(blocks.is_empty(), "no bearer must never call session-core");
+    }
+
+    #[tokio::test]
+    async fn fetch_skill_context_is_empty_when_nothing_matches() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().agent_skills = vec![sample_agent_skill(
+            "Weather",
+            &["weather"],
+            "Use yr_weather for Norwegian coordinates.",
+        )];
+        let session_channel = spawn_session_channel(rec).await;
+
+        let blocks =
+            fetch_skill_context(&session_channel, Some("b"), "org_test", "what is 2+2").await;
+
+        assert!(blocks.is_empty());
     }
 
     #[tokio::test]

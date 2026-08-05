@@ -1,18 +1,18 @@
 # integration-corev2
 
-First-party Velion integration broker. This service replaces the existing
+First-party Verevon integration broker. This service replaces the existing
 Ingestion Plane `integration-core` v1 and removes Nango as the owner of OAuth
 sessions, token storage, capability consent, provider connections, and internal
 token brokering.
 
-Nango was used as a reference for the primitives Velion needs:
+Nango was used as a reference for the primitives Verevon needs:
 
 - Auth: provider OAuth, token refresh, multi-tenant connections.
 - Proxy/token broker: internal services get short-lived provider tokens without
   storing credentials themselves.
 - Functions/actions: later worker layer for provider-specific sync and actions.
 
-The implementation is first-party and Velion-owned. It does not depend on
+The implementation is first-party and Verevon-owned. It does not depend on
 Nango packages or Nango runtime services.
 
 ## Current scope
@@ -38,7 +38,7 @@ Nango packages or Nango runtime services.
   so scope and capability upgrades keep the same connection ID and audit
   history.
 - Provider readiness on `GET /api/v1/providers`, including `configured`,
-  `status`, and `missingConfig`, so Velion UI only shows connectable providers
+  `status`, and `missingConfig`, so Verevon UI only shows connectable providers
   when required credentials exist.
 - Capability bundles for onboarding, knowledge sync, inbox, and full workspace.
 - Connection capabilities and source consent APIs.
@@ -101,7 +101,7 @@ Nango packages or Nango runtime services.
   - `POST /internal/connectors/token`
   - selected `/integrations/...` compatibility routes from the old NestJS
     integration-service, backed by the named action executor.
-- OAuth callback that posts a browser message back to Velion UI.
+- OAuth callback that posts a browser message back to Verevon UI.
 
 ## Microsoft capability bundles
 
@@ -219,7 +219,7 @@ go run ./cmd/api
 
 ## Action execution
 
-Callers execute named provider operations against an exact Velion connection:
+Callers execute named provider operations against an exact Verevon connection:
 
 ```json
 {
@@ -247,7 +247,7 @@ Supported operation families:
 
 Effectful operations use a top-level `writeAttestation` compact JWS. The JWS
 header is exactly `alg=EdDSA`,
-`typ=velion.provider-write-attestation+jwt`, and a configured nonempty `kid`.
+`typ=verevon.provider-write-attestation+jwt`, and a configured nonempty `kid`.
 The service trusts only standard-base64, 32-byte Ed25519 public keys from
 `INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON`; startup rejects missing,
 placeholder, duplicate, malformed, symmetric, or non-conversation issuers.
@@ -308,7 +308,7 @@ public test key, claims, and regenerated full JWS is in
 
 The old ID-Knuten integration-service exposed provider-shaped routes. Go keeps
 read-only route names for migration, but every route still requires internal
-auth and resolves a Velion connection before calling a whitelisted action.
+auth and resolves a Verevon connection before calling a whitelisted action.
 Legacy write routes fail closed because an internal key cannot satisfy the
 service-bearer plus signed-attestation contract; callers must migrate to
 `POST /api/v1/connections/{id}/actions` or `POST /api/v1/actions/execute`.
@@ -406,7 +406,7 @@ first safe orchestration boundary:
   `POST /api/v1/sync-jobs/{id}/cancel`; this is a reversible UX control for
   stopping onboarding/settings work without deleting historical job evidence.
 
-Browser/UI callers should consume the Velion v2 BFF sync routes and SSE stream.
+Browser/UI callers should consume the Verevon v2 BFF sync routes and SSE stream.
 They must not call the internal token broker or infer proof evidence from
 optimistic UI nodes.
 
@@ -416,14 +416,14 @@ When `NATS_ENABLED=true`, the service publishes:
 
 - `integration.connected`
 - `integration.disconnected`
-- `velion.ingestion.integration.sync_started`
-- `velion.ingestion.integration.sync_handoff`
-- `velion.ingestion.integration.connection_updated`
-- `velion.ingestion.integration.consent_changed`
-- `velion.ingestion.integration.webhook_received`
+- `verevon.ingestion.integration.sync_started`
+- `verevon.ingestion.integration.sync_handoff`
+- `verevon.ingestion.integration.connection_updated`
+- `verevon.ingestion.integration.consent_changed`
+- `verevon.ingestion.integration.webhook_received`
 
-Set `NATS_SUBJECT_PREFIX=velion.events` to publish subjects such as
-`velion.events.integration.connected`.
+Set `NATS_SUBJECT_PREFIX=verevon.events` to publish subjects such as
+`verevon.events.integration.connected`.
 
 ## Provider migration blueprint
 
@@ -437,7 +437,7 @@ The old unified-service profile and real-time features are split by ownership:
 
 - `integration-corev2` owns integration identity, connection state, capability
   consent, sync events, webhook records, token leases, and integration audit.
-- Velion v2 BFF/UI owns real-time delivery, profile views, settings UX, source
+- Verevon v2 BFF/UI owns real-time delivery, profile views, settings UX, source
   inspectors, and onboarding/dashboard presentation.
 - Data Plane v2 owns source records, graph evidence, indexing, and retrieval
   state.
@@ -445,5 +445,5 @@ The old unified-service profile and real-time features are split by ownership:
   roles, and plans.
 
 `GET /api/v1/projections/integration-profile` is a lightweight integration read
-model for Velion UI/BFF composition. It is not a replacement user profile store
+model for Verevon UI/BFF composition. It is not a replacement user profile store
 and does not own matching or AI interpretation.

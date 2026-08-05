@@ -70,6 +70,16 @@ func TestGraphAssetListerDiscoversAndSubscribesMetaInboxAssets(t *testing.T) {
 			t.Errorf("ids = %v, missing %s", ids, want)
 		}
 	}
+	assets, err := lister.ListWebhookAssets(t.Context(), store.Connection{
+		ID: "conn-meta", ProviderKey: "meta",
+		Capabilities: []string{"social.inbox.read", "social.whatsapp.manage"},
+	})
+	if err != nil {
+		t.Fatalf("ListWebhookAssets error: %v", err)
+	}
+	if !slices.Equal(assets.PageIDs, []string{"page-1"}) || !slices.Equal(assets.InstagramAccountIDs, []string{"ig-1"}) || !slices.Equal(assets.WhatsAppBusinessAccountIDs, []string{"waba-1"}) {
+		t.Fatalf("classified assets = %+v", assets)
+	}
 	if len(subscribed) != 0 {
 		t.Fatalf("discovery mutated provider subscriptions: %v", subscribed)
 	}
@@ -81,6 +91,41 @@ func TestGraphAssetListerDiscoversAndSubscribesMetaInboxAssets(t *testing.T) {
 	}
 	if !slices.Equal(subscribed, []string{"page-1", "waba-1"}) {
 		t.Fatalf("subscribed assets = %v, want Page and WABA", subscribed)
+	}
+}
+
+func TestGraphAssetListerDiscoversStandaloneInstagramLoginAccountWithoutFacebookPageSubscription(t *testing.T) {
+	var requestedPaths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedPaths = append(requestedPaths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/me":
+			if r.Header.Get("Authorization") != "Bearer user-token" {
+				t.Fatalf("Instagram profile Authorization = %q", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "ig-1", "username": "verevon_support"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	lister := &GraphAssetLister{BaseURL: "https://graph.facebook.invalid/v25.0", InstagramBaseURL: server.URL, Tokens: staticTokenSource{}, HTTP: server.Client()}
+	connection := store.Connection{ID: "conn-instagram", ProviderKey: "instagram", Capabilities: []string{"social.inbox.read"}}
+
+	assets, err := lister.ListWebhookAssets(t.Context(), connection)
+	if err != nil {
+		t.Fatalf("ListWebhookAssets error: %v", err)
+	}
+	if !slices.Equal(assets.AccountIDs, []string{"ig-1"}) || !slices.Equal(assets.InstagramAccountIDs, []string{"ig-1"}) {
+		t.Fatalf("assets = %+v, want standalone Instagram professional account", assets)
+	}
+	if err := lister.SubscribeWebhookAccounts(t.Context(), connection, assets.AccountIDs); err != nil {
+		t.Fatalf("SubscribeWebhookAccounts error: %v", err)
+	}
+	if !slices.Equal(requestedPaths, []string{"/me", "/me"}) {
+		t.Fatalf("requested paths = %v, want profile discovery only", requestedPaths)
 	}
 }
 

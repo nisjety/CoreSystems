@@ -52,7 +52,7 @@ Steps:
 6. **Rebuild edge** (`docker compose -f "apps/Ingestion Plane/docker-compose.yml" build quarry-edge` → `up -d --no-deps quarry-edge`). Cache-warm now, so faster.
 
 BFF + UI:
-7. **BFF** `apps/Frontend Plane/velionv2/src/app/api/v1/search/answer/stream/route.ts`
+7. **BFF** `apps/Frontend Plane/verevonv2/src/app/api/v1/search/answer/stream/route.ts`
    — POST {query}. Mint Quarry audience token; open SSE to
    `${QUARRY_EDGE_URL}/v1/answer/stream`; re-stream frames to the browser
    (pattern: copy `app/api/chat/stream/route.ts` pipe loop).
@@ -72,11 +72,11 @@ a non-empty streamed answer + citations.
 ## Part B — Convex persistence (local convex-backend)
 
 Goal: persist search/answer threads + saved searches to the **local**
-`convex-backend` container; real-time reads in velionv2.
+`convex-backend` container; real-time reads in verevonv2.
 
 Investigate first (not yet done):
-- `apps/Frontend Plane/velionv2/convex/` (schema.ts, functions) — does it exist?
-- How velionv2 connects: `ConvexProvider` / `ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL)`.
+- `apps/Frontend Plane/verevonv2/convex/` (schema.ts, functions) — does it exist?
+- How verevonv2 connects: `ConvexProvider` / `ConvexReactClient(process.env.NEXT_PUBLIC_CONVEX_URL)`.
   The local deployment URL = the `convex-backend` container (check its published
   port + `convex dev`/self-hosted env). "Everything local" → point
   `NEXT_PUBLIC_CONVEX_URL` at the local convex-backend, NOT cloud.

@@ -519,7 +519,7 @@ pub struct ImageResult {
 /// `GET /search?q=<q>&format=json&categories=images`, returning results with
 /// `img_src`, `thumbnail_src`, `url` (source page), and `title`. This is a
 /// focused companion to [`SearXNGSearch`] (which serves the general/web
-/// vertical) so Quarry can back Velion's IMAGES tab without disturbing the
+/// vertical) so Quarry can back Verevon's IMAGES tab without disturbing the
 /// `SearchProvider` chain.
 pub struct SearXNGImages {
     http: Client,

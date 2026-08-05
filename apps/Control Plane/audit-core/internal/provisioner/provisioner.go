@@ -14,40 +14,43 @@ import (
 )
 
 const (
-	StreamName                                   = "VELION_CONTROL_OBSERVABILITY"
-	DLQSubject                                   = "velion.dlq.audit-core.>"
+	StreamName                                   = "VEREVON_CONTROL_OBSERVABILITY"
+	DLQSubject                                   = "verevon.dlq.audit-core.>"
 	AuthEventsStreamName                         = "AUTH_EVENTS"
 	ControlEventsStreamName                      = "CONTROL_PLANE_EVENTS"
 	BillingPlanConsumerName                      = "billing-core-organization-plan-changed"
 	BillingPlanSubject                           = "organization.plan.changed"
-	BillingPlanDeliverySubject                   = "_VELION.CONTROL.DELIVER.billing.organization-plan-changed"
+	BillingPlanDeliverySubject                   = "_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed"
 	ControlSharedStreamName                      = "AQENCIA_CONTROLPLANE"
 	LegacyBridgeConsumerName                     = "control-shared-legacy-bridge"
-	LegacyBridgeDelivery                         = "_VELION.CONTROL.SHARED.DELIVER.legacy"
-	ConvexControlDLQSubject                      = "velion.application.dlq.convex.controlplane"
-	GDPRErasureRequestedSubject                  = "velion.gdpr.erasure.requested"
-	GDPRErasureDLQSubject                        = "velion.gdpr.erasure.dlq.documents-api"
-	GDPROwnershipTransferredSubject              = "velion.gdpr.ownership.transferred"
+	LegacyBridgeDelivery                         = "_VEREVON.CONTROL.SHARED.DELIVER.legacy"
+	ConvexControlDLQSubject                      = "verevon.application.dlq.convex.controlplane"
+	GDPRErasureRequestedSubject                  = "verevon.gdpr.erasure.requested"
+	GDPRErasureDLQSubject                        = "verevon.gdpr.erasure.dlq.documents-api"
+	GDPROwnershipTransferredSubject              = "verevon.gdpr.ownership.transferred"
 	DocumentsGDPRConsumerName                    = "documents-api-gdpr-erasure-v1"
-	DocumentsGDPRDeliverySubject                 = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
+	DocumentsGDPRDeliverySubject                 = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
 	DocumentsOrgErasureConsumerName              = "documents-api-org-erasure"
-	DocumentsOrgErasureDelivery                  = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
-	DocumentsOrgPurgeDLQSubject                  = "velion.gdpr.erasure.dlq.documents-api-org-purge"
+	DocumentsOrgErasureDelivery                  = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
+	DocumentsOrgPurgeDLQSubject                  = "verevon.gdpr.erasure.dlq.documents-api-org-purge"
 	ConversationOrgErasureConsumerName           = "conversation-core-org-erasure"
-	ConversationOrgErasureDelivery               = "_VELION.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
+	ConversationOrgErasureDelivery               = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.gdpr-erasure"
+	ConversationInteractiveRetentionConsumerName = "conversation-core-interactive-retention"
+	ConversationInteractiveRetentionDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.conversation.interactive-retention"
+	InteractiveRetentionEnabledSubject           = "aqencia.controlplane.org.interactive_retention.enabled"
 	SessionGDPRErasureConsumerName               = "session-core-gdpr-erasure-v1"
 	QuarryControlOrgErasureConsumerName          = "quarry-control-org-erasure"
-	QuarryControlOrgErasureDelivery              = "_VELION.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
-	OrgDeletionSubjectWildcard                   = "velion.org.deletion.>"
-	OrgDeletionPendingSubject                    = "velion.org.deletion.pending"
-	OrgDeletionReminderSubject                   = "velion.org.deletion.reminder"
-	OrgDeletionCancelledSubject                  = "velion.org.deletion.cancelled"
+	QuarryControlOrgErasureDelivery              = "_VEREVON.CONTROL.SHARED.DELIVER.ingestion.quarry-control.org-erasure"
+	OrgDeletionSubjectWildcard                   = "verevon.org.deletion.>"
+	OrgDeletionPendingSubject                    = "verevon.org.deletion.pending"
+	OrgDeletionReminderSubject                   = "verevon.org.deletion.reminder"
+	OrgDeletionCancelledSubject                  = "verevon.org.deletion.cancelled"
 	NotificationOrgDeletionPendingConsumerName   = "notification-core-org-deletion-pending"
 	NotificationOrgDeletionReminderConsumerName  = "notification-core-org-deletion-reminder"
 	NotificationOrgDeletionCancelledConsumerName = "notification-core-org-deletion-cancelled"
-	NotificationOrgDeletionPendingDelivery       = "_VELION.CONTROL.SHARED.DELIVER.application.notification.org-deletion-pending"
-	NotificationOrgDeletionReminderDelivery      = "_VELION.CONTROL.SHARED.DELIVER.application.notification.org-deletion-reminder"
-	NotificationOrgDeletionCancelledDelivery     = "_VELION.CONTROL.SHARED.DELIVER.application.notification.org-deletion-cancelled"
+	NotificationOrgDeletionPendingDelivery       = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-pending"
+	NotificationOrgDeletionReminderDelivery      = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-reminder"
+	NotificationOrgDeletionCancelledDelivery     = "_VEREVON.CONTROL.SHARED.DELIVER.application.notification.org-deletion-cancelled"
 	ModelToolsStreamName                         = "TOOLS_COMPLETIONS"
 	ModelOrchestrationStreamName                 = "MP_ORCHESTRATION_EVENTS"
 	ModelRunEventsStreamName                     = "MODEL_PLANE_RUN_EVENTS"
@@ -55,31 +58,33 @@ const (
 	SessionOrchestrationConsumerName             = "session-core-orchestration"
 	InsightRunConsumerName                       = "insight-core-agent-run-subscriber"
 	InsightApprovalConsumerName                  = "insight-core-agent-approval-subscriber"
-	InsightRunDeliverySubject                    = "_VELION.MODEL.DELIVER.application.insight.run"
-	InsightApprovalDeliverySubject               = "_VELION.MODEL.DELIVER.application.insight.approval"
-	ApplicationEventsStreamName                  = "VELION_APPLICATION"
-	ApplicationModelStreamName                   = "VELION_MODEL"
-	ApplicationIngestionStreamName               = "VELION_INGESTION"
+	InsightRunDeliverySubject                    = "_VEREVON.MODEL.DELIVER.application.insight.run"
+	InsightApprovalDeliverySubject               = "_VEREVON.MODEL.DELIVER.application.insight.approval"
+	ApplicationEventsStreamName                  = "VEREVON_APPLICATION"
+	ApplicationModelStreamName                   = "VEREVON_MODEL"
+	ApplicationIngestionStreamName               = "VEREVON_INGESTION"
 	ConversationAIActionConsumerName             = "conversation-core-ai-action-executor"
 	ConversationModelActionConsumerName          = "conversation-core-model-action-proposed"
 	ConversationWebhookConsumerName              = "conversation-core-webhook-received"
 	InsightMetricConsumerName                    = "insight-core-metric-subscriber"
-	ConversationAIActionDelivery                 = "_VELION.APPLICATION.DELIVER.conversation.ai-action-reviewed"
-	ConversationModelActionDelivery              = "_VELION.APPLICATION.DELIVER.conversation.model-action-proposed"
-	ConversationWebhookDelivery                  = "_VELION.APPLICATION.DELIVER.conversation.webhook-received"
-	InsightMetricDelivery                        = "_VELION.APPLICATION.DELIVER.insight.metrics"
+	NotificationConversationFollowConsumerName   = "notification-core-conversation-followed-message"
+	ConversationAIActionDelivery                 = "_VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed"
+	ConversationModelActionDelivery              = "_VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed"
+	ConversationWebhookDelivery                  = "_VEREVON.APPLICATION.DELIVER.conversation.webhook-received"
+	InsightMetricDelivery                        = "_VEREVON.APPLICATION.DELIVER.insight.metrics"
+	NotificationConversationFollowDelivery       = "_VEREVON.APPLICATION.DELIVER.notification.conversation-followed-message"
 	IndexEngineOrgErasureConsumerName            = "index-engine-org-erasure"
 	GraphIndexOrgErasureConsumerName             = "graph-index-gdpr-erasure-v1"
 	WikiStoreOrgErasureConsumerName              = "wiki-store-org-erasure"
-	WikiStoreOrgErasureDelivery                  = "_VELION.CONTROL.SHARED.DELIVER.data.wiki-store.org-erasure"
+	WikiStoreOrgErasureDelivery                  = "_VEREVON.CONTROL.SHARED.DELIVER.data.wiki-store.org-erasure"
 	RetrievalEngineOrgErasureConsumerName        = "retrieval-engine-gdpr-erasure-v1"
 	DataQualityOrgErasureConsumerName            = "data-quality-org-erasure"
-	DataQualityOrgErasureDelivery                = "_VELION.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
+	DataQualityOrgErasureDelivery                = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
 	DataOrchestratorOrgErasureConsumerName       = "data-orchestrator-org-erasure"
-	DataOrchestratorOrgErasureDelivery           = "_VELION.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
+	DataOrchestratorOrgErasureDelivery           = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-orchestrator.org-erasure"
 	QuickwitAdapterOrgErasureConsumerName        = "quickwit-adapter-gdpr-erasure-v1"
 	CostCoreOrgErasureConsumerName               = "cost-core-org-erasure"
-	CostCoreOrgErasureDelivery                   = "_VELION.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
+	CostCoreOrgErasureDelivery                   = "_VEREVON.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
 	EmbeddingEngineOrgErasureConsumerName        = "embedding-engine-org-erasure"
 )
 
@@ -136,11 +141,11 @@ func ParseBuses(raw string) ([]Bus, error) {
 }
 
 func PlaneSubject(kind, plane string) string {
-	return fmt.Sprintf("velion.%s.v2.%s.>", kind, plane)
+	return fmt.Sprintf("verevon.%s.v2.%s.>", kind, plane)
 }
 
 func LegacyPlaneSubject(kind, plane string) string {
-	return fmt.Sprintf("velion.%s.v1.%s.>", kind, plane)
+	return fmt.Sprintf("verevon.%s.v1.%s.>", kind, plane)
 }
 
 func ConsumerName(busName, kind string) string {
@@ -148,7 +153,7 @@ func ConsumerName(busName, kind string) string {
 }
 
 func DeliverySubject(plane, kind string) string {
-	return fmt.Sprintf("_VELION.AUDIT.DELIVER.%s.%s-v2", plane, kind)
+	return fmt.Sprintf("_VEREVON.AUDIT.DELIVER.%s.%s-v2", plane, kind)
 }
 
 // Provision converges only the known observability resources. It never
@@ -285,9 +290,9 @@ func ProvisionApplicationRuntime(ctx context.Context, js nats.JetStreamContext) 
 		name     string
 		subjects []string
 	}{
-		{name: ApplicationEventsStreamName, subjects: []string{"velion.application.>"}},
-		{name: ApplicationModelStreamName, subjects: []string{"velion.model.>"}},
-		{name: ApplicationIngestionStreamName, subjects: []string{"velion.ingestion.>"}},
+		{name: ApplicationEventsStreamName, subjects: []string{"verevon.application.>"}},
+		{name: ApplicationModelStreamName, subjects: []string{"verevon.model.>"}},
+		{name: ApplicationIngestionStreamName, subjects: []string{"verevon.ingestion.>"}},
 	} {
 		if err := ensureRuntimeStream(js, stream.name, stream.subjects, 14*24*time.Hour, 0); err != nil {
 			return err
@@ -299,18 +304,22 @@ func ProvisionApplicationRuntime(ctx context.Context, js nats.JetStreamContext) 
 	}{
 		{stream: ApplicationEventsStreamName, config: applicationPushConsumer(
 			ConversationAIActionConsumerName, ConversationAIActionDelivery,
-			"velion.application.conversation.ai_action.reviewed",
+			"verevon.application.conversation.ai_action.reviewed",
 		)},
 		{stream: ApplicationModelStreamName, config: applicationPushConsumer(
 			ConversationModelActionConsumerName, ConversationModelActionDelivery,
-			"velion.model.action.proposed",
+			"verevon.model.action.proposed",
 		)},
 		{stream: ApplicationIngestionStreamName, config: applicationPushConsumer(
 			ConversationWebhookConsumerName, ConversationWebhookDelivery,
-			"velion.ingestion.integration.webhook_received",
+			"verevon.ingestion.integration.webhook_received",
 		)},
 		{stream: ApplicationEventsStreamName, config: applicationPushConsumer(
-			InsightMetricConsumerName, InsightMetricDelivery, "velion.application.>",
+			InsightMetricConsumerName, InsightMetricDelivery, "verevon.application.>",
+		)},
+		{stream: ApplicationEventsStreamName, config: applicationPushConsumer(
+			NotificationConversationFollowConsumerName, NotificationConversationFollowDelivery,
+			"verevon.application.conversation.message.received",
 		)},
 	}
 	for _, consumer := range consumers {
@@ -391,9 +400,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	subjects := []string{
 		"aqencia.controlplane.>",
 		"notifications.>",
-		"velion.session.>",
+		"verevon.session.>",
 		"aqencia.reasoning.session.>",
-		"velion.agent.>",
+		"verevon.agent.>",
 		"aqencia.reasoning.run.>",
 		"app.session.>",
 		ConvexControlDLQSubject,
@@ -441,6 +450,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 		return err
 	}
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, conversationOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, conversationInteractiveRetentionConsumerConfig()); err != nil {
 		return err
 	}
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, sessionGDPRErasureConsumerConfig()); err != nil {
@@ -697,19 +709,32 @@ func conversationOrgErasureConsumerConfig() *nats.ConsumerConfig {
 	}
 }
 
+// conversationInteractiveRetentionConsumerConfig provisions Conversation
+// Core's narrow cleanup subscriber. Its durable must match
+// interactiveRetentionDurable in conversation-core-go; it receives only
+// false-to-true ZDR transitions and has no authority over the GDPR fan-out.
+func conversationInteractiveRetentionConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: ConversationInteractiveRetentionConsumerName, DeliverSubject: ConversationInteractiveRetentionDelivery,
+		DeliverGroup: ConversationInteractiveRetentionConsumerName, FilterSubject: InteractiveRetentionEnabledSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
 func convexControlConsumerConfigs() []*nats.ConsumerConfig {
 	definitions := []struct {
 		durable  string
 		delivery string
 		filter   string
 	}{
-		{"convex-org-created-v1", "_VELION.CONTROL.SHARED.DELIVER.application.convex.org-created", "aqencia.controlplane.org.created"},
-		{"convex-org-updated-v1", "_VELION.CONTROL.SHARED.DELIVER.application.convex.org-updated", "aqencia.controlplane.org.updated"},
-		{"convex-org-deleted-v1", "_VELION.CONTROL.SHARED.DELIVER.application.convex.org-deleted", "aqencia.controlplane.org.deleted"},
-		{"convex-org-member-added-v1", "_VELION.CONTROL.SHARED.DELIVER.application.convex.member-added", "aqencia.controlplane.org.member_added"},
-		{"convex-org-member-removed-v1", "_VELION.CONTROL.SHARED.DELIVER.application.convex.member-removed", "aqencia.controlplane.org.member_removed"},
-		{"convex-org-changed-v2", "_VELION.CONTROL.SHARED.DELIVER.application.convex.org-changed", "aqencia.controlplane.org.changed"},
-		{"convex-org-member-changed-v2", "_VELION.CONTROL.SHARED.DELIVER.application.convex.member-changed", "aqencia.controlplane.org.member_changed"},
+		{"convex-org-created-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-created", "aqencia.controlplane.org.created"},
+		{"convex-org-updated-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-updated", "aqencia.controlplane.org.updated"},
+		{"convex-org-deleted-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-deleted", "aqencia.controlplane.org.deleted"},
+		{"convex-org-member-added-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-added", "aqencia.controlplane.org.member_added"},
+		{"convex-org-member-removed-v1", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-removed", "aqencia.controlplane.org.member_removed"},
+		{"convex-org-changed-v2", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.org-changed", "aqencia.controlplane.org.changed"},
+		{"convex-org-member-changed-v2", "_VEREVON.CONTROL.SHARED.DELIVER.application.convex.member-changed", "aqencia.controlplane.org.member_changed"},
 	}
 	configs := make([]*nats.ConsumerConfig, 0, len(definitions))
 	for _, definition := range definitions {

@@ -25,10 +25,15 @@ type addressDTO struct {
 	City       string `json:"city" validate:"required"`
 	Country    string `json:"country" validate:"required,len=2"`
 	IsBusiness bool   `json:"is_business"`
+	Phone      string `json:"phone"`
+	Email      string `json:"email"`
 }
 
 func (d addressDTO) toDomain() carrier.Address {
-	return carrier.Address{Name: d.Name, Street: d.Street, PostalCode: d.PostalCode, City: d.City, Country: d.Country, IsBusiness: d.IsBusiness}
+	return carrier.Address{
+		Name: d.Name, Street: d.Street, PostalCode: d.PostalCode, City: d.City, Country: d.Country, IsBusiness: d.IsBusiness,
+		Phone: d.Phone, Email: d.Email,
+	}
 }
 
 type customsItemDTO struct {
@@ -245,7 +250,7 @@ func listHandler(store *Store) http.HandlerFunc {
 
 // labelHandler serves the stored label. Default: raw bytes (PDF). With
 // ?format=zpl the ZPL text; with ?format=json a base64 envelope (what the
-// Velion gateway proxies, since its JSON pipe cannot carry raw PDF bytes).
+// Verevon gateway proxies, since its JSON pipe cannot carry raw PDF bytes).
 func labelHandler(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		principal, ok := verifiedPrincipal(w, r)

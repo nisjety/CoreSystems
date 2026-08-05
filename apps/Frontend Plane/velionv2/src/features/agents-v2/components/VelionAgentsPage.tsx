@@ -6,45 +6,45 @@ import {
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { VelionButton, VelionIconButton } from "@/components/ui/velion-ui";
+import { VerevonButton, VerevonIconButton } from "@/components/ui/verevon-ui";
 import {
   agentFeatureOptionsByRole,
   type AgentRoleId,
   type AgentFeatureId,
 } from "@/features/agents-v2/lib/agent-roles";
 import { useAgentFeature, useAgentSelection } from "@/features/agents-v2/lib/use-agent-selection";
-import { VelionChatbotStudio } from "@/features/agents-v2/components/VelionChatbotStudio";
-import { VelionWorkflowBuilder } from "@/features/agents-v2/components/VelionWorkflowBuilder";
-import { RoleCounterpartSurface } from "@/features/agents-v2/components/VelionAgentRoleSurfaces";
-import { agentBlueprints } from "@/features/agents-v2/lib/velion-agent-blueprints";
+import { VerevonChatbotStudio } from "@/features/agents-v2/components/VerevonChatbotStudio";
+import { VerevonWorkflowBuilder } from "@/features/agents-v2/components/VerevonWorkflowBuilder";
+import { RoleCounterpartSurface } from "@/features/agents-v2/components/VerevonAgentRoleSurfaces";
+import { agentBlueprints } from "@/features/agents-v2/lib/verevon-agent-blueprints";
 import {
   AgentMetricStrip,
   RoleCard,
   RoleConversationPreview,
   StageReadinessPanel,
   StageSystemCard,
-} from "@/features/agents-v2/components/VelionAgentsWorkspacePrimitives";
+} from "@/features/agents-v2/components/VerevonAgentsWorkspacePrimitives";
 import type {
   AgentBlueprint,
-} from "@/features/agents-v2/lib/velion-agent-page-types";
+} from "@/features/agents-v2/lib/verevon-agent-page-types";
 import {
   controlFocusClass,
   roleEyebrowClass,
   rolePanelClass,
-} from "@/features/agents-v2/lib/velion-agent-page-styles";
+} from "@/features/agents-v2/lib/verevon-agent-page-styles";
 
-export function VelionAgentsPage() {
+export function VerevonAgentsPage() {
   const [agentSelection, setAgentSelection] = useAgentSelection();
   const [agentFeature, setAgentFeature] = useAgentFeature(agentSelection);
   const activeRoleId = agentSelection === "all" ? null : agentSelection;
   const activeRole = agentBlueprints.find((role) => role.id === activeRoleId) ?? null;
 
   if (activeRole?.id === "workflow") {
-    return <VelionWorkflowBuilder />;
+    return <VerevonWorkflowBuilder />;
   }
 
   if (activeRole?.id === "chatbot") {
-    return <VelionChatbotStudio />;
+    return <VerevonChatbotStudio />;
   }
 
   return (
@@ -78,7 +78,7 @@ function AllRolesOverview({ onRoleSelect }: { onRoleSelect: (role: AgentRoleId) 
           One agent system for the entire customer journey
         </h1>
         <p className="mx-auto mt-3 max-w-[620px] text-[14px] leading-6 text-[#6D717B] dark:text-[#AEB4C0]">
-          Choose a Velion blueprint, then configure the role with knowledge, tests, channels, and insight loops.
+          Choose a Verevon blueprint, then configure the role with knowledge, tests, channels, and insight loops.
         </p>
       </header>
 
@@ -162,11 +162,11 @@ function SelectedAgentWorkspace({
           </div>
           <p className="mt-3 text-[12px] leading-5 text-[#626873] dark:text-[#AEB4C0]">{operatingModel.activationSummary}</p>
           <div className="mt-4 flex gap-2">
-            <VelionButton variant="primary" size="sm" radius="pill" className={cn("flex-1 px-4 text-[12px] font-semibold", controlFocusClass)}>
+            <VerevonButton variant="primary" size="sm" radius="pill" className={cn("flex-1 px-4 text-[12px] font-semibold", controlFocusClass)}>
               <Rocket className="size-3.5" />
               {operatingModel.activationLabel}
-            </VelionButton>
-            <VelionIconButton
+            </VerevonButton>
+            <VerevonIconButton
               type="button"
               size="md"
               radius="pill"
@@ -174,7 +174,7 @@ function SelectedAgentWorkspace({
               className={cn("border border-[#E2E3E8] bg-white dark:border-[#2B2D33] dark:bg-[#17181C]", controlFocusClass)}
             >
               <Play className="size-3.5" />
-            </VelionIconButton>
+            </VerevonIconButton>
           </div>
           <div className="mt-4 grid gap-1 sm:grid-cols-2" aria-label={`${role.shortTitle} feature areas`}>
             {featureOptions.map((option) => (

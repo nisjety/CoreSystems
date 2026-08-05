@@ -7,7 +7,7 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import { VelionButton, VelionIconButton } from "@/components/ui/velion-ui";
+import { VerevonButton, VerevonIconButton } from "@/components/ui/verevon-ui";
 import { cn } from "@/lib/utils";
 
 export function IntegrationCard({
@@ -42,9 +42,9 @@ export function IntegrationCard({
       </div>
       <h2 className="mt-5 text-[18px] font-semibold">{title}</h2>
       <p className="mt-3 text-[14px] leading-6 text-[#5F6673] dark:text-[#AEB4C0]">{description}</p>
-      <VelionButton size="sm" radius="sm" className="mt-auto px-4 font-semibold">
+      <VerevonButton size="sm" radius="sm" className="mt-auto px-4 font-semibold">
         Configure
-      </VelionButton>
+      </VerevonButton>
     </article>
   );
 }
@@ -76,12 +76,12 @@ export function ActionCard({
         {subtitle}
       </p>
       <div className="mt-auto flex justify-end gap-3">
-        <VelionIconButton size="lg" radius="sm" aria-label={`Open ${title} tool menu`} className="border border-[#E2E3E8] bg-white shadow-sm dark:border-[#303238] dark:bg-[#111216]">
+        <VerevonIconButton size="lg" radius="sm" aria-label={`Open ${title} tool menu`} className="border border-[#E2E3E8] bg-white shadow-sm dark:border-[#303238] dark:bg-[#111216]">
           <MoreHorizontal className="size-5" />
-        </VelionIconButton>
-        <VelionButton radius="sm" className="px-7 text-[13px] font-semibold">
+        </VerevonIconButton>
+        <VerevonButton radius="sm" className="px-7 text-[13px] font-semibold">
           Customize
-        </VelionButton>
+        </VerevonButton>
       </div>
     </article>
   );
@@ -138,12 +138,12 @@ export function ChannelHeroCard({
           {widget ? <ToggleSwitch enabled /> : null}
         </div>
         <div className="mt-10 flex justify-end gap-3">
-          <VelionIconButton size="lg" radius="sm" aria-label={`${widget ? "Chat widget" : "Help page"} preview device`} className="border border-[#E2E3E8] dark:border-[#303238]">
+          <VerevonIconButton size="lg" radius="sm" aria-label={`${widget ? "Chat widget" : "Help page"} preview device`} className="border border-[#E2E3E8] dark:border-[#303238]">
             <Smartphone className="size-5" />
-          </VelionIconButton>
-          <VelionButton radius="sm" className="px-10 text-[13px] font-semibold">
+          </VerevonIconButton>
+          <VerevonButton radius="sm" className="px-10 text-[13px] font-semibold">
             {widget ? "Manage" : "Setup"}
-          </VelionButton>
+          </VerevonButton>
         </div>
       </div>
     </article>
@@ -174,10 +174,10 @@ export function ChannelCard({
       </h2>
       <p className="mt-3 text-[17px] leading-7 text-[#555B65] dark:text-[#AEB4C0]">{description}</p>
       <div className="mt-auto flex justify-end gap-3">
-        <VelionIconButton size="lg" radius="sm" aria-label={`${title} device preview`} className="border border-[#E2E3E8] dark:border-[#303238]">
+        <VerevonIconButton size="lg" radius="sm" aria-label={`${title} device preview`} className="border border-[#E2E3E8] dark:border-[#303238]">
           <Smartphone className="size-5" />
-        </VelionIconButton>
-        <VelionButton radius="sm" className="px-7 text-[13px] font-semibold">{action}</VelionButton>
+        </VerevonIconButton>
+        <VerevonButton radius="sm" className="px-7 text-[13px] font-semibold">{action}</VerevonButton>
       </div>
     </article>
   );
@@ -185,8 +185,8 @@ export function ChannelCard({
 
 export function SquareIconButton({ Icon, label }: { Icon: LucideIcon; label: string }) {
   return (
-    <VelionIconButton size="lg" radius="sm" aria-label={label} className="border border-[#E2E3E8] bg-white shadow-sm dark:border-[#303238] dark:bg-[#15161A]">
+    <VerevonIconButton size="lg" radius="sm" aria-label={label} className="border border-[#E2E3E8] bg-white shadow-sm dark:border-[#303238] dark:bg-[#15161A]">
       <Icon className="size-5" />
-    </VelionIconButton>
+    </VerevonIconButton>
   );
 }

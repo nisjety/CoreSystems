@@ -191,11 +191,11 @@ func TestSummarizeMemoryActivityFallsBackWhenInferenceIsUnavailable(t *testing.T
 	}
 }
 
-// The model id must stay a concrete model. A `velion-*` intent tier is re-routed
+// The model id must stay a concrete model. A `verevon-*` intent tier is re-routed
 // by prompt size and lands a fixed-token micro-call on a reasoning model that
 // answers 200 with an empty body.
 func TestConsolidationModelIsNotAnIntentTier(t *testing.T) {
-	if strings.HasPrefix(MemoryConsolidationModel, "velion-") {
+	if strings.HasPrefix(MemoryConsolidationModel, "verevon-") {
 		t.Fatalf("MemoryConsolidationModel = %q, must be a concrete model id",
 			MemoryConsolidationModel)
 	}

@@ -2,7 +2,7 @@
  * Phase A · A3 — /api/usage/summary proxy → audit-core
  * (`GET /v1/usage/summary?org_id=...&since=...&until=...`).
  *
- * Powers the velion `/settings/usage` dashboard. Returns one row per
+ * Powers the verevon `/settings/usage` dashboard. Returns one row per
  * (plane, op) for the supplied window with totals across the window.
  */
 

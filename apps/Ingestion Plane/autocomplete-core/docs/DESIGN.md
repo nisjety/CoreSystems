@@ -64,7 +64,7 @@ The public contract is resource-shaped and envelope-based:
 | `limit` | 1-20 |
 
 Tenant context comes from `x-org-id`; browser access should be proxied through
-Velion/backend.
+Verevon/backend.
 
 ## Reliability
 

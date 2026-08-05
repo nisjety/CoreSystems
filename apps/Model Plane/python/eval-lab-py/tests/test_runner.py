@@ -77,7 +77,7 @@ CANNED_STREAM = [
     'data: {"input_tokens": 12, "output_tokens": 5, "cost_usd": 0.00042, "latency_ms": 900}',
     "",
     "event: done",
-    'data: {"model_used": "velion-budget"}',
+    'data: {"model_used": "verevon-budget"}',
     "",
 ]
 
@@ -90,7 +90,7 @@ def test_sse_parser_and_outcome_assembly() -> None:
     assert outcome.cost_usd == 0.00042
     assert outcome.input_tokens == 12 and outcome.output_tokens == 5
     assert outcome.tool_calls == ["knowledge_search"]
-    assert outcome.model_used == "velion-budget"
+    assert outcome.model_used == "verevon-budget"
     assert not outcome.paused_for_approval
 
 

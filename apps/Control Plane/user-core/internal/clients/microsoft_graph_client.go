@@ -1,6 +1,6 @@
 // Package clients — Microsoft Graph identity client.
 //
-// G41 (velion-gap.md §8.30 / Slice D): when a Microsoft OAuth account is
+// G41 (verevon-gap.md §8.30 / Slice D): when a Microsoft OAuth account is
 // linked to a user, this client fetches the user's Graph profile + photo
 // so user-core can soft-update the local row with displayName, jobTitle,
 // mail, office location, preferred language, mobile phone, and avatar.

@@ -662,7 +662,7 @@ Quarry supports deterministic and model-assisted extraction with schema validati
 
 The proposed Fara/open-weight plus frontier-model combination should be part of a broader router rather than a fixed two-model pipeline.
 
-The user-provided Fara and frontier benchmark figures should be reproduced in Velion's own harness before they are treated as routing truth.
+The user-provided Fara and frontier benchmark figures should be reproduced in Verevon's own harness before they are treated as routing truth.
 
 ### 11.1 Planner tiers
 
@@ -960,14 +960,14 @@ The Browser Action IR and ObservationBundle must remain backend-neutral. Backend
 
 ## 17. Browserbase improvements
 
-Quarry already supports Browserbase. Improve the integration by using its strongest runtime capabilities while keeping Velion's own control plane.
+Quarry already supports Browserbase. Improve the integration by using its strongest runtime capabilities while keeping Verevon's own control plane.
 
 ### Recommended use
 
 - persistent contexts for login state;
 - keep-alive and reconnect;
 - live-view takeover;
-- HLS session replay embedded in Velion;
+- HLS session replay embedded in Verevon;
 - browser/session metadata bound to tenant/run;
 - multitab recording;
 - Agent Identity/verified fingerprints when policy permits;
@@ -978,9 +978,9 @@ Quarry already supports Browserbase. Improve the integration by using its strong
 
 - Browserbase Model Gateway as Model Plane's model authority;
 - Browserbase Functions as canonical orchestration;
-- Browserbase dashboard as Velion's customer administration UI.
+- Browserbase dashboard as Verevon's customer administration UI.
 
-Velion should show Browserbase replay/live-view through its own SolidJS task UI where licensing and API terms allow.
+Verevon should show Browserbase replay/live-view through its own SolidJS task UI where licensing and API terms allow.
 
 ---
 
@@ -1124,7 +1124,7 @@ Add browser security suites based on:
 - WAInjectBench;
 - PIArena;
 - BrowserGym security environments/DoomArena where available;
-- Velion-specific malicious pages.
+- Verevon-specific malicious pages.
 
 ---
 
@@ -1497,7 +1497,7 @@ Use BrowserGym/AgentLab adapters for:
 - MiniWoB for primitive actions;
 - OpenApps and TimeWarp as appropriate.
 
-### 27.2 Velion BrowserBench
+### 27.2 Verevon BrowserBench
 
 Create business-relevant suites:
 
@@ -1759,7 +1759,7 @@ Add:
 - site profiles;
 - traces and artifacts;
 - prompt-injection boundaries;
-- Velion BrowserBench.
+- Verevon BrowserBench.
 
 ### Use as donors or lab adapters
 
@@ -1837,7 +1837,7 @@ Add:
 3. WebArena Verified.
 4. WorkArena.
 5. VisualWebArena.
-6. Velion BrowserBench.
+6. Verevon BrowserBench.
 7. prompt-injection suites.
 8. outcome-based model/runtime routing.
 
@@ -1856,7 +1856,7 @@ Quarry's browser-agent improvements are successful when:
 - repeated verified trajectories can be promoted into deterministic workflows;
 - self-healing cannot silently substitute a different business action;
 - Browserbase, local Chromium, Browserless, and future backends share one Quarry contract;
-- browser sessions can be watched, taken over, resumed, and replayed in Velion's own UI;
+- browser sessions can be watched, taken over, resumed, and replayed in Verevon's own UI;
 - benchmark results identify the best planner/observation/backend combination by task class;
 - security tests include indirect prompt injection and credential-exfiltration attempts;
 - Firecrawl-level endpoint and SDK ergonomics are available without making Firecrawl a dependency.
@@ -1896,7 +1896,7 @@ Evaluation
   WebArena Verified
   WorkArena
   VisualWebArena
-  Velion BrowserBench
+  Verevon BrowserBench
 ```
 
 Quarry V2 should become the **governed browser and web-intelligence execution engine** underneath Model Plane, not another end-to-end black-box browser agent.
@@ -3194,7 +3194,7 @@ Do not duplicate external effects for action workflows.
 ## 45. Quarry Proof Bundle
 
 Every important acquisition or browser task should produce a portable evidence
-object compatible with the broader Velion Proof Bundle.
+object compatible with the broader Verevon Proof Bundle.
 
 ```ts
 interface QuarryProofBundle {

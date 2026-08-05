@@ -94,7 +94,7 @@ func validateAuditOutboxRow(row AuditOutboxRow) error {
 	if strings.TrimSpace(row.EventID) == "" || len(row.EventID) > 128 {
 		return fmt.Errorf("audit event ID must contain 1-128 characters")
 	}
-	if !strings.HasPrefix(row.Subject, "velion.audit.v2.control.user-core.") {
+	if !strings.HasPrefix(row.Subject, "verevon.audit.v2.control.user-core.") {
 		return fmt.Errorf("audit subject %q is outside user-core authority", row.Subject)
 	}
 	if !json.Valid(row.Payload) {

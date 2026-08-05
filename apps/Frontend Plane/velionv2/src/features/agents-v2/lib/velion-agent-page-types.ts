@@ -5,7 +5,7 @@ import type {
   AgentRoleId,
   AgentStageId,
 } from "@/features/agents-v2/lib/agent-roles";
-import type { AgentVisualProps } from "@/features/agents-v2/components/VelionAgentsVisuals";
+import type { AgentVisualProps } from "@/features/agents-v2/components/VerevonAgentsVisuals";
 
 export type StageCard = {
   title: string;

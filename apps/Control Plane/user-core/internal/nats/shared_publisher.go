@@ -13,7 +13,7 @@ import (
 )
 
 // SharedPublisher publishes cross-plane domain events to the shared
-// velion-nats broker on the aqencia.controlplane.* subject namespace.
+// verevon-nats broker on the aqencia.controlplane.* subject namespace.
 //
 // Subject convention: aqencia.controlplane.<entity>.<verb>
 //
@@ -43,7 +43,7 @@ type SharedCredentials struct {
 // when sharedURL is empty (shared publishing disabled).
 func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientName string) (*SharedPublisher, error) {
 	if sharedURL == "" {
-		log.Println("ℹ️  VELION_NATS_URL not set — cross-plane publishing disabled")
+		log.Println("ℹ️  VEREVON_NATS_URL not set — cross-plane publishing disabled")
 		return nil, nil
 	}
 
@@ -236,7 +236,7 @@ func (sp *SharedPublisher) PublishGDPRErasure(ctx context.Context, eventID strin
 	if strings.TrimSpace(eventID) == "" || !json.Valid(payload) {
 		return fmt.Errorf("invalid GDPR fan-out event")
 	}
-	message := nats.NewMsg("velion.gdpr.erasure.requested")
+	message := nats.NewMsg("verevon.gdpr.erasure.requested")
 	message.Header.Set("Nats-Msg-Id", eventID)
 	message.Data = append([]byte(nil), payload...)
 	ack, err := sp.gdprJS.PublishMsg(ctx, message)

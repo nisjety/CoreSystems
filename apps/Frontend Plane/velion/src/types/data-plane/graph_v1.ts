@@ -1,7 +1,7 @@
 /**
  * Wave 11.C-a — TypeScript mirror of `apps/Data Plane/proto/graph_v1.proto`.
  *
- * Hand-rolled from the proto so the velion UI binds to a versioned
+ * Hand-rolled from the proto so the verevon UI binds to a versioned
  * contract while we wait for proto-gen tooling. When `pnpm proto-gen`
  * lands, replace this file with the generated output — the public
  * shapes are identical.
@@ -92,7 +92,7 @@ export const graphExpansionResponseSchema = z.object({
 });
 export type GraphExpansionResponse = z.infer<typeof graphExpansionResponseSchema>;
 
-// ─── velion UI-facing aggregate ───────────────────────────────────────────
+// ─── verevon UI-facing aggregate ───────────────────────────────────────────
 
 /**
  * What the GraphRAG viewer hydrates from `/api/knowledge/graph`. The

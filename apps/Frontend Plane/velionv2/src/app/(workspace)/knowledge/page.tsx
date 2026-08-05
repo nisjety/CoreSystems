@@ -1,19 +1,19 @@
 import type { Metadata } from "next";
-import { VelionKnowledgePage } from "@/features/knowledge-v2/components/VelionKnowledgePage";
-import { VelionProductShell } from "@/features/shell-v2/components/VelionProductShell";
+import { VerevonKnowledgePage } from "@/features/knowledge-v2/components/VerevonKnowledgePage";
+import { VerevonProductShell } from "@/features/shell-v2/components/VerevonProductShell";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Knowledge | Velion v2",
-  description: "Velion knowledge operations.",
+  title: "Knowledge | Verevon v2",
+  description: "Verevon knowledge operations.",
 };
 
 export default async function KnowledgePage() {
   await requireCompletedOnboarding("/knowledge");
 
   return (
-    <VelionProductShell activeRoute="/knowledge" defaultSidebarExpanded>
-      <VelionKnowledgePage />
-    </VelionProductShell>
+    <VerevonProductShell activeRoute="/knowledge" defaultSidebarExpanded>
+      <VerevonKnowledgePage />
+    </VerevonProductShell>
   );
 }

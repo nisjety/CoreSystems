@@ -153,12 +153,12 @@ pub struct AppState {
     /// those cores 401 a missing key, and an honest local error beats a
     /// round-trip that can only fail.
     pub application_core_internal_key: String,
-    /// Velion's own public origin (e.g. "<http://localhost:5173>"), as seen by
+    /// Verevon's own public origin (e.g. "<http://localhost:5173>"), as seen by
     /// a user's browser through the gateway. Used only to build the OAuth
     /// `redirect_uri` for MCP server connections — an external authorization
     /// server must redirect back to a URL the browser can actually reach,
     /// never model-gateway's internal address.
-    pub velion_public_origin: String,
+    pub verevon_public_origin: String,
     /// Shared static secret proving to capability-core that a `GET
     /// .../oauth-token` call genuinely came from model-gateway, for the one
     /// call site (`proxy_mcp_tool`'s execution-core-triggered dispatch) that
@@ -297,7 +297,7 @@ impl AppState {
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
             application_core_internal_key: String::new(),
-            velion_public_origin: "http://localhost:5173".to_owned(),
+            verevon_public_origin: "http://localhost:5173".to_owned(),
             mcp_oauth_service_token: String::new(),
             http_client: reqwest::Client::new(),
             // Pricing disabled by default (no cost-core URL); `from_env` wires it
@@ -475,7 +475,7 @@ impl AppState {
         let application_core_internal_key = std::env::var("APPLICATION_CORE_INTERNAL_KEY")
             .or_else(|_| std::env::var("INTERNAL_API_KEY"))
             .unwrap_or_default();
-        let velion_public_origin = std::env::var("VELION_PUBLIC_ORIGIN")
+        let verevon_public_origin = std::env::var("VEREVON_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| "http://localhost:5173".to_owned());
         let mcp_oauth_service_token =
             std::env::var("MCP_OAUTH_SERVICE_TOKEN").unwrap_or_default();
@@ -586,7 +586,7 @@ impl AppState {
             state.insight_core_base_url = insight_core_base_url.clone();
             state.social_core_base_url = social_core_base_url.clone();
             state.application_core_internal_key = application_core_internal_key.clone();
-            state.velion_public_origin = velion_public_origin.clone();
+            state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache.clone();
@@ -627,7 +627,7 @@ impl AppState {
             state.insight_core_base_url = insight_core_base_url;
             state.social_core_base_url = social_core_base_url;
             state.application_core_internal_key = application_core_internal_key;
-            state.velion_public_origin = velion_public_origin.clone();
+            state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache;

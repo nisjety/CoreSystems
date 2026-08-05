@@ -48,5 +48,5 @@ func TestDisabledModeDispatchFailsWithoutSyntheticSuccess(t *testing.T) {
 //   - req.Type        → WorkflowID  (must match a workflow in your Novu dashboard)
 //   - req.RecipientID → SubscriberID
 //   - req.RequestID   → Novu idempotency key  (Novu deduplicates on this)
-//   - req.Payload     → trigger payload + _velion_* correlation fields
+//   - req.Payload     → trigger payload + _verevon_* correlation fields
 // ---------------------------------------------------------------------------

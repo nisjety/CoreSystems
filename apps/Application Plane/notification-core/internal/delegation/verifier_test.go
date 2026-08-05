@@ -15,7 +15,7 @@ func TestVerifierAcceptsBoundDelegationAndRejectsReplay(t *testing.T) {
 	verifier, err := NewVerifier(Config{
 		Audience: "notification-core",
 		Keys: map[string]string{
-			"velion-gateway": "gateway-test-secret-at-least-32-bytes",
+			"verevon-gateway": "gateway-test-secret-at-least-32-bytes",
 		},
 		Now: func() time.Time { return now },
 	})
@@ -25,7 +25,7 @@ func TestVerifierAcceptsBoundDelegationAndRejectsReplay(t *testing.T) {
 
 	body := []byte(`{"organization_id":"org-1","recipient":{"kind":"user","id":"user-1"}}`)
 	request := signedRequest(t, http.MethodPost, "http://notification-core:3140/api/v1/notification-requests", body, signedFields{
-		serviceID:      "velion-gateway",
+		serviceID:      "verevon-gateway",
 		secret:         "gateway-test-secret-at-least-32-bytes",
 		timestamp:      now,
 		nonce:          "nonce-1234567890",
@@ -38,7 +38,7 @@ func TestVerifierAcceptsBoundDelegationAndRejectsReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
-	if principal.ServiceID != "velion-gateway" || principal.UserID != "user-1" || principal.OrganizationID != "org-1" {
+	if principal.ServiceID != "verevon-gateway" || principal.UserID != "user-1" || principal.OrganizationID != "org-1" {
 		t.Fatalf("principal = %#v", principal)
 	}
 	if _, err := verifier.Verify(request, body); !IsReplay(err) {
@@ -50,7 +50,7 @@ func TestVerifierRejectsBodyOrgAndMethodTampering(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	verifier, err := NewVerifier(Config{
 		Audience: "notification-core",
-		Keys:     map[string]string{"velion-gateway": "gateway-test-secret-at-least-32-bytes"},
+		Keys:     map[string]string{"verevon-gateway": "gateway-test-secret-at-least-32-bytes"},
 		Now:      func() time.Time { return now },
 	})
 	if err != nil {
@@ -59,7 +59,7 @@ func TestVerifierRejectsBodyOrgAndMethodTampering(t *testing.T) {
 
 	body := []byte(`{"type":"support.requested"}`)
 	base := signedFields{
-		serviceID:      "velion-gateway",
+		serviceID:      "verevon-gateway",
 		secret:         "gateway-test-secret-at-least-32-bytes",
 		timestamp:      now,
 		nonce:          "nonce-original-123",
@@ -92,7 +92,7 @@ func TestVerifierRejectsUnknownPrincipalAndExpiredTimestamp(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	verifier, err := NewVerifier(Config{
 		Audience: "notification-core",
-		Keys:     map[string]string{"velion-gateway": "gateway-test-secret-at-least-32-bytes"},
+		Keys:     map[string]string{"verevon-gateway": "gateway-test-secret-at-least-32-bytes"},
 		Now:      func() time.Time { return now },
 		MaxSkew:  2 * time.Minute,
 	})
@@ -112,7 +112,7 @@ func TestVerifierRejectsUnknownPrincipalAndExpiredTimestamp(t *testing.T) {
 	}
 
 	expired := signedRequest(t, http.MethodGet, "http://notification-core:3140/notifications", body, signedFields{
-		serviceID: "velion-gateway",
+		serviceID: "verevon-gateway",
 		secret:    "gateway-test-secret-at-least-32-bytes",
 		timestamp: now.Add(-3 * time.Minute),
 		nonce:     "nonce-expired-123",
@@ -122,11 +122,11 @@ func TestVerifierRejectsUnknownPrincipalAndExpiredTimestamp(t *testing.T) {
 	}
 }
 
-func TestVerifierAcceptsVelionGatewayCrossLanguageFixture(t *testing.T) {
+func TestVerifierAcceptsVerevonGatewayCrossLanguageFixture(t *testing.T) {
 	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	verifier, err := NewVerifier(Config{
 		Audience: "notification-core",
-		Keys:     map[string]string{"velion-gateway": "0123456789abcdef0123456789abcdef"},
+		Keys:     map[string]string{"verevon-gateway": "0123456789abcdef0123456789abcdef"},
 		Now:      func() time.Time { return now },
 	})
 	if err != nil {
@@ -137,7 +137,7 @@ func TestVerifierAcceptsVelionGatewayCrossLanguageFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	request.Header.Set(HeaderServiceID, "velion-gateway")
+	request.Header.Set(HeaderServiceID, "verevon-gateway")
 	request.Header.Set(HeaderUserID, "user-1")
 	request.Header.Set(HeaderOrganizationID, "org-1")
 	request.Header.Set(HeaderRole, "admin")
@@ -150,7 +150,7 @@ func TestVerifierAcceptsVelionGatewayCrossLanguageFixture(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify() error = %v", err)
 	}
-	if principal.ServiceID != "velion-gateway" || principal.OrganizationID != "org-1" || principal.Role != "admin" {
+	if principal.ServiceID != "verevon-gateway" || principal.OrganizationID != "org-1" || principal.Role != "admin" {
 		t.Fatalf("principal = %#v", principal)
 	}
 }

@@ -1,4 +1,4 @@
-# CoreSystem root .gitignore — one repo covers all 6 planes + velion frontend.
+# CoreSystem root .gitignore — one repo covers all 6 planes + verevon frontend.
 # Exclude large build artefacts, dependency dirs, and runtime state. Keep
 # tracked: source, docs, compose files, Dockerfiles, env templates.
 

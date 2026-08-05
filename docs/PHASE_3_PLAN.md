@@ -1,6 +1,6 @@
-# Velion — Phase 3 "Complete the FULL versions" Execution Plan
+# Verevon — Phase 3 "Complete the FULL versions" Execution Plan
 
-> **Status:** Approved 2026-06-21 (recon-grounded + hardened by a 6-persona triage council). Source roadmap: `Velion-ai-first.md` (§7 CONTINUE + council #7 + the FULL completions of the Phase-2 product MVPs). **The greenfield wishlist (audit council #9) stays CUT.**
+> **Status:** Approved 2026-06-21 (recon-grounded + hardened by a 6-persona triage council). Source roadmap: `Verevon-ai-first.md` (§7 CONTINUE + council #7 + the FULL completions of the Phase-2 product MVPs). **The greenfield wishlist (audit council #9) stays CUT.**
 >
 > ## What Phase 3 is
 > **Make the wedge spine PROVABLE end-to-end and residency-honest:** monitor (Quarry change→notification) → brief (insight producers + scheduled delivery) → approve (durable HITL) → **act in-region** (embeddings on the model_plane gRPC hop, not direct-Azure). Plus the non-PII Brreg leads completion and the honest WorkflowBuilder label + the solid/* bug fixes.
@@ -16,7 +16,7 @@
 > ## ENTRY-GATE
 > Several items depend on **Phases 1/2/Ownership having LANDED** (E's Preview-gate carry-through; any Ownership/GDPR-coupled item; the D-1 surfaces). Treat that as an explicit gate, not an assumption — do not schedule a dependent sub-item before its predecessor is merged-and-green.
 
-Paths: gateway = `apps/Frontend Plane/velionv3/apps/gateway`; SPA = `apps/Frontend Plane/velionv3/src` (quote the space).
+Paths: gateway = `apps/Frontend Plane/verevonv3/apps/gateway`; SPA = `apps/Frontend Plane/verevonv3/src` (quote the space).
 
 ---
 
@@ -59,7 +59,7 @@ The hop is fully coded both ends (`inference-core` `create_embedding` real, bind
 
 ### `PR-5` — E: insight-core producer legs + scheduled brief delivery — deps: Entry-gate; parallel with B
 W3 is live with 1/4 producers (conversation-core).
-- Add the **social-core** producer leg (map `velion.application.social.*` lifecycle subjects → `surface=social`) [S] + the **model-plane-agents** leg (run/tool/approval counts via the model-plane-nats bridge) [M].
+- Add the **social-core** producer leg (map `verevon.application.social.*` lifecycle subjects → `surface=social`) [S] + the **model-plane-agents** leg (run/tool/approval counts via the model-plane-nats bridge) [M].
 - **Scheduled brief DELIVERY** via the existing **notification-core Novu adapter** (a Go scheduler POSTs a `daily_brief` notification carrying the **Preview gate** — do NOT build Novu) [M]; register the `daily_brief` workflow; fix the 2 stale code comments.
 - **DoD:** ≥3/4 producers live with real counts; brief delivered in_app+email with the Preview gate visible; idempotent; **unmapped-event-skipped test** locks the allow-list honesty. *(Defers GA4/GSC, the Quarry-change producer, and citation enrichment.)*
 

@@ -3,7 +3,7 @@ import type { Page } from '@playwright/test';
 
 /**
  * Advanced onboarding journeys (J2, J5, J8, J9). Closes the four ❌ entries
- * in velion-gap.md §12 — the underlying features were ✅ Closed in Waves
+ * in verevon-gap.md §12 — the underlying features were ✅ Closed in Waves
  * 10 + 11 + 13 (Slices D and F + the live Graph verification). These tests
  * pin the user-facing behaviour so the next Better Auth / Convex / Graph
  * change can't silently regress G18/G21/G45.
@@ -69,7 +69,7 @@ test.describe('Onboarding — advanced journeys (§12 J2/J5/J8/J9)', () => {
   });
 
   // ────────────────────────────────────────────────────────────────────────
-  // J2 — Microsoft Entra zero-input path (closes velion-gap.md G18 + G21)
+  // J2 — Microsoft Entra zero-input path (closes verevon-gap.md G18 + G21)
   // ────────────────────────────────────────────────────────────────────────
   // A Microsoft enterprise user who already has an org from their tenant
   // signs in once and lands directly on /dashboard. The onboarding wizard
@@ -143,7 +143,7 @@ test.describe('Onboarding — advanced journeys (§12 J2/J5/J8/J9)', () => {
   });
 
   // ────────────────────────────────────────────────────────────────────────
-  // J5 — Refresh resilience (closes velion-gap.md G16 verification)
+  // J5 — Refresh resilience (closes verevon-gap.md G16 verification)
   // ────────────────────────────────────────────────────────────────────────
   // User starts the wizard, fills the org step, "closes the tab" (clears
   // localStorage + cookies on a fresh context), reopens /onboarding, and

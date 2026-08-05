@@ -45,7 +45,7 @@ http.route({
 });
 
 // G35: Control Session projection — session-core's `Refresh` mirrors the
-// aggregated user/org/billing snapshot here so velion can subscribe
+// aggregated user/org/billing snapshot here so verevon can subscribe
 // reactively via `useQuery(api.controlSessions.byUser, ...)`.
 http.route({
   path: "/ingest/control-session",

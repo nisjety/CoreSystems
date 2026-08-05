@@ -1,19 +1,19 @@
 import type { Metadata } from "next";
-import { VelionAgentsShell } from "@/features/agents-v2/components/VelionAgentsShell";
-import { VelionChatbotStudio } from "@/features/agents-v2/components/VelionChatbotStudio";
+import { VerevonAgentsShell } from "@/features/agents-v2/components/VerevonAgentsShell";
+import { VerevonChatbotStudio } from "@/features/agents-v2/components/VerevonChatbotStudio";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Create Chatbot | Velion v2",
-  description: "Create a Velion chatbot agent.",
+  title: "Create Chatbot | Verevon v2",
+  description: "Create a Verevon chatbot agent.",
 };
 
 export default async function CreateChatbotPage() {
   await requireCompletedOnboarding("/agents/chatbots/new");
 
   return (
-    <VelionAgentsShell initialAgentSelection="chatbot">
-      <VelionChatbotStudio />
-    </VelionAgentsShell>
+    <VerevonAgentsShell initialAgentSelection="chatbot">
+      <VerevonChatbotStudio />
+    </VerevonAgentsShell>
   );
 }

@@ -1,8 +1,8 @@
 # Onboarding Live Crawl
 
-How velion's "drop your URL" onboarding step gets real `page_fetched`
+How verevon's "drop your URL" onboarding step gets real `page_fetched`
 and `branding_extracted` events back from Quarry, in under two seconds,
-without authentication on the velion → control hop.
+without authentication on the verevon → control hop.
 
 This document covers the end-to-end chain, the env vars per service,
 the failure modes, and the dev/prod posture for the auth bypass.
@@ -11,7 +11,7 @@ the failure modes, and the dev/prod posture for the auth bypass.
 
 ```
 ┌────────────────┐    POST /api/onboarding/    ┌─────────────────────┐
-│ velion browser ├───►   crawl-preview         │ velion Next.js      │
+│ verevon browser ├───►   crawl-preview         │ verevon Next.js      │
 │ (wizard step 3)│    {url: "skinsecret.no"}   │ route.ts            │
 └────────────────┘                             │                     │
        ▲                                       │  1. normalize URL   │
@@ -77,7 +77,7 @@ the failure modes, and the dev/prod posture for the auth bypass.
        │   └──────────────────────────────┬──────────────────────────┘
        │                                  │
        └──────────────────────────────────┘
-         velion's poll sees the events arrive and forwards them
+         verevon's poll sees the events arrive and forwards them
          as SSE snippets + branding to the wizard.
 ```
 
@@ -85,7 +85,7 @@ the failure modes, and the dev/prod posture for the auth bypass.
 
 | Service             | Port  | Language | Image                               |
 |---------------------|-------|----------|-------------------------------------|
-| velion              | 3000  | TS       | `frontend-plane-velion-frontend`    |
+| verevon              | 3000  | TS       | `frontend-plane-verevon-frontend`    |
 | quarry-control      | 8081  | Go       | `ingestion-plane-quarry-control`    |
 | quarry-edge         | 8082  | Rust     | `ingestion-plane-quarry-edge`       |
 | quarry-orchestrator | —     | Go       | `ingestion-plane-quarry-orchestrator` |
@@ -93,19 +93,19 @@ the failure modes, and the dev/prod posture for the auth bypass.
 | Postgres (ingestion)| 5432  | upstream | `postgres:16`                       |
 | Redis (ingestion)   | —     | upstream | `redis:7` (internal only)           |
 
-velion talks to quarry-control via the compose network using
+verevon talks to quarry-control via the compose network using
 `http://quarry-control:8081`. Nothing on the host side calls control
 directly except the smoke probe.
 
 ## Env vars
 
-### velion
+### verevon
 
 ```
 QUARRY_API_URL=http://quarry-control:8081
 ```
 
-That's it. velion's route generates its own idempotency keys and uses
+That's it. verevon's route generates its own idempotency keys and uses
 DNS to validate seed URLs before forwarding them.
 
 ### quarry-control
@@ -151,7 +151,7 @@ or set ENVIRONMENT to a non-prod value (wrong — fix the bypass).
 
 ## Hardening landed in this iteration
 
-1. **SSRF guard** (velion route) — refuses to forward private,
+1. **SSRF guard** (verevon route) — refuses to forward private,
    loopback, link-local, and non-http(s) hosts to Quarry. Resolves
    DNS first and validates resolved addresses too.
 2. **Branding URL allow-list** (`WebsiteStep.normalizeBranding`) —
@@ -165,8 +165,8 @@ or set ENVIRONMENT to a non-prod value (wrong — fix the bypass).
    in-memory dedupe set (1 h TTL by default), per-job attempt counter,
    and `markFailed` PUT to control after `MaxAttempts` (5) consecutive
    dispatch errors so failing jobs stop spamming.
-5. **Idempotent job creation** — velion sends an
-   `Idempotency-Key: velion-crawl-<sha256>` header derived from
+5. **Idempotent job creation** — verevon sends an
+   `Idempotency-Key: verevon-crawl-<sha256>` header derived from
    `(seedUrl, cap, day-bucket)`. Control returns 200 with the existing
    record on collision instead of 201 + duplicate row.
 6. **Structured warning events** — the route emits
@@ -187,7 +187,7 @@ docker run --rm --network=inter-plane-bus alpine sh -c "
     -H 'Accept: text/event-stream' \
     -d '{\"url\":\"skinsecret.no\",\"maxPages\":3}' \
     --max-time 12 \
-    http://frontend-plane-velion-frontend-1:3000/api/onboarding/crawl-preview"
+    http://frontend-plane-verevon-frontend-1:3000/api/onboarding/crawl-preview"
 ```
 
 Expected: `started → snippet → branding → … → done {source: "live"}`
@@ -198,7 +198,7 @@ or `no_events`, follow the failure-mode table below.
 
 | Symptom (in SSE stream) | Most likely cause | Fix |
 |---|---|---|
-| `warning code: control_unreachable` | quarry-control container down or velion can't DNS-resolve it | `docker ps | grep quarry-control`; check velion is on `inter-plane-bus` |
+| `warning code: control_unreachable` | quarry-control container down or verevon can't DNS-resolve it | `docker ps | grep quarry-control`; check verevon is on `inter-plane-bus` |
 | `warning code: no_events` (job created but no events flow) | orchestrator not running, or Temporal worker disconnected, or workflow registration broken | `docker logs quarry-orchestrator` — look for `jobs dispatcher started` |
 | `warning code: private_address` | user typed an internal host | expected; SSRF guard working |
 | `warning code: dns_failed` | typo'd domain | expected; surfaces in wizard |
@@ -209,9 +209,9 @@ or `no_events`, follow the failure-mode table below.
 
 ## Where the code lives
 
-- velion route: `apps/Frontend Plane/velion/src/app/api/onboarding/crawl-preview/route.ts`
-- velion consumer: `apps/Frontend Plane/velion/src/components/auth/onboarding/steps/WebsiteStep.tsx`
-- velion brand strip: `apps/Frontend Plane/velion/src/components/auth/onboarding/OnboardingFrame.tsx`
+- verevon route: `apps/Frontend Plane/verevon/src/app/api/onboarding/crawl-preview/route.ts`
+- verevon consumer: `apps/Frontend Plane/verevon/src/components/auth/onboarding/steps/WebsiteStep.tsx`
+- verevon brand strip: `apps/Frontend Plane/verevon/src/components/auth/onboarding/OnboardingFrame.tsx`
 - control jobs: `services/quarry-control/internal/resources/resources.go`
 - control store: `services/quarry-control/internal/store/store.go` (mem) + `…/pg/resources.go` (pg)
 - jobs dispatcher: `services/quarry-orchestrator/internal/jobs/dispatcher.go`

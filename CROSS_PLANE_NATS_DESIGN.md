@@ -4,7 +4,7 @@
 
 Each plane operates independently with:
 - **Local NATS** (`{plane}-nats`): Intra-plane event bus on `{plane}-net` network
-- **Shared NATS** (`velion-nats`): Cross-plane event broker on `triodelab-net` network
+- **Shared NATS** (`verevon-nats`): Cross-plane event broker on `triodelab-net` network
 
 Services publish to **both**:
 1. Local NATS for intra-plane subscribers
@@ -16,7 +16,7 @@ Services publish to **both**:
 ┌─────────────────────────────────────────────────────────────┐
 │                      triodelab-net (shared)                 │
 │  ┌──────────────────┐                                        │
-│  │ velion-nats      │ ← all planes connect here             │
+│  │ verevon-nats      │ ← all planes connect here             │
 │  │  (JetStream)     │                                        │
 │  │  subjects:       │                                        │
 │  │  aqencia.*.>     │                                        │
@@ -83,7 +83,7 @@ Examples:
 All service dockerfiles get:
 ```yaml
 environment:
-    NATS_SHARED_URL: nats://velion-nats:4222
+    NATS_SHARED_URL: nats://verevon-nats:4222
   NATS_SHARED_TOKEN: "aqencia-shared-nats-token-2026"
 networks:
   - {plane}-net          # Local plane network
@@ -180,7 +180,7 @@ class SharedNatsPublisher {
 
 ### ✅ Control Plane (DONE)
 - **Services**: auth-core (NestJS), user-core (Go), org-core (Go), billing-core (Go)
-- **Status**: All connected and publishing to velion-nats
+- **Status**: All connected and publishing to verevon-nats
   - `auth-core`: 6 event types (user registration, org creation, etc.)
   - `user-core`: user.registered published to shared NATS
   - `org-core`: org.created/updated/deleted via SharedPublisher interface

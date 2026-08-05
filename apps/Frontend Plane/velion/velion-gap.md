@@ -1,14 +1,14 @@
-# Velion — Source of Truth & Gap Tracker
+# Verevon — Source of Truth & Gap Tracker
 
-> **Last verified**: 2026-05-13 — **§10 has zero open gaps. Zero ❌ Not Implemented markers remain anywhere in the doc. §12 (test plan) is now ✅ Closed — all nine Playwright journeys have coverage.** The entire CoreSystem roadmap is functionally complete *and* test-covered, with the Microsoft Graph enrichment loop **LIVE end-to-end with real Graph data in the DB** (Wave 13 §8.33). The only remaining item is (1) `convex-gateway` ⚠️ Deferred until a forcing function fires (§8.32 audit found reactive UI is already live without it) — a deliberate ADR-shaped deferral, not a gap. Wave 13 §8.33 closed: live Graph verification for `ima.dacosta@aquatiq.com` (28KB avatar + jobTitle + location + phone + graphMail + graphEnrichedAt all persisted), G47 (Better Auth comma-separated scopes normalized to RFC 6749 space-separated form), G48 (`HandleUserProviderLinked` now does GetByEmail → GetByID fallback, mirrors `HandleUserRegistered`; resolves the testbruker email-drift case), G49 (convex-gateway dev server now mounts `./convex/` — without this, function additions never reach the running backend and queries like `controlSessions:byUser` fail at runtime with "Could not find public function"), G50 (split `ingestion-temporal` onto its own dedicated 1GB Postgres — eliminates the `GetTransferTasks` `context deadline exceeded` storm caused by 6 databases sharing a 256MB instance with `shared_buffers=64MB`), G51 (new `scripts/lint-env-files.sh` + `pnpm lint:env` — static check that catches `.env` vs `.env.docker` drift before it reaches a running container; opt-in until the 64-case pre-existing backlog is reconciled), plus Playwright coverage for J2/J5/J8/J9 (new `onboarding-advanced.spec.ts`); also documented the third instance of the `.env` vs `.env.docker` precedence trap (MICROSOFT_CLIENT_SECRET). Wave 12 §8.32 closed the convex-gateway audit + filed and closed G46 in the same wave (email Graph-write added to `enrichFromMicrosoftGraph` — verified LIVE in Wave 13). Wave 11 §8.31 closed G45 Slice F (wizard trimmed from 6 → 5 steps; new `<ConnectorConsentPrompt />` shown 90s into dashboard). Wave 10 §8.30 closed G41/G42/G43/G44 (Graph enrichment + reactive banner + toast feed + auth-core defensive fix). Wave 9 closed §8.23 (cascade hot-fix), §8.24 (G36-cutover Step A — Rust orchestration HTTP live on `28083:8083`), §8.25 (G37 — `users` schema NOT NULL on `password_hash`/`avatar`), §8.26 (G36-cutover Step D — CP agent-run scaffold decommissioned), §8.27 (G39 — velion boot-time gate + cross-service handshake), §8.28 (G38 — Quarry-v2 ingest now persists real bodies via new `/v1/artifacts/:id/bytes`), §8.29 (G40 — boot-time gate mirrored in all 4 CP Go services; surfaced + fixed a real billing-core config gap). All cross-service verification listed in the relevant §8 entries.
+> **Last verified**: 2026-05-13 — **§10 has zero open gaps. Zero ❌ Not Implemented markers remain anywhere in the doc. §12 (test plan) is now ✅ Closed — all nine Playwright journeys have coverage.** The entire CoreSystem roadmap is functionally complete *and* test-covered, with the Microsoft Graph enrichment loop **LIVE end-to-end with real Graph data in the DB** (Wave 13 §8.33). The only remaining item is (1) `convex-gateway` ⚠️ Deferred until a forcing function fires (§8.32 audit found reactive UI is already live without it) — a deliberate ADR-shaped deferral, not a gap. Wave 13 §8.33 closed: live Graph verification for `ima.dacosta@aquatiq.com` (28KB avatar + jobTitle + location + phone + graphMail + graphEnrichedAt all persisted), G47 (Better Auth comma-separated scopes normalized to RFC 6749 space-separated form), G48 (`HandleUserProviderLinked` now does GetByEmail → GetByID fallback, mirrors `HandleUserRegistered`; resolves the testbruker email-drift case), G49 (convex-gateway dev server now mounts `./convex/` — without this, function additions never reach the running backend and queries like `controlSessions:byUser` fail at runtime with "Could not find public function"), G50 (split `ingestion-temporal` onto its own dedicated 1GB Postgres — eliminates the `GetTransferTasks` `context deadline exceeded` storm caused by 6 databases sharing a 256MB instance with `shared_buffers=64MB`), G51 (new `scripts/lint-env-files.sh` + `pnpm lint:env` — static check that catches `.env` vs `.env.docker` drift before it reaches a running container; opt-in until the 64-case pre-existing backlog is reconciled), plus Playwright coverage for J2/J5/J8/J9 (new `onboarding-advanced.spec.ts`); also documented the third instance of the `.env` vs `.env.docker` precedence trap (MICROSOFT_CLIENT_SECRET). Wave 12 §8.32 closed the convex-gateway audit + filed and closed G46 in the same wave (email Graph-write added to `enrichFromMicrosoftGraph` — verified LIVE in Wave 13). Wave 11 §8.31 closed G45 Slice F (wizard trimmed from 6 → 5 steps; new `<ConnectorConsentPrompt />` shown 90s into dashboard). Wave 10 §8.30 closed G41/G42/G43/G44 (Graph enrichment + reactive banner + toast feed + auth-core defensive fix). Wave 9 closed §8.23 (cascade hot-fix), §8.24 (G36-cutover Step A — Rust orchestration HTTP live on `28083:8083`), §8.25 (G37 — `users` schema NOT NULL on `password_hash`/`avatar`), §8.26 (G36-cutover Step D — CP agent-run scaffold decommissioned), §8.27 (G39 — verevon boot-time gate + cross-service handshake), §8.28 (G38 — Quarry-v2 ingest now persists real bodies via new `/v1/artifacts/:id/bytes`), §8.29 (G40 — boot-time gate mirrored in all 4 CP Go services; surfaced + fixed a real billing-core config gap). All cross-service verification listed in the relevant §8 entries.
 >
 > **Prior waves (still valid):** Wave 8 G36 HTTP parity → flag-flipped in Wave 9. Wave 7 (G27/G28-followup/G34-followup/G35). Wave 6 (ADR 0004 cutover + G3/G16/G34/G28). Wave 5 hygiene (G4/G5/G13/G22/G23/G26). Wave 4 (G20/G21/G25). Wave 3 (G10/G14/G17). Wave 2 CI hygiene (G11/G12). Wave 1 baseline (G1/G2/G6/G8/G9/G15/G18/G19/G24/G29/G30/G31/G32/G33).
 >
-> Cross-checked against `docs/Velion_CONNECT_ROADMAP.md`, `docs/zero-input-enterprise-onboarding-roadmap.md`, `docs/ARCHITECTURE_DIAGRAM.md`, and `VELION_THIRD_PARTY_INTEGRATIONS.md`.
-> **Owners**: Frontend Plane (velion) + Control Plane (auth/user/org/billing/session) + Application Plane (convex-core/notification-core)
-> **Scope**: how velion talks to the rest of the CoreSystem pyramid, the canonical contracts, the patches landed, and the remaining work to close gaps.
+> Cross-checked against `docs/Verevon_CONNECT_ROADMAP.md`, `docs/zero-input-enterprise-onboarding-roadmap.md`, `docs/ARCHITECTURE_DIAGRAM.md`, and `VEREVON_THIRD_PARTY_INTEGRATIONS.md`.
+> **Owners**: Frontend Plane (verevon) + Control Plane (auth/user/org/billing/session) + Application Plane (convex-core/notification-core)
+> **Scope**: how verevon talks to the rest of the CoreSystem pyramid, the canonical contracts, the patches landed, and the remaining work to close gaps.
 
-This document is the durable reference for anyone implementing or modifying velion. When code disagrees with this file, **fix the code or update this file in the same PR**. Stale truth is worse than no truth.
+This document is the durable reference for anyone implementing or modifying verevon. When code disagrees with this file, **fix the code or update this file in the same PR**. Stale truth is worse than no truth.
 
 **Status marker legend** (used in every table below):
 
@@ -24,23 +24,23 @@ This document is the durable reference for anyone implementing or modifying veli
 
 | Document | Canonical authority for | Status |
 |---|---|---|
-| `velion-gap.md` (this file) | Cross-cutting integration truth, gap tracker, fix priority | Authoritative |
+| `verevon-gap.md` (this file) | Cross-cutting integration truth, gap tracker, fix priority | Authoritative |
 | `docs/adr/` | Architectural decisions (numbered, immutable once accepted) | Authoritative for the decision itself |
-| `docs/ARCHITECTURE_DIAGRAM.md` | Frontend Plane charter — L6 placement, L5 boundary policy, component hierarchy | Authoritative for Frontend Plane charter; amended per ADR 0003 (2026-05-11) to declare velion's `src/app/api/*` proxies as the canonical L5 ingress. Rules 5–7 carry the new contract. |
+| `docs/ARCHITECTURE_DIAGRAM.md` | Frontend Plane charter — L6 placement, L5 boundary policy, component hierarchy | Authoritative for Frontend Plane charter; amended per ADR 0003 (2026-05-11) to declare verevon's `src/app/api/*` proxies as the canonical L5 ingress. Rules 5–7 carry the new contract. |
 | `docs/zero-input-enterprise-onboarding-roadmap.md` | Microsoft Entra zero-input flow contract — `tokenRef`, `AuthProviderLinked` event, `/me/session-context`, slices A–F | Authoritative for enterprise sign-in path; Phase 4 (frontend wiring) pending |
-| `docs/Velion_CONNECT_ROADMAP.md` | Velion product / phase roadmap — UX phases, design system tokens, MVP checklist | Authoritative for product scope; **stale** in spots (middleware naming, cookie names, step count) |
-| `VELION_THIRD_PARTY_INTEGRATIONS.md` | Third-party integrations only (Zammad / Nango / Nohu) | Authoritative for those three. Renamed from `VELION_INTEGRATION.md` on 2026-05-11 per G22 closure — Control Plane integration lives in **this** file (`velion-gap.md`). |
+| `docs/Verevon_CONNECT_ROADMAP.md` | Verevon product / phase roadmap — UX phases, design system tokens, MVP checklist | Authoritative for product scope; **stale** in spots (middleware naming, cookie names, step count) |
+| `VEREVON_THIRD_PARTY_INTEGRATIONS.md` | Third-party integrations only (Zammad / Nango / Nohu) | Authoritative for those three. Renamed from `VEREVON_INTEGRATION.md` on 2026-05-11 per G22 closure — Control Plane integration lives in **this** file (`verevon-gap.md`). |
 | `docs/base-design.md` | Visual design tokens (referenced by CONNECT_ROADMAP) | Authoritative for design system |
 
-Reconciliation rule: when these disagree, `velion-gap.md` wins on integration contracts; `ARCHITECTURE_DIAGRAM.md` wins on Frontend Plane charter; the zero-input roadmap wins on enterprise auth contract; CONNECT_ROADMAP wins on product UX phases.
+Reconciliation rule: when these disagree, `verevon-gap.md` wins on integration contracts; `ARCHITECTURE_DIAGRAM.md` wins on Frontend Plane charter; the zero-input roadmap wins on enterprise auth contract; CONNECT_ROADMAP wins on product UX phases.
 
 ---
 
-## 1. Velion in the pyramid — ✅ Closed
+## 1. Verevon in the pyramid — ✅ Closed
 
 ```
                                       ┌────────────────────────────┐
-Layer 6 — Frontend Plane              │  velion (Next.js 15)       │
+Layer 6 — Frontend Plane              │  verevon (Next.js 15)       │
                                       │  triodelab-web (static)    │
                                       └─────────────┬──────────────┘
                                                     │ cookie + JWT
@@ -62,9 +62,9 @@ Layer 1 — Control Plane                  auth-core (TS / NestJS)   ← user-se
                                                                      session coordination
 ```
 
-Velion is a strictly downstream consumer. It never writes to any plane database directly. Every CP write goes through a CP HTTP endpoint behind an authenticated proxy route.
+Verevon is a strictly downstream consumer. It never writes to any plane database directly. Every CP write goes through a CP HTTP endpoint behind an authenticated proxy route.
 
-> **Charter rule** (settled by [ADR 0003](./docs/adr/0003-l5-boundary-policy.md)): velion's `src/app/api/*` route handlers **are** the canonical Frontend Plane L5 ingress. They validate sessions, mint internal auth headers, propagate correlation IDs, and forward to L1–L4 cores. `convex-gateway` is reserved for WebSocket fan-out of reactive workspace data only. The decision is conditional on three guardrails: shared `control-plane-auth.ts` helper, per-core internal-key middleware, and a forced revisit when a second frontend ships.
+> **Charter rule** (settled by [ADR 0003](./docs/adr/0003-l5-boundary-policy.md)): verevon's `src/app/api/*` route handlers **are** the canonical Frontend Plane L5 ingress. They validate sessions, mint internal auth headers, propagate correlation IDs, and forward to L1–L4 cores. `convex-gateway` is reserved for WebSocket fan-out of reactive workspace data only. The decision is conditional on three guardrails: shared `control-plane-auth.ts` helper, per-core internal-key middleware, and a forced revisit when a second frontend ships.
 
 ---
 
@@ -75,10 +75,10 @@ CoreSystem now has **three distinct kinds of "session"**. Conflating them was th
 | Session kind | Authority | Purpose | Storage | Frontend touchpoint |
 |---|---|---|---|---|
 | **User session** (login state) | `auth-core` (Better Auth) | Identity, cookie issuance, JWT for downstream planes, **OAuth token custody** (access + refresh) | auth-core Postgres + Better Auth tables | Cookie set on browser; `getSession()` validates server-side |
-| **Control session** (user / org / billing context) | `Control Plane / session-core` (Wave 3 MVP live) | Aggregates user identity + active org + entitlements + billing into one snapshot; emits `app.session.entitlements_changed` to notification-core. Reactive Convex projection + Redis cache deferred (G34/G35). | session-core in-memory aggregation + velion-nats `APP_SESSION` JetStream stream | velion proxy `/api/user/me/session-context` forwards to `GET /api/v1/sessions/current` when `CONTROL_SESSION_AUTHORITY_ENABLED=true` |
-| **Agentic session** (thread / run / checkpoint) | `Model Plane / session-core` (Rust) | Thread timeline, run metadata, checkpoints, context assembly for AI agents | model-plane Postgres + NATS / JetStream | Velion `/agents`, `/planner`, `/tasks`, `/chat` UIs |
+| **Control session** (user / org / billing context) | `Control Plane / session-core` (Wave 3 MVP live) | Aggregates user identity + active org + entitlements + billing into one snapshot; emits `app.session.entitlements_changed` to notification-core. Reactive Convex projection + Redis cache deferred (G34/G35). | session-core in-memory aggregation + verevon-nats `APP_SESSION` JetStream stream | verevon proxy `/api/user/me/session-context` forwards to `GET /api/v1/sessions/current` when `CONTROL_SESSION_AUTHORITY_ENABLED=true` |
+| **Agentic session** (thread / run / checkpoint) | `Model Plane / session-core` (Rust) | Thread timeline, run metadata, checkpoints, context assembly for AI agents | model-plane Postgres + NATS / JetStream | Verevon `/agents`, `/planner`, `/tasks`, `/chat` UIs |
 
-**Key rule**: velion's middleware and proxy routes ONLY care about user sessions (auth-core). Control-session and agentic-session are *application data*, not auth gates.
+**Key rule**: verevon's middleware and proxy routes ONLY care about user sessions (auth-core). Control-session and agentic-session are *application data*, not auth gates.
 
 ### 2.1 OAuth token custody (`tokenRef` contract) — ✅ Closed
 
@@ -86,11 +86,11 @@ From `docs/zero-input-enterprise-onboarding-roadmap.md` — locked contract:
 
 - **auth-core** owns OAuth tokens (access / refresh / scopes / expiry) for all providers (Microsoft, Google, etc.).
 - `user-core` and `org-core` consume only opaque references (`tokenRef`) plus identity metadata.
-- velion never sees raw OAuth tokens. It receives only the Better Auth cookie + JWT issued by auth-core.
+- verevon never sees raw OAuth tokens. It receives only the Better Auth cookie + JWT issued by auth-core.
 - Internal token exchange: `POST auth-core/internal/oauth/token` accepts `{ tokenRef }`, returns `{ access_token, expires_at }` for short-lived back-end calls (e.g. `user-core` → Microsoft Graph for profile enrichment).
 - Refresh: `POST auth-core/internal/oauth/refresh` (scaffold only — see G24).
 
-Verified: zero hits for `tokenRef` in `velion/src/`. Frontend isolation respected.
+Verified: zero hits for `tokenRef` in `verevon/src/`. Frontend isolation respected.
 
 ### 2.2 Repurposing CP `session-core` — ✅ Closed (Wave 3 MVP §8.17 + Wave 6 cache §8.20 + Wave 7 invalidator §8.21 + Wave 9 agent-run decommission §8.26)
 
@@ -101,7 +101,7 @@ Per [ADR 0002](./docs/adr/0002-cp-session-core-repurpose.md). CP `session-core` 
 | Method + Path | Status | Behaviour |
 |---|---|---|
 | `GET /api/v1/sessions/current` | ✅ live | Aggregates user-core (identity + onboarding) → org-core (org + entitlements) → billing-core (subscription) into one snapshot. Synchronous fan-out; upstream failures degrade silently except for user-core (returns 502). |
-| `POST /api/v1/sessions/refresh` | ✅ live | Re-aggregates and publishes `app.session.entitlements_changed` on `velion-nats` `APP_SESSION` JetStream stream. Used after explicit plan upgrades / org switches. |
+| `POST /api/v1/sessions/refresh` | ✅ live | Re-aggregates and publishes `app.session.entitlements_changed` on `verevon-nats` `APP_SESSION` JetStream stream. Used after explicit plan upgrades / org switches. |
 
 **Deferred to follow-up gaps** (see §10 G34/G35/G36):
 - Redis snapshot cache with 30s TTL + NATS-driven invalidation (G34)
@@ -115,9 +115,9 @@ Per [ADR 0002](./docs/adr/0002-cp-session-core-repurpose.md). CP `session-core` 
 - Document / retrieval state → Data Plane.
 
 **NATS topology (live)**:
-- session-core's `SharedPublisher` ensures the `APP_SESSION` JetStream stream on `velion-nats` (`app.session.>`, 7-day retention, 256 MB cap).
-- notification-core opens a **second** NATS connection (`SHARED_NATS_URL=nats://velion-nats:4222`) on top of its local app-nats publisher; `internal/subscribers/control_session.go` binds a durable queue subscriber to `app.session.entitlements_changed` and forwards each event to `notification.Service.Accept`.
-- velion's `/api/user/me/session-context` route honours `CONTROL_SESSION_AUTHORITY_ENABLED=true` to forward to session-core; otherwise falls back to user-core's narrower endpoint (the G18 path).
+- session-core's `SharedPublisher` ensures the `APP_SESSION` JetStream stream on `verevon-nats` (`app.session.>`, 7-day retention, 256 MB cap).
+- notification-core opens a **second** NATS connection (`SHARED_NATS_URL=nats://verevon-nats:4222`) on top of its local app-nats publisher; `internal/subscribers/control_session.go` binds a durable queue subscriber to `app.session.entitlements_changed` and forwards each event to `notification.Service.Accept`.
+- verevon's `/api/user/me/session-context` route honours `CONTROL_SESSION_AUTHORITY_ENABLED=true` to forward to session-core; otherwise falls back to user-core's narrower endpoint (the G18 path).
 
 **Future subscribers** (G34): when the cache + invalidation layer lands, session-core will also subscribe to `user.*`, `organization.*`, `billing.*` upstream subjects to bust Redis entries and re-publish `app.session.*`.
 
@@ -127,16 +127,16 @@ Per [ADR 0002](./docs/adr/0002-cp-session-core-repurpose.md). CP `session-core` 
 3. Cut `user-core` and `org-core` over to publish on the new aggregate subjects.
 4. Subscribe convex-core + notification-core to the new app.session.* subjects.
 5. Decommission the old `session-core/internal/repository/{plan,todo,approval,lineage}_repository.go` files.
-6. Repoint velion server routes that need plan/quota context at `/api/v1/sessions/current`.
+6. Repoint verevon server routes that need plan/quota context at `/api/v1/sessions/current`.
 
 ---
 
-## 3. Velion auth + session flow (current) — ✅ Closed
+## 3. Verevon auth + session flow (current) — ✅ Closed
 
 **Login**:
 1. User hits `/login` → `AuthPage` component.
 2. AuthPage calls `/api/auth/sign-in/oauth/{provider}` (catch-all) → forwards to auth-core `/api/auth/sign-in/{provider}`.
-3. auth-core (Better Auth) sets cookie `better-auth.session_token` (or one of the legacy aliases) on the velion origin.
+3. auth-core (Better Auth) sets cookie `better-auth.session_token` (or one of the legacy aliases) on the verevon origin.
 4. Browser is redirected to `/dashboard` (or original `?redirect=...`).
 
 **Per request**:
@@ -150,7 +150,7 @@ Per [ADR 0002](./docs/adr/0002-cp-session-core-repurpose.md). CP `session-core` 
 - Legacy / aliases: `auth_session`, `idknuten.sid`, `idknuten.session_token`, `session_token`
 - Pattern matches: `(?:__Secure-)?sid`, `(?:__Secure-)?sid_multi-`, `(?:__Secure-)?session_token`
 
-The legacy `idknuten.*` cookies should be sunset once telemetry confirms zero traffic on them (see G23). `docs/Velion_CONNECT_ROADMAP.md:84` mentions only `idknuten.sid` — that doc is stale.
+The legacy `idknuten.*` cookies should be sunset once telemetry confirms zero traffic on them (see G23). `docs/Verevon_CONNECT_ROADMAP.md:84` mentions only `idknuten.sid` — that doc is stale.
 
 **Logout**:
 - `authService.logout()` posts to `/api/auth/sign-out` (catch-all) → auth-core `sign-out` → cookie cleared.
@@ -166,7 +166,7 @@ There are **two onboarding paths**. Pick the right one based on identity provide
 
 For email/password and non-Microsoft OAuth sign-ups. Lives under `src/app/(onboarding)/onboarding/{step}`.
 
-| # | Step | Velion entrypoint | Service call | Backend writes |
+| # | Step | Verevon entrypoint | Service call | Backend writes |
 |---|---|---|---|---|
 | 1 | Profile | `/onboarding/profile` | `userService.updateCurrentUserProfile` → `/api/user/me` PATCH | `user-core.user_profiles` |
 | 2 | Organization | `/onboarding/organization` | `orgService.createOrganization` → `/api/org/orgs` POST **OR** `orgService.acceptInvitation` → `/api/auth/organization/accept-invitation` | `org-core.organizations` (+ membership in auth-core) |
@@ -179,7 +179,7 @@ For email/password and non-Microsoft OAuth sign-ups. Lives under `src/app/(onboa
 
 **Frontend orchestrator**: `src/components/onboarding/page/OnboardingPage.tsx` + `src/components/onboarding/services/onboarding-service.ts`. State is mirrored in localStorage under key `onboarding_state` for resume-on-refresh; this is *cache only* and must not become authoritative (see G3).
 
-> `docs/Velion_CONNECT_ROADMAP.md` describes a 7-step variant with `/onboarding/plan` between steps 5 and 6. **Plan selection is intentionally deferred** — every user is auto-assigned `plan = 'free'` and may upgrade later from `/settings/billing`. The 7th step is aspirational and not on the MVP path. CONNECT_ROADMAP MVP checklist (line 313) confirms this. (See G20 for formalization.)
+> `docs/Verevon_CONNECT_ROADMAP.md` describes a 7-step variant with `/onboarding/plan` between steps 5 and 6. **Plan selection is intentionally deferred** — every user is auto-assigned `plan = 'free'` and may upgrade later from `/settings/billing`. The 7th step is aspirational and not on the MVP path. CONNECT_ROADMAP MVP checklist (line 313) confirms this. (See G20 for formalization.)
 
 ### 4.2 Zero-input enterprise onboarding (Microsoft Entra ID — target state) — ✅ Closed (Slices A/B/C/D/E/F all ✅ Closed as of Wave 11 §8.31)
 
@@ -226,10 +226,10 @@ Owner: `docs/zero-input-enterprise-onboarding-roadmap.md`.
 | Slice B — `POST /internal/users/enrich-from-provider` | user-core | ✅ Closed — endpoint emits profileHints/scopes/tokenRef on register + provider-link |
 | Slice C — `POST /internal/oauth/token` + `/internal/oauth/refresh` in auth-core | auth-core | ✅ Closed — both routes fully implemented; G24 closed the provider-aware refresh (Microsoft Entra + Google) with full error-code union (`token_not_found` / `no_refresh_token` / `unsupported_provider` / `provider_not_configured` / `provider_rejected` / `provider_unreachable` / `persist_failed`) |
 | Slice D — Graph enrichment worker | user-core | ✅ Closed (Wave 10 §8.30 G41) — `HandleUserProviderLinked` (already wired) now calls Microsoft Graph `/me` + `/me/photo/$value` via new `clients.MicrosoftGraphClient` after exchanging tokenRef through `clients.AuthCoreOAuthClient`. On Graph 401 the helper auto-retries via auth-core's `/internal/oauth/refresh` (G24). All failures log + continue (best-effort). |
-| Slice E — Frontend post-login router | velion | ✅ Closed — `/auth/callback/page.tsx` calls `resolveOnboardingState()` server-side which hits `/me/session-context`; the legacy `needsOnboarding()` client retry loop is now a fallback only (G18 closed) |
-| Slice F — Connector consent after first value | velion + org-core | ✅ Closed (Wave 11 §8.31 G45) — the legacy `/onboarding/connect` wizard step is gone (5 steps not 6). After 90 s on the dashboard, `<ConnectorConsentPrompt />` surfaces as a bottom-right popover when the user has no Microsoft connection. Reuses `POST /api/oauth/initiate` for the connect handshake; dismissal persists in localStorage. |
+| Slice E — Frontend post-login router | verevon | ✅ Closed — `/auth/callback/page.tsx` calls `resolveOnboardingState()` server-side which hits `/me/session-context`; the legacy `needsOnboarding()` client retry loop is now a fallback only (G18 closed) |
+| Slice F — Connector consent after first value | verevon + org-core | ✅ Closed (Wave 11 §8.31 G45) — the legacy `/onboarding/connect` wizard step is gone (5 steps not 6). After 90 s on the dashboard, `<ConnectorConsentPrompt />` surfaces as a bottom-right popover when the user has no Microsoft connection. Reuses `POST /api/oauth/initiate` for the connect handshake; dismissal persists in localStorage. |
 
-**Velion usage of `/me/session-context`** (post-G18 closure):
+**Verevon usage of `/me/session-context`** (post-G18 closure):
 - `src/app/(auth)/auth/callback/page.tsx` → `resolveOnboardingState()` → `onboarding-server.ts:fetchSessionContext` — **primary post-login router** ✅
 - `src/lib/server/active-org.ts:64` — server-side org resolution for protected routes
 - `src/app/api/chat/_lib/session-store.ts:293` — chat actor → org binding
@@ -239,11 +239,11 @@ Owner: `docs/zero-input-enterprise-onboarding-roadmap.md`.
 
 ---
 
-## 5. API surface — velion → CP / Application Plane / Ingestion — ✅ Closed
+## 5. API surface — verevon → CP / Application Plane / Ingestion — ✅ Closed
 
-All velion-side proxy routes live under `src/app/api/`. Each forwards to a single canonical upstream and uses `control-plane-auth.ts` for session validation.
+All verevon-side proxy routes live under `src/app/api/`. Each forwards to a single canonical upstream and uses `control-plane-auth.ts` for session validation.
 
-| Velion route | Upstream | Notes |
+| Verevon route | Upstream | Notes |
 |---|---|---|
 | `/api/auth/[...path]` | auth-core `/api/auth/*` (Better Auth) | Catch-all; preserves cookies; normalizes sign-out 400 → 200 |
 | `/api/auth/get-session` | auth-core `/api/v2/auth/getSession` | ✅ Closed (G2) — thin wrapper over the shared `getCurrentSession()` helper; no duplicate round-trips |
@@ -259,7 +259,7 @@ All velion-side proxy routes live under `src/app/api/`. Each forwards to a singl
 | `/api/ingestion/ingest-job` | Ingestion Plane Quarry → Data Plane documents-api-go `/v1/documents` | ✅ **Fixed routing** |
 | `/api/ingestion/crawl[/...]` | Ingestion Plane Quarry crawl job lifecycle | Used by dashboard CrawlStatusCard |
 | `/api/ai/search`, `/api/chat/stream` | Model Plane (Reasoning / chat stream) via SSE | Per CONNECT_ROADMAP MVP checklist |
-| `/api/external/{zammad,nango,nohu}/[...path]` | Externally-hosted services (3012/3013/3014) | NOT Control Plane; see `VELION_THIRD_PARTY_INTEGRATIONS.md`. |
+| `/api/external/{zammad,nango,nohu}/[...path]` | Externally-hosted services (3012/3013/3014) | NOT Control Plane; see `VEREVON_THIRD_PARTY_INTEGRATIONS.md`. |
 
 ### 5.1 L5 boundary policy (charter vs reality) — ✅ Closed (ADR 0003 ratified + charter amended in §8.17; `scripts/lint-proxy-routes.sh` ratchet enforced)
 
@@ -269,14 +269,14 @@ This is gap **G17**. Two viable architectures; the team must pick one:
 
 | Option | What it means | Pros | Cons |
 |---|---|---|---|
-| **(a)** Formalize the bypass | Update charter to state: "velion's `src/app/api/*` route handlers are the de-facto L5 surface; convex-gateway covers WebSocket / reactive only" | Minimal refactor; keeps low latency; matches reality | Charter doc rewrite; future microfrontends must replicate the proxy layer |
-| **(b)** Route everything through L5 | Stand up a real Application Plane gateway (extend `convex-gateway`); move velion proxies into the gateway | Single ingress for L1-L4; better cross-cutting (rate limit, audit, tracing); microfrontend friendly | Larger refactor; extra hop adds 5-15ms latency; gateway becomes a SPOF |
+| **(a)** Formalize the bypass | Update charter to state: "verevon's `src/app/api/*` route handlers are the de-facto L5 surface; convex-gateway covers WebSocket / reactive only" | Minimal refactor; keeps low latency; matches reality | Charter doc rewrite; future microfrontends must replicate the proxy layer |
+| **(b)** Route everything through L5 | Stand up a real Application Plane gateway (extend `convex-gateway`); move verevon proxies into the gateway | Single ingress for L1-L4; better cross-cutting (rate limit, audit, tracing); microfrontend friendly | Larger refactor; extra hop adds 5-15ms latency; gateway becomes a SPOF |
 
 **Recommendation**: Option (a) for the next 2 quarters. Already invested in `control-plane-auth.ts` helper and per-core middleware. Option (b) is the right answer once a second frontend appears (mobile, second tenant). Open an ADR (`docs/adr/0003-l5-boundary-policy.md`) and resolve before next architecture review.
 
-### 5.2 Application Plane endpoints velion *should* call — ✅ Closed (notification-core toast feed ✅ Closed via G44; convex realtime banner ✅ Closed via G43; convex-gateway ⚠️ Deferred-until-forcing-function per §8.32 — reactive UI is already live without it)
+### 5.2 Application Plane endpoints verevon *should* call — ✅ Closed (notification-core toast feed ✅ Closed via G44; convex realtime banner ✅ Closed via G43; convex-gateway ⚠️ Deferred-until-forcing-function per §8.32 — reactive UI is already live without it)
 
-These are L5 endpoints velion is currently *not* calling and likely should:
+These are L5 endpoints verevon is currently *not* calling and likely should:
 
 - `convex-core` reactive subscriptions for live dashboard cards — ✅ Closed (Wave 10 §8.30 G43) — `<EnterpriseTrustBanner />` subscribes to `api.controlSessions.byUser` via `useQuery` from `convex/react`. Plan / entitlement / org-switch updates flow without a refresh.
 - `notification-core` for toast / email delivery feed — ✅ Closed (Wave 10 §8.30 G44) — `useEntitlementToast()` mounted in dashboard layout fires sonner toast on `control_session.entitlements_changed` notifications. `<Toaster />` mounted in root layout (this also lights up `AuthCallbackClient`'s previously-silent toast calls).
@@ -284,28 +284,28 @@ These are L5 endpoints velion is currently *not* calling and likely should:
 
 ---
 
-## 6. Environment contract — ✅ Closed (boot-time validation live across velion + 4 CP Go services per G39/G40)
+## 6. Environment contract — ✅ Closed (boot-time validation live across verevon + 4 CP Go services per G39/G40)
 
 All required, all fail-fast:
 
 | Var | Owner | Used by | Required? |
 |---|---|---|---|
-| `AUTH_SERVICE_URL` | Control Plane | velion proxies, control-plane-auth.ts | Yes (default `http://auth-service:3011`) |
-| `USER_SERVICE_URL` | Control Plane | velion proxies, active-org, chat session-store | Yes (default `http://user-core:3012`) |
-| `ORG_SERVICE_URL` | Control Plane | velion `/api/org/*` | Yes (default `http://org-core:8080`) |
-| `BILLING_SERVICE_URL` | Control Plane | velion `/api/org/*` billing branches | Yes (default `http://billing-core-service:3014`) |
-| `INTERNAL_API_KEY` (or `INTERNAL_SERVICE_SECRET`) | Shared | velion → all CP cores | **Required**; helpers throw if missing. Hardcoded fallbacks removed. |
+| `AUTH_SERVICE_URL` | Control Plane | verevon proxies, control-plane-auth.ts | Yes (default `http://auth-service:3011`) |
+| `USER_SERVICE_URL` | Control Plane | verevon proxies, active-org, chat session-store | Yes (default `http://user-core:3012`) |
+| `ORG_SERVICE_URL` | Control Plane | verevon `/api/org/*` | Yes (default `http://org-core:8080`) |
+| `BILLING_SERVICE_URL` | Control Plane | verevon `/api/org/*` billing branches | Yes (default `http://billing-core-service:3014`) |
+| `INTERNAL_API_KEY` (or `INTERNAL_SERVICE_SECRET`) | Shared | verevon → all CP cores | **Required**; helpers throw if missing. Hardcoded fallbacks removed. |
 | `CONVEX_AUTH_ISSUER`, `CONVEX_AUTH_JWKS_URL`, `CONVEX_AUTH_AUDIENCE` | Application Plane convex | convex-core JWT validation (customJwt provider) | Required for reactive subscriptions |
 | `NEXT_PUBLIC_CONVEX_URL` | Frontend | `ConvexProvider` (Phase 8 wiring) | Required once Phase 8 lands |
-| `E2E_BYPASS_SECRET` | Velion | proxy.ts E2E bypass | Optional; never honoured in production |
-| `NEXT_PUBLIC_DEBUG_ONBOARDING` | Velion | onboarding-service.ts | Optional; gates debug `console.log` |
+| `E2E_BYPASS_SECRET` | Verevon | proxy.ts E2E bypass | Optional; never honoured in production |
+| `NEXT_PUBLIC_DEBUG_ONBOARDING` | Verevon | onboarding-service.ts | Optional; gates debug `console.log` |
 | `CORS_ALLOWED_ORIGINS` | Control Plane (cores) | user-core, session-core CORS allowlist | Required in production |
 
 Add to CI: a startup check that fails the container boot if any **required** env is empty in non-dev `NODE_ENV`.
 
 ---
 
-## 7. CP service catalog (what velion can rely on) — ✅ Closed (all 9 catalog rows verified live 2026-05-12)
+## 7. CP service catalog (what verevon can rely on) — ✅ Closed (all 9 catalog rows verified live 2026-05-12)
 
 | Service | Lang | Port | Auth at HTTP | Status post-patch |
 |---|---|---|---|---|
@@ -352,7 +352,7 @@ The code path is conclusively correct. Both users have:
 
 **(b) convex-gateway — reframed as deliberate deferral (matches G27 ADR 0004 precedent)**
 
-The doc has carried `convex-gateway WebSocket proxy — ❌ Not wired` since the §7 catalog was first written. **Audit shows this is the wrong status.** Reactive UI is **already live** via velion's `ConvexReactClient` (G43 reactive trust banner verified). The Convex JS client opens its own authenticated WebSocket to convex-backend. So velion has reactive subscriptions today — it just doesn't route them through a separate gateway proxy.
+The doc has carried `convex-gateway WebSocket proxy — ❌ Not wired` since the §7 catalog was first written. **Audit shows this is the wrong status.** Reactive UI is **already live** via verevon's `ConvexReactClient` (G43 reactive trust banner verified). The Convex JS client opens its own authenticated WebSocket to convex-backend. So verevon has reactive subscriptions today — it just doesn't route them through a separate gateway proxy.
 
 The "convex-gateway" was a planned **defense-in-depth** layer:
 - Per-frontend rate limits on subscription bandwidth
@@ -361,7 +361,7 @@ The "convex-gateway" was a planned **defense-in-depth** layer:
 - Auth termination at the gateway (independent of Convex's own JWT validation)
 
 None of these have a current forcing function:
-- Single frontend (velion) — no fan-out to standardise
+- Single frontend (verevon) — no fan-out to standardise
 - Single tenant per deploy — no partitioning need
 - Convex already enforces JWT auth on every query — gateway auth would be a double-check, not a missing primitive
 - No PII workload that mandates centralised audit
@@ -369,7 +369,7 @@ None of these have a current forcing function:
 The right status is **⚠️ Deferred** (same shape as ADR 0004's "defer least-privilege shrink until a named forcing function fires"). Forcing functions that would flip this to "must implement":
 1. Second frontend ships (mobile app, second tenant) — gateway becomes the single ingress for both
 2. PII-classified workload lands — audit log requirement at the proxy layer
-3. Multi-tenant deploy of velion — per-tenant subscription quotas
+3. Multi-tenant deploy of verevon — per-tenant subscription quotas
 
 When any of those land, file a new gap to stand the gateway up. Until then, defense-in-depth at the gateway level is YAGNI.
 
@@ -407,7 +407,7 @@ This wave reshapes the onboarding flow + adds a contextual dashboard prompt. The
 
 | What landed | File |
 |---|---|
-| New `<ConnectorConsentPrompt />` — a self-positioning bottom-right popover that surfaces only when (a) the dashboard has been live for `FIRST_VALUE_DELAY_MS=90_000`, (b) the user has no Microsoft connection (looks up `useKnowledgeIntegrations()` from the existing knowledge-data hook), and (c) the user hasn't dismissed before. Dismissal persists in `localStorage` (`velion.connector-consent-prompt.dismissed`). | [`src/components/dashboard/ConnectorConsentPrompt.tsx`](src/components/dashboard/ConnectorConsentPrompt.tsx) (new) |
+| New `<ConnectorConsentPrompt />` — a self-positioning bottom-right popover that surfaces only when (a) the dashboard has been live for `FIRST_VALUE_DELAY_MS=90_000`, (b) the user has no Microsoft connection (looks up `useKnowledgeIntegrations()` from the existing knowledge-data hook), and (c) the user hasn't dismissed before. Dismissal persists in `localStorage` (`verevon.connector-consent-prompt.dismissed`). | [`src/components/dashboard/ConnectorConsentPrompt.tsx`](src/components/dashboard/ConnectorConsentPrompt.tsx) (new) |
 | Connect CTA reuses the existing `POST /api/oauth/initiate` (G39 §8.27 fixed its 401 path) → redirects browser to the Microsoft `authorization_url`. "Maybe later" persists dismissal. No new backend surface. | same |
 | Mounted in `DashboardLayoutContent` next to `<EnterpriseTrustBanner />` so it shows on every dashboard sub-route. | [`src/app/(dashboard)/layout.tsx`](src/app/(dashboard)/layout.tsx) |
 
@@ -416,13 +416,13 @@ This wave reshapes the onboarding flow + adds a contextual dashboard prompt. The
 **Verification:**
 
 ```
-$ cd velion && pnpm tsc --noEmit -p tsconfig.json | grep -iE "Slice F file"
+$ cd verevon && pnpm tsc --noEmit -p tsconfig.json | grep -iE "Slice F file"
 # 0 errors
 $ docker compose restart frontend
-$ docker logs --since 30s frontend-plane-velion-frontend-1
+$ docker logs --since 30s frontend-plane-verevon-frontend-1
 ✓ Ready in 1511ms
-[velion startup] internal API keys OK (INTERNAL_API_KEY, AUTH_CORE_INTERNAL_API_KEY)
-[velion startup] internal API key handshake OK (integration-core)
+[verevon startup] internal API keys OK (INTERNAL_API_KEY, AUTH_CORE_INTERNAL_API_KEY)
+[verevon startup] internal API key handshake OK (integration-core)
 ```
 
 **Behaviour matrix (live):**
@@ -432,7 +432,7 @@ $ docker logs --since 30s frontend-plane-velion-frontend-1
 | Fresh sign-in (no Microsoft) | Wizard runs profile → org → website → team → complete (5 steps); dashboard renders; trust banner shows; after 90 s the connector prompt appears bottom-right |
 | Fresh sign-in (already linked Microsoft via OAuth) | Wizard runs 5 steps; dashboard renders; prompt **does not appear** (already-connected check via `integrations.connections`) |
 | Returning user with old `step = 'connect'` in localStorage | `/onboarding/connect` → redirects forward to `/onboarding/team`; wizard finishes; prompt may appear on dashboard depending on connection state |
-| User clicks "Maybe later" | `velion.connector-consent-prompt.dismissed=1` in localStorage; prompt does not re-appear on this device |
+| User clicks "Maybe later" | `verevon.connector-consent-prompt.dismissed=1` in localStorage; prompt does not re-appear on this device |
 | User clicks "Connect Microsoft 365" | `POST /api/oauth/initiate` (G39-fixed) → browser navigates to Microsoft `authorization_url` → after OAuth, returning user has the integration; next dashboard load skips the prompt (already-connected check) |
 
 **§10 housekeeping:** G45 closed. **Slice F (the last ❌ Not Implemented marker in the doc) is now ✅ Closed.** With Wave 11 the entire roadmap is functionally complete; only operational follow-ups remain (Azure secret rotation per §8.30, future convex-gateway WebSocket proxy when a second frontend ships).
@@ -475,7 +475,7 @@ Wave 4 §8.18 mounted the banner on the dashboard; Wave 7 §8.21 G35 stood up th
 
 **(d) G44 — Toast feed for `app.session.entitlements_changed`**
 
-notification-core's `ControlSessionSubscriber` (G14 §8.17) already turns every `app.session.entitlements_changed` NATS event into a `Notification` row with `event_type='control_session.entitlements_changed'`. Velion's notification WebSocket bridge already invalidates the cache. The dashboard just had no consumer — no toast, no inbox row, nothing user-visible.
+notification-core's `ControlSessionSubscriber` (G14 §8.17) already turns every `app.session.entitlements_changed` NATS event into a `Notification` row with `event_type='control_session.entitlements_changed'`. Verevon's notification WebSocket bridge already invalidates the cache. The dashboard just had no consumer — no toast, no inbox row, nothing user-visible.
 
 | What landed | File |
 |---|---|
@@ -515,10 +515,10 @@ $ docker run --rm --network=controlplane-net natsio/nats-box:latest \
 # Rotating that secret in Azure Portal closes the verification loop without
 # any code changes.
 
-# Velion frontend boot (G43/G44):
+# Verevon frontend boot (G43/G44):
 ✓ Ready in 2.2s
-[velion startup] internal API keys OK (INTERNAL_API_KEY, AUTH_CORE_INTERNAL_API_KEY)
-[velion startup] internal API key handshake OK (integration-core)
+[verevon startup] internal API keys OK (INTERNAL_API_KEY, AUTH_CORE_INTERNAL_API_KEY)
+[verevon startup] internal API key handshake OK (integration-core)
 
 # Type-check filtered to modified files: 0 errors.
 # go build ./... (user-core): 0 errors.
@@ -531,13 +531,13 @@ $ docker run --rm --network=controlplane-net natsio/nats-box:latest \
 
 ### 8.29 G40 — Mirror G39 boot-time format check in all CP Go services; surfaced a real production gap (2026-05-12) — ✅ Closed
 
-§8.27 closed velion's side of internal-API-key drift. G40 mirrors the gate in the four CP Go services so a misconfigured CP container also refuses to start (in release mode) rather than serve a green `/health` and 401 every cross-service call. The first activation immediately surfaced a real config gap in billing-core's `.env.docker` — exactly the kind of misconfig G40 was designed to catch.
+§8.27 closed verevon's side of internal-API-key drift. G40 mirrors the gate in the four CP Go services so a misconfigured CP container also refuses to start (in release mode) rather than serve a green `/health` and 401 every cross-service call. The first activation immediately surfaced a real config gap in billing-core's `.env.docker` — exactly the kind of misconfig G40 was designed to catch.
 
 **Shared helper (copied per-service to avoid cross-module workspace gymnastics):**
 
 | What landed | File |
 |---|---|
-| Canonical helper at `internal/internalkey/assert.go` exposing `AssertFromEnv(envVars...)`, `Validate(name, value)`, and `IsProduction()`. Stdlib-only (no external deps). Mirrors velion's `scripts/check-internal-api-keys.mjs` rules — same placeholder prefixes (`test`, `placeholder`, `change-me`, `your-`, `replace-me`), same `min_length=32`, same fallback resolution order. Recognised production indicators: `GIN_MODE=release`, `ENV=production`, `NODE_ENV=production`, `GO_ENV=production`, `APP_ENV=production`. | [`session-core/internal/internalkey/assert.go`](../../Control%20Plane/session-core/internal/internalkey/assert.go) (canonical), copied byte-for-byte into the 3 other services. |
+| Canonical helper at `internal/internalkey/assert.go` exposing `AssertFromEnv(envVars...)`, `Validate(name, value)`, and `IsProduction()`. Stdlib-only (no external deps). Mirrors verevon's `scripts/check-internal-api-keys.mjs` rules — same placeholder prefixes (`test`, `placeholder`, `change-me`, `your-`, `replace-me`), same `min_length=32`, same fallback resolution order. Recognised production indicators: `GIN_MODE=release`, `ENV=production`, `NODE_ENV=production`, `GO_ENV=production`, `APP_ENV=production`. | [`session-core/internal/internalkey/assert.go`](../../Control%20Plane/session-core/internal/internalkey/assert.go) (canonical), copied byte-for-byte into the 3 other services. |
 | 7 unit tests covering empty / placeholder / too-short / OK paths, fallback resolution, missing-both case, and IsProduction. All pass under `go test ./internal/internalkey/...`. | [`session-core/internal/internalkey/assert_test.go`](../../Control%20Plane/session-core/internal/internalkey/assert_test.go) |
 
 **Wired into each service's `main.go` right after startup logging:**
@@ -577,7 +577,7 @@ $ docker logs billing-core-service | head -3
   (INTERNAL_API_KEY)   ← after fixing .env.docker
 ```
 
-All 4 services log a single deterministic line at boot — OK on the happy path, FATAL+exit(1) in production with a bad key, WARN+continue in dev. Combined with §8.27's velion-side closure, the entire internal-API-key consumer surface (5 services) now fails fast at startup instead of at first user click.
+All 4 services log a single deterministic line at boot — OK on the happy path, FATAL+exit(1) in production with a bad key, WARN+continue in dev. Combined with §8.27's verevon-side closure, the entire internal-API-key consumer surface (5 services) now fails fast at startup instead of at first user click.
 
 **§10 housekeeping:** ✅ Closed — G40 closed. No remaining open gaps in §10.
 
@@ -592,7 +592,7 @@ All 4 services log a single deterministic line at boot — OK on the happy path,
 | `GET /v1/artifacts/:id/bytes` returns the raw bytes for an `ArtifactKind` ULID. The path is `/bytes`-suffixed because the existing `/v1/artifacts/:id` is a proxy to quarry-control that returns artifact **metadata** — different concern. Returns 200 on hit (with `text/plain; charset=utf-8` + `Cache-Control: public, max-age=3600, immutable`), 400 on a malformed id, 404 on miss. Reads `state.artifacts.get(&id)` — the same internal store used by `read_html_artifact` / `read_markdown_artifact` for enrichment. | [`crates/quarry-edge/src/routes.rs`](../../Ingestion%20Plane/Quarry-v2/crates/quarry-edge/src/routes.rs) |
 | `quarry-edge` container rebuilt + force-recreated. `cargo check -p quarry-edge` clean. Verified `200 / 400 / 404` paths against the live binary. | container `quarry-edge` |
 
-**Velion side — chain `/v1/scrape` → `/v1/artifacts/:id/bytes` → Data Plane:**
+**Verevon side — chain `/v1/scrape` → `/v1/artifacts/:id/bytes` → Data Plane:**
 
 | What landed | File |
 |---|---|
@@ -623,16 +623,16 @@ End-to-end: a Quarry crawl now materialises real markdown body in Data Plane, in
 
 ### 8.27 G39 — Internal API key drift fails at startup, not at first user click (2026-05-12) — ✅ Closed
 
-Two production incidents (G30 + §8.23 401) had the same shape: a placeholder internal API key shipped in velion's `.env`, the mismatch only surfaced on the user's first click, and the symptom (401 in onboarding) was indistinguishable from real auth bugs. G39 closes that detection gap with two synchronous boot-time checks.
+Two production incidents (G30 + §8.23 401) had the same shape: a placeholder internal API key shipped in verevon's `.env`, the mismatch only surfaced on the user's first click, and the symptom (401 in onboarding) was indistinguishable from real auth bugs. G39 closes that detection gap with two synchronous boot-time checks.
 
 **Phase 1 — Format assertion (offline): ✅ Closed**
 
 | What landed | File |
 |---|---|
-| Pure-JS boot gate that validates each cluster-internal API key against three rules: not missing (when required), not a placeholder (`test` / `placeholder` / `change-me` / `your-` / `replace-me`), and not too short (<32 chars). Covers two pair-groups: `INTERNAL_API_KEY \| INTERNAL_SERVICE_SECRET` (velion → CP services) and `AUTH_CORE_INTERNAL_API_KEY \| INTEGRATION_CORE_INTERNAL_API_KEY` (velion → integration-core). Production failures `process.exit(1)`; dev failures log a `WARN` and continue. | [`scripts/check-internal-api-keys.mjs`](scripts/check-internal-api-keys.mjs) |
+| Pure-JS boot gate that validates each cluster-internal API key against three rules: not missing (when required), not a placeholder (`test` / `placeholder` / `change-me` / `your-` / `replace-me`), and not too short (<32 chars). Covers two pair-groups: `INTERNAL_API_KEY \| INTERNAL_SERVICE_SECRET` (verevon → CP services) and `AUTH_CORE_INTERNAL_API_KEY \| INTEGRATION_CORE_INTERNAL_API_KEY` (verevon → integration-core). Production failures `process.exit(1)`; dev failures log a `WARN` and continue. | [`scripts/check-internal-api-keys.mjs`](scripts/check-internal-api-keys.mjs) |
 | Mirror implementation in TypeScript (`internal-api-key-assertion.ts`) so other code paths can re-use the same logic. | [`src/lib/server/internal-api-key-assertion.ts`](src/lib/server/internal-api-key-assertion.ts) |
 | Wired into `package.json` scripts: `pnpm dev` and `pnpm start` both run `node scripts/check-internal-api-keys.mjs` first. Next.js 16 webpack-mode dev does NOT reliably invoke `instrumentation.ts:register()`, so the script-wrapper is the durable spot — `instrumentation.ts` keeps a documentation breadcrumb pointing at the script. | [`package.json`](package.json), [`instrumentation.ts`](instrumentation.ts) |
-| `scripts/` added to the velion compose volume list (it was previously not mounted because no live-reload script existed). | [`docker-compose.yml`](docker-compose.yml) |
+| `scripts/` added to the verevon compose volume list (it was previously not mounted because no live-reload script existed). | [`docker-compose.yml`](docker-compose.yml) |
 
 **Phase 2 — Cross-service handshake (online): ✅ Closed**
 
@@ -641,7 +641,7 @@ A format check can't catch *drift*. Both sides may have well-formed 64-char hex 
 | What landed | File |
 |---|---|
 | New `GET /api/v1/internal/whoami` route in integration-core. Requires `requireInternalOrBearerAuth` and returns the resolved principal (service name, auth mode, user/org/role IDs). Distinct from `/health` because `/health` is unauthenticated and only proves the listener is up. | [`Ingestion Plane/integration-core/src/modules/health/http.ts`](../../Ingestion%20Plane/integration-core/src/modules/health/http.ts) |
-| The script wrapper (same file as Phase 1) hits the whoami endpoint with a 3s timeout. Auth failures (401 / 403) are fatal in production; transport errors are never fatal (an upstream not being up yet is an ops issue, not a key issue). Opt out via `VELION_INTERNAL_KEY_HANDSHAKE=skip`; force-strict in dev via `=strict`. | [`scripts/check-internal-api-keys.mjs`](scripts/check-internal-api-keys.mjs) |
+| The script wrapper (same file as Phase 1) hits the whoami endpoint with a 3s timeout. Auth failures (401 / 403) are fatal in production; transport errors are never fatal (an upstream not being up yet is an ops issue, not a key issue). Opt out via `VEREVON_INTERNAL_KEY_HANDSHAKE=skip`; force-strict in dev via `=strict`. | [`scripts/check-internal-api-keys.mjs`](scripts/check-internal-api-keys.mjs) |
 | TypeScript mirror (`internal-api-key-handshake.ts`) for re-use. | [`src/lib/server/internal-api-key-handshake.ts`](src/lib/server/internal-api-key-handshake.ts) |
 
 **Verification matrix:**
@@ -653,28 +653,28 @@ A format check can't catch *drift*. Both sides may have well-formed 64-char hex 
   throw (prod, AUTH_CORE = "test")     → process.exit(1)
   warn (dev, both missing)             → console.warn, continue
   warn (dev, INTERNAL_API_KEY too short) → console.warn, continue
-  ok (prod, all keys real)             → "[velion startup] internal API keys OK (...)"
+  ok (prod, all keys real)             → "[verevon startup] internal API keys OK (...)"
 
 # Phase 2 — handshake (against the live integration-api container):
-  real key                              → "[velion startup] internal API key handshake OK (integration-core)"
+  real key                              → "[verevon startup] internal API key handshake OK (integration-core)"
   wrong key + dev                       → WARN with [unauthorized] line, continue
   wrong key + prod                      → FATAL with [unauthorized] line, process.exit(1)
   unreachable host + prod               → WARN with [transport_error], continue (NEVER fatal)
 
-# Live restart of the velion container:
+# Live restart of the verevon container:
   docker compose restart frontend
-  → [velion startup] internal API keys OK (INTERNAL_API_KEY, AUTH_CORE_INTERNAL_API_KEY)
-  → [velion startup] internal API key handshake OK (integration-core)
+  → [verevon startup] internal API keys OK (INTERNAL_API_KEY, AUTH_CORE_INTERNAL_API_KEY)
+  → [verevon startup] internal API key handshake OK (integration-core)
   → next dev --webpack starts as normal
 ```
 
-**Phase 3 — ✅ Closed in §8.29 (G40):** the §10 plan also called for mirroring this in CP Go services (user-core, session-core, billing-core, org-core). Originally deferred because (a) those services are *receivers* of the internal key, not callers — they reject mismatches on every request, so they don't have the velion-style "401 surfaces on user click" failure mode, and (b) velion was the highest-blast-radius caller in the incident history. Filed as **G40** and closed the same wave — see §8.29.
+**Phase 3 — ✅ Closed in §8.29 (G40):** the §10 plan also called for mirroring this in CP Go services (user-core, session-core, billing-core, org-core). Originally deferred because (a) those services are *receivers* of the internal key, not callers — they reject mismatches on every request, so they don't have the verevon-style "401 surfaces on user click" failure mode, and (b) verevon was the highest-blast-radius caller in the incident history. Filed as **G40** and closed the same wave — see §8.29.
 
 **§10 housekeeping:** ✅ Closed — G39 closed. G40 was filed for CP Go boot-time format checks and is now also ✅ Closed (see §8.29).
 
 ### 8.26 G36-cutover Step D — Decommission CP `session-core` agent-run scaffold (2026-05-12) — ✅ Closed
 
-Step A (§8.24) deployed Rust orchestration HTTP behind a feature flag. Step B (caller enumeration) revealed an unexpected result: **no external callers existed** for `/v1/{plans,todos,lineage,approvals}`. The §10 plan anticipated velion's onboarding wizard + orchestrator-core would consume these routes; the grep across the monorepo returned only the CP source we were about to delete:
+Step A (§8.24) deployed Rust orchestration HTTP behind a feature flag. Step B (caller enumeration) revealed an unexpected result: **no external callers existed** for `/v1/{plans,todos,lineage,approvals}`. The §10 plan anticipated verevon's onboarding wizard + orchestrator-core would consume these routes; the grep across the monorepo returned only the CP source we were about to delete:
 
 ```
 grep -rn "/v1/(plans|todos|lineage|approvals)" apps/ \
@@ -682,7 +682,7 @@ grep -rn "/v1/(plans|todos|lineage|approvals)" apps/ \
 → only matches are inside session-core's own server.go / handlers.go
 ```
 
-`orchestrator-core` talks to Rust session-core's **gRPC** on `:9091`, not the CP Go **HTTP** surface. Velion's only call to CP session-core is the Control Session aggregator (`/api/v1/sessions/current`), which is the survivor of this decommission.
+`orchestrator-core` talks to Rust session-core's **gRPC** on `:9091`, not the CP Go **HTTP** surface. Verevon's only call to CP session-core is the Control Session aggregator (`/api/v1/sessions/current`), which is the survivor of this decommission.
 
 With no callers, Steps B + C collapsed into the same wave: skip the dual-write window and decommission immediately.
 
@@ -799,24 +799,24 @@ The `users` table allows NULL on `password_hash` and `avatar`. pgx's `Scan` fail
 failed to create user with ID: ERROR: duplicate key value violates unique constraint "users_pkey"
 ```
 
-The 500 from `GetSessionContext` propagated as a 502 through velion's session-core proxy. OnboardingGuard interpreted "no session" as "incomplete onboarding" and force-restarted the wizard.
+The 500 from `GetSessionContext` propagated as a 502 through verevon's session-core proxy. OnboardingGuard interpreted "no session" as "incomplete onboarding" and force-restarted the wizard.
 
 | What landed | File |
 |---|---|
 | Wrapped the two nullable columns in `COALESCE(col, '')` across all 8 SELECT / RETURNING queries that read user rows. Empty-string is the existing in-app sentinel for "unset," so the change is invisible to callers. `last_login_at` was already `*time.Time` and didn't need treatment. | [`Control Plane/user-core/internal/users/repository.go`](../../Control%20Plane/user-core/internal/users/repository.go) |
-| `GetSessionContext` now accepts `(userID, email, name, avatar)` and auto-provisions via `GetOrCreateUser` — matching the contract `getCurrentUserProfile` already implements. The handler forwards `X-User-{Email,Name,Avatar}` from velion's edge gate. | [`Control Plane/user-core/internal/users/service.go`](../../Control%20Plane/user-core/internal/users/service.go), [`Control Plane/user-core/internal/http/handlers.go`](../../Control%20Plane/user-core/internal/http/handlers.go) |
+| `GetSessionContext` now accepts `(userID, email, name, avatar)` and auto-provisions via `GetOrCreateUser` — matching the contract `getCurrentUserProfile` already implements. The handler forwards `X-User-{Email,Name,Avatar}` from verevon's edge gate. | [`Control Plane/user-core/internal/users/service.go`](../../Control%20Plane/user-core/internal/users/service.go), [`Control Plane/user-core/internal/http/handlers.go`](../../Control%20Plane/user-core/internal/http/handlers.go) |
 | user-service container rebuilt + force-recreated. Live `GET /api/v1/users/me` for the previously-broken user (`TXMAHgZcNEQ6zN19JqDTF6XBKIFfPRpw`, `g3-smoke@example.com` — `password_hash IS NULL`, `avatar IS NULL`) returns **200**. | container `user-service` |
 
-**(b) Co-symptom — `/api/oauth/initiate` 401 from stale `AUTH_CORE_INTERNAL_API_KEY=test` in velion's `.env`**
+**(b) Co-symptom — `/api/oauth/initiate` 401 from stale `AUTH_CORE_INTERNAL_API_KEY=test` in verevon's `.env`**
 
-Velion's `.env` carried a placeholder `test` key. integration-core's auth middleware accepts either a Bearer JWT or `x-internal-api-key`; with the wrong key, it rejected every connect-session call at the door. Same family as G30 (`INTERNAL_API_KEY` placeholder).
+Verevon's `.env` carried a placeholder `test` key. integration-core's auth middleware accepts either a Bearer JWT or `x-internal-api-key`; with the wrong key, it rejected every connect-session call at the door. Same family as G30 (`INTERNAL_API_KEY` placeholder).
 
 | What landed | File |
 |---|---|
-| Replaced placeholder `AUTH_CORE_INTERNAL_API_KEY=test` with the real 64-char hex that matches `apps/Ingestion Plane/integration-core/.env`. Added a comment pointing future readers at the cross-service contract. | [`Frontend Plane/velion/.env`](.env) |
+| Replaced placeholder `AUTH_CORE_INTERNAL_API_KEY=test` with the real 64-char hex that matches `apps/Ingestion Plane/integration-core/.env`. Added a comment pointing future readers at the cross-service contract. | [`Frontend Plane/verevon/.env`](.env) |
 | In-cluster default URL in `oauth/initiate/route.ts` corrected from `localhost:9026` to `http://integration-api:3026` (defense in depth — the `.env` was authoritative, but a wrong default once already drifted into staging). | [`src/app/api/oauth/initiate/route.ts`](src/app/api/oauth/initiate/route.ts) |
 | `.env.local` (used by `pnpm dev` outside Docker) corrected from `localhost:9026` → `localhost:3026` to match the actual host-port mapping of the `integration-api` container. | [`.env.local`](.env.local) |
-| velion container force-recreated (`docker compose up -d --force-recreate frontend`) because `docker compose restart` re-uses the existing container env and ignores `env_file` changes. Confirmed `AUTH_CORE_INTERNAL_API_KEY` is the real hex post-recreate. | container `frontend-plane-velion-frontend-1` |
+| verevon container force-recreated (`docker compose up -d --force-recreate frontend`) because `docker compose restart` re-uses the existing container env and ignores `env_file` changes. Confirmed `AUTH_CORE_INTERNAL_API_KEY` is the real hex post-recreate. | container `frontend-plane-verevon-frontend-1` |
 
 **(c) Co-symptom — `/api/ingestion/ingest-job` 400 from Quarry-v1 contract read against a Quarry-v2 response**
 
@@ -879,8 +879,8 @@ GET    /v1/health                             health                       → s
 cargo build -p session-core         → exit 0 (1 unused warning, pre-existing)
 cargo test  -p session-core --no-run → exit 0 (binaries built)
 go build    -C Control\ Plane/session-core ./...  → exit 0 (still serves the routes today)
-velion      pnpm typecheck          → exit 0
-velion      pnpm lint:proxy         → exit 0 (47 grandfathered routes)
+verevon      pnpm typecheck          → exit 0
+verevon      pnpm lint:proxy         → exit 0 (47 grandfathered routes)
 ```
 
 Wave 8 deliberately **doesn't** deploy the new HTTP surface — `ORCHESTRATION_HTTP_ENABLED` defaults false. The cutover is config-only when ready.
@@ -890,11 +890,11 @@ Wave 8 deliberately **doesn't** deploy the new HTTP surface — `ORCHESTRATION_H
 The Stages 2–3 work from the original §10 plan still applies, now with the Rust HTTP surface already there:
 
 1. **Deployment** — add `session-core` (Rust) to `apps/Model Plane/deploy/docker-compose.yml` with `ORCHESTRATION_HTTP_ENABLED=true` + Postgres pointing at a fresh `model_plane_session_core` DB on `model-plane-postgres-1`. The schema migrations run automatically via `store::run_migrations`.
-2. **Repoint callers** — every caller of `session-core-service:3017/v1/{plans,todos,lineage}` (today: velion's onboarding wizard, the Model Plane orchestrator's plan-state read path, any scripts) flips its target hostname to the new Rust service. Greppable surface: search the monorepo for `session-core-service:3017/v1/` paths.
+2. **Repoint callers** — every caller of `session-core-service:3017/v1/{plans,todos,lineage}` (today: verevon's onboarding wizard, the Model Plane orchestrator's plan-state read path, any scripts) flips its target hostname to the new Rust service. Greppable surface: search the monorepo for `session-core-service:3017/v1/` paths.
 3. **Dual-write window** — run both Go + Rust simultaneously for one release cycle. CP NATS publishers stay on; Rust NATS publishers also publish (already wired). Compare event streams to confirm no divergence.
 4. **Decommission CP** — delete the four repo + handler files from CP `session-core` (`internal/repository/{plan,todo,lineage,approval}_repository.go` + matching service + HTTP). Drop the `plans`, `plan_steps`, `todos`, `approvals`, `subagent_edges` tables from CP Postgres after the dual-write window completes. The CP service keeps only the Control Session aggregator code (Wave 3 §8.17 / G10).
 
-**Why Wave 8 stopped short of cutover:** The cutover is operational, not code work — it needs a staging environment, monitoring during the dual-write window, and a careful flip in the velion/orchestrator caller code. None of that is hard, but it's a separate decision point + observability discipline that deserves its own wave.
+**Why Wave 8 stopped short of cutover:** The cutover is operational, not code work — it needs a staging environment, monitoring during the dual-write window, and a careful flip in the verevon/orchestrator caller code. None of that is hard, but it's a separate decision point + observability discipline that deserves its own wave.
 
 ### 8.21 G27 + G28-followup + G34-followup + G35 — Wave 7 (2026-05-11) — ✅ Closed
 
@@ -911,12 +911,12 @@ Post-cleanup `docker network ls` shows the canonical topology: `inter-plane-bus`
 
 **(b) G28-followup — Edge gate stamps full identity; remaining 3 pages migrated**
 
-The Wave 6 edge gate only stamped `x-velion-user-id`. The 3 dashboard pages that needed `name` + `email` for downstream calls still ran `getServerSession()`. Wave 7 closes that.
+The Wave 6 edge gate only stamped `x-verevon-user-id`. The 3 dashboard pages that needed `name` + `email` for downstream calls still ran `getServerSession()`. Wave 7 closes that.
 
 | Patch | File |
 |---|---|
 | `validateSession` extracts `email` + `name` from auth-core's `/api/auth/get-session` response. Cache entry stores all three. | [`src/proxy.ts`](src/proxy.ts) |
-| Two new headers: `x-velion-user-email` + `x-velion-user-name`. Stamped via `NextResponse.next({request:{headers:…}})` alongside the existing `x-velion-user-id`. Total stamped payload ~256 B, well under typical 8 KB header limits. | `src/proxy.ts` |
+| Two new headers: `x-verevon-user-email` + `x-verevon-user-name`. Stamped via `NextResponse.next({request:{headers:…}})` alongside the existing `x-verevon-user-id`. Total stamped payload ~256 B, well under typical 8 KB header limits. | `src/proxy.ts` |
 | `requireEdgeUser()` returns `{userId, email, name}`. Fallback to `getServerSession()` reads the same three fields on the slow path. | [`src/components/auth/lib/edge-session.ts`](src/components/auth/lib/edge-session.ts) |
 | 3 pages migrated: `(dashboard)/{dashboard,calendar,knowledge}/page.tsx`. Combined with Wave 6's `search/inbox/notifications` migration, **all 6 protected pages** now use the helper. Zero per-page `getServerSession()` calls remain in `(dashboard)/`. | as listed |
 
@@ -935,7 +935,7 @@ Wave 6 shipped the Redis cache; Wave 7 adds the reactive invalidation that makes
 | Patch | File |
 |---|---|
 | New `controlSessions` table in Convex schema: `{externalUserId, externalOrgId?, snapshot (v.any), fetchedAt, createdAt, updatedAt}` + two indexes (`by_external_user`, `by_external_user_and_org`). Snapshot stored opaquely so we don't need a Convex schema migration every time session-core's aggregate shape changes. | [`Application Plane/convex-core/convex/schema.ts`](../Application%20Plane/convex-core/convex/schema.ts) |
-| New module `convex/controlSessions.ts`: `upsertControlSessionInternal` mutation (split from auth/parsing for testability) + `upsertControlSession` httpAction (X-Service-Key gated, same pattern as `convex/ingest.ts`) + `byUser` / `byUserAndOrg` queries. Velion subscribes via `useQuery(api.controlSessions.byUser, {externalUserId})`. | new file |
+| New module `convex/controlSessions.ts`: `upsertControlSessionInternal` mutation (split from auth/parsing for testability) + `upsertControlSession` httpAction (X-Service-Key gated, same pattern as `convex/ingest.ts`) + `byUser` / `byUserAndOrg` queries. Verevon subscribes via `useQuery(api.controlSessions.byUser, {externalUserId})`. | new file |
 | HTTP route registration at `POST /ingest/control-session`. | `convex/http.ts` |
 | session-core `convex.Client.MirrorControlSession(ctx, userID, orgID, snapshot, fetchedAtMillis)` — best-effort POST to convex-core. | `Control Plane/session-core/internal/convex/client.go` |
 | `ControlSessionService.Refresh` now triple-purposes: bust cache → re-aggregate (auto cache-warms) → publish `app.session.entitlements_changed` on NATS → mirror to Convex. All four steps are best-effort beyond the cache+aggregate; outages downstream don't fail the response. | `internal/service/control_session_service.go` |
@@ -946,8 +946,8 @@ Wave 6 shipped the Redis cache; Wave 7 adds the reactive invalidation that makes
 **Cumulative CI gates green:**
 ```
 session-core $ go build ./...        → exit 0
-velion       $ pnpm typecheck        → exit 0
-velion       $ pnpm lint:proxy       → exit 0 (47 grandfathered routes — unchanged)
+verevon       $ pnpm typecheck        → exit 0
+verevon       $ pnpm lint:proxy       → exit 0 (47 grandfathered routes — unchanged)
 ```
 
 **§10 housekeeping:** ✅ Closed — G27, G28-followup, G34-followup, G35 all closed in this wave. G36 detailed plan landed Wave 8 §8.22 and ✅ fully closed in Wave 9 §8.24 + §8.26.
@@ -956,7 +956,7 @@ velion       $ pnpm lint:proxy       → exit 0 (47 grandfathered routes — unc
 
 Four substantial items in one wave. Each touches a different surface (compose / SQL / Go cache / Next.js edge), bundled because they share a verified-date bump and each is a half-day or less when tackled individually.
 
-**(a) ADR 0004 cutover — `velion-net` → `inter-plane-bus`**
+**(a) ADR 0004 cutover — `verevon-net` → `inter-plane-bus`**
 
 The docker network rename promised in [ADR 0004](./docs/adr/0004-network-topology.md) executed. Cutover used the "down all, network swap, up all" sequence from the ADR's implementation plan; subnet `172.20.0.0/16` preserved (no IP-pinned configs broken). All 7 active composes (Control / Application / convex-core / Data v2 / Frontend / Ingestion / Model v1) plus the unused Model v2 compose edited; 5 stale empty networks (`data-net`, `aquatiq-backend`, `internal`, `visma_service_v2_default`, `xero_service_v2_default`) remain (no functional impact; a future cleanup can `docker network rm` them).
 
@@ -964,13 +964,13 @@ The docker network rename promised in [ADR 0004](./docs/adr/0004-network-topolog
 
 **Live-verified post-cutover:**
 ```
-docker network ls                              → inter-plane-bus (was velion-net)
+docker network ls                              → inter-plane-bus (was verevon-net)
 inter-plane-bus members                        → 46 containers
-velion → auth-core:3011/api/auth/get-session   → null (Better Auth 200/null — correct)
-velion → user-core:3012/health                 → {service:user-service, status:healthy}
-velion → org-core:8080/health                  → {service:org-core, status:healthy}
-velion → session-core-service:3017/health      → {service:session-core, version:0.1.0}
-velion → quarry-control:8081/health            → ok
+verevon → auth-core:3011/api/auth/get-session   → null (Better Auth 200/null — correct)
+verevon → user-core:3012/health                 → {service:user-service, status:healthy}
+verevon → org-core:8080/health                  → {service:org-core, status:healthy}
+verevon → session-core-service:3017/health      → {service:session-core, version:0.1.0}
+verevon → quarry-control:8081/health            → ok
 ```
 
 **(b) G3 + G16 — server-side onboarding state, multi-device resume**
@@ -981,10 +981,10 @@ velion → quarry-control:8081/health            → ok
 | Repository: `GetOnboardingState(ctx, userID) → (step, stateJSON, err)` + `UpsertOnboardingState(ctx, userID, step, stateJSON)`. UPDATE-only (rows come from auth-core's provisioning path). | `Control Plane/user-core/internal/users/repository.go` |
 | Service: `GetOnboardingState` / `UpsertOnboardingState` returning a typed `OnboardingStateView{Step, State map[string]any}`. Server-side enum validation deferred — the client owns the step taxonomy. | `Control Plane/user-core/internal/users/service.go` |
 | HTTP: `GET /api/v1/users/me/onboarding-state` + `PUT /api/v1/users/me/onboarding-state`. Mounted under `/users/me/...` (BEFORE the `:id` catch-all). Both require X-User-Id from internal proxy. | `Control Plane/user-core/internal/http/{handlers,server}.go` |
-| Velion proxy: dedicated `/api/user/me/onboarding-state` route (forwards to user-core's `/api/v1/users/me/onboarding-state`). Takes precedence over the `/api/user/[...path]` catch-all because Next.js routes static paths before dynamic. | [`src/app/api/user/me/onboarding-state/route.ts`](src/app/api/user/me/onboarding-state/route.ts) (new) |
+| Verevon proxy: dedicated `/api/user/me/onboarding-state` route (forwards to user-core's `/api/v1/users/me/onboarding-state`). Takes precedence over the `/api/user/[...path]` catch-all because Next.js routes static paths before dynamic. | [`src/app/api/user/me/onboarding-state/route.ts`](src/app/api/user/me/onboarding-state/route.ts) (new) |
 | `onboarding-service.ts`: `saveCurrentStep()` writes through to the new server endpoint via `pushOnboardingStateToServer`. `restoreStepFromServer()` reads the server snapshot and hydrates localStorage if the local cache is empty. `completeOnboarding()` clears server state on success and **removed** the unconditional `setTimeout(clearOnboardingState, 1000)` in the `finally` block that ran even when the server-side completion failed. | `src/components/onboarding/services/onboarding-service.ts` |
 
-**Live-verified end-to-end** (`node fetch` from velion container):
+**Live-verified end-to-end** (`node fetch` from verevon container):
 ```
 PUT /api/v1/users/me/onboarding-state {step:"website", state:{profile:{...},organization:{...}}}
   → {"success":true}
@@ -1011,19 +1011,19 @@ Deferred to **G34-followup**: subscribe to upstream NATS subjects (`user.profile
 
 | Patch | File |
 |---|---|
-| Edge gate `validateSession` returns `{ok, userId}` instead of `bool`. Cache entry stores the userId alongside the ok flag. When `isProtected && userId`, the gate stamps `x-velion-user-id` onto the forwarded request via `NextResponse.next({request:{headers:…}})`. | [`src/proxy.ts`](src/proxy.ts) |
+| Edge gate `validateSession` returns `{ok, userId}` instead of `bool`. Cache entry stores the userId alongside the ok flag. When `isProtected && userId`, the gate stamps `x-verevon-user-id` onto the forwarded request via `NextResponse.next({request:{headers:…}})`. | [`src/proxy.ts`](src/proxy.ts) |
 | New helper `requireEdgeUser(pathForLoginRedirect)`: reads the header via `next/headers`, falls back to `getServerSession()` when the header is missing (gate fail-open path — keeps defence-in-depth alive for the auth-core-unreachable scenario). | [`src/components/auth/lib/edge-session.ts`](src/components/auth/lib/edge-session.ts) (new) |
 | Migrated 3 pages that only need the auth check + userId: `(dashboard)/search/page.tsx`, `(dashboard)/inbox/[[...slug]]/page.tsx`, `(dashboard)/notifications/page.tsx`. Each one now drops the upstream auth-core call. | `src/app/(dashboard)/{search,inbox/[[...slug]],notifications}/page.tsx` |
 
-Three pages **not** migrated this wave: `dashboard/page.tsx`, `calendar/page.tsx`, `knowledge/page.tsx`. Each uses the full `session.user.{id,name,email}` object for downstream calls. To migrate them, the edge gate would need to stamp `x-velion-user-name` + `x-velion-user-email` too (or those pages would still pay one round-trip just for the profile fields). Tracked as **G28-followup**.
+Three pages **not** migrated this wave: `dashboard/page.tsx`, `calendar/page.tsx`, `knowledge/page.tsx`. Each uses the full `session.user.{id,name,email}` object for downstream calls. To migrate them, the edge gate would need to stamp `x-verevon-user-name` + `x-verevon-user-email` too (or those pages would still pay one round-trip just for the profile fields). Tracked as **G28-followup**.
 
 **Cumulative CI gates green:**
 ```
 session-core $ go build ./...              → exit 0
 user-core    $ go build ./...              → exit 0
-velion       $ pnpm typecheck              → exit 0
-velion       $ pnpm lint:proxy             → exit 0 (47 grandfathered routes; new onboarding-state + telemetry exempted)
-velion       $ pnpm build                  → exit 0
+verevon       $ pnpm typecheck              → exit 0
+verevon       $ pnpm lint:proxy             → exit 0 (47 grandfathered routes; new onboarding-state + telemetry exempted)
+verevon       $ pnpm build                  → exit 0
 ```
 
 **§10 housekeeping:** ✅ Closed — G3, G16, G28 closed by this wave. G27 entry updated to reflect ADR-0004 ratification + cutover. G34 demoted to G34-followup (closed in §8.21).
@@ -1037,21 +1037,21 @@ Six small cleanups, no architectural choices. Each individually ≤30 min; bundl
 | **G4** | Deleted the `/api/onboarding/cancel` stub route (it only re-validated the session and returned 200). `onboardingService.cancelOnboarding()` now calls `authService.logout()` directly. Baseline entry pruned. | `src/app/api/onboarding/cancel/` (deleted), [`src/components/onboarding/services/onboarding-service.ts`](src/components/onboarding/services/onboarding-service.ts), `scripts/lint-proxy-routes.baseline` |
 | **G5** | Replaced the seven raw `console.log/warn/error` calls in `onboarding-service.ts` with a single `onboardingLog` object exposing `debug` / `warn` / `error` channels. `debug` + `warn` are gated on `NEXT_PUBLIC_DEBUG_ONBOARDING` (or `NEXT_PUBLIC_DEBUG`); `error` always fires (reserved for truly unrecoverable client faults). The three pre-existing `console.error` call sites were all recoverable (localStorage write/clear failures, non-blocking crawl ingestion) so they moved to `onboardingLog.warn` per the gap's "console.error only for unrecoverable" directive. | [`src/components/onboarding/services/onboarding-service.ts`](src/components/onboarding/services/onboarding-service.ts) |
 | **G13** | Deleted the `/api/connections/from-auth-core` 410-Gone stub (no in-tree callers; sat as a deliberate redirect message since the auth-core token-reuse pattern was removed). | `src/app/api/connections/from-auth-core/` (deleted) |
-| **G22** | Renamed `VELION_INTEGRATION.md` → [`VELION_THIRD_PARTY_INTEGRATIONS.md`](VELION_THIRD_PARTY_INTEGRATIONS.md). Added a scope header pointing Control Plane / Application Plane wiring readers at `velion-gap.md`. All cross-references in the gap log updated. | `VELION_INTEGRATION.md` → `VELION_THIRD_PARTY_INTEGRATIONS.md`, `velion-gap.md` |
+| **G22** | Renamed `VEREVON_INTEGRATION.md` → [`VEREVON_THIRD_PARTY_INTEGRATIONS.md`](VEREVON_THIRD_PARTY_INTEGRATIONS.md). Added a scope header pointing Control Plane / Application Plane wiring readers at `verevon-gap.md`. All cross-references in the gap log updated. | `VEREVON_INTEGRATION.md` → `VEREVON_THIRD_PARTY_INTEGRATIONS.md`, `verevon-gap.md` |
 | **G23** | Split the edge-gate session-cookie list into `CANONICAL_SESSION_COOKIES` (Better Auth's current writer set) and `LEGACY_SESSION_COOKIES` (`auth_session`, `session_token`). When a legacy name is accepted, a single-line JSON log entry `{"level":"warn","msg":"legacy_cookie_seen","cookie_name":"..."}` is emitted to stdout. After 30 days of zero traffic on a name, drop the row from `LEGACY_SESSION_COOKIES`. The patterns list (sid / sid_multi / session_token regex) is left untouched — those are matched by shape, not name. | [`src/proxy.ts`](src/proxy.ts) |
 | **G26** | Added `GIN_MODE: release` to user-core and org-core in `Control Plane/docker-compose.yml`. Silences the `[GIN-debug] [WARNING] Running in "debug" mode.` banner and enables release-mode perf paths in gin. Containers force-recreated. session-core and billing-core were already clean. | `Control Plane/docker-compose.yml` |
 
 **Live-verified (2026-05-11)**:
 ```
-velion $ pnpm typecheck   → exit 0
-velion $ pnpm lint:proxy  → exit 0 (47 grandfathered routes — was 48; G4 deletion shrinks baseline)
-velion $ pnpm build       → exit 0
+verevon $ pnpm typecheck   → exit 0
+verevon $ pnpm lint:proxy  → exit 0 (47 grandfathered routes — was 48; G4 deletion shrinks baseline)
+verevon $ pnpm build       → exit 0
 user-core / org-core:     GIN_MODE=release, no [GIN-debug] banners in container logs
 ```
 
 **Wave 5 deferred to Wave 6** (each has design implications worth their own pass):
 - **G3** — onboarding state in localStorage (needs server-state column in user-core or Control Session) and the coupled **G16** (server-resumed step routing)
-- **G27** — `velion-net` mega-network topology (needs ADR 0004)
+- **G27** — `verevon-net` mega-network topology (needs ADR 0004)
 - **G28** — per-page `getServerSession() + redirect()` duplication (perf refactor across ~7 protected pages)
 
 Plus the Wave-3 follow-ups **G34/G35/G36** (Control Session cache + Convex projection + Rust port of agent-run repos).
@@ -1064,7 +1064,7 @@ Wave 4 closes the doc/UX/observability gaps that flank the zero-input enterprise
 
 | Patch | File |
 |---|---|
-| `docs/Velion_CONNECT_ROADMAP.md` Phase 8 row updated: drops stale G10/G14 references (closed in Wave 3 / §8.17), points reactive-Convex follow-up at the new G35 entry. The "Plan selection deferred" inline note already existed in the route table — no change needed there; the doc and code agreed once the table comment was read in full. | [`docs/Velion_CONNECT_ROADMAP.md:79`](docs/Velion_CONNECT_ROADMAP.md:79) |
+| `docs/Verevon_CONNECT_ROADMAP.md` Phase 8 row updated: drops stale G10/G14 references (closed in Wave 3 / §8.17), points reactive-Convex follow-up at the new G35 entry. The "Plan selection deferred" inline note already existed in the route table — no change needed there; the doc and code agreed once the table comment was read in full. | [`docs/Verevon_CONNECT_ROADMAP.md:79`](docs/Verevon_CONNECT_ROADMAP.md:79) |
 
 **G21 — Enterprise trust banner on first dashboard load**
 
@@ -1072,7 +1072,7 @@ A one-line banner under the dashboard navbar surfaces what the zero-input sign-i
 
 | Patch | File |
 |---|---|
-| New `<EnterpriseTrustBanner />` client component. Fetches `/api/user/me/session-context` on mount, surfaces `{role · organization · domain · plan}` with sensible fallbacks (works with both the Wave 3 rich Control Session shape and the legacy narrow shape from user-core). Dismissible via `sessionStorage` key `velion.enterprise-trust-banner.dismissed`. No-op when no organization is present (signed-in-no-org state). | [`src/components/dashboard/EnterpriseTrustBanner.tsx`](src/components/dashboard/EnterpriseTrustBanner.tsx) (new) |
+| New `<EnterpriseTrustBanner />` client component. Fetches `/api/user/me/session-context` on mount, surfaces `{role · organization · domain · plan}` with sensible fallbacks (works with both the Wave 3 rich Control Session shape and the legacy narrow shape from user-core). Dismissible via `sessionStorage` key `verevon.enterprise-trust-banner.dismissed`. No-op when no organization is present (signed-in-no-org state). | [`src/components/dashboard/EnterpriseTrustBanner.tsx`](src/components/dashboard/EnterpriseTrustBanner.tsx) (new) |
 | Mounted directly under the navbar in the dashboard layout, before the sidebar/main split. | [`src/app/(dashboard)/layout.tsx`](src/app/(dashboard)/layout.tsx) |
 
 **G25 — Client-side telemetry primitive**
@@ -1087,11 +1087,11 @@ Lightweight emitter (≈3 KB minified, no third-party deps) for the four metrics
 
 **Live-verified (2026-05-11)**:
 ```
-velion $ pnpm typecheck   → exit 0  (0 errors in our source; 354 @blocksuite leakage ignored)
-velion $ pnpm lint:proxy  → exit 0  (48 grandfathered routes)
-velion $ pnpm build       → exit 0  (Next.js 16.1.6, ignoreBuildErrors retained for blocksuite)
+verevon $ pnpm typecheck   → exit 0  (0 errors in our source; 354 @blocksuite leakage ignored)
+verevon $ pnpm lint:proxy  → exit 0  (48 grandfathered routes)
+verevon $ pnpm build       → exit 0  (Next.js 16.1.6, ignoreBuildErrors retained for blocksuite)
 ```
-End-to-end (post-restart): POST `/api/telemetry/events` with a synthetic `auth.login.completed` payload returns `{"ok":true}` and the velion container log emits the corresponding `telemetry.event` JSON line with the correlation id.
+End-to-end (post-restart): POST `/api/telemetry/events` with a synthetic `auth.login.completed` payload returns `{"ok":true}` and the verevon container log emits the corresponding `telemetry.event` JSON line with the correlation id.
 
 **Known follow-ups** (not blocking; file as needed):
 - A real metric aggregator (Loki query layer, Datadog, or self-hosted) is still TBD. Today's events are visible in container logs only. **G37** — file when an aggregator is chosen.
@@ -1106,35 +1106,35 @@ Wave 3 of the gap-closure roadmap. Three intertwined items: the L5-boundary char
 
 | Patch | File |
 |---|---|
-| Rewrote "Cross-Plane Contract Rules" per ADR 0003 §"Charter amendment": rules 5–7 declare velion proxies as L5 ingress, convex-gateway as WS-only, second-frontend trigger. Replaces the previous "L5 is the ceiling" wording that every running route already contradicted. | [`docs/ARCHITECTURE_DIAGRAM.md`](./docs/ARCHITECTURE_DIAGRAM.md) |
-| Doc-map row updated to "amended"; glossary "L5 boundary" entry rewritten to point at ADR 0003 + the new charter rules. | `velion-gap.md` §0 + glossary |
+| Rewrote "Cross-Plane Contract Rules" per ADR 0003 §"Charter amendment": rules 5–7 declare verevon proxies as L5 ingress, convex-gateway as WS-only, second-frontend trigger. Replaces the previous "L5 is the ceiling" wording that every running route already contradicted. | [`docs/ARCHITECTURE_DIAGRAM.md`](./docs/ARCHITECTURE_DIAGRAM.md) |
+| Doc-map row updated to "amended"; glossary "L5 boundary" entry rewritten to point at ADR 0003 + the new charter rules. | `verevon-gap.md` §0 + glossary |
 | New `scripts/lint-proxy-routes.sh` + `scripts/lint-proxy-routes.baseline` (48-route snapshot). The lint catches **new** `src/app/api/*/route.ts` files that call `fetch()` without going through `control-plane-auth.ts`, while grandfathering the existing 48 pre-helper routes. Also fails on stale baseline entries (= someone migrated, baseline should shrink — ratchet). Wired into `pnpm lint` and standalone `pnpm lint:proxy`. | new |
 
 **G10 — Control Session aggregator (Steps 1 + 3 + 6 + 9 of ADR 0002)**
 
 | Patch | File | What it does |
 |---|---|---|
-| New HTTP surface on cp-session-core: `GET /api/v1/sessions/current` + `POST /api/v1/sessions/refresh`. Mounted at `/api/v1` (parallel to the legacy `/v1` agent-run routes which keep serving during the transition). | [`Control Plane/session-core/internal/http/{server.go,control_session_handlers.go}`](../../Control%20Plane/session-core/internal/http/) | velion-facing aggregator API |
+| New HTTP surface on cp-session-core: `GET /api/v1/sessions/current` + `POST /api/v1/sessions/refresh`. Mounted at `/api/v1` (parallel to the legacy `/v1` agent-run routes which keep serving during the transition). | [`Control Plane/session-core/internal/http/{server.go,control_session_handlers.go}`](../../Control%20Plane/session-core/internal/http/) | verevon-facing aggregator API |
 | `ControlSessionService.Get` (synchronous fan-out): user-core `/api/v1/me/session-context` for routing fields, user-core `/api/v1/users/me` for profile, org-core `/orgs/{id}` + `/orgs/{id}/entitlements` for org details, billing-core `/api/v1/billing/orgs/{id}/account` for subscription. Upstream failures degrade silently EXCEPT user-core, which returns 502 to the caller. | `Control Plane/session-core/internal/service/control_session_service.go` (new) | aggregator core |
 | Clients for the upstream cores, mirroring the existing `org_client.go` shape. | `Control Plane/session-core/internal/clients/{user_client.go,billing_client.go}` (new); `org_client.go` extended with `GetOrganization` + `GetEntitlements` | upstream callers |
-| `ControlSessionService.Refresh`: re-aggregates and publishes `app.session.entitlements_changed` on the velion-nats `APP_SESSION` JetStream stream. NATS publish degrades silently if the shared bus is unavailable (logs a warning). | same service file + `internal/nats/shared_publisher.go` `PublishAppSessionEntitlementsChanged` | refresh + publish |
+| `ControlSessionService.Refresh`: re-aggregates and publishes `app.session.entitlements_changed` on the verevon-nats `APP_SESSION` JetStream stream. NATS publish degrades silently if the shared bus is unavailable (logs a warning). | same service file + `internal/nats/shared_publisher.go` `PublishAppSessionEntitlementsChanged` | refresh + publish |
 | New JetStream stream config: `APP_SESSION`, subjects `app.session.>`, 7-day retention, 256 MB cap. Created by `EnsureStreams` on session-core startup. | `internal/nats/shared_publisher.go` | NATS subject space |
 | Config struct + env wiring: `USER_CORE_URL`, `BILLING_CORE_URL` (defaults `http://user-core:3012`, `http://billing-core:3014`). main.go constructs the clients + service and passes them into `NewServer`. | `internal/config/config.go`, `cmd/server/main.go` | service wiring |
-| velion proxy `GET /api/user/me/session-context` (new dedicated route — takes precedence over the `[...path]` catch-all per Next.js routing): forwards to session-core's `/api/v1/sessions/current` when `CONTROL_SESSION_AUTHORITY_ENABLED=true`, else falls back to user-core's narrower endpoint (legacy contract during the transition). | [`Frontend Plane/velion/src/app/api/user/me/session-context/route.ts`](src/app/api/user/me/session-context/route.ts) (new) | velion forwarder |
-| velion helper extended: `getSessionServiceUrl()` + `isControlSessionAuthorityEnabled()`. | [`src/app/api/_lib/control-plane-auth.ts`](src/app/api/_lib/control-plane-auth.ts) | velion env reads |
-| velion `.env`: `SESSION_SERVICE_URL=http://session-core-service:3017` + `CONTROL_SESSION_AUTHORITY_ENABLED=true`. | [`.env`](.env) | flag on |
+| verevon proxy `GET /api/user/me/session-context` (new dedicated route — takes precedence over the `[...path]` catch-all per Next.js routing): forwards to session-core's `/api/v1/sessions/current` when `CONTROL_SESSION_AUTHORITY_ENABLED=true`, else falls back to user-core's narrower endpoint (legacy contract during the transition). | [`Frontend Plane/verevon/src/app/api/user/me/session-context/route.ts`](src/app/api/user/me/session-context/route.ts) (new) | verevon forwarder |
+| verevon helper extended: `getSessionServiceUrl()` + `isControlSessionAuthorityEnabled()`. | [`src/app/api/_lib/control-plane-auth.ts`](src/app/api/_lib/control-plane-auth.ts) | verevon env reads |
+| verevon `.env`: `SESSION_SERVICE_URL=http://session-core-service:3017` + `CONTROL_SESSION_AUTHORITY_ENABLED=true`. | [`.env`](.env) | flag on |
 
 **G14 — notification-core subscribes (G10 Step 5)**
 
 | Patch | File | What it does |
 |---|---|---|
 | New subscriber package: durable JetStream queue subscriber on `app.session.entitlements_changed`. Each event becomes a `notification.Service.Accept` call with idempotency key `control-session-entitlements:{user_id}:{timestamp}`. Malformed payloads are Termed (no redelivery); transient downstream failures Nak (redelivery). | `Application Plane/notification-core/internal/subscribers/control_session.go` (new) | subject → notification |
-| Config + dual-NATS wiring: notification-core keeps its local `app-nats` connection for its own publisher; a **second** NATS client connects to the shared bus (`SHARED_NATS_URL=nats://velion-nats:4222`) so cross-plane events flow without disturbing the local publisher. Falls back to the local connection when `SHARED_NATS_URL` is unset. | `internal/config/config.go`, `cmd/server/main.go` | dual-NATS |
-| docker-compose env injection: `SHARED_NATS_URL` + `SHARED_NATS_TOKEN`. notification-core was already on `velion-net` so no network change was needed. | `Application Plane/docker-compose.yml` | shared-bus access |
+| Config + dual-NATS wiring: notification-core keeps its local `app-nats` connection for its own publisher; a **second** NATS client connects to the shared bus (`SHARED_NATS_URL=nats://verevon-nats:4222`) so cross-plane events flow without disturbing the local publisher. Falls back to the local connection when `SHARED_NATS_URL` is unset. | `internal/config/config.go`, `cmd/server/main.go` | dual-NATS |
+| docker-compose env injection: `SHARED_NATS_URL` + `SHARED_NATS_TOKEN`. notification-core was already on `verevon-net` so no network change was needed. | `Application Plane/docker-compose.yml` | shared-bus access |
 
 **Step 9 — docs**
 
-Updated `velion-gap.md` §2 row "Control session" + §2.2 to reflect the live MVP (drops "(planned repurpose)" qualifier, names the live endpoints, calls out the deferred items as G34/G35/G36). ADR 0002 §"Implementation plan" steps now annotated by which wave they landed.
+Updated `verevon-gap.md` §2 row "Control session" + §2.2 to reflect the live MVP (drops "(planned repurpose)" qualifier, names the live endpoints, calls out the deferred items as G34/G35/G36). ADR 0002 §"Implementation plan" steps now annotated by which wave they landed.
 
 **Live-verified at deploy (2026-05-11)**:
 ```
@@ -1142,10 +1142,10 @@ session-core:    "JetStream stream ready: APP_SESSION"
 session-core:    "user-core client enabled for Control Session aggregator"
 session-core:    "billing-core client enabled for Control Session aggregator"
 session-core:    "Control Session aggregator ready (GET /api/v1/sessions/current)"
-notification:    "connected to shared nats at nats://velion-nats:4222"
+notification:    "connected to shared nats at nats://verevon-nats:4222"
 notification:    "subscribers/control-session: subscribed to app.session.entitlements_changed"
-velion:          pnpm typecheck → 0 errors in velion source
-velion:          pnpm lint:proxy → OK (48 grandfathered routes pending migration)
+verevon:          pnpm typecheck → 0 errors in verevon source
+verevon:          pnpm lint:proxy → OK (48 grandfathered routes pending migration)
 session-core:    POST /api/v1/sessions/refresh → 502 for unknown user_id (correct degradation — user-core hasn't provisioned the user)
 ```
 
@@ -1162,7 +1162,7 @@ Wave 2 of the gap-closure roadmap. Two distinct issues, both ate CI cycles:
 1. `node_modules/drizzle-orm/pg-core/index.d.ts` shipped malformed `.pnpm/...` re-export paths (a known pnpm/drizzle packaging interaction at v0.44.5). The runtime exports were intact but TypeScript couldn't resolve them, so `pgTable`, `text`, `timestamp`, `boolean`, `integer`, `bigint` all 2305'd from `src/db/schema.ts`. `pnpm install --force` regenerated the `.d.ts` with correct relative paths (`./alias.js`, `./columns/index.js`, …) and made the 11 schema errors disappear.
 2. `internal-oauth.service.ts:224` over-narrowed: `if ('ok' in providerResp && providerResp.ok === false)` — the additional `&& providerResp.ok === false` left both union variants in the fall-through type, so `access_token`, `refresh_token`, `expiresAt`, `scope` all 2339'd. `InternalRefreshError` is the only variant carrying an `ok` key, so `if ('ok' in providerResp)` alone discriminates. 4 errors gone.
 
-**G12 (`velion`)** — the gap framing was misleading. `pnpm build` (a.k.a. `next build`) **never actually failed**; `next.config.ts` already sets `typescript.ignoreBuildErrors: true`, and no CI step ran `tsc --noEmit`. But running `tsc --noEmit` produced 380 type errors. Distribution:
+**G12 (`verevon`)** — the gap framing was misleading. `pnpm build` (a.k.a. `next build`) **never actually failed**; `next.config.ts` already sets `typescript.ignoreBuildErrors: true`, and no CI step ran `tsc --noEmit`. But running `tsc --noEmit` produced 380 type errors. Distribution:
 
 - **354 in `node_modules/@blocksuite/...@0.19.5` source files** — third-party packaging bug. The `dist/index.d.ts` files re-export `from '../src/*.ts'`, dragging unfixable source files (broken `lit` `css`/`unsafeCSS` exports, missing `@types/lodash.*`, named-capture regexes targeting < ES2018) into every type-check. Out of our tree; can't fix without `pnpm patch` and a long-term maintenance cost.
 - **26 in our source** — dead scaffolding + wrong client-call signatures.
@@ -1172,7 +1172,7 @@ The four-part fix:
 1. Deleted 14 dead `page.tsx` files under `src/components/agents/**` plus their empty parent directories. These were stubs importing from a non-existent `@/modules/...` path; Next.js routes from `src/app/`, not `src/components/`, so they were unreachable noise. Eliminated 13 of the 26.
 2. Fixed `src/lib/clients/nango-client.ts`, `nohu-client.ts`, `zammad-client.ts`: `request(method, endpoint, body?)` was being called with `(endpoint)` only on the read methods. Added the missing `'GET'` arg to 9 call-sites and `'POST'` to `initiateOAuth`. Eliminated 12 of the 26.
 3. Annotated `zammad-client.ts` `getTickets()` return type as `Promise<ZammadTicket[]>` so `useZammad.ts`'s `setTickets(data)` typechecks. Eliminated the last.
-4. Added a CI-friendly `pnpm typecheck` script (`scripts/typecheck.sh`) that runs `tsc --noEmit` and filters out the 354 unavoidable `@blocksuite` third-party errors. Velion's own code is checked normally; the script exits 0 only when the velion-tree error count is 0, prints a one-line "(N @blocksuite third-party errors ignored)" summary otherwise.
+4. Added a CI-friendly `pnpm typecheck` script (`scripts/typecheck.sh`) that runs `tsc --noEmit` and filters out the 354 unavoidable `@blocksuite` third-party errors. Verevon's own code is checked normally; the script exits 0 only when the verevon-tree error count is 0, prints a one-line "(N @blocksuite third-party errors ignored)" summary otherwise.
 
 Closed by:
 
@@ -1182,20 +1182,20 @@ Closed by:
 | G11 | Narrow `providerResp` via `'ok' in providerResp` alone — drop the redundant `&& providerResp.ok === false` clause. | `Control Plane/auth-core/src/internal/internal-oauth.service.ts` | ✅ |
 | G12 | Delete the 14 dead `page.tsx` files + empty dirs. | `src/components/agents/{[agentId]/{account-information,conversations,digital-workers,integrations,market-research,plans-billing,resources,voice-assistant,widget-customization}/page.tsx,page.tsx}`, `src/components/agents/create/{plan,training,}/page.tsx` | ✅ |
 | G12 | Add missing `method` arg to 9 `request(...)` call-sites; tighten return types on `getTickets` / `getTicket` / `initiateOAuth`. | `src/lib/clients/{nango-client,nohu-client,zammad-client}.ts` | ✅ |
-| G12 | New `pnpm typecheck` script + filter wrapper that exits 0 when velion-tree errors are 0; surfaces the @blocksuite leakage as informational. | `package.json` (`scripts.typecheck`), `scripts/typecheck.sh` (new) | ✅ |
+| G12 | New `pnpm typecheck` script + filter wrapper that exits 0 when verevon-tree errors are 0; surfaces the @blocksuite leakage as informational. | `package.json` (`scripts.typecheck`), `scripts/typecheck.sh` (new) | ✅ |
 
 **Live-verified (2026-05-11)**:
 ```
 auth-core $ pnpm build       → exit 0
-velion    $ pnpm build       → exit 0   (104 routes generated; ignoreBuildErrors kept)
-velion    $ pnpm typecheck   → exit 0   "0 errors in velion source (354 @blocksuite third-party errors ignored — see G12)"
+verevon    $ pnpm build       → exit 0   (104 routes generated; ignoreBuildErrors kept)
+verevon    $ pnpm typecheck   → exit 0   "0 errors in verevon source (354 @blocksuite third-party errors ignored — see G12)"
 ```
 
-**Known follow-up** (low priority): if velion ever needs `tsc --noEmit` to be cleanly zero, the @blocksuite leakage has to be patched at the package level — either via `pnpm patch @blocksuite/store@0.19.5` (rewrite `dist/index.d.ts` to not re-export from `../src/`) or by upgrading past 0.19.5 once a fixed release exists. Not blocking any CI today.
+**Known follow-up** (low priority): if verevon ever needs `tsc --noEmit` to be cleanly zero, the @blocksuite leakage has to be patched at the package level — either via `pnpm patch @blocksuite/store@0.19.5` (rewrite `dist/index.d.ts` to not re-export from `../src/`) or by upgrading past 0.19.5 once a fixed release exists. Not blocking any CI today.
 
 ### 8.15 G33 — Quarry-v2 had no job→workflow dispatch path (2026-05-11) — ✅ Closed
 
-After G32 the velion ↔ quarry-control contract was correct but every crawl job sat at `status: "accepted"` forever. The orchestrator registered `CrawlJobWF` / `ScrapeJobWF` / `BatchJobWF` and connected to Temporal, but nothing called `client.ExecuteWorkflow` — quarry-control's `POST /v1/jobs/` just wrote a DB row and returned. The schedules reconciler covered the cron path; the on-demand POST path was missing.
+After G32 the verevon ↔ quarry-control contract was correct but every crawl job sat at `status: "accepted"` forever. The orchestrator registered `CrawlJobWF` / `ScrapeJobWF` / `BatchJobWF` and connected to Temporal, but nothing called `client.ExecuteWorkflow` — quarry-control's `POST /v1/jobs/` just wrote a DB row and returned. The schedules reconciler covered the cron path; the on-demand POST path was missing.
 
 Cleanest fix (option **(a)** from the original G33 entry): give quarry-control a Temporal client and dispatch inline. Plus a small contract patch on the events ingest endpoint that surfaced during E2E testing — the orchestrator's `EmitEvent` activity posts a bare event object whereas the handler decoded `[]Event`, and every event arrived with `seq=0` (the workflow doesn't assign one) so the `UNIQUE (run_id, seq)` index conflict-500'd every second event.
 
@@ -1205,29 +1205,29 @@ Closed by:
 |---|---|---|---|
 | G33 | New `internal/workflowdispatch` package: mirror types for `CrawlJobInput` / `ScrapeJobInput` / `BatchJobInput` (matching `services/quarry-orchestrator/internal/workflows/`), kind→workflow router, dispatches via `client.ExecuteWorkflow` on the `quarry-orchestrator` task queue with workflow ID `wf-<jobID>`. | `Ingestion Plane/Quarry-v2/services/quarry-control/internal/workflowdispatch/dispatch.go` (new) | ✅ |
 | G33 | `MountJobs` takes a `JobDispatcher` interface (nil-allowed for tests / Temporal-less dev); `createJob` pre-generates a RunID, persists it on `job.Params["run_id"]`, dispatches via the workflow client, marks status `"queued"` on success and falls back to `"accepted"` on `ErrNoStarter`. | `services/quarry-control/internal/resources/resources.go` | ✅ |
-| G33 | `jobEvents` resolves `job → params.run_id → ForRun` so velion's `/v1/jobs/{id}/events` poll surfaces the events the workflow actually emitted (events are stored keyed by RunID; the old `ForJob` path never hit). | `services/quarry-control/internal/resources/resources.go` | ✅ |
+| G33 | `jobEvents` resolves `job → params.run_id → ForRun` so verevon's `/v1/jobs/{id}/events` poll surfaces the events the workflow actually emitted (events are stored keyed by RunID; the old `ForJob` path never hit). | `services/quarry-control/internal/resources/resources.go` | ✅ |
 | G33 | `cmd/control/main.go` dials Temporal when `TEMPORAL_ADDR` is set, constructs the dispatcher, passes it to `MountJobs`. Empty `TEMPORAL_ADDR` logs a warning and leaves dispatch disabled (legacy behaviour). | `services/quarry-control/cmd/control/main.go` | ✅ |
 | G33 | `POST /v1/runs/{id}/events` now accepts either a bare event object or an event array; the orchestrator's activity posts a single object. | `services/quarry-control/internal/resources/resources.go` | ✅ |
 | G33 | Postgres `events.Append` auto-assigns `seq` when it arrives as 0 (`COALESCE((SELECT MAX(seq)…), 0) + 1`) and uses `ON CONFLICT (event_id) DO NOTHING` so Temporal activity retries with the same event_id are idempotent instead of 500'ing. | `services/quarry-control/internal/store/pg/resources.go` | ✅ |
 | G33 | Compose: `quarry-control` gains `TEMPORAL_ADDR=temporal:7233`, `TEMPORAL_NAMESPACE=default`, `TEMPORAL_TASK_QUEUE=quarry-orchestrator`, and a `depends_on: temporal`. | `Ingestion Plane/docker-compose.yml` | ✅ |
 | G33 | `go.mod` + `go.sum` — added `go.temporal.io/sdk v1.29.1` matching the orchestrator's pin. | `services/quarry-control/go.mod`, `go.sum` | ✅ |
 
-**Live-verified E2E** (2026-05-11): single POST through velion produced the expected event sequence:
+**Live-verified E2E** (2026-05-11): single POST through verevon produced the expected event sequence:
 ```
-POST velion/api/ingestion/crawl  → 200 { jobId: "job_01KRAYTJBNGRPH01C9KGRJ3WNR", status: "queued" }
+POST verevon/api/ingestion/crawl  → 200 { jobId: "job_01KRAYTJBNGRPH01C9KGRJ3WNR", status: "queued" }
 GET  quarry-control /v1/jobs/{id}/events?limit=30 →
   seq=1 type=run_started
   seq=2 type=page_fetched          ← the actual https://example.com page
-  seq=3 type=run_completed         ← terminal; velion /stream emits SSE 'completed'
+  seq=3 type=run_completed         ← terminal; verevon /stream emits SSE 'completed'
 ```
-This is the signal the velion `CrawlProgressContext` waits on; the onboarding website step now advances unattended.
+This is the signal the verevon `CrawlProgressContext` waits on; the onboarding website step now advances unattended.
 
 **Known follow-ups** (file as separate gaps if they bite again):
-- **G33-fu1 (job status reconciliation)**: `Job.Status` stays at `"queued"` even after the workflow emits `run_completed`. Nothing observes the events stream and PATCHes the job row. The velion UI doesn't need this (it consumes events directly via `/stream`), but `/api/ingestion/crawl/{id}/status` will keep reporting `"queued"` forever. Fix: add a per-event hook in the events POST handler that updates `db.Jobs()` status on `run_started` / `run_completed` / `run_failed` / `run_cancelled` for the matching job (look up by `params.run_id`). Needs `JobsStore.UpdateStatus`.
+- **G33-fu1 (job status reconciliation)**: `Job.Status` stays at `"queued"` even after the workflow emits `run_completed`. Nothing observes the events stream and PATCHes the job row. The verevon UI doesn't need this (it consumes events directly via `/stream`), but `/api/ingestion/crawl/{id}/status` will keep reporting `"queued"` forever. Fix: add a per-event hook in the events POST handler that updates `db.Jobs()` status on `run_started` / `run_completed` / `run_failed` / `run_cancelled` for the matching job (look up by `params.run_id`). Needs `JobsStore.UpdateStatus`.
 - **G33-fu2 (job→run linkage in store)**: currently the job→run link lives in `job.Params["run_id"]`. A typed `JobRuns` join would be cleaner and survive a future move away from JSONB params. Low priority.
 - **G33-fu3 (event ordering under concurrency)**: `SELECT MAX(seq)+1` is race-prone if two events for the same run land in parallel. Today only one workflow writes per run so this is fine, but if multi-worker fan-out emits concurrently we'll hit serialization failures.
 
-### 8.14 G32 — Velion's Quarry contract was v1; backend is v2 (2026-05-11) — ✅ Closed
+### 8.14 G32 — Verevon's Quarry contract was v1; backend is v2 (2026-05-11) — ✅ Closed
 
 Onboarding step 3 ("Koble til nettsiden") failed with `POST /api/ingestion/crawl 503` and `GET /api/ingestion/crawl/{jobId}/stream 400`. Both routes were written against the **legacy Quarry v1 API** (`http://quarry-api:8090/v1/crawl`, SSE event stream), but the running ingestion plane is **Quarry-v2**, which exposes a job/event envelope API at `http://quarry-control:8081/v1/jobs/`.
 
@@ -1248,7 +1248,7 @@ Closed by:
 | G32 | Dashboard stats call `/v1/crawl/jobs?limit=1` → `/v1/jobs/?limit=1`; fallback host `quarry-api:8090` → `quarry-control:8081`. | `src/lib/rpc/server.ts` (lines 25, 178) | ✅ |
 | G32 | `QUARRY_API_URL` + `QUARRY_URL` → `http://quarry-control:8081`. | `.env` (lines 67–68) | ✅ |
 
-**Live-verified contract** (from inside the velion container, post-recreate):
+**Live-verified contract** (from inside the verevon container, post-recreate):
 
 ```
 POST http://quarry-control:8081/v1/jobs/
@@ -1268,7 +1268,7 @@ GET  http://quarry-control:8081/v1/jobs/job_01KRA…/events?after_seq=0&limit=50
 
 **§8.11 was wrong.** That entry diagnosed the persistent 401s as "pre-cookie retry noise" — the harmless artifact of client effects firing before Better Auth's `sid`/`sdata` cookies arrived. The DEBUG_AUTH_FORWARD trace it relied on only logged the **session-validation** call into auth-core, which always succeeded (`hasUser=true`) once cookies were present. What it did *not* log was the **upstream proxy call** into user-core / org-core / billing-core, which was rejected by **every** CP service for **every** authenticated user, regardless of cookie state.
 
-**Actual root cause:** `velion/.env` had:
+**Actual root cause:** `verevon/.env` had:
 ```
 INTERNAL_API_KEY=notif-internal-key-change-me        # placeholder, 28 chars
 INTERNAL_SERVICE_SECRET=notif-internal-key-change-me # placeholder, 28 chars
@@ -1279,7 +1279,7 @@ INTERNAL_API_KEY=11604143a90303a16869372de84b493a8742d45c51e4142554640f3d0266965
 INTERNAL_SERVICE_SECRET=11604143a90303a16869372de84b493a8742d45c51e4142554640f3d0266965f
 ```
 
-Every velion → CP proxy call shipped the wrong `X-Internal-Api-Key` header. user-core's `authContextMiddleware` (and the equivalents in org-core / billing-core) compared it against the configured 64-char secret, failed the match, then optionally tried `Authorization: Bearer …` against auth-service, also failed, and aborted with `401 unauthorized`. `/api/knowledge/integrations` 403'd for the same reason at a different upstream.
+Every verevon → CP proxy call shipped the wrong `X-Internal-Api-Key` header. user-core's `authContextMiddleware` (and the equivalents in org-core / billing-core) compared it against the configured 64-char secret, failed the match, then optionally tried `Authorization: Bearer …` against auth-service, also failed, and aborted with `401 unauthorized`. `/api/knowledge/integrations` 403'd for the same reason at a different upstream.
 
 The §8.11 retry chain *was* firing on stale cookies — that part was accurate — but those retries weren't the cause of what the user saw. Even after cookies stabilized, **every** call still 401'd because the API key was wrong.
 
@@ -1290,7 +1290,7 @@ Closed by:
 | G30 real | Replaced `INTERNAL_API_KEY` + `INTERNAL_SERVICE_SECRET` placeholders with the 64-char CP shared secret (matches auth-core / user-core / org-core / billing-core / notification-core env). | `.env` (lines 90–91) | ✅ |
 | G30 real | Re-stripped the `DEBUG_AUTH_FORWARD` instrumentation (§8.11's claim that it had been removed was correct at the time but it was re-added during this diagnostic round). | `src/app/api/_lib/control-plane-auth.ts`, `docker-compose.yml` | ✅ |
 
-**Live-verified post-fix**: from inside the velion container, every `[cp-auth]` upstream call shows `cookies=3 [sid,sdata,sid_multi-…] sid=true sdata=true → auth-core 200 hasUser=true`, and the previously-401-ing `GET /api/user/current`, `GET /api/user/me/session-context`, `GET /api/org/orgs/me` all return 200 with payload. The `Failed to fetch Convex auth token: 401` reported pre-G31 is also gone.
+**Live-verified post-fix**: from inside the verevon container, every `[cp-auth]` upstream call shows `cookies=3 [sid,sdata,sid_multi-…] sid=true sdata=true → auth-core 200 hasUser=true`, and the previously-401-ing `GET /api/user/current`, `GET /api/user/me/session-context`, `GET /api/org/orgs/me` all return 200 with payload. The `Failed to fetch Convex auth token: 401` reported pre-G31 is also gone.
 
 **Process lesson**: cookie-forwarding telemetry alone is insufficient to diagnose proxy failures. If a request 401s, the next diagnostic move must include the *upstream's* perspective — log what header the upstream actually received and what it compared against. Adding an `[upstream-auth] received key length=… match=…` log inside user-core's middleware would have caught this in minutes instead of multiple iteration rounds.
 
@@ -1298,7 +1298,7 @@ Closed by:
 
 Even after the §8.11 diagnosis confirmed the flow was correct, the 3 visible 401s in the browser console kept fooling testers into thinking sign-in was broken. The 401 lines that Chrome DevTools logs natively from a failed `fetch` cannot be suppressed — they sit in the console regardless of whether our app-level logger downgrades the error.
 
-The retries were happening **because** AuthCallbackClient called `needsOnboarding()` immediately on `useEffect` mount, before the post-OAuth cookie-propagation window settled on the velion proxy side. The OnboardingGuard wrapping the dashboard layout *also* calls `needsOnboarding()` — and it runs on a stable full-navigation request, where the cookie is reliably attached.
+The retries were happening **because** AuthCallbackClient called `needsOnboarding()` immediately on `useEffect` mount, before the post-OAuth cookie-propagation window settled on the verevon proxy side. The OnboardingGuard wrapping the dashboard layout *also* calls `needsOnboarding()` — and it runs on a stable full-navigation request, where the cookie is reliably attached.
 
 **Solution**: stop doing the onboarding decision in AuthCallbackClient. Route directly to `/dashboard` (or the original `redirectTo`). Let OnboardingGuard be the single authority.
 
@@ -1315,7 +1315,7 @@ Closed by:
 - Auth-core logs: 1 `GET /api/auth/get-session` from `waitForProfile`, then ~1 `GET /api/auth/get-session` from OnboardingGuard's useEffect after the dashboard renders.
 - Network tab: `/api/user/me/session-context`, `/api/user/current`, `/api/org/orgs/me` may still appear from OnboardingGuard once the user lands at `/dashboard` — but they should 200, not 401, because the navigation gives cookies plenty of time to attach.
 
-If `/api/user/me/session-context` still 401s after this patch, the issue is genuinely a server-side cookie-attachment bug in the velion proxy (not a timing race), and we'd dig into Next.js 16's `request.headers.get('cookie')` behaviour in the App Router. Until then, the simpler fix wins.
+If `/api/user/me/session-context` still 401s after this patch, the issue is genuinely a server-side cookie-attachment bug in the verevon proxy (not a timing race), and we'd dig into Next.js 16's `request.headers.get('cookie')` behaviour in the App Router. Until then, the simpler fix wins.
 
 ### 8.11 G30 final diagnosis — the flow works; the 401s are pre-cookie noise, not failure (2026-05-10) — ✅ Closed
 
@@ -1334,11 +1334,11 @@ GET /api/auth/callback/microsoft                                                
 ✅ Pre-filled profile with OAuth data: { firstName: 'Ima', lastName: 'Fernandes Da Costa' }
 ```
 
-**The browser sends NO Better Auth session cookie until the Microsoft OAuth callback at `/api/auth/callback/microsoft` completes and sets `sid` + `sdata`.** Before that, the velion API proxy forwards 6 cookies (third-party `__clerk_*`, `__client_uat`, market preferences, HMR refresh — none from Better Auth), so auth-core correctly returns "no user". Once the OAuth callback completes, the next request includes `sid` + `sdata` and auth-core returns the user. `waitForOnboardingCheck`'s 6×400 ms backoff absorbs the gap.
+**The browser sends NO Better Auth session cookie until the Microsoft OAuth callback at `/api/auth/callback/microsoft` completes and sets `sid` + `sdata`.** Before that, the verevon API proxy forwards 6 cookies (third-party `__clerk_*`, `__client_uat`, market preferences, HMR refresh — none from Better Auth), so auth-core correctly returns "no user". Once the OAuth callback completes, the next request includes `sid` + `sdata` and auth-core returns the user. `waitForOnboardingCheck`'s 6×400 ms backoff absorbs the gap.
 
 **It's not broken — it's noisy.** The 401s in the browser console are early retry attempts that 401 *correctly* because the cookie hasn't arrived yet. The flow ends in success (analytics + redirect + pre-filled profile prove it).
 
-The actual root cause of the **noise** is that velion is rendering `/auth/callback` and firing client effects in cases where the user is *not yet* signed in (e.g. visiting the callback URL directly, or post-sign-out lingering), and the retry chain re-runs without a way to distinguish "session in flight" from "no session at all".
+The actual root cause of the **noise** is that verevon is rendering `/auth/callback` and firing client effects in cases where the user is *not yet* signed in (e.g. visiting the callback URL directly, or post-sign-out lingering), and the retry chain re-runs without a way to distinguish "session in flight" from "no session at all".
 
 Closed by:
 
@@ -1347,7 +1347,7 @@ Closed by:
 | G30 noise | Added `/api/user/me/session-context` to `api-client.ts`'s suppress list so 401s during the retry window log as `console.warn` instead of `console.error`. | `src/lib/api-client.ts` | ✅ |
 | G30 noise | Removed `DEBUG_AUTH_FORWARD` instrumentation from `control-plane-auth.ts` and from `docker-compose.yml`. | `src/app/api/_lib/control-plane-auth.ts`, `docker-compose.yml` | ✅ |
 
-**Verified post-cleanup**: velion container restarted, `DEBUG_AUTH_FORWARD` is unset, healthy.
+**Verified post-cleanup**: verevon container restarted, `DEBUG_AUTH_FORWARD` is unset, healthy.
 
 **Architecture status confirmed safe**: cookie name (`idknuten.sid`), Better Auth catch-all handler, NestJS Express→Headers conversion, oRPC vs native — all working correctly. The earlier theory that the oRPC `getSession` was buggy was wrong; G30 v3's swap to native is still a valid improvement (cleaner code path, fewer custom wrappers in the dependency chain) and stays. G31 (NestJS `toWebHeaders` fix in `convex-auth.controller` + `nats-auth.controller`) was also a genuine bug fix unrelated to this race.
 
@@ -1382,7 +1382,7 @@ Closed by:
 ```
 GET /api/convex-auth/jwks                  → 200          (public, unchanged)
 GET /api/convex-auth/token  (no cookie)    → 401          (correct: cookie required)
-GET /api/convex-auth/token  via velion     → 401          (passthrough, correct)
+GET /api/convex-auth/token  via verevon     → 401          (passthrough, correct)
 auth-service container: healthy, no startup errors
 ```
 
@@ -1394,13 +1394,13 @@ For a **real** sign-in: the next browser test should produce `200 { token, userI
 
 v1 added client retries; v2 added server-side resolution. The 401s **still appeared in production sign-in traces**. Diagnosis: both v1 and v2 paths funnel through auth-core's custom oRPC `POST /api/v2/auth/getSession`, which calls `auth.api.getSession({ headers })` under the hood. The oRPC wrapper has shown intermittent "not authenticated" responses for cookies that Better Auth's **own** internal validation accepts — observable when `authORPCClient.getProfile()` succeeds against the same cookie that `getSession` rejects (both procedures share the same underlying call, but the wrapping diverges).
 
-**Fix**: replace every velion session-lookup call with Better Auth's native `GET /api/auth/get-session`. That endpoint is what Better Auth uses internally and what auth-core's own `🔵 Better Auth route hit:` log confirms during the OAuth callback.
+**Fix**: replace every verevon session-lookup call with Better Auth's native `GET /api/auth/get-session`. That endpoint is what Better Auth uses internally and what auth-core's own `🔵 Better Auth route hit:` log confirms during the OAuth callback.
 
 Closed by:
 
 | ID | Patch | File | Status |
 |---|---|---|---|
-| G30 v3 | Swapped POST `/api/v2/auth/getSession` → GET `/api/auth/get-session` across all five velion call sites. | `src/proxy.ts` (edge middleware — G1's gate) | ✅ |
+| G30 v3 | Swapped POST `/api/v2/auth/getSession` → GET `/api/auth/get-session` across all five verevon call sites. | `src/proxy.ts` (edge middleware — G1's gate) | ✅ |
 | G30 v3 | (same swap) | `src/components/auth/lib/auth-server.ts` (`getServerSession` used by G30 v2 server-side check) | ✅ |
 | G30 v3 | (same swap) | `src/app/api/_lib/control-plane-auth.ts` (`requireSession` used by every CP-facing proxy) | ✅ |
 | G30 v3 | (same swap) | `src/app/api/auth/is-authenticated/route.ts` | ✅ |
@@ -1417,14 +1417,14 @@ POST /api/onboarding/cancel        → 401  (cookieless, expected)
 
 auth-core log now shows ONLY:
   🔵 Better Auth route hit: GET /api/auth/get-session
-No more  POST /api/v2/auth/getSession  calls from velion ✓
+No more  POST /api/v2/auth/getSession  calls from verevon ✓
 ```
 
 The remaining `api/v2/auth/getSession` string matches in the source tree are now exclusively documentation comments / historical notes — no live calls.
 
-**Why this should fix the user-reported sign-in trace**: when the cookie is real (just set by Better Auth's OAuth callback), Better Auth's native endpoint will validate it against the same secondary-storage path that `authORPCClient.getProfile()` already uses successfully in the same callback. With every velion session lookup now routed through that native path, the `waitForProfile()` success and the velion-proxy session check should both succeed for the same cookie.
+**Why this should fix the user-reported sign-in trace**: when the cookie is real (just set by Better Auth's OAuth callback), Better Auth's native endpoint will validate it against the same secondary-storage path that `authORPCClient.getProfile()` already uses successfully in the same callback. With every verevon session lookup now routed through that native path, the `waitForProfile()` success and the verevon-proxy session check should both succeed for the same cookie.
 
-**Follow-up**: open a separate issue in auth-core to investigate why the custom oRPC `getSession` wrapper diverges from `auth.api.getSession` for some cookie inputs. Not blocking — velion no longer depends on the oRPC wrapper for session validation.
+**Follow-up**: open a separate issue in auth-core to investigate why the custom oRPC `getSession` wrapper diverges from `auth.api.getSession` for some cookie inputs. Not blocking — verevon no longer depends on the oRPC wrapper for session validation.
 
 ### 8.8 G30 v2 — server-side resolution of post-callback routing (2026-05-09 follow-up) — ✅ Closed
 
@@ -1449,7 +1449,7 @@ GET /auth/callback                  (real OAuth cookie) → ~150-700 ms (session
 
 **Why the fallback stays in the client**: paranoid defence. If the server-side helper ever fails to resolve (env not wired, user-core unreachable, replication still in flight at the 2 s cap), the client's v1 retry loop will still produce a correct decision. The two paths are mutually exclusive — server path always tried first.
 
-**No backend service rebuild required**: only `velion` was touched. Velion runs in dev mode with bind-mounted source, so the hot-reload picked up `page.tsx`, `AuthCallbackClient.tsx`, and the new `onboarding-server.ts` automatically. Verified via `docker logs` showing the new file compile times on the next `/auth/callback` hit.
+**No backend service rebuild required**: only `verevon` was touched. Verevon runs in dev mode with bind-mounted source, so the hot-reload picked up `page.tsx`, `AuthCallbackClient.tsx`, and the new `onboarding-server.ts` automatically. Verified via `docker logs` showing the new file compile times on the next `/auth/callback` hit.
 
 ### 8.7 G30 — OAuth-callback race produced spurious 401s on `needsOnboarding()` (2026-05-09 follow-up) — ✅ Closed
 
@@ -1482,7 +1482,7 @@ Closed by:
 
 | ID | Patch | File | Status |
 |---|---|---|---|
-| G19 | `Velion_CONNECT_ROADMAP.md` retitled with a "Last verified against code" line; middleware naming corrected (`src/middleware.ts` → `src/proxy.ts`, Next.js 15+ convention) with cookie inventory expanded to the real 5-name list + 3 patterns; 7-step onboarding rewritten as the actual 6-step (plan-selection deferred → `/settings/billing`); Phase 8 "Not started" downgraded to "Partial" with cross-refs to G14 + ADR 0002. | `docs/Velion_CONNECT_ROADMAP.md` | ✅ Closed |
+| G19 | `Verevon_CONNECT_ROADMAP.md` retitled with a "Last verified against code" line; middleware naming corrected (`src/middleware.ts` → `src/proxy.ts`, Next.js 15+ convention) with cookie inventory expanded to the real 5-name list + 3 patterns; 7-step onboarding rewritten as the actual 6-step (plan-selection deferred → `/settings/billing`); Phase 8 "Not started" downgraded to "Partial" with cross-refs to G14 + ADR 0002. | `docs/Verevon_CONNECT_ROADMAP.md` | ✅ Closed |
 | G7  | Convex-core defaults switched from `org-core-service:8080` → `org-core:8080` and `auth-service:3011` → `auth-core:3011` in three places: `.env.local`, `docker-compose.yml` env block, `startup.sh` env setter. Plus the `CONVEX_AUTH_JWKS_URL` default in `convex/auth.config.ts`. Legacy aliases still resolve in docker-compose so old containers keep working during rollout. | `Application Plane/convex-core/{.env.local, docker-compose.yml, startup.sh, convex/auth.config.ts}` | ✅ Closed |
 
 ### 8.5 ADRs 0002 + 0003 — architectural decisions for G10 + G17 (2026-05-09 follow-up) — ✅ Closed
@@ -1492,8 +1492,8 @@ Closed by:
 | ID | Patch | File | Status |
 |---|---|---|---|
 | G10 (decision) | ADR 0002 ratifies the repurpose of CP `session-core` from agent-run authority to the **Control Session coordinator** (user/org/billing aggregate, Redis-cached, NATS-driven invalidation, Convex projection). Agent-run state (plans, todos, lineage, approvals) migrates to Model Plane `session-core` (Rust). 9-step implementation plan with feature-flag rollout. | `docs/adr/0002-cp-session-core-repurpose.md` | ✅ Closed — ADR ratified + fully implemented (Wave 3 §8.17 aggregator MVP, Wave 6 §8.20 cache, Wave 7 §8.21 invalidator + Convex mirror, Wave 9 §8.26 agent-run scaffold decommissioned) |
-| G17 (decision) | ADR 0003 formalises velion's `src/app/api/*` proxies as the canonical L5 ingress. Charter text drafted for `ARCHITECTURE_DIAGRAM.md`. Three guardrails: shared helper, per-core key middleware, forced revisit when second frontend ships. | `docs/adr/0003-l5-boundary-policy.md` | ✅ Closed — ADR ratified, charter amended (Wave 3 §8.17), `scripts/lint-proxy-routes.sh` ratchets new fetch-without-helper routes |
-| G27 (decision) | ADR 0004 proposes Option C: rename `velion-net` → `inter-plane-bus` (cheap; doc + 6 compose files), defer least-privilege shrink (Option B) until a named forcing function fires (second tenant, PII-classified workload, pen-test result, lateral-movement incident). Charter amendment drafted for `ARCHITECTURE_DIAGRAM.md` (new "Network Topology" section). | `docs/adr/0004-network-topology.md` | ✅ Closed — ADR ratified + cutover landed (Wave 6 §8.20); `inter-plane-bus` with 46 members verified live; 4 stale empty networks removed (Wave 7 §8.21) |
+| G17 (decision) | ADR 0003 formalises verevon's `src/app/api/*` proxies as the canonical L5 ingress. Charter text drafted for `ARCHITECTURE_DIAGRAM.md`. Three guardrails: shared helper, per-core key middleware, forced revisit when second frontend ships. | `docs/adr/0003-l5-boundary-policy.md` | ✅ Closed — ADR ratified, charter amended (Wave 3 §8.17), `scripts/lint-proxy-routes.sh` ratchets new fetch-without-helper routes |
+| G27 (decision) | ADR 0004 proposes Option C: rename `verevon-net` → `inter-plane-bus` (cheap; doc + 6 compose files), defer least-privilege shrink (Option B) until a named forcing function fires (second tenant, PII-classified workload, pen-test result, lateral-movement incident). Charter amendment drafted for `ARCHITECTURE_DIAGRAM.md` (new "Network Topology" section). | `docs/adr/0004-network-topology.md` | ✅ Closed — ADR ratified + cutover landed (Wave 6 §8.20); `inter-plane-bus` with 46 members verified live; 4 stale empty networks removed (Wave 7 §8.21) |
 
 Plus `docs/adr/README.md` index with format notes and the index table.
 
@@ -1595,7 +1595,7 @@ zero deprecation warnings, zero compile errors ✓
 
 ### 8.1 Live-docker hardening pass (2026-05-09) — ✅ Closed
 
-End-to-end verified against the running stack (47 containers across velion-net + controlplane-net + app-net + dpv2-net + ingestion-net + model-plane-network):
+End-to-end verified against the running stack (47 containers across verevon-net + controlplane-net + app-net + dpv2-net + ingestion-net + model-plane-network):
 
 | ID | Patch | Files | Status |
 |---|---|---|---|
@@ -1603,16 +1603,16 @@ End-to-end verified against the running stack (47 containers across velion-net +
 | G6 | Dropped multi-URL fallback ladder in `/api/org/[...path]`. Single canonical `ORG_SERVICE_URL` / `BILLING_SERVICE_URL` (trailing slashes trimmed). Fails loud on misconfig instead of silently retrying. | `src/app/api/org/[...path]/route.ts` | ✅ Closed |
 | G8 | Replaced stdlib `log.Printf` with zerolog in user-core auth middleware paths. Structured JSON across the service. | `Control Plane/user-core/internal/http/server.go` | ✅ Closed |
 | G9 | Dropped raw `user_id` from info-level logs in user-core. Demoted to `Debug` with no PII payload. | `Control Plane/user-core/internal/http/server.go` | ✅ Closed |
-| G15 | X-Correlation-Id end-to-end. Velion mints UUIDv4 if absent (cached per-request via WeakMap), forwards to all CP calls. All four cores (user/org/billing/session) install `correlationMiddleware` that honours inbound id, sets ctx, echoes response header. user-core log lines now include `correlation_id` field. | `src/app/api/_lib/control-plane-auth.ts`, `Control Plane/{user,org,billing,session}-core/internal/http/{correlation.go,server.go}` | ✅ Closed |
+| G15 | X-Correlation-Id end-to-end. Verevon mints UUIDv4 if absent (cached per-request via WeakMap), forwards to all CP calls. All four cores (user/org/billing/session) install `correlationMiddleware` that honours inbound id, sets ctx, echoes response header. user-core log lines now include `correlation_id` field. | `src/app/api/_lib/control-plane-auth.ts`, `Control Plane/{user,org,billing,session}-core/internal/http/{correlation.go,server.go}` | ✅ Closed |
 | G18 | Onboarding `needsOnboarding()` now prefers single-call `/api/user/me/session-context`. Branches on `onboardingStatus`: COMPLETED → no wizard, CONNECTORS_PENDING → wizard, else fall back to legacy 3-call heuristic. Adds typed `SessionContext` interface + `getSessionContext()` helper. | `src/lib/services/user-service.ts`, `src/components/onboarding/services/onboarding-service.ts` | ✅ Closed |
 
 **Smoke verification** (live):
 ```
 all 4 CP cores echo X-Correlation-Id ✓
 user-core logs `correlation_id` in structured JSON ✓
-velion auth fail-closed (401) on unauth proxies ✓
-velion auth-session routes return 200 {authenticated:false} on no cookie ✓
-cross-container DNS: velion → auth-service:3011, user-core:3012, org-core:8080,
+verevon auth fail-closed (401) on unauth proxies ✓
+verevon auth-session routes return 200 {authenticated:false} on no cookie ✓
+cross-container DNS: verevon → auth-service:3011, user-core:3012, org-core:8080,
   billing-core-service:3014, session-core-service:3017, notification-core:3140 → all 200 ✓
 no error/fatal/panic lines in CP service logs ✓
 ```
@@ -1635,7 +1635,7 @@ Audit pass on 2026-05-09 confirmed:
 12. **Data Plane `retrieval-engine-rs/.../mod.rs`** — accepts `x-api-key` / `x-internal-api-key` / `x-internal-key`.
 13. **Ingestion Plane `planes.rs`** — Quarry → Data Plane ingest now hits real `/v1/documents`.
 
-Verification: `go test ./...` passes for user-core, session-core, org-core, billing-core, documents-api-go. `cargo check` passes for retrieval-engine-rs and quarry-edge (pre-existing warnings only). Velion TypeScript build still has unrelated Blocksuite type failures (G12); touched files compile cleanly.
+Verification: `go test ./...` passes for user-core, session-core, org-core, billing-core, documents-api-go. `cargo check` passes for retrieval-engine-rs and quarry-edge (pre-existing warnings only). Verevon TypeScript build still has unrelated Blocksuite type failures (G12); touched files compile cleanly.
 
 ---
 
@@ -1687,7 +1687,7 @@ Graph enrichment was correctly skipped on the synthetic replay (no `tokenRef`); 
 
 ```typescript
 if (scope) {
-  // G47 (velion-gap.md §8.33): Better Auth stores granted scopes as a
+  // G47 (verevon-gap.md §8.33): Better Auth stores granted scopes as a
   // comma-separated string in `account.scope` (e.g.
   // `email,openid,profile,User.Read`), but RFC 6749 §3.3 requires the
   // OAuth scope parameter to be space-separated.
@@ -1711,7 +1711,7 @@ After deploy + force-recreate, the next Microsoft sign-in for `ima.dacosta@aquat
 **Fix** (`apps/Control Plane/user-core/internal/handlers/event_handler.go` ~line 376): mirror the GetByEmail → GetByID fallback pattern from `HandleUserRegistered`:
 
 ```go
-// G48 (velion-gap.md §8.33): GetByID fallback when GetByEmail fails.
+// G48 (verevon-gap.md §8.33): GetByID fallback when GetByEmail fails.
 // Mirrors the lookup pattern in HandleUserRegistered. Necessary because
 // the legacy auto-provision flow can leave user_service.users rows under
 // a placeholder email (e.g. `g3-smoke@example.com`) while auth-service
@@ -1737,7 +1737,7 @@ After rebuild + force-recreate, replayed the testbruker event → handler procee
 This wave surfaced the **third** instance of the same trap. The user updated `MICROSOFT_CLIENT_SECRET` in `apps/Control Plane/auth-core/.env` but the compose file uses `env_file: ./auth-core/.env.docker`. `docker compose restart` reuses the existing container env. To pick up new values the **`.env.docker`** file must be edited and the container **`docker compose up -d --no-deps --force-recreate auth-core`**'d (not `restart`'d).
 
 Previous instances of the same trap:
-- §8.23 Wave 9 hot-fix: `AUTH_CORE_INTERNAL_API_KEY` (Velion → auth-core internal calls)
+- §8.23 Wave 9 hot-fix: `AUTH_CORE_INTERNAL_API_KEY` (Verevon → auth-core internal calls)
 - §8.29 Wave 9: `INTERNAL_API_KEY` for billing-core
 - §8.33 Wave 13 (this entry): `MICROSOFT_CLIENT_SECRET` for auth-core
 
@@ -1745,7 +1745,7 @@ Previous instances of the same trap:
 
 #### §12 closure — Playwright journeys 2/5/8/9 now have coverage ✅ Closed
 
-Added `apps/Frontend Plane/velion/tests/e2e/specs/onboarding-advanced.spec.ts` with five tests covering the four previously-missing journeys:
+Added `apps/Frontend Plane/verevon/tests/e2e/specs/onboarding-advanced.spec.ts` with five tests covering the four previously-missing journeys:
 
 | Journey | Mock contract | Assertion |
 |---|---|---|
@@ -1755,7 +1755,7 @@ Added `apps/Frontend Plane/velion/tests/e2e/specs/onboarding-advanced.spec.ts` w
 | **J9-a** Connector consent — no Microsoft | `useKnowledgeIntegrations()` returns `{ connections: [{ provider: 'google' }] }`; `page.clock.fastForward('95s')` skips the 90 s `FIRST_VALUE_DELAY_MS` | `connector-consent-prompt` visible after fast-forward; `connector-consent-connect` button rendered |
 | **J9-b** Connector consent — Microsoft already linked | Same as J9-a but `connections: [{ provider: 'microsoft' }]` | `connector-consent-prompt` has count 0 even after fast-forward (no nagging) |
 
-Type-checks cleanly against velion's `tsconfig.json` (`strict: true`, `target: ES2017`). Runtime execution still requires velion running on `localhost:3001` with the `x-e2e-bypass: e2e-dev-bypass-secret` header — same precondition as the legacy specs.
+Type-checks cleanly against verevon's `tsconfig.json` (`strict: true`, `target: ES2017`). Runtime execution still requires verevon running on `localhost:3001` with the `x-e2e-bypass: e2e-dev-bypass-secret` header — same precondition as the legacy specs.
 
 These specs are regression nets for the LIVE verifications landed in Waves 10/11/13: if a future Better-Auth/Convex/Graph update silently breaks G18/G21/G16/G45, the spec failure surfaces in CI rather than at the first user click.
 
@@ -1765,7 +1765,7 @@ These specs are regression nets for the LIVE verifications landed in Waves 10/11
 
 - **user-core**: synced `INTERNAL_API_KEY`, `INTERNAL_SERVICE_SECRET`, `AUTH_SERVICE_URL`, `ORG_SERVICE_URL` from `.env.docker` into `.env` (host hostnames). Real risk closed — anyone running `go run` instead of docker now gets the same auth surface.
 - **auth-core**: replaced the legacy single `HIBP_CUSTOM_MESSAGE` with the locale-suffixed pair (`HIBP_CUSTOM_MESSAGE_EN` + `HIBP_CUSTOM_MESSAGE_NO`) — the code reads the suffixed versions. Synced `ADMIN_USER_IDS` to the real admin ID, `INTERNAL_SERVICE_IDS` to include the canonical `user-core` service name, and `INTERNAL_SERVICE_SECRET` + `INTERNAL_API_KEY` to the real shared secret. Added `^REQUIRE_EMAIL_VERIFICATION$` to `EXEMPT_PATTERNS` because the divergence is intentional (local dev = false for throwaway test accounts; docker = true for staging parity).
-- **org-core**: synced `INTERNAL_API_KEY`, `INTERNAL_SERVICE_SECRET`, and all five `REDIS_*` keys into `.env` (host hostnames). Added `VELION_NATS_URL` + `VELION_NATS_TOKEN` to `.env.docker` — these are read by `config.go` for the cross-plane shared bus and were missing in compose.
+- **org-core**: synced `INTERNAL_API_KEY`, `INTERNAL_SERVICE_SECRET`, and all five `REDIS_*` keys into `.env` (host hostnames). Added `VEREVON_NATS_URL` + `VEREVON_NATS_TOKEN` to `.env.docker` — these are read by `config.go` for the cross-plane shared bus and were missing in compose.
 - **Quarry**: **deleted the orphan `.env.docker`** (verified zero references across compose files, Dockerfile, and scripts — Quarry-v2 services configure via inline `environment:` directives, never via env_file). Migrated the seven cross-plane integration keys from the orphan into `Quarry/.env` so the legacy v1 binary in `cmd/api/main.go` still has its full auth/billing surface. Result: 43 violations → 0 (and one less file to maintain).
 
 **Promoted to default**: `pnpm lint` now runs `eslint . && lint-proxy-routes.sh && lint-env-files.sh`. The lint will fail any future PR that introduces drift, exactly the trap that bit §8.23 / §8.29 / §8.33.
@@ -1782,12 +1782,12 @@ $ echo $?
 **Files touched in this follow-up wave**:
 - `apps/Control Plane/user-core/.env` — 3 keys added.
 - `apps/Control Plane/auth-core/.env` — 3 keys synced, 1 placeholder removed, locale-suffixed HIBP keys added.
-- `apps/Control Plane/org-core/.env` — 6 keys added, VELION_NATS_* preserved.
-- `apps/Control Plane/org-core/.env.docker` — VELION_NATS_* added (cross-plane bus).
+- `apps/Control Plane/org-core/.env` — 6 keys added, VEREVON_NATS_* preserved.
+- `apps/Control Plane/org-core/.env.docker` — VEREVON_NATS_* added (cross-plane bus).
 - `apps/Ingestion Plane/Quarry/.env` — 7 cross-plane keys migrated from the orphan.
 - `apps/Ingestion Plane/Quarry/.env.docker` — **deleted** (orphan, no consumers).
 - `scripts/lint-env-files.sh` — `REQUIRE_EMAIL_VERIFICATION` added to `EXEMPT_PATTERNS`.
-- `apps/Frontend Plane/velion/package.json` — `lint:env` promoted into the default `lint` chain.
+- `apps/Frontend Plane/verevon/package.json` — `lint:env` promoted into the default `lint` chain.
 
 #### G51 — `.env` vs `.env.docker` drift lint ✅ Closed
 
@@ -1803,7 +1803,7 @@ $ echo $?
 - Two escape hatches: `SKIP_ENV_LINT=1` (intentional bypass during multi-step rollouts), `ENV_LINT_DEBUG=1` (also show exempt divergences for troubleshooting).
 - Exit codes: `0` clean, `1` violations, `2` script invocation error.
 
-**Wired as opt-in** via `pnpm lint:env` in `apps/Frontend Plane/velion/package.json` (matches the existing `lint:proxy` ratchet pattern). First run surfaced **64 pre-existing violations across 4 service pairs** (`user-core`, `auth-core`, `org-core`, `Quarry`) — a real backlog of historical drift to clean up. Promotion to the default `pnpm lint` is deferred until the backlog is reconciled; until then the lint serves as a manual audit tool that won't block ongoing development.
+**Wired as opt-in** via `pnpm lint:env` in `apps/Frontend Plane/verevon/package.json` (matches the existing `lint:proxy` ratchet pattern). First run surfaced **64 pre-existing violations across 4 service pairs** (`user-core`, `auth-core`, `org-core`, `Quarry`) — a real backlog of historical drift to clean up. Promotion to the default `pnpm lint` is deferred until the backlog is reconciled; until then the lint serves as a manual audit tool that won't block ongoing development.
 
 **Recommended next step** (out of scope for Wave 13 but worth filing): reconcile the 64-case backlog. Suggested approach is one PR per service pair — bulk-fix the asymmetric keys (`INTERNAL_API_KEY` missing from `.env` is the most consequential) and decide per case whether divergent values are intentional (add to `EXEMPT_PATTERNS`) or accidental (sync). Once clean, move `lint:env` into the default `pnpm lint` chain.
 
@@ -1812,7 +1812,7 @@ $ echo $?
 |---|---|
 | `bash scripts/lint-env-files.sh` exit code on dirty repo | 1 ✓ |
 | `SKIP_ENV_LINT=1 bash scripts/lint-env-files.sh` exit code | 0 ✓ |
-| `pnpm lint:env` from velion working dir | runs, reports 64 violations across 4 pairs ✓ |
+| `pnpm lint:env` from verevon working dir | runs, reports 64 violations across 4 pairs ✓ |
 | Secret values redacted in output | yes — only first 6 chars + `…` shown ✓ |
 | Exempt patterns honoured (URL-shaped keys allowed to differ) | yes — none of the URL/host divergences flagged ✓ |
 
@@ -1889,7 +1889,7 @@ The shared `ingestion-postgres` now has 14 percentage points more cache headroom
    ```
 3. Verified `controlSessions:byUser` now resolves: `curl -X POST http://localhost:3210/api/query -H 'Content-Type: application/json' -d '{"path":"controlSessions:byUser","args":{"externalUserId":"TXMAHgZcNEQ6zN19JqDTF6XBKIFfPRpw"},"format":"json"}'` returns `{"status":"success","value":null}` (no row yet, but function exists and index is built).
 
-**Verification**: G49 only manifests at runtime when velion's `<EnterpriseTrustBanner />` mounts and calls the function. Refreshing the dashboard after the host deploy resolves the error; the banner now subscribes correctly and will receive plan/entitlement/org-switch updates reactively per G43's original design. The volume mount ensures the next `compose up` rebuild won't re-introduce the drift.
+**Verification**: G49 only manifests at runtime when verevon's `<EnterpriseTrustBanner />` mounts and calls the function. Refreshing the dashboard after the host deploy resolves the error; the banner now subscribes correctly and will receive plan/entitlement/org-switch updates reactively per G43's original design. The volume mount ensures the next `compose up` rebuild won't re-introduce the drift.
 
 #### Files touched
 
@@ -1899,9 +1899,9 @@ The shared `ingestion-postgres` now has 14 percentage points more cache headroom
 4. **`apps/Application Plane/convex-core/docker-compose.yml`** — G49 volume mount `./convex:/app/convex` on `convex-gateway`.
 5. **`apps/Ingestion Plane/docker-compose.yml`** — G50 new `temporal-postgres` service + `ingestion-temporal-postgres-data` volume + repointed `temporal` service from shared `ingestion-postgres` to dedicated instance + raised memory 384M → 768M.
 6. **`apps/Ingestion Plane/init-databases.sql`** — G50 removed `temporal` + `temporal_visibility` DB creation (now lives on the dedicated postgres); left a comment block explaining the split + why not to re-add the lines.
-7. **`apps/Frontend Plane/velion/tests/e2e/specs/onboarding-advanced.spec.ts`** — §12 closure: new spec covering J2/J5/J8/J9 (zero-input, refresh resilience, plan upgrade, connector consent). Type-checks cleanly with `tsconfig.json` strict mode; uses `page.clock` for the J9 90 s timer.
+7. **`apps/Frontend Plane/verevon/tests/e2e/specs/onboarding-advanced.spec.ts`** — §12 closure: new spec covering J2/J5/J8/J9 (zero-input, refresh resilience, plan upgrade, connector consent). Type-checks cleanly with `tsconfig.json` strict mode; uses `page.clock` for the J9 90 s timer.
 8. **`scripts/lint-env-files.sh`** (monorepo root) — G51 lint script that walks every `apps/*/.../` directory with both `.env` and `.env.docker`, flags missing keys (always) and divergent values (with URL/host-shaped exemption allowlist). `SKIP_ENV_LINT=1` escape hatch; secret values fingerprinted for CI safety.
-9. **`apps/Frontend Plane/velion/package.json`** — added `lint:env` script that shells out to the monorepo-root lint. Opt-in for now; promote to default `lint` after the 64-case pre-existing backlog is reconciled.
+9. **`apps/Frontend Plane/verevon/package.json`** — added `lint:env` script that shells out to the monorepo-root lint. Opt-in for now; promote to default `lint` after the 64-case pre-existing backlog is reconciled.
 
 #### Verification
 
@@ -1923,11 +1923,11 @@ After Wave 13, the only remaining item in the entire doc is item (3) — a delib
 
 ## 9. Onboarding flawless — checklist for end-to-end success — ✅ Closed (manual path + zero-input path both ✅ Closed; all checklist items covered post Wave 11)
 
-For an onboarding run to be considered "flawless" after these patches, the following must all hold true. Run this checklist before any release that touches CP or velion auth/onboarding.
+For an onboarding run to be considered "flawless" after these patches, the following must all hold true. Run this checklist before any release that touches CP or verevon auth/onboarding.
 
 ### 9.1 Manual wizard path (email/password, non-Microsoft OAuth) — ✅ Closed (all 12 checklist items verified post Wave 9 hot-fix series)
 
-- [ ] Sign-in via OAuth lands cookie on velion origin, `getSession` returns 200 with `user.id`.
+- [ ] Sign-in via OAuth lands cookie on verevon origin, `getSession` returns 200 with `user.id`.
 - [ ] Middleware redirect from protected page when no cookie present; from `/sign-up` to `/dashboard` when cookie present.
 - [ ] `needsOnboarding()` returns true for fresh user (no profile, no org).
 - [ ] Step 1 PATCH `/api/user/me` writes profile; refresh shows `firstName` populated from `user-core`.
@@ -1956,13 +1956,13 @@ For an onboarding run to be considered "flawless" after these patches, the follo
 
 ## 10. Known gaps & hardening roadmap — ✅ Closed (zero open gaps as of 2026-05-13; Graph enrichment fully LIVE post Wave 13 §8.33)
 
-Each gap has a stable ID so PRs can reference (`closes velion-gap.md G3`). Severity levels: CRITICAL → blocks production, HIGH → ships unsafe / broken, MEDIUM → drift / perf / hygiene, LOW → cleanup.
+Each gap has a stable ID so PRs can reference (`closes verevon-gap.md G3`). Severity levels: CRITICAL → blocks production, HIGH → ships unsafe / broken, MEDIUM → drift / perf / hygiene, LOW → cleanup.
 
 **Current state (2026-05-13 — post Wave 13):** Zero open gaps + zero ❌ markers anywhere in the doc. The Microsoft Graph enrichment loop is now **LIVE end-to-end** — verified with real DB writes for `ima.dacosta@aquatiq.com` (28KB avatar, jobTitle, location, phone, graphMail, graphEnrichedAt) and resolved email-drift for `testbruker@aquatiq.com` (per Wave 13 §8.33). Five new gaps filed and all closed in the same wave: **G46** (Wave 12), **G47** (Wave 13 scope normalization), **G48** (Wave 13 GetByID fallback), **G49** (Wave 13 convex-gateway volume mount — keep deployed functions in sync with `./convex/` source), **G50** (Wave 13 ingestion-temporal split onto a dedicated 1GB Postgres — eliminates intermittent `GetTransferTasks` failures). Outstanding test work only: Playwright journeys 2/5/8/9 per §12. Convex-gateway WebSocket proxy remains ⚠️ Deferred per §8.32 (deliberate ADR-shaped deferral, not a gap — distinct from the function-deploy gap G49 closed).
 
 ---
 
-### ~~G51~~ — ✅ Closed 2026-05-13 (see [§8.33](#833-wave-13--slice-d-goes-fully-live-with-real-graph-data--g47g48-filed-and-closed-2026-05-13--closed)). `.env` vs `.env.docker` drift had bitten the codebase three times (§8.23 AUTH_CORE_INTERNAL_API_KEY, §8.29 billing-core INTERNAL_API_KEY, §8.33 MICROSOFT_CLIENT_SECRET). New `scripts/lint-env-files.sh` walks every `apps/*/.../` pair, flags missing keys (always violation) and divergent secret-shaped values (allowlist exempts URL/host-shaped keys where divergence is the entire point). Wired as opt-in `pnpm lint:env` from velion; promotion to default `pnpm lint` deferred until the 64-case pre-existing backlog is reconciled (one PR per service pair). Secret values fingerprinted in output so the lint is CI-safe.
+### ~~G51~~ — ✅ Closed 2026-05-13 (see [§8.33](#833-wave-13--slice-d-goes-fully-live-with-real-graph-data--g47g48-filed-and-closed-2026-05-13--closed)). `.env` vs `.env.docker` drift had bitten the codebase three times (§8.23 AUTH_CORE_INTERNAL_API_KEY, §8.29 billing-core INTERNAL_API_KEY, §8.33 MICROSOFT_CLIENT_SECRET). New `scripts/lint-env-files.sh` walks every `apps/*/.../` pair, flags missing keys (always violation) and divergent secret-shaped values (allowlist exempts URL/host-shaped keys where divergence is the entire point). Wired as opt-in `pnpm lint:env` from verevon; promotion to default `pnpm lint` deferred until the 64-case pre-existing backlog is reconciled (one PR per service pair). Secret values fingerprinted in output so the lint is CI-safe.
 
 ### ~~G50~~ — ✅ Closed 2026-05-13 (see [§8.33](#833-wave-13--slice-d-goes-fully-live-with-real-graph-data--g47g48-filed-and-closed-2026-05-13--closed)). `ingestion-temporal` was sharing a 256MB `ingestion-postgres` instance (`shared_buffers=64MB`) with five other databases (`quarry`, `quarry_v2`, `ingestion_plane_db`, `imports`, `integration`) plus its own `temporal` + `temporal_visibility`. Concurrent history-shard scanning blew the cache → intermittent `GetTransferTasks` failures with `context deadline exceeded`. Split out a dedicated `ingestion-temporal-postgres` service (1GB RAM, `shared_buffers=256MB`, `effective_cache_size=768MB`); dumped + restored both DBs in-place; raised `ingestion-temporal` memory 384M → 768M. Post-split: 0 `GetTransferTasks` errors, `ingestion-postgres` cache pressure dropped from 32% → 18% (more headroom for the actual ingestion workload). Old DBs left on `ingestion-postgres` as read-only orphans for one-week rollback safety; drop later with `DROP DATABASE temporal; DROP DATABASE temporal_visibility;`.
 
@@ -1992,11 +1992,11 @@ Each gap has a stable ID so PRs can reference (`closes velion-gap.md G3`). Sever
 
 ---
 
-### ~~G38~~ — ✅ Closed 2026-05-12 (see [§8.28](#828-g38--quarry-v2-ingest-job-now-persists-real-page-bodies-not-url-placeholders-2026-05-12)). New `GET /v1/artifacts/:id/bytes` on quarry-edge + velion ingest-job chain `/v1/scrape` → `/v1/artifacts/:id/bytes` → Data Plane POST with stable idempotency key. End-to-end verified against a live crawl.
+### ~~G38~~ — ✅ Closed 2026-05-12 (see [§8.28](#828-g38--quarry-v2-ingest-job-now-persists-real-page-bodies-not-url-placeholders-2026-05-12)). New `GET /v1/artifacts/:id/bytes` on quarry-edge + verevon ingest-job chain `/v1/scrape` → `/v1/artifacts/:id/bytes` → Data Plane POST with stable idempotency key. End-to-end verified against a live crawl.
 
 ---
 
-### ~~G39~~ — ✅ Closed 2026-05-12 (see [§8.27](#827-g39--internal-api-key-drift-fails-at-startup-not-at-first-user-click-2026-05-12)). Phase 1 (format check) + Phase 2 (cross-service handshake) both live in velion's boot path. CP Go mirror filed as G40.
+### ~~G39~~ — ✅ Closed 2026-05-12 (see [§8.27](#827-g39--internal-api-key-drift-fails-at-startup-not-at-first-user-click-2026-05-12)). Phase 1 (format check) + Phase 2 (cross-service handshake) both live in verevon's boot path. CP Go mirror filed as G40.
 
 ### ~~G40~~ — ✅ Closed 2026-05-12 (see [§8.29](#829-g40--mirror-g39-boot-time-format-check-in-all-cp-go-services-surfaced-a-real-production-gap-2026-05-12)). All 4 CP Go services (session-core, user-core, org-core, billing-core) now run `internalkey.AssertFromEnv` at boot — FATAL+exit(1) in release mode, WARN+continue in dev. First activation surfaced + fixed a real config gap: billing-core's `.env.docker` was missing `INTERNAL_API_KEY` entirely.
 
@@ -2025,7 +2025,7 @@ Each gap has a stable ID so PRs can reference (`closes velion-gap.md G3`). Sever
   3. Smoke test: `curl http://localhost:28083/v1/plans -H "Content-Type: application/json" -d '{}'` should return a 400 (not 404) — the route exists and rejects the empty body.
 
 *Step B — Repoint callers* (~half-day, depends on call-site count):
-  4. Greppable surface: `grep -rn "session-core-service:3017/v1/\(plans\|todos\|lineage\)" --include='*.{go,ts,rs}'` across the monorepo. Expected consumers: velion's onboarding wizard (plans/todos during agent runs), the Model Plane orchestrator itself (today round-trips CP for plan state — post-port it reads its own DB directly via `orchestration_store`), any ad-hoc scripts.
+  4. Greppable surface: `grep -rn "session-core-service:3017/v1/\(plans\|todos\|lineage\)" --include='*.{go,ts,rs}'` across the monorepo. Expected consumers: verevon's onboarding wizard (plans/todos during agent runs), the Model Plane orchestrator itself (today round-trips CP for plan state — post-port it reads its own DB directly via `orchestration_store`), any ad-hoc scripts.
   5. Each caller flips its env var (e.g. `SESSION_CORE_AGENT_RUN_URL`) from `session-core-service:3017` to `session-core:8083`.
 
 *Step C — Dual-write window* (one release cycle, monitoring):
@@ -2046,19 +2046,19 @@ Each gap has a stable ID so PRs can reference (`closes velion-gap.md G3`). Sever
 
 ### 11.1 Plan upgrade (free → pro) — ✅ Closed (live; uses Wave 6 §8.20 cache invalidation + Wave 7 §8.21 reactive subscribers)
 ```
-Velion UI → /api/org/orgs/{orgId}/plan POST { plan: "pro" }
+Verevon UI → /api/org/orgs/{orgId}/plan POST { plan: "pro" }
       → org-core POST /orgs/:id/plan
         → org-core writes organizations.plan, org_plan_history
         → publishes organization.plan.changed on NATS
           → billing-core consumes → billing.account_updated
           → CP session-core (repurposed) consumes both → updates Control Session in Redis + Convex projection
           → notification-core consumes app.session.entitlements_changed → email + Convex toast
-        → 200 OK to velion with normalized organization
+        → 200 OK to verevon with normalized organization
 ```
 
 ### 11.2 Onboarding completion (post-fix) — ✅ Closed (live; auto-provision path verified end-to-end in Wave 9 §8.23 against the broken `g3-smoke@example.com` user)
 ```
-Velion UI → onboardingService.completeOnboarding()
+Verevon UI → onboardingService.completeOnboarding()
       → userService.markOnboardingComplete(email, userId)
       → /api/user/onboarding/complete POST
         → control-plane-auth.requireSession (validates with auth-core)
@@ -2079,7 +2079,7 @@ User clicks "Sign in with Microsoft"
         → user-core enrich-from-provider (Graph /me, /me/photo)
         → org-core ensure-from-tenant (auto-resolve / provision)
         → user-core ensure-membership (OWNER for first / MEMBER else)
-      → velion callback handler GETs /api/user/me/session-context
+      → verevon callback handler GETs /api/user/me/session-context
         → response: { userId, orgId, role, onboardingStatus: "COMPLETED" }
       → router.replace('/dashboard')
         → <EnterpriseTrustBanner /> renders resolved org / domain / role
@@ -2091,7 +2091,7 @@ User clicks "Sign in with Microsoft"
 
 ## 12. Test plan — ✅ Closed (Wave 13: Journeys 2, 5, 8, 9 added to `tests/e2e/specs/onboarding-advanced.spec.ts` — all nine journeys now have Playwright coverage)
 
-Velion onboarding regression suite (Playwright). Specs live under `tests/e2e/specs/`.
+Verevon onboarding regression suite (Playwright). Specs live under `tests/e2e/specs/`.
 
 | Spec file | Covers | Status |
 |---|---|---|
@@ -2115,7 +2115,7 @@ Coverage gate: 80% of `src/components/onboarding/**` and `src/app/api/{user,org,
 - Mocking convention matches the legacy `onboarding.spec.ts`: a generic `**/api/**` POST catch-all returns `{ success: true }`, then specific routes whose response shape matters get explicit `.route()` overrides.
 - J5 uses `browser.newContext()` instead of clearing storage on the existing context — it's a more faithful simulation of "fresh tab" because `localStorage` doesn't survive context boundaries.
 - J9 uses Playwright's `page.clock.install()` + `page.clock.fastForward()` (Playwright 1.45+) to skip the 90 s `FIRST_VALUE_DELAY_MS` timer in `<ConnectorConsentPrompt />`. Don't replace this with a real-time wait — the test must stay under 5 s.
-- The suite requires velion to be running on `localhost:3001` (per `playwright.config.ts`) with the `x-e2e-bypass: e2e-dev-bypass-secret` header. Type-check passes with the velion `tsconfig.json` settings (`strict: true`, `target: ES2017`); runtime execution requires a live velion dev server.
+- The suite requires verevon to be running on `localhost:3001` (per `playwright.config.ts`) with the `x-e2e-bypass: e2e-dev-bypass-secret` header. Type-check passes with the verevon `tsconfig.json` settings (`strict: true`, `target: ES2017`); runtime execution requires a live verevon dev server.
 
 ---
 
@@ -2124,21 +2124,21 @@ Coverage gate: 80% of `src/components/onboarding/**` and `src/app/api/{user,org,
 - **Better Auth** — TS auth library used by auth-core; owns the cookie + JWT session + governance.
 - **Control Session** — aggregated user/org/billing snapshot, lives in repurposed CP `session-core` (planned). may be rust if rust is better for this than Go's in-memory map + Redis combo.
 - **Agentic session** — thread / run / checkpoint state for AI agents, lives in Model Plane `session-core` (Rust).
-- **Convex projection** — read-only mirror of Control Plane state in convex-core, used by velion for reactive UI.
-- **Internal API key** — `INTERNAL_API_KEY` (or `INTERNAL_SERVICE_SECRET`); shared secret between velion proxy and CP cores. Required.
+- **Convex projection** — read-only mirror of Control Plane state in convex-core, used by verevon for reactive UI.
+- **Internal API key** — `INTERNAL_API_KEY` (or `INTERNAL_SERVICE_SECRET`); shared secret between verevon proxy and CP cores. Required.
 - **`tokenRef`** — opaque reference to an OAuth token held by auth-core. Other planes hold the reference, never the raw token.
 - **`AuthProviderLinked`** — NATS event auth-core publishes after OAuth callback; payload `(userId, provider, providerUserId, tenantId, scopes, tokenRef)`.
 - **`/me/session-context`** — user-core endpoint returning `{ userId, orgId, role, onboardingStatus }`. Canonical post-login routing input.
 - **Quarry** — Ingestion Plane crawler used by onboarding step 3.
 - **Brreg** — Norwegian Enhetsregisteret; used for org-number verification in step 2. should be moved to Control Plane as part of the org-core resolution service.
-- **L5 boundary** — the Application Plane layer. Per [ADR 0003](./docs/adr/0003-l5-boundary-policy.md) (accepted 2026-05-09, amended into `ARCHITECTURE_DIAGRAM.md` 2026-05-11), velion's `src/app/api/*` route handlers **are** the canonical L5 ingress; they validate sessions via `control-plane-auth.ts`, mint internal auth headers, and forward to L1–L4 cores. `convex-gateway` is reserved for WebSocket fan-out of reactive workspace data only. New proxy routes are guarded by `scripts/lint-proxy-routes.sh`.
+- **L5 boundary** — the Application Plane layer. Per [ADR 0003](./docs/adr/0003-l5-boundary-policy.md) (accepted 2026-05-09, amended into `ARCHITECTURE_DIAGRAM.md` 2026-05-11), verevon's `src/app/api/*` route handlers **are** the canonical L5 ingress; they validate sessions via `control-plane-auth.ts`, mint internal auth headers, and forward to L1–L4 cores. `convex-gateway` is reserved for WebSocket fan-out of reactive workspace data only. New proxy routes are guarded by `scripts/lint-proxy-routes.sh`.
 
 ---
 
 ## 14. Maintenance — ✅ Closed (reference material)
 
-- This file lives at `velion/velion-gap.md`. Mirror it nowhere else.
+- This file lives at `verevon/verevon-gap.md`. Mirror it nowhere else.
 - When a gap is closed, **delete it from §10 in the same PR** that closes it. Do not just strike-through.
-- When a new architectural decision lands (new plane, new core, schema migration touching velion), update §1 / §2 / §6 in the same PR.
+- When a new architectural decision lands (new plane, new core, schema migration touching verevon), update §1 / §2 / §6 in the same PR.
 - The "Last verified" date at the top must match the most recent grep + read pass over the touched files. Re-run the verification before every release.
-- Roadmap docs (`docs/Velion_CONNECT_ROADMAP.md`, `docs/zero-input-enterprise-onboarding-roadmap.md`, `docs/ARCHITECTURE_DIAGRAM.md`) must reference this file as the integration source of truth — when they conflict, this file wins on integration contracts.
+- Roadmap docs (`docs/Verevon_CONNECT_ROADMAP.md`, `docs/zero-input-enterprise-onboarding-roadmap.md`, `docs/ARCHITECTURE_DIAGRAM.md`) must reference this file as the integration source of truth — when they conflict, this file wins on integration contracts.

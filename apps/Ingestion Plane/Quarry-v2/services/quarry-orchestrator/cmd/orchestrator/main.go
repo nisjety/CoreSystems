@@ -137,7 +137,7 @@ func main() {
 	go schedMgr.Run(rootCtx)
 
 	// Ad-hoc jobs dispatcher: polls control for newly POSTed jobs (the
-	// REST entrypoint velion's onboarding crawl-preview uses) and
+	// REST entrypoint verevon's onboarding crawl-preview uses) and
 	// starts the matching Temporal workflow. Without this, ad-hoc jobs
 	// never execute — only scheduled cron jobs would.
 	jobsMgr := jobs.New(c, jobs.Config{

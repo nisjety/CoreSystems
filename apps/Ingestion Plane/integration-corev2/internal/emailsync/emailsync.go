@@ -1,5 +1,5 @@
 // Package emailsync pulls inbound email from connected Gmail (Google) and
-// Outlook (Microsoft Graph) mailboxes into the Velion Inbox.
+// Outlook (Microsoft Graph) mailboxes into the Verevon Inbox.
 //
 // It is the missing "caller" side of the long-standing email pathway: the
 // conversation-ingest-rs bridge (/internal/ingest/email) and the outbound
@@ -44,6 +44,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -61,19 +62,22 @@ type Participant struct {
 
 // EmailMessage is one normalized inbound message ready for the ingest bridge.
 type EmailMessage struct {
-	ProviderEventID   string
-	ProviderMessageID string
-	ProviderThreadID  string
-	MessageIDHeader   string
-	ReferencesHeader  string
-	InReplyToHeader   string
-	Direction         string
-	Subject           string
-	From              Participant
-	To                []Participant
-	BodyText          string
-	BodyHTML          string
-	OccurredAt        time.Time
+	ProviderEventID       string
+	ProviderMessageID     string
+	ProviderThreadID      string
+	MessageIDHeader       string
+	ReferencesHeader      string
+	InReplyToHeader       string
+	AutoSubmitted         string
+	ContentType           string
+	OutboundCorrelationID string
+	Direction             string
+	Subject               string
+	From                  Participant
+	To                    []Participant
+	BodyText              string
+	BodyHTML              string
+	OccurredAt            time.Time
 }
 
 // FetchResult is one provider fetch: the new messages plus the cursor to
@@ -156,11 +160,27 @@ type ConnectionSource interface {
 	UpsertEmailSyncState(ctx context.Context, state store.EmailSyncState) error
 }
 
+// ConnectionSyncStatusUpdater is optional so lightweight test stores and
+// alternate runtimes can keep using the worker without owning the connection
+// table. The Postgres repository implements it to project provider delivery
+// health into the connection status API.
+type ConnectionSyncStatusUpdater interface {
+	UpdateConnectionSyncStatus(ctx context.Context, connectionID, status string) error
+}
+
 // ConnectionContextUpdater is the optional store capability used when a
 // provider safely discovers a durable tenant binding during fetch. The
 // binding must be committed before any fetched message is delivered.
 type ConnectionContextUpdater interface {
 	BindConnectionProviderContext(ctx context.Context, id, key, value string) (store.Connection, error)
+}
+
+// InboxSyncJobClient is the narrow internal handoff the worker uses for an
+// explicit Support refresh. The API owns queue transitions and audit events;
+// the worker only claims a bounded job and reports its content-free outcome.
+type InboxSyncJobClient interface {
+	ClaimSyncJob(context.Context, handoff.SyncClaimRequest) (store.SyncJob, error)
+	UpdateSyncProgress(context.Context, string, handoff.SyncProgressRequest) (store.SyncJob, error)
 }
 
 // TokenSource resolves a fresh (refresh-aware) access token for a connection.
@@ -175,22 +195,25 @@ type Ingestor interface {
 
 // rawEmailEvent is the bridge's RawEmailEvent wire shape (snake_case).
 type rawEmailEvent struct {
-	OrgID             string        `json:"org_id"`
-	ConnectionID      string        `json:"connection_id"`
-	Provider          string        `json:"provider"`
-	ProviderEventID   string        `json:"provider_event_id"`
-	ProviderMessageID string        `json:"provider_message_id"`
-	ProviderThreadID  string        `json:"provider_thread_id"`
-	MessageIDHeader   string        `json:"message_id_header,omitempty"`
-	ReferencesHeader  string        `json:"references_header,omitempty"`
-	InReplyToHeader   string        `json:"in_reply_to_header,omitempty"`
-	Direction         string        `json:"direction"`
-	Subject           string        `json:"subject"`
-	From              Participant   `json:"from"`
-	To                []Participant `json:"to,omitempty"`
-	BodyText          string        `json:"body_text"`
-	BodyHTML          string        `json:"body_html,omitempty"`
-	OccurredAt        time.Time     `json:"occurred_at"`
+	OrgID                 string        `json:"org_id"`
+	ConnectionID          string        `json:"connection_id"`
+	Provider              string        `json:"provider"`
+	ProviderEventID       string        `json:"provider_event_id"`
+	ProviderMessageID     string        `json:"provider_message_id"`
+	ProviderThreadID      string        `json:"provider_thread_id"`
+	MessageIDHeader       string        `json:"message_id_header,omitempty"`
+	ReferencesHeader      string        `json:"references_header,omitempty"`
+	InReplyToHeader       string        `json:"in_reply_to_header,omitempty"`
+	AutoSubmitted         string        `json:"auto_submitted,omitempty"`
+	ContentType           string        `json:"content_type,omitempty"`
+	OutboundCorrelationID string        `json:"outbound_correlation_id,omitempty"`
+	Direction             string        `json:"direction"`
+	Subject               string        `json:"subject"`
+	From                  Participant   `json:"from"`
+	To                    []Participant `json:"to,omitempty"`
+	BodyText              string        `json:"body_text"`
+	BodyHTML              string        `json:"body_html,omitempty"`
+	OccurredAt            time.Time     `json:"occurred_at"`
 }
 
 // IngestClient posts normalized messages to conversation-ingest-rs.
@@ -213,20 +236,23 @@ func (c *IngestClient) Ingest(ctx context.Context, conn store.Connection, msg Em
 		// Provider is the connection's provider key ("google"/"microsoft") so
 		// the stored ChannelThreadRef routes replies through the matching
 		// buildSendOperation case (gmail.send / mail.send).
-		Provider:          conn.ProviderKey,
-		ProviderEventID:   msg.ProviderEventID,
-		ProviderMessageID: msg.ProviderMessageID,
-		ProviderThreadID:  msg.ProviderThreadID,
-		MessageIDHeader:   msg.MessageIDHeader,
-		ReferencesHeader:  msg.ReferencesHeader,
-		InReplyToHeader:   msg.InReplyToHeader,
-		Direction:         direction,
-		Subject:           msg.Subject,
-		From:              msg.From,
-		To:                msg.To,
-		BodyText:          msg.BodyText,
-		BodyHTML:          msg.BodyHTML,
-		OccurredAt:        msg.OccurredAt,
+		Provider:              conn.ProviderKey,
+		ProviderEventID:       msg.ProviderEventID,
+		ProviderMessageID:     msg.ProviderMessageID,
+		ProviderThreadID:      msg.ProviderThreadID,
+		MessageIDHeader:       msg.MessageIDHeader,
+		ReferencesHeader:      msg.ReferencesHeader,
+		InReplyToHeader:       msg.InReplyToHeader,
+		AutoSubmitted:         msg.AutoSubmitted,
+		ContentType:           msg.ContentType,
+		OutboundCorrelationID: msg.OutboundCorrelationID,
+		Direction:             direction,
+		Subject:               msg.Subject,
+		From:                  msg.From,
+		To:                    msg.To,
+		BodyText:              msg.BodyText,
+		BodyHTML:              msg.BodyHTML,
+		OccurredAt:            msg.OccurredAt,
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
@@ -359,20 +385,22 @@ func validServiceToken(token string) bool {
 // Worker drives one poll loop over all inbox-capable connections (email
 // mailboxes plus the chat sources: Teams, Slack, X DMs, Discord).
 type Worker struct {
-	Store   ConnectionSource
-	Tokens  TokenSource
-	Ingest  Ingestor
-	Gmail   Fetcher
-	Graph   Fetcher
-	Teams   Fetcher
-	Slack   Fetcher
-	XDM     Fetcher
-	Discord Fetcher
-	Logger  *zerolog.Logger
+	Store       ConnectionSource
+	Tokens      TokenSource
+	Ingest      Ingestor
+	Integration InboxSyncJobClient
+	Gmail       Fetcher
+	Graph       Fetcher
+	Teams       Fetcher
+	Slack       Fetcher
+	XDM         Fetcher
+	Discord     Fetcher
+	Logger      *zerolog.Logger
 
-	PollInterval   time.Duration
-	BackfillWindow time.Duration
-	MaxPerCycle    int
+	PollInterval       time.Duration
+	ManualPollInterval time.Duration
+	BackfillWindow     time.Duration
+	MaxPerCycle        int
 }
 
 // providerPlan is one poll source: a provider key plus the capability that
@@ -407,6 +435,13 @@ func (p providerPlan) source() string {
 	return p.providerKey
 }
 
+func (p providerPlan) inboxChannel() string {
+	if p.channelProvider != "" {
+		return p.channelProvider
+	}
+	return "email"
+}
+
 // stateKey returns the email_sync_state primary key for this plan.
 func (p providerPlan) stateKey(connectionID string) string {
 	if p.stateKeySuffix == "" {
@@ -424,23 +459,145 @@ var providerPlans = []providerPlan{
 	{providerKey: "discord", capability: "messages.read", scope: "bot", stateKeySuffix: "discord", fetcherKey: "discord", channelProvider: "discord"},
 }
 
+const emailWorkerConsumer = "email-worker"
+
 func (w Worker) Run(ctx context.Context) error {
 	interval := w.PollInterval
 	if interval <= 0 {
 		interval = 60 * time.Second
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	manualInterval := w.ManualPollInterval
+	if manualInterval <= 0 {
+		manualInterval = 2 * time.Second
+	}
+	scheduledTicker := time.NewTicker(interval)
+	manualTicker := time.NewTicker(manualInterval)
+	defer scheduledTicker.Stop()
+	defer manualTicker.Stop()
+
+	if _, err := w.RunManualInboxJobs(ctx); err != nil {
+		w.logWarn(err, "manual inbox sync iteration failed")
+	}
+	if _, err := w.RunOnce(ctx); err != nil {
+		w.logWarn(err, "email sync iteration failed")
+	}
 	for {
-		if _, err := w.RunOnce(ctx); err != nil {
-			w.logWarn(err, "email sync iteration failed")
-		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-manualTicker.C:
+			if _, err := w.RunManualInboxJobs(ctx); err != nil {
+				w.logWarn(err, "manual inbox sync iteration failed")
+			}
+		case <-scheduledTicker.C:
+			if _, err := w.RunOnce(ctx); err != nil {
+				w.logWarn(err, "email sync iteration failed")
+			}
 		}
 	}
+}
+
+// RunManualInboxJobs consumes explicit refreshes requested from Support. It
+// does not use the generic integration-sync queue: those jobs can represent
+// document ingestion, while these jobs must be fetched by the inbox worker.
+func (w Worker) RunManualInboxJobs(ctx context.Context) (int, error) {
+	if w.Integration == nil {
+		return 0, nil
+	}
+	total := 0
+	for {
+		job, err := w.Integration.ClaimSyncJob(ctx, handoff.SyncClaimRequest{
+			Consumer: emailWorkerConsumer,
+			Target:   emailWorkerConsumer,
+		})
+		if err != nil {
+			var serviceErr *handoff.ServiceHTTPError
+			if errors.As(err, &serviceErr) && serviceErr.StatusCode == http.StatusNotFound {
+				return total, nil
+			}
+			return total, err
+		}
+		ingested, processErr := w.processManualInboxJob(ctx, job)
+		total += ingested
+		if processErr != nil {
+			return total, processErr
+		}
+	}
+}
+
+func (w Worker) processManualInboxJob(ctx context.Context, job store.SyncJob) (int, error) {
+	plan, ok := inboxPlanForManualJob(job)
+	if !ok {
+		return 0, w.failManualInboxJob(ctx, job, "inbox_sync_plan_unavailable")
+	}
+	connection, err := w.connectionForManualJob(ctx, job)
+	if err != nil {
+		return 0, w.failManualInboxJob(ctx, job, "inbox_sync_connection_unavailable")
+	}
+	if !connectionEligible(connection, plan.capability, plan.scope) {
+		return 0, w.failManualInboxJob(ctx, job, "inbox_sync_permission_unavailable")
+	}
+	ingested, err := w.syncConnection(ctx, connection, plan)
+	if err != nil {
+		if progressErr := w.failManualInboxJob(ctx, job, "inbox_sync_failed"); progressErr != nil {
+			return ingested, fmt.Errorf("%w; record manual inbox failure: %v", err, progressErr)
+		}
+		// The terminal failed receipt is the operator-facing outcome for a
+		// provider failure. Keep claiming the remaining independent jobs so a
+		// bad mailbox cannot delay a healthy one in the same Support refresh.
+		return ingested, nil
+	}
+	if _, err := w.Integration.UpdateSyncProgress(ctx, job.ID, handoff.SyncProgressRequest{
+		Consumer: emailWorkerConsumer,
+		Status:   "completed",
+		Message:  "Inbox refresh completed.",
+		Checkpoint: map[string]any{
+			"inboxChannel": plan.inboxChannel(),
+		},
+		Metadata: map[string]any{
+			"messagesIngested": ingested,
+		},
+	}); err != nil {
+		return ingested, fmt.Errorf("complete manual inbox sync job: %w", err)
+	}
+	return ingested, nil
+}
+
+func (w Worker) failManualInboxJob(ctx context.Context, job store.SyncJob, failureCode string) error {
+	_, err := w.Integration.UpdateSyncProgress(ctx, job.ID, handoff.SyncProgressRequest{
+		Consumer: emailWorkerConsumer,
+		Status:   "failed",
+		Message:  "Inbox refresh failed. Check the connection status and reconnect if needed.",
+		Metadata: map[string]any{
+			"failureCode": failureCode,
+		},
+	})
+	return err
+}
+
+func inboxPlanForManualJob(job store.SyncJob) (providerPlan, bool) {
+	channel, _ := job.Metadata["inboxChannel"].(string)
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	providerKey := strings.ToLower(strings.TrimSpace(job.ProviderKey))
+	for _, plan := range providerPlans {
+		if plan.providerKey == providerKey && plan.inboxChannel() == channel {
+			return plan, true
+		}
+	}
+	return providerPlan{}, false
+}
+
+func (w Worker) connectionForManualJob(ctx context.Context, job store.SyncJob) (store.Connection, error) {
+	connections, err := w.Store.ListConnections(ctx, store.ConnectionFilter{ProviderKey: job.ProviderKey})
+	if err != nil {
+		return store.Connection{}, err
+	}
+	for _, connection := range connections {
+		if connection.ID == job.ConnectionID && connection.OrganizationID == job.OrganizationID {
+			return connection, nil
+		}
+	}
+	return store.Connection{}, store.ErrNotFound
 }
 
 // RunOnce syncs every eligible connection once and returns the number of
@@ -481,9 +638,7 @@ func connectionEligible(conn store.Connection, capability, scope string) bool {
 	if conn.DeletedAt != nil {
 		return false
 	}
-	switch conn.Status {
-	case "active", "needs_refresh":
-	default:
+	if conn.Status != "active" {
 		return false
 	}
 	if slices.Contains(conn.Capabilities, capability) {
@@ -513,7 +668,7 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 
 	token, err := w.Tokens.AccessTokenForConnection(ctx, conn.ID)
 	if err != nil {
-		return 0, w.recordFailure(ctx, state, fmt.Errorf("resolve access token: %w", err))
+		return 0, w.recordConnectionFailure(ctx, conn.ID, state, fmt.Errorf("resolve access token: %w", err))
 	}
 
 	maxMessages := w.MaxPerCycle
@@ -540,18 +695,18 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 		result, err = fetchWith(ctx, fetcher, conn, token.AccessToken, "", backfill, maxMessages)
 	}
 	if err != nil {
-		return 0, w.recordFailure(ctx, state, fmt.Errorf("fetch %s mailbox: %w", plan.source(), err))
+		return 0, w.recordConnectionFailure(ctx, conn.ID, state, fmt.Errorf("fetch %s mailbox: %w", plan.source(), err))
 	}
 
 	if len(result.ProviderContextPatch) > 0 {
 		updater, ok := w.Store.(ConnectionContextUpdater)
 		if !ok {
-			return 0, w.recordFailure(ctx, state, errors.New("persist provider context: store does not support connection context updates"))
+			return 0, w.recordConnectionFailure(ctx, conn.ID, state, errors.New("persist provider context: store does not support connection context updates"))
 		}
 		for key, value := range result.ProviderContextPatch {
 			updated, updateErr := updater.BindConnectionProviderContext(ctx, conn.ID, key, value)
 			if updateErr != nil {
-				return 0, w.recordFailure(ctx, state, fmt.Errorf("persist provider context: %w", updateErr))
+				return 0, w.recordConnectionFailure(ctx, conn.ID, state, fmt.Errorf("persist provider context: %w", updateErr))
 			}
 			conn = updated
 		}
@@ -577,7 +732,7 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 			// Do not advance the cursor past a failed ingest: the whole batch
 			// re-runs next cycle and conversation-core's idempotency key makes
 			// the already-ingested prefix a no-op.
-			return ingested, w.recordFailure(ctx, state, fmt.Errorf("ingest message %s: %w", msg.ProviderEventID, err))
+			return ingested, w.recordConnectionFailure(ctx, conn.ID, state, fmt.Errorf("ingest message %s: %w", msg.ProviderEventID, err))
 		}
 		ingested++
 	}
@@ -587,8 +742,9 @@ func (w Worker) syncConnection(ctx context.Context, conn store.Connection, plan 
 	state.LastError = ""
 	state.FailureCount = 0
 	if err := w.Store.UpsertEmailSyncState(ctx, state); err != nil {
-		return ingested, fmt.Errorf("persist sync state for %s: %w", stateKey, err)
+		return ingested, w.recordConnectionFailure(ctx, conn.ID, state, fmt.Errorf("persist sync state for %s: %w", stateKey, err))
 	}
+	w.updateConnectionSyncStatus(ctx, conn.ID, "synced")
 	if ingested > 0 {
 		w.logInfo(fmt.Sprintf("ingested %d %s message(s) for connection %s", ingested, deliveryConn.ProviderKey, conn.ID))
 	}
@@ -628,6 +784,22 @@ func (w Worker) recordFailure(ctx context.Context, state store.EmailSyncState, c
 		w.logWarn(err, "persist failure state for connection "+state.ConnectionID)
 	}
 	return cause
+}
+
+func (w Worker) recordConnectionFailure(ctx context.Context, connectionID string, state store.EmailSyncState, cause error) error {
+	err := w.recordFailure(ctx, state, cause)
+	w.updateConnectionSyncStatus(ctx, connectionID, "failed")
+	return err
+}
+
+func (w Worker) updateConnectionSyncStatus(ctx context.Context, connectionID, status string) {
+	updater, ok := w.Store.(ConnectionSyncStatusUpdater)
+	if !ok {
+		return
+	}
+	if err := updater.UpdateConnectionSyncStatus(ctx, connectionID, status); err != nil {
+		w.logWarn(err, "persist connection sync status for "+connectionID)
+	}
 }
 
 func (w Worker) logWarn(err error, msg string) {

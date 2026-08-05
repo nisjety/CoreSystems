@@ -16,7 +16,7 @@ type Config struct {
 	// ClientURL identifies the service calling the API — X-Bring-Client-URL
 	// header, required on every request alongside the two above (per
 	// developer.bring.com/api's "Connect to the APIs" section). Defaults to
-	// velion.no; override with BRING_CLIENT_URL for a different environment.
+	// verevon.no; override with BRING_CLIENT_URL for a different environment.
 	ClientURL string
 	BaseURL   string // override for testing; empty uses defaultBaseURL
 	// BookingBaseURL / TrackingBaseURL override the Booking and Tracking API

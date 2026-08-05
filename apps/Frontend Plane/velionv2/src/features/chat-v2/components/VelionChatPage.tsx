@@ -28,8 +28,8 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import type { ComposerSubmitPayload } from "@/features/chat-v2/components/VelionComposer";
-import { VelionIconButton } from "@/components/ui/velion-ui";
+import type { ComposerSubmitPayload } from "@/features/chat-v2/components/VerevonComposer";
+import { VerevonIconButton } from "@/components/ui/verevon-ui";
 import { ChatMarkdown } from "@/features/chat-v2/components/ChatMarkdown";
 import { EmptyChatPromptChips } from "@/features/chat-v2/components/EmptyChatPromptChips";
 import type {
@@ -40,7 +40,7 @@ import type {
 import {
   consumeChatLaunchMotion,
   isAssistantPlaceholder,
-  useVelionChatWorkspace,
+  useVerevonChatWorkspace,
   type AgentTaskStep,
   type ChatArtifact,
   type ChatMessage,
@@ -62,9 +62,9 @@ const DashboardComposer = dynamic<DashboardComposerProps>(
   { ssr: false },
 );
 
-export function VelionChatPage() {
+export function VerevonChatPage() {
   const messageListRef = useRef<HTMLDivElement>(null);
-  const chat = useVelionChatWorkspace();
+  const chat = useVerevonChatWorkspace();
   const { activeSession, activeSessionId, composerDraft, copiedMessageId } = chat;
   const hasActiveMessages = Boolean(activeSession?.messages.length);
   const [launchMotion, setLaunchMotion] = useState(false);
@@ -161,12 +161,12 @@ export function VelionChatPage() {
   return (
     <div
       className={cn(
-        "velion-chat-page relative flex h-full min-h-0 w-full overflow-hidden bg-transparent text-[#202126] transition-colors dark:text-[#F7F8F8]",
-        launchMotion ? "velion-chat-page-launch" : "",
+        "verevon-chat-page relative flex h-full min-h-0 w-full overflow-hidden bg-transparent text-[#202126] transition-colors dark:text-[#F7F8F8]",
+        launchMotion ? "verevon-chat-page-launch" : "",
       )}
     >
-      {launchMotion ? <div className="velion-chat-launch-wash" aria-hidden="true" /> : null}
-      <section className="relative z-10 flex min-w-0 flex-1 flex-col" aria-label="Velion chat workspace">
+      {launchMotion ? <div className="verevon-chat-launch-wash" aria-hidden="true" /> : null}
+      <section className="relative z-10 flex min-w-0 flex-1 flex-col" aria-label="Verevon chat workspace">
         {hasActiveMessages ? (
           <ChatHeader
             activeSession={activeSession}
@@ -190,7 +190,7 @@ export function VelionChatPage() {
             className="min-h-0 flex-1 overflow-y-auto px-4 py-8 md:px-8"
           >
             <div className="mx-auto flex min-h-full w-full max-w-[840px] flex-col">
-              <div className="velion-chat-thread space-y-7 pb-16 md:pb-20">
+              <div className="verevon-chat-thread space-y-7 pb-16 md:pb-20">
                 {activeSession?.messages.map((message, index) => {
                   const previous = index > 0 ? activeSession.messages[index - 1] : null;
                   const showDivider =
@@ -227,7 +227,7 @@ export function VelionChatPage() {
           <StepsPanel steps={taskSteps} screen={agentScreen} onStopTask={chat.stopTask} />
         )}
         {hasActiveMessages && tab === "chat" ? (
-          <div className="velion-chat-composer-dock relative shrink-0 bg-[#FCFCFD]/92 px-4 pb-5 pt-3 backdrop-blur-xl dark:bg-[#101114]/90 md:px-6">
+          <div className="verevon-chat-composer-dock relative shrink-0 bg-[#FCFCFD]/92 px-4 pb-5 pt-3 backdrop-blur-xl dark:bg-[#101114]/90 md:px-6">
             {showScrollDown ? (
               <button
                 type="button"
@@ -415,7 +415,7 @@ function SourcesPanel({
       <EmptyPanel
         icon={<Link2 className="size-5" />}
         title="Ingen kilder ennå"
-        subtitle="Interne kunnskapskilder og websøk dukker opp her når Velion bruker dem i svaret."
+        subtitle="Interne kunnskapskilder og websøk dukker opp her når Verevon bruker dem i svaret."
       />
     );
   }
@@ -677,7 +677,7 @@ function ArtifactsPanel({ artifacts }: { artifacts: ChatArtifact[] }) {
       <EmptyPanel
         icon={<FileCode2 className="size-5" />}
         title="Ingen artefakter ennå"
-        subtitle="Dokumenter, kode og andre artefakter Velion lager dukker opp her."
+        subtitle="Dokumenter, kode og andre artefakter Verevon lager dukker opp her."
       />
     );
   }
@@ -856,7 +856,7 @@ function ChatHeader({
     <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ECECF0]/80 bg-[#FCFCFD]/86 px-4 backdrop-blur-xl dark:border-[#25272D] dark:bg-[#101114]/86 md:px-6">
       <div className="min-w-0">
         <h1 className="truncate text-[14px] font-semibold leading-5 text-[#202126] dark:text-white">
-          {activeSession?.title ?? "Velion Chat"}
+          {activeSession?.title ?? "Verevon Chat"}
         </h1>
         {activeSession ? (
           <p className="truncate text-[11px] font-medium leading-4 text-[#858992] dark:text-[#8B929F]">
@@ -867,7 +867,7 @@ function ChatHeader({
 
       <div className="flex items-center gap-1.5">
         <TopLayerTooltip label="Regenerate latest response" placement="bottom">
-          <VelionIconButton
+          <VerevonIconButton
             type="button"
             aria-label="Regenerate latest response"
             disabled={!activeSession?.messages.some((message) => message.role === "user")}
@@ -877,10 +877,10 @@ function ChatHeader({
             className="text-[#6F757E] disabled:opacity-40 dark:text-[#AEB4C0]"
           >
             <RefreshCw className="size-4" />
-          </VelionIconButton>
+          </VerevonIconButton>
         </TopLayerTooltip>
         <TopLayerTooltip label="New chat" placement="bottom">
-          <VelionIconButton
+          <VerevonIconButton
             type="button"
             aria-label="New chat"
             onClick={onNewChat}
@@ -889,7 +889,7 @@ function ChatHeader({
             className="bg-[#111111] text-white hover:bg-[#2A2A2A] dark:bg-white dark:text-[#111111]"
           >
             <MessageSquarePlus className="size-4" />
-          </VelionIconButton>
+          </VerevonIconButton>
         </TopLayerTooltip>
       </div>
     </header>
@@ -907,7 +907,7 @@ function EmptyChatState({
   const composerValue = selectedPrompt ?? composerDraft;
 
   return (
-    <div className="velion-chat-empty flex min-h-0 flex-1 items-center justify-center px-4 py-10">
+    <div className="verevon-chat-empty flex min-h-0 flex-1 items-center justify-center px-4 py-10">
       <div className="w-full max-w-[980px] -translate-y-[2vh]">
         <div className="mb-8 flex items-center justify-center gap-3 text-center">
           <Sparkles className="size-7 text-[#DD7A1F]" strokeWidth={1.75} />
@@ -958,13 +958,13 @@ function prettyModel(model: string) {
   if (lower.includes("gpt-4.1")) return "GPT-4.1";
   if (lower.includes("gpt-4o")) return "GPT-4o";
   if (lower.includes("claude")) return "Claude Sonnet";
-  if (lower.includes("reason")) return "Velion Reasoner";
+  if (lower.includes("reason")) return "Verevon Reasoner";
   return model.length > 22 ? `${model.slice(0, 22)}…` : model;
 }
 
 function DateDivider({ value }: { value: string }) {
   return (
-    <div className="velion-chat-divider relative flex items-center justify-center py-1">
+    <div className="verevon-chat-divider relative flex items-center justify-center py-1">
       <span className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-transparent via-[#ECECEF] to-transparent dark:via-[#26282E]" />
       <span className="relative rounded-full px-3 text-[11px] font-semibold uppercase tracking-[0.09em] text-[#A8ADB5] dark:text-[#6F7682]">
         {formatDayLabel(value)}
@@ -975,8 +975,8 @@ function DateDivider({ value }: { value: string }) {
 
 function ThinkingDots() {
   return (
-    <span className="velion-chat-thinking inline-flex items-center gap-2 text-[14px] font-medium text-[#8A8F98] dark:text-[#8B929F]">
-      <span className="velion-thinking-dots" aria-hidden="true">
+    <span className="verevon-chat-thinking inline-flex items-center gap-2 text-[14px] font-medium text-[#8A8F98] dark:text-[#8B929F]">
+      <span className="verevon-thinking-dots" aria-hidden="true">
         <span />
         <span />
         <span />
@@ -1457,12 +1457,12 @@ function MessageBlock({
 
   if (assistant) {
     return (
-      <article className="velion-chat-message group flex flex-col">
+      <article className="verevon-chat-message group flex flex-col">
         <div className="mb-2 flex items-center gap-2">
           <span className="grid size-6 place-items-center rounded-[8px] border border-[#E7E8ED] bg-white text-[#C07B33] shadow-sm dark:border-[#2D3037] dark:bg-[#17181D]">
             <Sparkles className="size-3.5" strokeWidth={1.8} />
           </span>
-          <span className="text-[13px] font-semibold text-[#2B2D33] dark:text-white">Velion</span>
+          <span className="text-[13px] font-semibold text-[#2B2D33] dark:text-white">Verevon</span>
           <span className="text-[11.5px] font-medium text-[#A8ADB5] dark:text-[#6F7682]">
             {formatRelative(message.createdAt)}
           </span>
@@ -1477,7 +1477,7 @@ function MessageBlock({
           ) : errored ? (
             <ErrorNotice message={message.content} onRetry={onRegenerate} />
           ) : (
-            <div className={cn(waiting && "velion-chat-streaming")}>
+            <div className={cn(waiting && "verevon-chat-streaming")}>
               {message.content && !isAssistantPlaceholder(message.content) ? (
                 <ChatMarkdown content={message.content} />
               ) : null}
@@ -1553,7 +1553,7 @@ function MessageBlock({
   }
 
   return (
-    <article className="velion-chat-message group flex flex-col items-end">
+    <article className="verevon-chat-message group flex flex-col items-end">
       <div className="mb-1 flex items-center gap-2 pr-1 text-[11.5px] font-medium text-[#9AA0A9] dark:text-[#737A85]">
         <span className="font-semibold text-[#6E737C] dark:text-[#AEB4C0]">Meg</span>
         <span>{formatRelative(message.createdAt)}</span>
@@ -1600,7 +1600,7 @@ function MessageBlock({
         </div>
       ) : (
         <>
-          <div className="velion-chat-bubble w-fit max-w-[560px] rounded-[18px] rounded-tr-[6px] bg-[#F3F3F4] px-4 py-2.5 text-[15px] leading-[1.6] text-[#26282D] dark:bg-[#202227] dark:text-[#F2F4F7]">
+          <div className="verevon-chat-bubble w-fit max-w-[560px] rounded-[18px] rounded-tr-[6px] bg-[#F3F3F4] px-4 py-2.5 text-[15px] leading-[1.6] text-[#26282D] dark:bg-[#202227] dark:text-[#F2F4F7]">
             <span className="whitespace-pre-wrap">{message.content}</span>
             <ToolChips tools={message.tools} />
             <AttachmentChips attachments={message.attachments} tone="user" />

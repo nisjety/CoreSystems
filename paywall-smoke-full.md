@@ -3,7 +3,7 @@
     - main [ref=e12]:
       - generic [ref=e13]:
         - generic [ref=e14]:
-          - heading "Do more with Velion" [level=1] [ref=e15]
+          - heading "Do more with Verevon" [level=1] [ref=e15]
           - paragraph [ref=e16]: Select a plan based on your needs
         - generic [ref=e17]:
           - button "Monthly" [ref=e18]
@@ -18,7 +18,7 @@
           - article [ref=e181] [cursor=pointer]:
             - generic [ref=e182]
             - generic [ref=e185]
-            - paragraph [ref=e188]: For testing Velion with one workspace before rollout.
+            - paragraph [ref=e188]: For testing Verevon with one workspace before rollout.
             - list [ref=e189]
             - button "Selected" [ref=e202]
         - article [ref=e46] [cursor=pointer]:

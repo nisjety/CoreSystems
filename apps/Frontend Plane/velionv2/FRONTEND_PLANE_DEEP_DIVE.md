@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-The Frontend Plane is not only a UI shell. In `velionv2` it is a Next.js 16 App Router application that also acts as the browser-facing boundary and BFF for the rest of CoreSystem. It authenticates the caller against Control Plane, normalizes request/response envelopes, mints audience tokens for downstream planes, and exposes the operational product surfaces that users actually work in.
+The Frontend Plane is not only a UI shell. In `verevonv2` it is a Next.js 16 App Router application that also acts as the browser-facing boundary and BFF for the rest of CoreSystem. It authenticates the caller against Control Plane, normalizes request/response envelopes, mints audience tokens for downstream planes, and exposes the operational product surfaces that users actually work in.
 
-The current `velionv2` tree is a real cross-plane integration surface with broad coverage:
+The current `verevonv2` tree is a real cross-plane integration surface with broad coverage:
 
 1. Control Plane identity, org, billing, and optional session aggregation.
 2. Ingestion Plane onboarding, source discovery, Quarry search/scrape, and integration APIs.
@@ -16,14 +16,14 @@ It is also visibly mid-convergence. Several upstream integrations are real and u
 
 ## Current Runtime Topology
 
-Primary compose file: `apps/Frontend Plane/velionv2/docker-compose.yml`
+Primary compose file: `apps/Frontend Plane/verevonv2/docker-compose.yml`
 
 ### Active/default compose services
 
 | Service | Host ports | Role |
 |---|---:|---|
 | `frontend` | `3000` | Next.js dev server and BFF |
-| `nats` / `velion-nats` | internal | local frontend-plane NATS utility bus |
+| `nats` / `verevon-nats` | internal | local frontend-plane NATS utility bus |
 
 ### Runtime characteristics
 
@@ -69,7 +69,7 @@ It should not own:
 
 ```mermaid
 flowchart TD
-    Browser["Browser users"] --> FE["velionv2 pages and client components"]
+    Browser["Browser users"] --> FE["verevonv2 pages and client components"]
     FE --> BFF["Next.js API routes / BFF"]
 
     BFF --> CP["Control Plane"]
@@ -337,15 +337,15 @@ The main remaining ambiguity is not hidden coupling. It is partial parity:
 
 | Path | Why it is a candidate | Current replacement/source |
 |---|---|---|
-| `apps/Frontend Plane/velionv2/CONTROL_PLANE_PARITY_AUDIT.md` | point-in-time parity snapshot, not broad plane truth | this deep dive plus live route/integration code |
-| `apps/Frontend Plane/velionv2/AUTH_ONBOARDING_PORT_PLAN.md` | migration plan doc, not runtime truth | current app routes and `FRONTEND_PLANE_DEEP_DIVE.md` |
-| `apps/Frontend Plane/velionv2/docs/Onboarding-plan.md` | planning-oriented, contains mocked/unavailable expectations | live onboarding routes plus this deep dive |
+| `apps/Frontend Plane/verevonv2/CONTROL_PLANE_PARITY_AUDIT.md` | point-in-time parity snapshot, not broad plane truth | this deep dive plus live route/integration code |
+| `apps/Frontend Plane/verevonv2/AUTH_ONBOARDING_PORT_PLAN.md` | migration plan doc, not runtime truth | current app routes and `FRONTEND_PLANE_DEEP_DIVE.md` |
+| `apps/Frontend Plane/verevonv2/docs/Onboarding-plan.md` | planning-oriented, contains mocked/unavailable expectations | live onboarding routes plus this deep dive |
 
 These are candidates for later review, not automatic deletion.
 
 ## Bottom Line
 
-The Frontend Plane is already a real operating surface for CoreSystem. `velionv2` is:
+The Frontend Plane is already a real operating surface for CoreSystem. `verevonv2` is:
 
 - a genuine user-facing workspace
 - a broad BFF boundary into every lower plane

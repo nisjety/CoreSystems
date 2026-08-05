@@ -5,7 +5,7 @@
 // The default policy row uses org_id="_default" — when an org has no
 // explicit row, this seed is used (loaded in migration 005).
 //
-// U5-2 (ui-ux-velion-gap.md §10).
+// U5-2 (ui-ux-verevon-gap.md §10).
 package channels
 
 import (
@@ -22,7 +22,7 @@ import (
 // config. Match the seed value in migration 005.
 const DefaultOrgID = "_default"
 
-// Config is one (org, event_type, channel) row. JSON tags match velion's
+// Config is one (org, event_type, channel) row. JSON tags match verevon's
 // `ChannelConfig` type in src/lib/notifications/types.ts.
 type Config struct {
 	OrgID                 string    `json:"org_id"`

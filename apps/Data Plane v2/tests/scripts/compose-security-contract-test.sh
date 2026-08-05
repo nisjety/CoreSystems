@@ -6,6 +6,7 @@ data_compose="$root_dir/apps/Data Plane v2/docker-compose.yml"
 self_owned_compose="$root_dir/apps/Data Plane v2/docker-compose.self-owned-data.yml"
 control_compose="$root_dir/apps/Control Plane/docker-compose.yml"
 model_production_compose="$root_dir/apps/Model Plane/deploy/docker-compose.production.yml"
+model_compose="$root_dir/apps/Model Plane/deploy/docker-compose.yml"
 ingestion_production_compose="$root_dir/apps/Ingestion Plane/docker-compose.production.yml"
 
 # Disposable E2E projects must be able to select unique network names instead
@@ -18,11 +19,22 @@ cross_plane_compose="$root_dir/apps/Data Plane v2/docker-compose.cross-plane.yml
 rg -Fq 'external: true' "$cross_plane_compose"
 rg -Fq 'name: ${INTER_PLANE_BUS_NETWORK:-inter-plane-bus}' "$cross_plane_compose"
 makefile="$root_dir/apps/Data Plane v2/Makefile"
-if rg -q '^cross-plane-up: cp-env velion-net' "$makefile"; then
+if rg -q '^cross-plane-up: cp-env verevon-net' "$makefile"; then
   echo "FAIL: connected startup may silently create an unowned shared network" >&2
   exit 1
 fi
 rg -q 'still points at local sandbox key material' "$makefile"
+rg -q 'MODEL_PLANE_INFERENCE_TOKEN_ISSUER: \$\{AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth\}' "$data_compose"
+rg -q 'JWT_REQUIRED_ISSUER: \$\{JWT_REQUIRED_ISSUER:-http://auth-core:3011/api/convex-auth\}' "$data_compose"
+if rg -q 'AUTH_CORE_ISSUER: \$\{AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth\}|JWT_REQUIRED_ISSUER: \$\{[^}]+:-http://localhost:3011/api/convex-auth\}|MODEL_PLANE_INFERENCE_TOKEN_ISSUER: \$\{AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth\}' "$data_compose"; then
+  echo "FAIL: Data Plane retains a localhost issuer default" >&2
+  exit 1
+fi
+rg -q 'AUTH_CORE_ISSUER: \$\{AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth\}' "$model_compose"
+if rg -q 'AUTH_CORE_ISSUER: \$\{AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth\}' "$model_compose"; then
+  echo "FAIL: Model Plane retains a localhost issuer default" >&2
+  exit 1
+fi
 standalone_compose="$root_dir/apps/Data Plane v2/docker-compose.standalone.yml"
 [ -f "$standalone_compose" ] || { echo "FAIL: missing explicit standalone overlay" >&2; exit 1; }
 

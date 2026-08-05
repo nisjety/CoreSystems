@@ -1,7 +1,7 @@
 id: "01-invoke-correctness"
 name: "Plain invoke correctness + usage accounting"
 prompt: "Svar med nøyaktig ett ord: PONG"
-model: velion-budget
+model: verevon-budget
 cost_ceiling_usd: 0.01
 checks:
   contains: ["PONG"]

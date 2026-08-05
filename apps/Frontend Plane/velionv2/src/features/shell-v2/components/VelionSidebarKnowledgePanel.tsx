@@ -18,7 +18,7 @@ import type { LiveKnowledgePayload, LiveKnowledgeSource } from "@/features/knowl
 import {
   SidebarPanelTitle,
   SidebarSearchField,
-} from "@/features/shell-v2/components/VelionSidebarPrimitives";
+} from "@/features/shell-v2/components/VerevonSidebarPrimitives";
 import {
   buildKnowledgeSidebarLiveData,
   filterKnowledgeFolders,
@@ -340,7 +340,7 @@ function KnowledgeModeSelector({
       </button>
       <ChevronDown className={cn("pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-[#1D1D1F] transition-transform dark:text-white", open ? "rotate-180" : "")} strokeWidth={2.2} />
       {open ? (
-        <menu id={listboxId} className="velion-popover absolute left-0 right-0 top-[calc(100%+8px)] z-[90] m-0 list-none p-1" aria-label="Knowledge view options">
+        <menu id={listboxId} className="verevon-popover absolute left-0 right-0 top-[calc(100%+8px)] z-[90] m-0 list-none p-1" aria-label="Knowledge view options">
           {knowledgeSidebarModeOptions.map((option, index) => {
             const selected = option.id === value;
             const active = activeIndex === index;

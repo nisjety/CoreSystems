@@ -3,7 +3,7 @@
 //! `org-core`'s `PublishGDPRErasureFanout` (both the explicit immediate
 //! hard-delete path and the 30-day retention cron) and `user-core`'s
 //! per-user erasure saga both publish onto the shared
-//! `velion.gdpr.erasure.requested` fan-out. This module decides which of
+//! `verevon.gdpr.erasure.requested` fan-out. This module decides which of
 //! those events this crate must act on, and performs the actual hard-purge
 //! of the org-scoped rows this service owns: the Quickwit admin
 //! rebuild/clear job queue (`quickwit_admin_jobs`) and its append-only audit
@@ -39,7 +39,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 const MAX_ID_LEN: usize = 255;
 
-/// Wire shape of one `velion.gdpr.erasure.requested` message. Producers
+/// Wire shape of one `verevon.gdpr.erasure.requested` message. Producers
 /// (`org-core`, `user-core`) do not emit the same optional field set, so
 /// only the fields this module reads are required to be present at all —
 /// everything else is optional-and-ignored rather than rejected.
@@ -60,7 +60,7 @@ pub struct OrganizationErasure {
     pub requested_by: String,
 }
 
-/// Failure decoding or validating a `velion.gdpr.erasure.requested`
+/// Failure decoding or validating a `verevon.gdpr.erasure.requested`
 /// message. Every variant is a poison condition — the caller should route
 /// the message to a dead-letter path (NAK, not ack) rather than retry it
 /// forever.
@@ -178,9 +178,12 @@ impl PurgeSummary {
 /// rolls back, so a NAK'd redelivery retries the whole purge cleanly.
 pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
-    let mut summary = PurgeSummary::default();
 
-    summary.quickwit_admin_job_audit = sqlx::query(
+    // Ordering matters: the audit rows are deleted first because the surviving
+    // `quickwit_admin_jobs` rows are what the `job_id IN (...)` subquery
+    // resolves against. Bound to locals (rather than assigned onto a
+    // `default()` struct) so the sequence stays explicit.
+    let quickwit_admin_job_audit = sqlx::query(
         "DELETE FROM quickwit_admin_job_audit
          WHERE org_id = $1
             OR job_id IN (SELECT job_id FROM quickwit_admin_jobs WHERE org_id = $1)",
@@ -190,14 +193,17 @@ pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Res
     .await?
     .rows_affected();
 
-    summary.quickwit_admin_jobs = sqlx::query("DELETE FROM quickwit_admin_jobs WHERE org_id = $1")
+    let quickwit_admin_jobs = sqlx::query("DELETE FROM quickwit_admin_jobs WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
     tx.commit().await?;
-    Ok(summary)
+    Ok(PurgeSummary {
+        quickwit_admin_job_audit,
+        quickwit_admin_jobs,
+    })
 }
 
 #[cfg(test)]

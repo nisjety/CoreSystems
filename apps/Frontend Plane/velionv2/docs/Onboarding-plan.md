@@ -1,14 +1,14 @@
-# Goal: Make Onboarding Prove Velion Understands The Company Before Paywall
+# Goal: Make Onboarding Prove Verevon Understands The Company Before Paywall
 
-Velion onboarding should feel like an AI system building the first operational picture of the company, not a pricing wizard. Each step must show what Velion learned, keep sensitive data out of the first-run experience, and give the user an obvious way to undo every onboarding choice.
+Verevon onboarding should feel like an AI system building the first operational picture of the company, not a pricing wizard. Each step must show what Verevon learned, keep sensitive data out of the first-run experience, and give the user an obvious way to undo every onboarding choice.
 
 ## Product Principles
 
-- Velion is the AI-first operator across support, sales, knowledge, routing, workflows, and deployment. The UI should show what Velion can do and where human review is still required.
+- Verevon is the AI-first operator across support, sales, knowledge, routing, workflows, and deployment. The UI should show what Verevon can do and where human review is still required.
 - Onboarding inspectors are read-only. Source edits, graph edits, and audited corrections belong in Knowledge and Settings after onboarding.
 - Data Plane v2 graph-index is the source of truth for real graph evidence. Optimistic UI nodes can show pending/importing states but must not be used as proof.
 - Model Plane recommendations must be non-blocking. Local proof renders instantly, graph/model evidence refines it when available, and failures must never stop plan selection.
-- Every onboarding action must be reversible: remove websites, switch back to Velion theme, disconnect connectors, choose a different plan, or continue after pending cleanup.
+- Every onboarding action must be reversible: remove websites, switch back to Verevon theme, disconnect connectors, choose a different plan, or continue after pending cleanup.
 
 ## Website Step
 
@@ -16,12 +16,12 @@ Velion onboarding should feel like an AI system building the first operational p
 - The user can continue after the first crawl signal or a terminal crawl state, add another website, remove a website, or skip.
 - `state.website` remains the primary website for compatibility. `state.additionalWebsites` stores extra crawled sites.
 - Crawl evidence is bounded and safe: status, page counts, element counts, content types, warnings, and capped snippets.
-- The right panel shows what Velion can use from the crawl and hints that audited edits happen later in Knowledge.
+- The right panel shows what Verevon can use from the crawl and hints that audited edits happen later in Knowledge.
 
 ## Organization And Brand Theme
 
 - The org inspector shows public identity evidence: logo, domain, BRREG facts, employee count, palette, and theme choices.
-- Users can choose Velion theme or the detected brand theme. Brand theme uses `branding.themeColor` first, then the first valid palette color.
+- Users can choose Verevon theme or the detected brand theme. Brand theme uses `branding.themeColor` first, then the first valid palette color.
 - The selected accent is applied immediately, persisted in onboarding state, and best-effort saved to workspace appearance settings.
 - Failed appearance saves are non-blocking: the local preview stays active and the user can retry or switch back.
 - Organization names are normalized for display so all-caps legal names read cleanly while legal suffixes like AS remain uppercase.
@@ -50,9 +50,9 @@ Velion onboarding should feel like an AI system building the first operational p
 
 - The paywall should show proof before asking for money:
   - Company identity: logo, normalized name, domains, employee count, selected theme.
-  - What Velion learned: crawled pages/elements, content types, safe source metadata, real graph counts.
+  - What Verevon learned: crawled pages/elements, content types, safe source metadata, real graph counts.
   - Likely customer intents: inferred from user brief, crawl snippets, connectors, and safe graph metadata.
-  - What Velion can do next: create chatbot, draft replies, build macros, connect Shopify/Zendesk/SharePoint, deploy widget, and suggest workflows.
+  - What Verevon can do next: create chatbot, draft replies, build macros, connect Shopify/Zendesk/SharePoint, deploy widget, and suggest workflows.
   - Expected first impact: directional ranges only, with human review categories.
   - Why the plan fits: tied to websites, source count, team size, workflow/risk needs, and plan capacity.
 - The user can still choose a lower plan. If plan capacity requires fewer active connectors, onboarding should explain which sources will be disconnected and let the user continue.

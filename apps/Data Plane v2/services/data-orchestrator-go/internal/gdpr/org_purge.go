@@ -1,7 +1,7 @@
 // Package gdpr implements data-orchestrator-go's slice of the cross-plane
 // GDPR erasure fan-out for the Per-Org Data Ownership & Erasure phase.
 //
-// org-core publishes `velion.gdpr.erasure.requested` on the shared broker
+// org-core publishes `verevon.gdpr.erasure.requested` on the shared broker
 // (control-shared-nats) when an organization is hard-erased, from two
 // trigger paths that share one payload shape (see apps/Control Plane/org-core
 // /internal/org/gdpr_erasure_fanout.go's PublishGDPRErasureFanout):
@@ -50,7 +50,7 @@ import (
 // constant. It is redefined here (rather than imported across a service
 // boundary Go modules don't share) exactly as every other GDPR-consuming
 // service in this program does.
-const ErasureRequestedSubject = "velion.gdpr.erasure.requested"
+const ErasureRequestedSubject = "verevon.gdpr.erasure.requested"
 
 // OrgPurger is the slice of persistence HandleOrgErasure needs. *PurgeRepo
 // (repo.go) satisfies this via HardPurgeByOrg.

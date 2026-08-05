@@ -9,7 +9,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { VelionButton } from "@/components/ui/velion-ui";
+import { VerevonButton } from "@/components/ui/verevon-ui";
 import type {
   AgentBlueprint,
   RoleFeature,
@@ -17,22 +17,22 @@ import type {
   RoleOperatingModel,
   StageCard,
   StageSystem,
-} from "@/features/agents-v2/lib/velion-agent-page-types";
+} from "@/features/agents-v2/lib/verevon-agent-page-types";
 import {
   controlFocusClass,
   roleEyebrowClass,
   roleInsetClass,
   rolePanelClass,
-} from "@/features/agents-v2/lib/velion-agent-page-styles";
+} from "@/features/agents-v2/lib/verevon-agent-page-styles";
 
 export function AgentMetricStrip({ metrics, role }: { metrics: RoleMetric[]; role: AgentBlueprint }) {
   return (
     <div className="grid gap-3 sm:grid-cols-3" aria-label="Agent readiness metrics">
       {metrics.map((metric) => (
-        <div key={metric.label} className={cn("velion-agent-panel", rolePanelClass(role))}>
-          <p className={cn("velion-agent-eyebrow", roleEyebrowClass(role))}>{metric.label}</p>
+        <div key={metric.label} className={cn("verevon-agent-panel", rolePanelClass(role))}>
+          <p className={cn("verevon-agent-eyebrow", roleEyebrowClass(role))}>{metric.label}</p>
           <p className="mt-2 text-[28px] font-semibold leading-none tracking-[-0.02em] text-[#202126] dark:text-white">{metric.value}</p>
-          <p className="velion-agent-body mt-2">{metric.detail}</p>
+          <p className="verevon-agent-body mt-2">{metric.detail}</p>
         </div>
       ))}
     </div>
@@ -57,12 +57,12 @@ export function CounterpartPanel({
   title: string;
 }) {
   return (
-    <div className={cn("velion-agent-panel", rolePanelClass(role), className)}>
+    <div className={cn("verevon-agent-panel", rolePanelClass(role), className)}>
       <div className="mb-3 flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className={cn("velion-agent-eyebrow", roleEyebrowClass(role))}>{eyebrow}</p>
-          <h2 className="velion-agent-title mt-1">{title}</h2>
-          <p className="velion-agent-body mt-1 max-w-[640px]">{description}</p>
+          <p className={cn("verevon-agent-eyebrow", roleEyebrowClass(role))}>{eyebrow}</p>
+          <h2 className="verevon-agent-title mt-1">{title}</h2>
+          <p className="verevon-agent-body mt-1 max-w-[640px]">{description}</p>
         </div>
         <span className={cn("grid size-8 shrink-0 place-items-center rounded-[8px] text-white", role.accentClass)}>
           <Icon className="size-4" />
@@ -75,12 +75,12 @@ export function CounterpartPanel({
 
 export function StatusRow({ label, role, value }: { label: string; role: AgentBlueprint; value: string }) {
   return (
-    <div className={cn("velion-agent-inset-row mt-2 justify-between first:mt-0", roleInsetClass(role))}>
+    <div className={cn("verevon-agent-inset-row mt-2 justify-between first:mt-0", roleInsetClass(role))}>
       <div className="flex min-w-0 items-center gap-2 text-[11px] font-semibold text-[#4B515C] dark:text-[#DCE2EC]">
         <span className={cn("size-1.5 shrink-0 rounded-full", role.accentClass)} />
         <span>{label}</span>
       </div>
-      <span className={cn("velion-agent-chip shrink-0 py-0.5", role.ringClass, role.iconClass)}>{value}</span>
+      <span className={cn("verevon-agent-chip shrink-0 py-0.5", role.ringClass, role.iconClass)}>{value}</span>
     </div>
   );
 }
@@ -102,7 +102,7 @@ export function AgentFeatureBoard({
   return (
     <section className="grid gap-3 lg:grid-cols-2" aria-label={`${role.shortTitle} configured capabilities`}>
       {sections.map((section) => (
-        <div key={section.title} className={cn("velion-agent-panel", rolePanelClass(role))}>
+        <div key={section.title} className={cn("verevon-agent-panel", rolePanelClass(role))}>
           <div className="mb-3 flex items-end justify-between gap-3">
             <div>
               <h2 className="text-[14px] font-semibold text-[#202126] dark:text-white">{section.title}</h2>
@@ -125,14 +125,14 @@ export function FeatureRow({ feature, role }: { feature: RoleFeature; role: Agen
   const Icon = feature.icon;
 
   return (
-    <div className={cn("velion-agent-inset flex gap-3", roleInsetClass(role))}>
+    <div className={cn("verevon-agent-inset flex gap-3", roleInsetClass(role))}>
       <span className="grid size-8 shrink-0 place-items-center rounded-[7px] bg-white text-[#3F444D] shadow-sm dark:bg-[#1B1D22] dark:text-[#DCE2EC]">
         <Icon className="size-4" strokeWidth={2} />
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-start justify-between gap-2">
           <h3 className="text-[12px] font-semibold text-[#202126] dark:text-white">{feature.title}</h3>
-          <span className={cn("velion-agent-chip shrink-0 py-0.5", role.ringClass, role.iconClass)}>
+          <span className={cn("verevon-agent-chip shrink-0 py-0.5", role.ringClass, role.iconClass)}>
             {feature.status}
           </span>
         </div>
@@ -150,7 +150,7 @@ export function RoleConversationPreview({
   role: AgentBlueprint;
 }) {
   return (
-    <div className={cn("velion-agent-inset mt-3", roleInsetClass(role))}>
+    <div className={cn("verevon-agent-inset mt-3", roleInsetClass(role))}>
       <div className="ml-auto max-w-[84%] rounded-[14px] bg-[#111111] px-3 py-2 text-[12px] leading-5 text-white dark:bg-white dark:text-[#111111]">
         {operatingModel.conversation.customer}
       </div>
@@ -181,29 +181,29 @@ export function RoleConversationPreview({
 
 export function StageReadinessPanel({ role, system }: { role: AgentBlueprint; system: StageSystem }) {
   return (
-    <div className={cn("velion-agent-panel velion-agent-panel-strong", rolePanelClass(role))}>
+    <div className={cn("verevon-agent-panel verevon-agent-panel-strong", rolePanelClass(role))}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className={cn("velion-agent-eyebrow", roleEyebrowClass(role))}>Operational checklist</p>
-          <h2 className="velion-agent-title mt-1">{role.shortTitle} readiness</h2>
+          <p className={cn("verevon-agent-eyebrow", roleEyebrowClass(role))}>Operational checklist</p>
+          <h2 className="verevon-agent-title mt-1">{role.shortTitle} readiness</h2>
         </div>
-        <VelionButton variant="primary" size="xs" radius="pill" className={cn("px-3 font-semibold", controlFocusClass)}>
+        <VerevonButton variant="primary" size="xs" radius="pill" className={cn("px-3 font-semibold", controlFocusClass)}>
           <Zap className="size-3.5" />
           {system.primaryAction}
-        </VelionButton>
+        </VerevonButton>
       </div>
       <div className="mt-4 grid gap-2">
         {system.checklist.map((item) => (
-          <div key={item} className={cn("velion-agent-inset-row", roleInsetClass(role))}>
+          <div key={item} className={cn("verevon-agent-inset-row", roleInsetClass(role))}>
             <CheckCircle2 className={cn("size-4 shrink-0", role.iconClass)} strokeWidth={2.1} />
             <span className="text-[12px] font-medium text-[#333740] dark:text-[#E6EAF0]">{item}</span>
           </div>
         ))}
       </div>
-      <VelionButton variant="secondary" size="xs" radius="pill" className={cn("mt-3 w-full px-3 font-semibold", controlFocusClass)}>
+      <VerevonButton variant="secondary" size="xs" radius="pill" className={cn("mt-3 w-full px-3 font-semibold", controlFocusClass)}>
         <PanelRight className="size-3.5" />
         {system.secondaryAction}
-      </VelionButton>
+      </VerevonButton>
     </div>
   );
 }
@@ -212,12 +212,12 @@ export function StageSystemCard({ card, role }: { card: StageCard; role: AgentBl
   const Icon = card.icon;
 
   return (
-    <div className={cn("velion-agent-panel velion-agent-panel-strong", rolePanelClass(role))}>
+    <div className={cn("verevon-agent-panel verevon-agent-panel-strong", rolePanelClass(role))}>
       <span className={cn("grid size-9 place-items-center rounded-[8px] text-white", role.accentClass)}>
         <Icon className="size-4" strokeWidth={2.1} />
       </span>
-      <h2 className="velion-agent-title mt-3">{card.title}</h2>
-      <p className="velion-agent-body mt-1 min-h-10">{card.description}</p>
+      <h2 className="verevon-agent-title mt-3">{card.title}</h2>
+      <p className="verevon-agent-body mt-1 min-h-10">{card.description}</p>
       <div className="mt-3 space-y-1.5 border-t border-dashed border-[#E3E4E8] pt-3 dark:border-[#2D3037]">
         {card.items.map((item) => (
           <div key={item} className="flex items-start gap-2 text-[11px] leading-4 text-[#3F444D] dark:text-[#D7DCE4]">
@@ -280,7 +280,7 @@ export function RoleCard({
           ))}
         </div>
 
-        <span className="velion-button velion-button-primary velion-button-xs velion-button-pill mt-auto w-max px-3 font-semibold group-hover:bg-[#000000]">
+        <span className="verevon-button verevon-button-primary verevon-button-xs verevon-button-pill mt-auto w-max px-3 font-semibold group-hover:bg-[#000000]">
           {role.cta}
           <ChevronRight className="size-3.5" strokeWidth={2.2} />
         </span>

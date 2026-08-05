@@ -13,7 +13,7 @@ Contractual Clauses (**SCCs**, EU 2021/914) **may be valid but is not always
 sufficient on its own**. The exporter must assess, case by case, whether the law
 and practice of the destination country provide a level of protection
 **essentially equivalent** to the EU/EEA — and, where it does not, apply
-**supplementary measures**. This TIA does that for Velion's processing.
+**supplementary measures**. This TIA does that for Verevon's processing.
 
 Crucially, the relevant question is **actual access risk**, not merely where data
 is physically stored. Even when production runs in **Sweden Central** or **Norway
@@ -32,7 +32,7 @@ East**, third-country access can arise through:
 | Flow | Data | Destination of *storage* | Possible third-country *access* | Mechanism |
 |------|------|--------------------------|----------------------------------|-----------|
 | Model inference & embeddings | prompts, completions, embeddings | **Sweden Central (EEA)** | US (Microsoft parent under CLOUD Act); remote support TBC | SCCs + supplementary measures; DPF (Microsoft) — see §5 |
-| Application/run-history/audit hosting | conversations, run-history, audit | **EEA** (Velion-controlled) | Cloud provider parent reach | SCCs + supplementary; EU-resident infra |
+| Application/run-history/audit hosting | conversations, run-history, audit | **EEA** (Verevon-controlled) | Cloud provider parent reach | SCCs + supplementary; EU-resident infra |
 | **TTS (known exception)** | text to synthesise | **East US 2 (US)** | Direct US processing | **Gap — remediation in progress; exclude protected classes until fixed** |
 | Transactional email (Resend) | recipient email, message content | **TBC — verify** | TBC | SCCs / DPF — **TBC, verify** |
 | SMS / 2FA (Twilio) | phone number, OTP | **TBC — verify** | TBC | SCCs / DPF — **TBC, verify** |
@@ -46,14 +46,14 @@ East**, third-country access can arise through:
   transfer route for DPF-certified US recipients, **but it is under active legal
   challenge ("Schrems III")** and may be invalidated, as Privacy Shield and Safe
   Harbor were before it.
-- **Therefore:** Velion does **not** rely on the DPF alone and does **not** claim
+- **Therefore:** Verevon does **not** rely on the DPF alone and does **not** claim
   immunity from US access. The CLOUD Act exposure is treated as a **disclosed
   residual risk** even where data is stored in Sweden/Norway, because Microsoft's
   US parentage keeps that access legally conceivable.
 
 ## 4. Supplementary measures applied
 
-Per EDPB Recommendations 01/2020, Velion applies a combination of technical,
+Per EDPB Recommendations 01/2020, Verevon applies a combination of technical,
 organisational, and contractual measures:
 
 **Technical**

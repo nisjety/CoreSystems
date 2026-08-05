@@ -1,6 +1,6 @@
 /**
  * Onboarding · NO/EN copy tables + helpers.
- * Ported verbatim from velion v1 `components/auth/onboarding/i18n.ts`,
+ * Ported verbatim from verevon v1 `components/auth/onboarding/i18n.ts`,
  * rewired to the shared `useLanguageSwitch` locale provider.
  *
  * Not a `"use client"` module: the copy tables + pure format helpers are
@@ -48,8 +48,8 @@ export const ONBOARDING_COPY = {
       eyebrow: "Steg 1 av 6",
       title: "Alt er klart",
       description: "Vi forbereder arbeidsplassen din. Det tar et øyeblikk.",
-      spinner: "Setter opp Velion ...",
-      overlayTitle: "Velion · for team som svarer.",
+      spinner: "Setter opp Verevon ...",
+      overlayTitle: "Verevon · for team som svarer.",
       overlayStats: "42 % raskere første svar · 18 språk · alt på din kunnskap.",
     },
     organization: {
@@ -70,7 +70,7 @@ export const ONBOARDING_COPY = {
       createError: "Kunne ikke opprette organisasjonen.",
       creating: "Oppretter ...",
       continue: "Fortsett",
-      personalizing: "Personaliserer Velion",
+      personalizing: "Personaliserer Verevon",
       foundEmployees: "{{name}}: {{count}} ansatte funnet.",
       fetchingPublicInfo: "Henter offentlig info om {{name}} ...",
       enterName: "Bekreft organisasjonen for å fortsette",
@@ -144,7 +144,7 @@ export const ONBOARDING_COPY = {
       eyebrow: "Steg 4 av 6 · Kilder",
       title: "Koble kilder",
       description:
-        "Velg systemene Velion skal lære fra. Hver kilde blir en klynge med noder i grafen til høyre.",
+        "Velg systemene Verevon skal lære fra. Hver kilde blir en klynge med noder i grafen til høyre.",
       categories: { chat: "Chat", docs: "Dokumenter", tools: "Verktøy" },
       continue: "Fortsett",
       skip: "Hopp over",
@@ -163,7 +163,7 @@ export const ONBOARDING_COPY = {
     },
     socialProof: {
       eyebrow: "Steg 5 av 6 · Trygghet",
-      title: "Bygg med Velion",
+      title: "Bygg med Verevon",
       description:
         "Vi gir samme infrastruktur som større supportteam - uten tungt oppsett. Datakildene du nettopp koblet til er allerede klare.",
       statOne: "av førsteforespørsler besvares innen 60 s.",
@@ -178,7 +178,7 @@ export const ONBOARDING_COPY = {
       defaultReason: "Du kan endre plan når som helst fra innstillinger.",
       why: "Hvorfor denne planen",
       choose: "Velg {{plan}}",
-      plansTitle: "Velion-planer",
+      plansTitle: "Verevon-planer",
       plansHeading: "Velg riktig nivå.",
       analyzing: "Analyserer",
       recommended: "{{plan}} anbefalt",
@@ -205,7 +205,7 @@ export const ONBOARDING_COPY = {
       fallbackTrialReason:
         "Du har ikke koblet til kilder ennå - start med gratisperioden.",
       fallbackTrialSummary:
-        "Lite signal ennå. Gratis lar deg teste i 14 dager før Velion anbefaler en betalt plan.",
+        "Lite signal ennå. Gratis lar deg teste i 14 dager før Verevon anbefaler en betalt plan.",
       reasonPrefix: "Basert på onboarding-signalene akkurat nå:",
       signalAgentTask: "Agentoppgave",
       sources: "{{count}} kilder",
@@ -221,7 +221,7 @@ export const ONBOARDING_COPY = {
       plans: {
         trial: {
           name: "Gratis",
-          description: "Prøv Velion og agenten i 14 dager før du velger betalt plan.",
+          description: "Prøv Verevon og agenten i 14 dager før du velger betalt plan.",
           features: ["Ingen kort kreves", "14 dagers prøveperiode", "Oppgrader når du er klar"],
           badge: "Gratis",
           cadence: "/mnd",
@@ -273,7 +273,7 @@ export const ONBOARDING_COPY = {
     },
     assembly: {
       eyebrow: "Ferdig",
-      title: "Velion klargjøres",
+      title: "Verevon klargjøres",
       description:
         "Vi flytter inn alt vi har samlet: kunnskap, integrasjoner og agenten din, og åpner dashboardet om noen sekunder.",
       ticks: [
@@ -296,9 +296,9 @@ export const ONBOARDING_COPY = {
         fallback: "som team",
       },
       summaryWithGoal:
-        'For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Dere beskrev behovet som "{{goal}}", og Velion kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.',
+        'For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Dere beskrev behovet som "{{goal}}", og Verevon kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.',
       summaryWithoutGoal:
-        "For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Velion kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.",
+        "For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Verevon kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.",
       reasonWithGoal:
         "{{prefix}} {{plan}} er riktig valg for {{subject}}: dere vil {{goalPhrase}}, og vi har {{sources}} som svargrunnlag.",
       reasonWithoutGoal:
@@ -339,8 +339,8 @@ export const ONBOARDING_COPY = {
       eyebrow: "Step 1 of 6",
       title: "All set",
       description: "We are preparing your workspace. This takes a moment.",
-      spinner: "Setting up Velion ...",
-      overlayTitle: "Velion · for teams that answer.",
+      spinner: "Setting up Verevon ...",
+      overlayTitle: "Verevon · for teams that answer.",
       overlayStats: "42% faster first response · 18 languages · grounded in your knowledge.",
     },
     organization: {
@@ -361,7 +361,7 @@ export const ONBOARDING_COPY = {
       createError: "Could not create the organization.",
       creating: "Creating ...",
       continue: "Continue",
-      personalizing: "Personalizing Velion",
+      personalizing: "Personalizing Verevon",
       foundEmployees: "{{name}}: {{count}} employees found.",
       fetchingPublicInfo: "Fetching public info about {{name}} ...",
       enterName: "Confirm the organization to continue",
@@ -434,7 +434,7 @@ export const ONBOARDING_COPY = {
       eyebrow: "Step 4 of 6 · Sources",
       title: "Connect sources",
       description:
-        "Pick the systems Velion should learn from. Each source becomes a node cluster in the graph on the right.",
+        "Pick the systems Verevon should learn from. Each source becomes a node cluster in the graph on the right.",
       categories: { chat: "Chat", docs: "Documents", tools: "Tools" },
       continue: "Continue",
       skip: "Skip",
@@ -453,7 +453,7 @@ export const ONBOARDING_COPY = {
     },
     socialProof: {
       eyebrow: "Step 5 of 6 · Proof",
-      title: "Build with Velion",
+      title: "Build with Verevon",
       description:
         "We give you the same infrastructure larger support teams use, without the heavy setup. The data sources you just connected are already ready.",
       statOne: "of first requests are answered within 60 s.",
@@ -468,7 +468,7 @@ export const ONBOARDING_COPY = {
       defaultReason: "You can change plan any time from settings.",
       why: "Why this plan",
       choose: "Choose {{plan}}",
-      plansTitle: "Velion plans",
+      plansTitle: "Verevon plans",
       plansHeading: "Choose the right tier.",
       analyzing: "Analyzing",
       recommended: "{{plan}} recommended",
@@ -494,7 +494,7 @@ export const ONBOARDING_COPY = {
       choosePlan: "Select plan",
       fallbackTrialReason: "You have not connected sources yet - start with the free period.",
       fallbackTrialSummary:
-        "There is little signal yet. Free lets you test for 14 days before Velion recommends a paid plan.",
+        "There is little signal yet. Free lets you test for 14 days before Verevon recommends a paid plan.",
       reasonPrefix: "Based on the current onboarding signals:",
       signalAgentTask: "Agent task",
       sources: "{{count}} sources",
@@ -509,7 +509,7 @@ export const ONBOARDING_COPY = {
       plans: {
         trial: {
           name: "Free",
-          description: "Try Velion and the agent for 14 days before choosing a paid plan.",
+          description: "Try Verevon and the agent for 14 days before choosing a paid plan.",
           features: ["No card required", "14 day trial", "Upgrade when you are ready"],
           badge: "Free",
           cadence: "/mo",
@@ -561,7 +561,7 @@ export const ONBOARDING_COPY = {
     },
     assembly: {
       eyebrow: "Done",
-      title: "Preparing Velion",
+      title: "Preparing Verevon",
       description:
         "We are moving in everything we collected: knowledge, integrations and your agent, then opening the dashboard in a few seconds.",
       ticks: [
@@ -584,9 +584,9 @@ export const ONBOARDING_COPY = {
         fallback: "as a team",
       },
       summaryWithGoal:
-        'For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. You described the need as "{{goal}}", and Velion can ground answers in {{sources}}. {{plan}} gives you {{fit}}.',
+        'For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. You described the need as "{{goal}}", and Verevon can ground answers in {{sources}}. {{plan}} gives you {{fit}}.',
       summaryWithoutGoal:
-        "For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. Velion can ground answers in {{sources}}. {{plan}} gives you {{fit}}.",
+        "For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. Verevon can ground answers in {{sources}}. {{plan}} gives you {{fit}}.",
       reasonWithGoal:
         "{{prefix}} {{plan}} is the right choice for {{subject}}: you want {{goalPhrase}}, and we have {{sources}} as the answer base.",
       reasonWithoutGoal:

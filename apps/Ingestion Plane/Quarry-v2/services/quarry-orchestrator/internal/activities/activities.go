@@ -88,7 +88,7 @@ type RunPageInput struct {
 // ContentType, Title, and Branding are best-effort fields the runtime
 // populates for HTML responses. They're optional for backward
 // compatibility — older runtime builds simply omit them and consumers
-// must degrade gracefully (e.g. the velion wizard falls back to URL-
+// must degrade gracefully (e.g. the verevon wizard falls back to URL-
 // based snippet kind detection when ContentType is empty).
 type RunPageResult struct {
 	RunID       string         `json:"run_id"`

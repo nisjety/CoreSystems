@@ -31,14 +31,14 @@ export async function GET() {
       // 403 (no org) and 5xx (Convex / user-core / integration-engine
       // unreachable) → degrade to empty payload so the Knowledge tab
       // renders its empty-state instead of a hard error. The reason
-      // surfaces in `x-velion-integration-warning` for observability.
+      // surfaces in `x-verevon-integration-warning` for observability.
       if (error.statusCode === 401) {
         return NextResponse.json({ error: error.message }, { status: 401 })
       }
       return NextResponse.json(EMPTY_INTEGRATIONS_PAYLOAD, {
         headers: {
           'Cache-Control': 'no-store',
-          'x-velion-integration-warning': error.message.slice(0, 200),
+          'x-verevon-integration-warning': error.message.slice(0, 200),
         },
       })
     }
@@ -47,7 +47,7 @@ export async function GET() {
     return NextResponse.json(EMPTY_INTEGRATIONS_PAYLOAD, {
       headers: {
         'Cache-Control': 'no-store',
-        'x-velion-integration-warning':
+        'x-verevon-integration-warning':
           error instanceof Error ? error.message.slice(0, 200) : 'unknown error',
       },
     })

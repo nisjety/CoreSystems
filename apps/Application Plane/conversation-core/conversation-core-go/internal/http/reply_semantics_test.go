@@ -35,7 +35,7 @@ func signedAgentRequest(t *testing.T, method, path string, body []byte) *stdhttp
 	t.Helper()
 	request := httptest.NewRequest(method, path, bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
-	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "member")
+	signConversationRequest(t, request, body, "verevon-gateway", testGatewaySecret, "user-1", "org-1", "member")
 	return request
 }
 

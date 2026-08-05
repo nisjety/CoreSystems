@@ -21,7 +21,7 @@ import (
 const (
 	serviceCredentialAudience = "org-core"
 	serviceCredentialEnv      = "ORG_CORE_SERVICE_CREDENTIALS"
-	gatewayServicePrincipal   = "velion-gateway"
+	gatewayServicePrincipal   = "verevon-gateway"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -175,7 +175,7 @@ func validPrincipal(value string) bool {
 
 // ValidateRequiredServiceCredentialRegistry is called before any listener or
 // database connection is opened. It also verifies the minimum gateway policy
-// needed by the current Velion v3 organization flows.
+// needed by the current Verevon v3 organization flows.
 func ValidateRequiredServiceCredentialRegistry(raw string) error {
 	credentials, err := parseServiceCredentials(raw)
 	if err != nil {
@@ -334,6 +334,8 @@ func organizationProxyScopes(method string, rest []string) []string {
 
 func internalOrganizationScopes(method string, rest []string) []string {
 	switch {
+	case len(rest) == 0 && method == http.MethodGet:
+		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "by-tenant" && method == http.MethodGet:
 		return []string{"org:tenant:read:any"}
 	case len(rest) == 1 && rest[0] == "ensure-from-tenant" && method == http.MethodPost:

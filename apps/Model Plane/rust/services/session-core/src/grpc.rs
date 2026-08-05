@@ -397,7 +397,13 @@ async fn create_thread_inner(
         }
     }
 
-    let thread_id = new_ulid();
+    // Support threads carry customer-authored transcript history. Their
+    // validated namespace is an immutable security classification consumed by
+    // the Frontend Gateway, so preserve that id instead of replacing it with a
+    // ULID. Every other session key keeps the standard server-minted id.
+    let thread_id = support_thread_id(&req.session_key)
+        .map(str::to_owned)
+        .unwrap_or_else(new_ulid);
     let now = Utc::now();
 
     let mut tx = pool
@@ -432,6 +438,25 @@ async fn create_thread_inner(
             nanos: nanos_to_i32(now.timestamp_subsec_nanos()),
         }),
     }))
+}
+
+fn support_thread_id(session_key: &str) -> Option<&str> {
+    let candidate = session_key.trim();
+    let uuid = candidate.strip_prefix("support_")?;
+    if uuid.len() != 36 {
+        return None;
+    }
+    for (index, byte) in uuid.bytes().enumerate() {
+        let valid = if matches!(index, 8 | 13 | 18 | 23) {
+            byte == b'-'
+        } else {
+            byte.is_ascii_hexdigit()
+        };
+        if !valid {
+            return None;
+        }
+    }
+    Some(candidate)
 }
 
 /// Persist dream-memory candidates to Letta unless the verified caller is Zero
@@ -475,8 +500,7 @@ async fn append_message_inner(
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
     let msg_id = new_ulid();
     let now = Utc::now();
-    let mut letta_sync: Option<(String, String, Vec<crate::dreaming::DreamMemoryCandidate>)> =
-        None;
+    let mut letta_sync: Option<(String, String, Vec<crate::dreaming::DreamMemoryCandidate>)> = None;
 
     let mut tx = pool
         .begin()
@@ -1770,9 +1794,7 @@ async fn get_context_assembly_inner(
     let knowledge_segments = svc
         .fetch_knowledge_segments(&thread_id, &evidence.document_ids, dataplane_bearer)
         .await;
-    let graph_segments = svc
-        .fetch_graph_segments(&thread_id, dataplane_bearer)
-        .await;
+    let graph_segments = svc.fetch_graph_segments(&thread_id, dataplane_bearer).await;
 
     let inputs = AssemblyInputs {
         policy_id: req.policy_id,
@@ -1840,7 +1862,8 @@ impl SessionCore for SessionService {
             let caller = identity(&request)?;
             authorize_operation(&caller, "session:write")?;
             let req = request.into_inner();
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                .await?;
             append_message_inner(
                 &self.pool,
                 self.letta_memory.as_ref(),
@@ -1873,8 +1896,13 @@ impl SessionCore for SessionService {
             // delegation — so an allowlisted service may own the run itself.
             let owner = match caller.user_id() {
                 Some(user_id) => {
-                    authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
-                        .await?;
+                    authorize_thread_owner(
+                        &self.pool,
+                        &caller,
+                        &req.thread_id,
+                        OwnerIntent::Mutate,
+                    )
+                    .await?;
                     user_id.to_owned()
                 }
                 None => {
@@ -2465,7 +2493,7 @@ impl SessionCore for SessionService {
                 .map(
                     |(thread_id, session_key, created_at, title, preview, updated_at)| {
                         let fallback_title = if session_key.trim().is_empty() {
-                            "Velion Chat"
+                            "Verevon Chat"
                         } else {
                             session_key.as_str()
                         };
@@ -2505,7 +2533,8 @@ impl SessionCore for SessionService {
             // its metadata) is still intact.
             let dataplane_bearer = self.delegated_dataplane_bearer(&request, &caller)?;
             let req = request.into_inner();
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                .await?;
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             get_context_assembly_inner(
                 self,
@@ -2542,7 +2571,8 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             // content remains exclusively in the live gateway request path.
             if !caller.zdr() {
                 authorize_operation(&caller, "session:write")?;
-                authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
+                authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                    .await?;
             }
             terminalization::start_managed_run_inner(&self.pool, req, caller.zdr())
                 .await
@@ -2697,9 +2727,15 @@ impl SessionService {
     ) -> Result<Option<DelegatedDataPlaneBearer>, Status> {
         match &self.auth {
             Some(auth) => auth.delegated_data_plane_bearer(request, caller),
-            None if request.metadata().get(DATA_PLANE_AUTH_METADATA_KEY).is_some() => Err(
-                Status::unavailable("delegated Data Plane credential cannot be verified"),
-            ),
+            None if request
+                .metadata()
+                .get(DATA_PLANE_AUTH_METADATA_KEY)
+                .is_some() =>
+            {
+                Err(Status::unavailable(
+                    "delegated Data Plane credential cannot be verified",
+                ))
+            }
             None => Ok(None),
         }
     }
@@ -3339,7 +3375,7 @@ pub async fn serve(
     // in this same Postgres. Provider HTTP (Azure OpenAI) lives in the gateway.
     let finetune = crate::finetune_grpc::FinetuneJobsService::new(pool.clone());
     let memory = crate::memory_grpc::MemoryGrpc::new(pool.clone(), letta_memory.clone());
-    // Velion intent layer ("model router") runtime policy. Owns the singleton
+    // Verevon intent layer ("model router") runtime policy. Owns the singleton
     // `routing_policy` JSONB row in this same Postgres; the BFF writes and
     // inference-core polls it.
     let routing = crate::routing_policy_grpc::RoutingPolicyService::new(pool.clone());
@@ -3401,7 +3437,7 @@ mod tests {
         append_letta_memory_rows, assemble_segments, authorize_dataplane, complete_step_inner,
         derive_idempotency_hash, finalize_tool_action_inner, pb, reserve_tool_action_inner,
         resolve_dataplane_addr, resolve_residency, semantic_context_search_status,
-        sync_dream_memory_unless_zdr, validate_user_checkpoint, AssemblyInputs,
+        support_thread_id, sync_dream_memory_unless_zdr, validate_user_checkpoint, AssemblyInputs,
         DelegatedDataPlaneBearer, LettaMemoryAdapter, MemoryRetention, SemanticContextSearchStatus,
         VerifiedIdentity, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
         MAX_USER_CHECKPOINT_STATE_BYTES, STEP_COMPLETED_TYPE_URL, ZDR_MEMORY_READ_SUPPRESSED,
@@ -3442,6 +3478,18 @@ mod tests {
             .await
             .expect("mock server records requests")
             .len()
+    }
+
+    #[test]
+    fn support_thread_ids_are_preserved_only_for_the_validated_uuid_namespace() {
+        let id = "support_123e4567-e89b-12d3-a456-426614174000";
+        assert_eq!(support_thread_id(id), Some(id));
+        assert_eq!(support_thread_id("support_not-a-uuid"), None);
+        assert_eq!(support_thread_id("ordinary-session-key"), None);
+        assert_eq!(
+            support_thread_id("support_123e4567-e89b-12d3-a456-426614174000-extra"),
+            None
+        );
     }
 
     #[test]
@@ -3593,7 +3641,7 @@ mod tests {
             "x-internal-key",
             "x-user-id",
             "x-org-id",
-            "x-velion-org-id",
+            "x-verevon-org-id",
         ] {
             assert!(
                 request.metadata().get(forbidden).is_none(),
@@ -3729,11 +3777,23 @@ mod tests {
         let (segs, total) = assemble_segments(&i);
         let kinds: Vec<&str> = segs.iter().map(|s| s.kind.as_str()).collect();
 
-        assert!(kinds.contains(&"retrieval"), "grounding was starved: {kinds:?}");
-        assert!(kinds.contains(&"knowledge"), "knowledge was starved: {kinds:?}");
+        assert!(
+            kinds.contains(&"retrieval"),
+            "grounding was starved: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"knowledge"),
+            "knowledge was starved: {kinds:?}"
+        );
         assert!(kinds.contains(&"graph"), "graph was starved: {kinds:?}");
-        assert!(kinds.contains(&"prompt"), "the run's own goal was dropped: {kinds:?}");
-        assert!(kinds.contains(&"thread"), "history should still get its share");
+        assert!(
+            kinds.contains(&"prompt"),
+            "the run's own goal was dropped: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"thread"),
+            "history should still get its share"
+        );
         assert!(total <= i.max_tokens, "budget overspent: {total}");
     }
 
@@ -3756,7 +3816,10 @@ mod tests {
         assert!(
             threads.last().is_some_and(|last| last.contains("29-")),
             "newest turn missing; kept={:?}",
-            threads.iter().map(|t| &t[..8.min(t.len())]).collect::<Vec<_>>()
+            threads
+                .iter()
+                .map(|t| &t[..8.min(t.len())])
+                .collect::<Vec<_>>()
         );
         assert!(
             !threads.iter().any(|t| t.starts_with("user: 0-")),
@@ -3797,7 +3860,9 @@ mod tests {
         let mut i = base();
         i.max_tokens = 1024;
         i.thread_messages = flooded_thread(10, 200);
-        i.retrieval_segments = (0..40).map(|n| format!("retrieved-{n}-{}", "y".repeat(200))).collect();
+        i.retrieval_segments = (0..40)
+            .map(|n| format!("retrieved-{n}-{}", "y".repeat(200)))
+            .collect();
 
         let (segs, _) = assemble_segments(&i);
         let kinds: Vec<&str> = segs.iter().map(|s| s.kind.as_str()).collect();

@@ -3,19 +3,19 @@
 ## Goal
 
 `integration-corev2` replaces the existing Ingestion Plane `integration-core`
-v1. Velion owns the integration layer instead of outsourcing the critical OAuth
-and token lifecycle to Nango. The product UI remains Velion-native, while
+v1. Verevon owns the integration layer instead of outsourcing the critical OAuth
+and token lifecycle to Nango. The product UI remains Verevon-native, while
 backend planes consume provider access through a narrow token broker contract.
 
 This is not a standalone clone of the old ID-Knuten NestJS integration service.
 The NestJS service remains a provider-action reference. The runtime authority is
-Velion's Control Plane.
+Verevon's Control Plane.
 
 ## Boundaries
 
 ```mermaid
 flowchart LR
-  UI["Velion UI"] --> BFF["Frontend BFF"]
+  UI["Verevon UI"] --> BFF["Frontend BFF"]
   BFF --> IC["integration-corev2"]
   IC --> AC["Control Plane auth-core"]
   IC --> OC["Control Plane org-core"]
@@ -48,7 +48,7 @@ flowchart LR
 - `finspo-core`: Microsoft 365 domain logic such as SharePoint inventory,
   ACL capture, governance proposals, Outlook/inbox enrichment later.
 - `Data Plane v2`: normalized graph and source evidence.
-- `Velion UI`: provider selection, consent explanation, source management,
+- `Verevon UI`: provider selection, consent explanation, source management,
   real-time inspectors, profile/dashboard views, and settings UX.
 
 ## Why Go
@@ -92,7 +92,7 @@ NATS, tokens, consent, and API orchestration.
 - TypeScript function runtime.
 - Direct provider token exposure to application code.
 
-Velion should add providers deliberately as product capabilities, not as a
+Verevon should add providers deliberately as product capabilities, not as a
 generic integration marketplace.
 
 ## Implementation direction
@@ -115,7 +115,7 @@ NestJS provider modules are blueprints while callers migrate:
   routes use the shared `x-internal-api-key`.
 - Connect-session creation is gated by org-core's effective plan for Bearer
   requests and bypassed for trusted internal onboarding/orchestration calls.
-- New product callers should depend on Velion connection IDs, capabilities, and
+- New product callers should depend on Verevon connection IDs, capabilities, and
   token leases instead of Nango connection IDs.
 - Internal token leases require an allowlisted `consumer`. Expiring-token
   refreshes are singleflighted per connection inside each Go process and, when
@@ -125,7 +125,7 @@ NestJS provider modules are blueprints while callers migrate:
   that another replica already refreshed.
 - Existing callers can migrate through the internal-auth `/integrations/...`
   compatibility routes. These routes are route-name compatible with the useful
-  NestJS provider actions, but they still require a Velion connection and never
+  NestJS provider actions, but they still require a Verevon connection and never
   expose a raw arbitrary proxy.
 - Onboarding and Knowledge previews should use
   `GET /api/v1/connections/{id}/discovery` for bounded proof metadata before
@@ -180,12 +180,12 @@ NestJS provider modules are blueprints while callers migrate:
 Unified-service is retired as a standalone NestJS runtime. Its useful features
 are preserved as smaller owned surfaces:
 
-- Unified profile becomes a Velion v2 BFF projection composed from Control Plane
+- Unified profile becomes a Verevon v2 BFF projection composed from Control Plane
   user/org data, `integration-corev2` connections/consents/sync status, and Data
   Plane source evidence.
 - Consent lives in `integration_connection_consents` and is exposed on
   `/api/v1/connections/{id}/consents`.
-- Real-time progress is exposed through Velion v2 BFF SSE and the
+- Real-time progress is exposed through Verevon v2 BFF SSE and the
   `integration-corev2` sync-event snapshot route.
 - NATS remains the event backbone, but events contain only token references,
   connection IDs, org/user IDs, scopes/capabilities, status, and safe metadata.

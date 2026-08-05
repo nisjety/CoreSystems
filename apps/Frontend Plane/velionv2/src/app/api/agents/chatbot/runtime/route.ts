@@ -68,7 +68,7 @@ export async function GET() {
       ...counts,
       message: connected
         ? "Support integration connected. Agent actions can use live support teams, groups, and macros."
-        : "Support integration is configured, but Velion could not reach Zammad.",
+        : "Support integration is configured, but Verevon could not reach Zammad.",
     },
   } satisfies RuntimeStatus);
 }

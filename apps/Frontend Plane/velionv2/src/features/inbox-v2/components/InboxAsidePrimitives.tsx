@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { ChevronDown, Plus } from "lucide-react";
-import { VelionButton, VelionIconButton } from "@/components/ui/velion-ui";
+import { VerevonButton, VerevonIconButton } from "@/components/ui/verevon-ui";
 import type { InboxModalRequest } from "@/features/inbox-v2/components/InboxWorkModal";
 import { formatDateKey } from "@/features/inbox-v2/lib/calendar-format";
 import { cn } from "@/lib/utils";
@@ -45,15 +45,15 @@ export function MiniCalendarGrid({
           {selectedDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
         </h3>
         <div className="flex items-center gap-1">
-          <VelionIconButton size="xs" radius="sm" onClick={() => onSelect(shiftDate(selectedDate, -7))} className="hover:bg-[#F5F1EC]" aria-label="Previous week">
+          <VerevonIconButton size="xs" radius="sm" onClick={() => onSelect(shiftDate(selectedDate, -7))} className="hover:bg-[#F5F1EC]" aria-label="Previous week">
             <ChevronDown className="size-4 rotate-90" />
-          </VelionIconButton>
-          <VelionButton size="xs" radius="sm" onClick={() => selectToday(onSelect)} className="h-7 px-2 text-[11px] font-semibold hover:bg-[#F5F1EC]">
+          </VerevonIconButton>
+          <VerevonButton size="xs" radius="sm" onClick={() => selectToday(onSelect)} className="h-7 px-2 text-[11px] font-semibold hover:bg-[#F5F1EC]">
             Today
-          </VelionButton>
-          <VelionIconButton size="xs" radius="sm" onClick={() => onSelect(shiftDate(selectedDate, 7))} className="hover:bg-[#F5F1EC]" aria-label="Next week">
+          </VerevonButton>
+          <VerevonIconButton size="xs" radius="sm" onClick={() => onSelect(shiftDate(selectedDate, 7))} className="hover:bg-[#F5F1EC]" aria-label="Next week">
             <ChevronDown className="size-4 -rotate-90" />
-          </VelionIconButton>
+          </VerevonIconButton>
         </div>
       </div>
       <div className="grid grid-cols-7 gap-1">
@@ -197,7 +197,7 @@ export function LinkRow({ label, onOpenModal }: { label: string; onOpenModal: (m
   return (
     <div className="flex items-center justify-between gap-3 text-[#626260]">
       <span>{label}</span>
-      <VelionIconButton
+      <VerevonIconButton
         onClick={() => onOpenModal({
           type: "work",
           title: label,
@@ -210,7 +210,7 @@ export function LinkRow({ label, onOpenModal }: { label: string; onOpenModal: (m
         className="bg-[#F5F1EC] text-[#111111]"
       >
         <Plus className="size-4" />
-      </VelionIconButton>
+      </VerevonIconButton>
     </div>
   );
 }

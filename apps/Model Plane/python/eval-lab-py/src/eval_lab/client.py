@@ -57,7 +57,7 @@ class EvalEnv:
         return True, ""
 
 
-class VelionClient:
+class VerevonClient:
     """Minimal synchronous client for one eval run."""
 
     def __init__(self, env: EvalEnv | None = None) -> None:
@@ -78,7 +78,7 @@ class VelionClient:
         response = self._http.post(
             f"{self.env.auth_core_url}/api/model-plane/internal-token",
             headers={"X-Internal-Api-Key": self.env.internal_api_key},
-            json={"orgId": org_id, "userId": user_id, "email": f"{user_id}@eval.velion.dev"},
+            json={"orgId": org_id, "userId": user_id, "email": f"{user_id}@eval.verevon.dev"},
         )
         response.raise_for_status()
         body = response.json()
@@ -120,7 +120,7 @@ class VelionClient:
         token: str,
         content: str,
         *,
-        model: str = "velion-balance",
+        model: str = "verevon-balance",
         structured_output_schema: str | None = None,
         timeout_s: float = 60.0,
     ) -> dict[str, object]:

@@ -55,7 +55,7 @@ func enqueueWikiPublished(ctx context.Context, tx pgx.Tx, event events.WikiVersi
 }
 
 // ListPages — Wave 3.1 / Wave 11.C-b close: paginated wiki page enumeration
-// for the velion sidebar (which previously had to fall back to localStorage
+// for the verevon sidebar (which previously had to fall back to localStorage
 // bookmarks). Filter is optional on workspace_id + page_status; both empty
 // means "every non-deleted page in the org".
 func (r *WikiRepo) ListPages(
@@ -1141,7 +1141,7 @@ func defaultOperatingMapVersion(runID *string, evidenceRefs []string) json.RawMe
 		confidence = 0.58
 	}
 	payload := map[string]any{
-		"summary": "Evidence-grounded AI Operating Map proposal for this Velion knowledge space.",
+		"summary": "Evidence-grounded AI Operating Map proposal for this Verevon knowledge space.",
 		"departments": []map[string]any{
 			{"id": "support", "name": "Support", "confidence": confidence, "evidence_refs": refAt(0)},
 			{"id": "sales", "name": "Sales", "confidence": confidence, "evidence_refs": refAt(1)},
@@ -1212,5 +1212,5 @@ func operatingMapMarkdown(raw json.RawMessage) string {
 	if err := json.Indent(&pretty, raw, "", "  "); err != nil {
 		pretty.Write(raw)
 	}
-	return fmt.Sprintf("# AI Operating Map\n\nAccepted Velion operating map generated from Knowledge evidence.\n\n```json\n%s\n```\n", pretty.String())
+	return fmt.Sprintf("# AI Operating Map\n\nAccepted Verevon operating map generated from Knowledge evidence.\n\n```json\n%s\n```\n", pretty.String())
 }

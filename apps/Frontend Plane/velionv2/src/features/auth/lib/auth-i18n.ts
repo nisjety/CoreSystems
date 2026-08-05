@@ -10,9 +10,9 @@ export type AuthLocale = Locale;
 
 export const AUTH_COPY = {
   nb: {
-    brand: "Velion",
+    brand: "Verevon",
     back: "← Tilbake",
-    support: { needHelp: "Trenger du hjelp?", contact: "Kontakt support", email: "support@velion.com" },
+    support: { needHelp: "Trenger du hjelp?", contact: "Kontakt support", email: "support@verevon.com" },
     terms: {
       prefixSignin: "Ved å fortsette aksepterer du våre",
       and: "og",
@@ -119,7 +119,7 @@ export const AUTH_COPY = {
       allowAll: "Tillat alle",
       saveChoice: "Lagre valg",
       rejectAll: "Avvis alle",
-      dialogIntro: "Velg hvordan Velion kan bruke informasjonskapsler på denne enheten.",
+      dialogIntro: "Velg hvordan Verevon kan bruke informasjonskapsler på denne enheten.",
       categories: { necessary: "Nødvendige", preferences: "Preferanser", analytics: "Analyse" },
       necessaryNote: "Kreves for sikker innlogging.",
       adjustableNote: "Kan justeres senere.",
@@ -127,9 +127,9 @@ export const AUTH_COPY = {
     },
   },
   en: {
-    brand: "Velion",
+    brand: "Verevon",
     back: "← Back",
-    support: { needHelp: "Need help?", contact: "Contact support", email: "support@velion.com" },
+    support: { needHelp: "Need help?", contact: "Contact support", email: "support@verevon.com" },
     terms: {
       prefixSignin: "By continuing you accept our",
       and: "and",
@@ -234,7 +234,7 @@ export const AUTH_COPY = {
       allowAll: "Allow all",
       saveChoice: "Save choice",
       rejectAll: "Reject all",
-      dialogIntro: "Choose how Velion can use cookies on this device.",
+      dialogIntro: "Choose how Verevon can use cookies on this device.",
       categories: { necessary: "Necessary", preferences: "Preferences", analytics: "Analytics" },
       necessaryNote: "Required for secure sign-in.",
       adjustableNote: "Can be adjusted later.",

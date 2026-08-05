@@ -6,7 +6,7 @@ import { getModelPlaneTokenInternal } from '@/lib/model-plane/auth-token'
 import type { PersistedAgent } from '@/components/agents/types'
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): public embed-widget message-send.
+ * Wave 9 (ui-ux-verevon-gap.md §19): public embed-widget message-send.
  *
  * Anonymous visitor flow — no Better Auth session required. Each
  * conversation is keyed by a `visitor_id` the widget generates

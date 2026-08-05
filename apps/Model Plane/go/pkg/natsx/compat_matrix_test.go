@@ -94,9 +94,9 @@ func TestLegacyMappings_ReversibleSubjectsRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	reversible := []string{
-		"velion.agent.run.run-reversible-1.event",
-		"velion.agent.run.01HXYZABCDEF.event",
-		"velion.session.sess-reversible.command",
+		"verevon.agent.run.run-reversible-1.event",
+		"verevon.agent.run.01HXYZABCDEF.event",
+		"verevon.session.sess-reversible.command",
 	}
 	for _, legacy := range reversible {
 		legacy := legacy
@@ -118,7 +118,7 @@ func TestLegacyMappings_UnknownSubjectIsIdentity(t *testing.T) {
 	t.Parallel()
 	for _, s := range []string{
 		"some.unknown.subject",
-		"velion.agent.run",            // incomplete
+		"verevon.agent.run",            // incomplete
 		"aqencia.other.thing.happened", // outside known aqencia set
 		"",
 	} {

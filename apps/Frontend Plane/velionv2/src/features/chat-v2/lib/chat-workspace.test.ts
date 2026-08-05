@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const STORAGE_KEY = "velion:v2:chat:sessions";
+const STORAGE_KEY = "verevon:v2:chat:sessions";
 const streamChatMock = vi.hoisted(() => vi.fn());
 const loadThreadHistoryMock = vi.hoisted(() => vi.fn());
 const cancelChatMock = vi.hoisted(() => vi.fn());

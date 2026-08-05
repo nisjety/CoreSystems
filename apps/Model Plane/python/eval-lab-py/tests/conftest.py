@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from eval_lab.client import EvalEnv, VelionClient
+from eval_lab.client import EvalEnv, VerevonClient
 from eval_lab.live_state import RESULTS, live_enabled
 from eval_lab.report import write_report
 
@@ -23,7 +23,7 @@ def client():
     ready, reason = env.ready()
     if not ready:
         pytest.skip(f"live stack not configured: {reason}")
-    instance = VelionClient(env)
+    instance = VerevonClient(env)
     yield instance
     instance.close()
 

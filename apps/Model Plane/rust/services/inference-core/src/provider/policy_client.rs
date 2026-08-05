@@ -1,6 +1,6 @@
 //! gRPC client for session-core's `RoutingPolicy` service.
 //!
-//! session-core owns the durable store for the Velion intent layer's runtime
+//! session-core owns the durable store for the Verevon intent layer's runtime
 //! policy (a JSONB singleton). This client reads it ([`PolicyClient::fetch`])
 //! and writes it ([`PolicyClient::set`]). The policy travels as an opaque JSON
 //! string in `config_json`; the canonical schema is [`RoutingPolicy`].

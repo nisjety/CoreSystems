@@ -4,7 +4,7 @@ import { resolveChatActor } from '@/app/api/chat/_lib/session-store'
 import { convexMutation } from '@/app/api/_lib/convex-client'
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): authenticated embed-config proxy.
+ * Wave 9 (ui-ux-verevon-gap.md §19): authenticated embed-config proxy.
  *
  * POST   /api/agents/{agentId}/embed  → enables (or rotates secret).
  *                                       Body: { theme?: {...} }

@@ -341,9 +341,9 @@ Model Plane cannot claim target parity until:
 
 **Model Plane is the reasoning engine.** It plans, reasons, routes, synthesizes, asks for tools, manages agent loops, and proposes knowledge changes. It does not own raw source capture, durable knowledge storage, or user-facing graph/wiki editing UX.
 
-## 12. 2026-05-20 — Velion Build Runtime Audit
+## 12. 2026-05-20 — Verevon Build Runtime Audit
 
-Source: `build-velion-services.sh` orchestrated build attempt; observed via `docker ps` + Docker BuildKit logs.
+Source: `build-verevon-services.sh` orchestrated build attempt; observed via `docker ps` + Docker BuildKit logs.
 
 ### Observed compose topology (`apps/Model Plane/deploy/docker-compose.yml`)
 
@@ -368,17 +368,17 @@ Source: `build-velion-services.sh` orchestrated build attempt; observed via `doc
 | task-core (Go) | 8090 / 9099 | same | not reached |
 | bridge-core (Go) | 8091 / 9100 | same | not reached |
 
-### Bootstrap one-shots declared by `build-velion-services.sh`
+### Bootstrap one-shots declared by `build-verevon-services.sh`
 `capability-migrations` · `minio-bootstrap` · `temporal-bootstrap` — removed post-exit-0 (not yet reached this run)
 
 ### Network
-- Plane runs on its own bridge `model-plane-network` — **NOT joined to `inter-plane-bus`**, so velion server-side calls by container name (`model-plane-model-gateway-1:8080`) fail unless Model Plane services are added to `inter-plane-bus`, or velion uses host ports.
+- Plane runs on its own bridge `model-plane-network` — **NOT joined to `inter-plane-bus`**, so verevon server-side calls by container name (`model-plane-model-gateway-1:8080`) fail unless Model Plane services are added to `inter-plane-bus`, or verevon uses host ports.
 - Older `version: "3.9"` attribute in the compose file is obsolete (warning, harmless).
 
 ### Remediation backlog
 1. `orchestrator-core/Dockerfile`: change build context to the `go/` workspace root and update WORKDIR + COPY so `../../gen` and `../../pkg/*` are present at build time.
 2. `capability-core`: run `go mod tidy` and commit the refreshed `go.sum`.
-3. (optional) Add `model-gateway`, `orchestrator-core`, `capability-core`, `bridge-core` to `inter-plane-bus` so cross-plane services (velion, ingestion, application) can call them by service name.
+3. (optional) Add `model-gateway`, `orchestrator-core`, `capability-core`, `bridge-core` to `inter-plane-bus` so cross-plane services (verevon, ingestion, application) can call them by service name.
 
 ## 13. 2026-05-20 — Verified all-green (R15)
 

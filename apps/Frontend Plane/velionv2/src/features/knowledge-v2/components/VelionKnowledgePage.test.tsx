@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { VelionKnowledgePage } from "@/features/knowledge-v2/components/VelionKnowledgePage";
+import { VerevonKnowledgePage } from "@/features/knowledge-v2/components/VerevonKnowledgePage";
 
 function makeFetchResponse(body: unknown, status = 200): Response {
   return {
@@ -180,8 +180,8 @@ const knowledgePayload = {
     webSources: [
       {
         id: "web-docs",
-        name: "Velion docs",
-        url: "https://docs.velion.ai",
+        name: "Verevon docs",
+        url: "https://docs.verevon.ai",
         kind: "crawl",
         status: "active",
         providerKey: "web",
@@ -243,7 +243,7 @@ const knowledgePayload = {
   },
 };
 
-describe("VelionKnowledgePage", () => {
+describe("VerevonKnowledgePage", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(makeFetchResponse(knowledgePayload))));
   });
@@ -253,7 +253,7 @@ describe("VelionKnowledgePage", () => {
   });
 
   it("renders the live overview payload", async () => {
-    render(<VelionKnowledgePage />);
+    render(<VerevonKnowledgePage />);
 
     expect(await screen.findByRole("heading", { name: /^folders$/i })).toBeVisible();
     expect(screen.getByRole("combobox", { name: /select knowledge collection/i })).toHaveDisplayValue("General Knowledge");
@@ -263,7 +263,7 @@ describe("VelionKnowledgePage", () => {
     expect(screen.getByRole("heading", { name: /data plane status/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /support knowledge/i })).toBeVisible();
     expect(screen.getByRole("heading", { name: /microsoft 365/i })).toBeVisible();
-    expect(screen.getByText(/docs\.velion\.ai/i)).toBeVisible();
+    expect(screen.getByText(/docs\.verevon\.ai/i)).toBeVisible();
     expect(screen.getAllByText(/quickwit-with-postgres-fallback/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/context mode/i)).toBeVisible();
     expect(screen.getAllByText(/shipping faq/i)[0]).toBeVisible();
@@ -271,7 +271,7 @@ describe("VelionKnowledgePage", () => {
 
   it("switches from overview to graph and chunks using live data", async () => {
     const user = userEvent.setup();
-    render(<VelionKnowledgePage />);
+    render(<VerevonKnowledgePage />);
 
     await screen.findByRole("heading", { name: /^folders$/i });
     await user.click(screen.getByRole("button", { name: /graph/i }));
@@ -287,7 +287,7 @@ describe("VelionKnowledgePage", () => {
 
   it("opens the add source modal", async () => {
     const user = userEvent.setup();
-    render(<VelionKnowledgePage />);
+    render(<VerevonKnowledgePage />);
 
     await screen.findByRole("heading", { name: /^folders$/i });
     await user.click(screen.getByRole("button", { name: /add source/i }));
@@ -300,13 +300,13 @@ describe("VelionKnowledgePage", () => {
 
   it("filters live knowledge by collection and search query", async () => {
     const user = userEvent.setup();
-    render(<VelionKnowledgePage />);
+    render(<VerevonKnowledgePage />);
 
     await screen.findByRole("heading", { name: /^folders$/i });
     await user.selectOptions(screen.getByRole("combobox", { name: /select knowledge collection/i }), "provider:microsoft");
 
     expect(screen.getByRole("heading", { name: /support knowledge/i })).toBeVisible();
-    expect(screen.queryByText(/velion docs/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/verevon docs/i)).not.toBeInTheDocument();
     expect(screen.getAllByText(/returns policy/i)[0]).toBeVisible();
     expect(screen.queryAllByText(/shipping faq/i)).toHaveLength(0);
 
@@ -325,7 +325,7 @@ describe("VelionKnowledgePage", () => {
       },
     }))));
 
-    render(<VelionKnowledgePage />);
+    render(<VerevonKnowledgePage />);
 
     expect(await screen.findByRole("heading", { name: /data plane status/i })).toBeVisible();
     expect(screen.getByText(/sparse backend: unknown/i)).toBeVisible();
@@ -342,7 +342,7 @@ describe("VelionKnowledgePage", () => {
             data: {
               id: "crawl-1",
               status: "queued",
-              target: "https://docs.velion.ai",
+              target: "https://docs.verevon.ai",
               createdAt: "2026-06-06T12:05:00.000Z",
             },
           }, 202),
@@ -351,16 +351,16 @@ describe("VelionKnowledgePage", () => {
       return Promise.resolve(makeFetchResponse(knowledgePayload));
     }));
 
-    render(<VelionKnowledgePage />);
+    render(<VerevonKnowledgePage />);
 
     await screen.findByRole("heading", { name: /^folders$/i });
     await user.click(screen.getByRole("button", { name: /add source/i }));
-    await user.type(screen.getByLabelText(/website url/i), "https://docs.velion.ai");
+    await user.type(screen.getByLabelText(/website url/i), "https://docs.verevon.ai");
     await user.clear(screen.getByLabelText(/max pages/i));
     await user.type(screen.getByLabelText(/max pages/i), "16");
     await user.click(screen.getByRole("button", { name: /start crawl/i }));
 
-    expect(await screen.findByText(/started a website crawl for https:\/\/docs\.velion\.ai/i)).toBeVisible();
+    expect(await screen.findByText(/started a website crawl for https:\/\/docs\.verevon\.ai/i)).toBeVisible();
     expect(vi.mocked(fetch)).toHaveBeenCalledWith(
       "/api/v1/knowledge/crawl",
       expect.objectContaining({

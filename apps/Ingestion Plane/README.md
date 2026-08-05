@@ -23,7 +23,7 @@
 ## Executive Summary
 
 The Ingestion Plane uses **Quarry-v2** for web/search ingestion. The older
-`Quarry/` Go service is deferred and should not be used by Velion v2. The
+`Quarry/` Go service is deferred and should not be used by Verevon v2. The
 active stack is defined in `docker-compose.yml` and starts:
 
 - `quarry-edge` on host port `8082`
@@ -153,7 +153,7 @@ Ingestion Plane/
 │   │   └── quarry-orchestrator     # Go Temporal workflows
 │   └── deploy/compose              # Standalone Quarry-v2 compose files
 │
-├── Quarry/                          # Deferred legacy Quarry; do not target Velion v2
+├── Quarry/                          # Deferred legacy Quarry; do not target Verevon v2
 │
 ├── imports-core/                    # File Import (Production)
 │   ├── app/

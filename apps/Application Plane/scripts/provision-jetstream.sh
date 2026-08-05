@@ -13,8 +13,8 @@ set -euo pipefail
 #
 #   apps/Application Plane> ./scripts/provision-jetstream.sh
 #
-# Cross-plane note: Ingestion's integration-corev2 publishes velion.ingestion.*
-# into VELION_INGESTION here (per-user "ingestion-integration-publisher"), so the
+# Cross-plane note: Ingestion's integration-corev2 publishes verevon.ingestion.*
+# into VEREVON_INGESTION here (per-user "ingestion-integration-publisher"), so the
 # conversation-core webhook consumer receives third-party integration events.
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -33,10 +33,10 @@ nb() { docker run --rm --network "$net" natsio/nats-box:latest \
 echo "== streams =="
 # name:subjects
 for spec in \
-  "VELION_APPLICATION:velion.application.>" \
-  "VELION_INGESTION:velion.ingestion.>" \
-  "VELION_MODEL:velion.model.>" \
-  "VELION_AUDIT:velion.audit.>"; do
+  "VEREVON_APPLICATION:verevon.application.>" \
+  "VEREVON_INGESTION:verevon.ingestion.>" \
+  "VEREVON_MODEL:verevon.model.>" \
+  "VEREVON_AUDIT:verevon.audit.>"; do
   name=${spec%%:*}; subj=${spec##*:}
   if nb "stream info $name" | grep -q "Information for Stream"; then
     echo "  = $name (exists)"
@@ -59,10 +59,11 @@ while IFS='|' read -r stream durable filter deliver; do
       --defaults" >/dev/null && echo "  + $stream/$durable"
   fi
 done <<'CONSUMERS'
-VELION_INGESTION|conversation-core-webhook-received|velion.ingestion.integration.webhook_received|_VELION.APPLICATION.DELIVER.conversation.webhook-received
-VELION_MODEL|conversation-core-model-action-proposed|velion.model.action.proposed|_VELION.APPLICATION.DELIVER.conversation.model-action-proposed
-VELION_APPLICATION|conversation-core-ai-action-executor|velion.application.conversation.ai_action.reviewed|_VELION.APPLICATION.DELIVER.conversation.ai-action-reviewed
-VELION_APPLICATION|insight-core-metric-subscriber|velion.application.>|_VELION.APPLICATION.DELIVER.insight.metrics
+VEREVON_INGESTION|conversation-core-webhook-received|verevon.ingestion.integration.webhook_received|_VEREVON.APPLICATION.DELIVER.conversation.webhook-received
+VEREVON_MODEL|conversation-core-model-action-proposed|verevon.model.action.proposed|_VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed
+VEREVON_APPLICATION|conversation-core-ai-action-executor|verevon.application.conversation.ai_action.reviewed|_VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed
+VEREVON_APPLICATION|insight-core-metric-subscriber|verevon.application.>|_VEREVON.APPLICATION.DELIVER.insight.metrics
+VEREVON_APPLICATION|notification-core-conversation-followed-message|verevon.application.conversation.message.received|_VEREVON.APPLICATION.DELIVER.notification.conversation-followed-message
 CONSUMERS
 
 echo "done."

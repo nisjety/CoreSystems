@@ -30,7 +30,7 @@
 
 ```text
 Frontend Plane
-    velion and future dedicated frontend apps
+    verevon and future dedicated frontend apps
 
 Application Plane (optional)
     convex, novu, affine, zammad, app-specific projections

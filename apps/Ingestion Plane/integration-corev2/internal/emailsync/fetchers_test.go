@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/triodelab/integration-corev2/internal/store"
 )
 
 func b64url(s string) string {
@@ -33,7 +35,7 @@ func gmailMessageJSON(id, thread, from, subject, bodyText string, labels ...stri
 			"mimeType": "multipart/alternative",
 			"headers": [
 				{"name": "From", "value": %q},
-				{"name": "To", "value": "Support <support@velion.no>"},
+				{"name": "To", "value": "Support <support@verevon.no>"},
 				{"name": "Subject", "value": %q},
 				{"name": "Message-ID", "value": "<%s@mail.example>"},
 				{"name": "In-Reply-To", "value": "<root@mail.example>"}
@@ -74,6 +76,9 @@ func TestGmail_BootstrapPinsCursorAndBackfills(t *testing.T) {
 	}
 	if result.NextCursor != "4711" {
 		t.Errorf("cursor = %q, want profile historyId 4711", result.NextCursor)
+	}
+	if result.ProviderContextPatch["mailbox_address"] != "owner@example.com" {
+		t.Errorf("mailbox address = %q, want provider-confirmed owner address", result.ProviderContextPatch["mailbox_address"])
 	}
 	if len(result.Messages) != 2 {
 		t.Fatalf("messages = %d, want 2", len(result.Messages))
@@ -133,6 +138,26 @@ func TestGmail_IncrementalSkipsSentAndAdvancesPerRecord(t *testing.T) {
 	}
 }
 
+func TestFindGmailHeaderReadsNestedOriginalMessageInDeliveryReport(t *testing.T) {
+	part := gmailPart{
+		MimeType: "multipart/report",
+		Headers: []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}{{Name: "Auto-Submitted", Value: "auto-replied"}},
+		Parts: []gmailPart{{
+			MimeType: "message/rfc822",
+			Headers: []struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			}{{Name: "X-Verevon-Outbound-Intent", Value: "outintent_123"}},
+		}},
+	}
+	if got := findGmailHeader(part, "x-verevon-outbound-intent"); got != "outintent_123" {
+		t.Fatalf("findGmailHeader = %q, want opaque nested marker", got)
+	}
+}
+
 func TestGmail_History404IsCursorExpired(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, `{"error": {"code": 404, "message": "Requested entity was not found."}}`, http.StatusNotFound)
@@ -155,7 +180,7 @@ func graphMessageJSON(id, subject, fromEmail, bodyHTML string, extra string) str
 		"bodyPreview": "preview text",
 		"body": {"contentType": "html", "content": %q},
 		"from": {"emailAddress": {"name": "Ola", "address": %q}},
-		"toRecipients": [{"emailAddress": {"name": "Support", "address": "support@velion.no"}}]%s
+		"toRecipients": [{"emailAddress": {"name": "Support", "address": "support@verevon.no"}}]%s
 	}`, id, subject, id, bodyHTML, fromEmail, extra)
 }
 
@@ -163,9 +188,14 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/me":
+			fmt.Fprint(w, `{"mail": "support@aquatiq.com", "userPrincipalName": "operator@aquatiq.com"}`)
 		case strings.Contains(r.URL.RawQuery, "changeType=created"):
 			if !strings.Contains(r.URL.RawQuery, "%24filter=receivedDateTime") && !strings.Contains(r.URL.RawQuery, "$filter=receivedDateTime") {
 				t.Errorf("initial delta missing receivedDateTime filter: %s", r.URL.RawQuery)
+			}
+			if !strings.Contains(r.URL.Query().Get("$select"), "internetMessageHeaders") {
+				t.Errorf("initial delta missing internetMessageHeaders selection: %s", r.URL.RawQuery)
 			}
 			fmt.Fprintf(w, `{"value": [%s], "@odata.nextLink": %q}`,
 				graphMessageJSON("g1", "Sak 1", "ola@x.no", "<p>hei</p>", ""),
@@ -184,7 +214,7 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	defer server.Close()
 
 	f := &GraphFetcher{BaseURL: server.URL, HTTP: server.Client()}
-	result, err := f.Fetch(context.Background(), "tok", "", 24*time.Hour, 25)
+	result, err := f.FetchConnection(context.Background(), store.Connection{}, "tok", "", 24*time.Hour, 25)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
@@ -194,6 +224,9 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	if result.NextCursor != server.URL+"/delta-final" {
 		t.Errorf("cursor = %q, want the deltaLink", result.NextCursor)
 	}
+	if result.ProviderContextPatch["mailbox_address"] != "support@aquatiq.com" {
+		t.Errorf("mailbox address = %q, want provider-confirmed mail address", result.ProviderContextPatch["mailbox_address"])
+	}
 	msg := result.Messages[0]
 	if msg.ProviderThreadID != "conv-1" || msg.MessageIDHeader != "<g1@outlook>" {
 		t.Errorf("threading fields: %+v", msg)
@@ -201,7 +234,7 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	if msg.BodyHTML != "<p>hei</p>" || msg.BodyText != "preview text" {
 		t.Errorf("bodies: text=%q html=%q", msg.BodyText, msg.BodyHTML)
 	}
-	if msg.From.Email != "ola@x.no" || len(msg.To) != 1 || msg.To[0].Email != "support@velion.no" {
+	if msg.From.Email != "ola@x.no" || len(msg.To) != 1 || msg.To[0].Email != "support@verevon.no" {
 		t.Errorf("participants: %+v", msg)
 	}
 }
@@ -238,6 +271,23 @@ func TestGraph_BodylessMessageIsRetained(t *testing.T) {
 	}
 	if message.BodyText != "(No message body)" {
 		t.Fatalf("body text = %q, want safe bodyless placeholder", message.BodyText)
+	}
+}
+
+func TestGraphNormalizeCarriesDeliveryReportHeaders(t *testing.T) {
+	raw := graphMessage{ID: "dsn-1", Subject: "Delivery report", ReceivedDateTime: "2026-07-08T09:00:00Z"}
+	raw.From.EmailAddress = graphEmailAddress{Name: "Mailer", Address: "mailer-daemon@example.com"}
+	raw.InternetMessageHeaders = []graphInternetMessageHeader{
+		{Name: "Auto-Submitted", Value: "auto-replied"},
+		{Name: "Content-Type", Value: "multipart/report; report-type=delivery-status"},
+		{Name: "X-Verevon-Outbound-Intent", Value: "outintent_123"},
+	}
+	message, ok := raw.normalize()
+	if !ok {
+		t.Fatal("normalize rejected Graph delivery report")
+	}
+	if message.AutoSubmitted != "auto-replied" || message.ContentType == "" || message.OutboundCorrelationID != "outintent_123" {
+		t.Fatalf("delivery report headers = %#v", message)
 	}
 }
 

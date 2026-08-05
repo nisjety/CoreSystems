@@ -3,12 +3,12 @@ package oauth
 import "testing"
 
 func TestNormalizeProviderContextShopifyShop(t *testing.T) {
-	context, err := NormalizeProviderContext("shopify", map[string]string{"shop": "Velion-Test"})
+	context, err := NormalizeProviderContext("shopify", map[string]string{"shop": "Verevon-Test"})
 	if err != nil {
 		t.Fatalf("NormalizeProviderContext error: %v", err)
 	}
-	if context["shop"] != "velion-test.myshopify.com" {
-		t.Fatalf("shop = %q, want velion-test.myshopify.com", context["shop"])
+	if context["shop"] != "verevon-test.myshopify.com" {
+		t.Fatalf("shop = %q, want verevon-test.myshopify.com", context["shop"])
 	}
 }
 

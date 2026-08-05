@@ -1,8 +1,8 @@
 /**
- * Boot-time validation of velion's internal-API-key environment.
+ * Boot-time validation of verevon's internal-API-key environment.
  *
- * G39 (see `velion-gap.md` §10): two production incidents have now been
- * caused by velion shipping a placeholder internal API key and the
+ * G39 (see `verevon-gap.md` §10): two production incidents have now been
+ * caused by verevon shipping a placeholder internal API key and the
  * mismatch only surfacing the first time a user clicked something —
  * G30 (`INTERNAL_API_KEY=placeholder`) and §8.23 (`AUTH_CORE_INTERNAL_API_KEY=test`).
  * In both cases a one-line boot-time assertion would have surfaced the
@@ -35,12 +35,12 @@ interface KeyCheck {
 const CHECKS: KeyCheck[] = [
   {
     envVars: ['INTERNAL_API_KEY', 'INTERNAL_SERVICE_SECRET'],
-    purpose: 'velion → Control Plane services (user-core, auth-core, billing-core, session-core)',
+    purpose: 'verevon → Control Plane services (user-core, auth-core, billing-core, session-core)',
     required: true,
   },
   {
     envVars: ['AUTH_CORE_INTERNAL_API_KEY', 'INTEGRATION_CORE_INTERNAL_API_KEY'],
-    purpose: 'velion → integration-core (connect sessions, OAuth provider catalogue)',
+    purpose: 'verevon → integration-core (connect sessions, OAuth provider catalogue)',
     required: true,
   },
 ]
@@ -140,7 +140,7 @@ export function assertInternalApiKeys(env: NodeJS.ProcessEnv = process.env): voi
     return
   }
   // Avoid making `next build` brittle in test runners that don't inject env.
-  if (env.NODE_ENV === 'test' && !env.VELION_ASSERT_KEYS_IN_TEST) {
+  if (env.NODE_ENV === 'test' && !env.VEREVON_ASSERT_KEYS_IN_TEST) {
     return
   }
 
@@ -150,7 +150,7 @@ export function assertInternalApiKeys(env: NodeJS.ProcessEnv = process.env): voi
     if (env.NODE_ENV === 'production') {
       // eslint-disable-next-line no-console
       console.log(
-        `[velion startup] internal API keys OK (${result.resolved.join(', ')})`,
+        `[verevon startup] internal API keys OK (${result.resolved.join(', ')})`,
       )
     }
     return
@@ -162,15 +162,15 @@ export function assertInternalApiKeys(env: NodeJS.ProcessEnv = process.env): voi
 
   const isProduction = env.NODE_ENV === 'production'
   const header = isProduction
-    ? `[velion startup] FATAL: internal API key validation failed (NODE_ENV=production)`
-    : `[velion startup] WARN: internal API key validation failed (NODE_ENV=${env.NODE_ENV ?? 'unset'} — continuing because not production)`
+    ? `[verevon startup] FATAL: internal API key validation failed (NODE_ENV=production)`
+    : `[verevon startup] WARN: internal API key validation failed (NODE_ENV=${env.NODE_ENV ?? 'unset'} — continuing because not production)`
 
   // eslint-disable-next-line no-console
   console[isProduction ? 'error' : 'warn'](`${header}\n${formatted}`)
 
   if (isProduction) {
     throw new Error(
-      `velion: refusing to start with invalid internal API key(s). ${result.problems.length} problem(s) detected.`,
+      `verevon: refusing to start with invalid internal API key(s). ${result.problems.length} problem(s) detected.`,
     )
   }
 }

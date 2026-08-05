@@ -188,7 +188,7 @@ non-`/test` (DHL), non-CIE (UPS), non-sandbox (FedEx) host unless
 honestly "deliberately NOT implemented … not stubbed" (`bring/booking.go:12-17`).
 New booking tests exist for dhl/fedex/ups and pass. **[source-only]**
 
-## Is shipping-core reachable as a Model Plane tool? (the velion-chat path)
+## Is shipping-core reachable as a Model Plane tool? (the verevon-chat path)
 
 Yes in source, with caveats. The inbound tool lives in the **Model Plane**, not
 here: `apps/Model Plane/rust/services/execution-core/src/shipping_tools.rs:116`

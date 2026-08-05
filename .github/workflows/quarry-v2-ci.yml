@@ -4,7 +4,7 @@ name: Quarry-v2 CI
 # executes workflows from the repository-root .github/workflows, so this
 # lives at the monorepo root but is path-scoped to Quarry-v2 so it does not
 # fire on unrelated plane changes. Mirrors the gating pattern used by
-# apps/Frontend Plane/velionv3's velionv3-ci.yml. Existing Quarry-v2 checks
+# apps/Frontend Plane/verevonv3's verevonv3-ci.yml. Existing Quarry-v2 checks
 # (coverage.yml, security.yml under apps/Ingestion Plane/Quarry-v2/.github/
 # workflows/) are left untouched; this adds the cargo check + cargo test
 # gate (compile-check alone previously let non-compiling test suites merge).

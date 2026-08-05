@@ -36,7 +36,7 @@ import {
   NewsDashboardCard,
   TrafficDashboardCard,
   WeatherDashboardCard,
-} from "@/features/dashboard-v2/components/VelionInformationCards";
+} from "@/features/dashboard-v2/components/VerevonInformationCards";
 import { DashboardComposer } from "@/features/composer-v2/components/DashboardComposer";
 import {
 	formatComposerTurnTime,
@@ -68,7 +68,7 @@ type SearchSuggestion = {
 	object: string;
 };
 
-type VelionHomeState = {
+type VerevonHomeState = {
 	activeTab: DashboardTab;
 	browseWeb: boolean;
 	cardPage: number;
@@ -87,7 +87,7 @@ type VelionHomeState = {
 	voiceMode: boolean;
 };
 
-type VelionHomeAction =
+type VerevonHomeAction =
 	| { type: "active-tab-changed"; tab: DashboardTab }
 	| { type: "browse-web-changed"; active: boolean }
 	| { type: "card-page-next"; pageCount: number }
@@ -107,7 +107,7 @@ type VelionHomeAction =
 	| { type: "card-prompt-applied"; card: DashboardCard }
 	| { type: "chat-launch-started" };
 
-function createInitialVelionHomeState(): VelionHomeState {
+function createInitialVerevonHomeState(): VerevonHomeState {
 	return {
 		activeTab: "Chat",
 		browseWeb: true,
@@ -128,10 +128,10 @@ function createInitialVelionHomeState(): VelionHomeState {
 	};
 }
 
-function velionHomeReducer(
-	state: VelionHomeState,
-	action: VelionHomeAction,
-): VelionHomeState {
+function verevonHomeReducer(
+	state: VerevonHomeState,
+	action: VerevonHomeAction,
+): VerevonHomeState {
 	switch (action.type) {
 		case "active-tab-changed":
 			return { ...state, activeTab: action.tab };
@@ -484,15 +484,15 @@ function firstName(value?: string | null) {
 	return trimmed.split(/\s+/)[0] || "";
 }
 
-export function VelionHome() {
+export function VerevonHome() {
 	const composerRef = useRef<HTMLDivElement>(null);
 	const router = useRouter();
 	const controlPlane = useControlPlaneContext();
 	const greeting = getNorwegianGreeting();
 	const [state, dispatch] = useReducer(
-		velionHomeReducer,
+		verevonHomeReducer,
 		undefined,
-		createInitialVelionHomeState,
+		createInitialVerevonHomeState,
 	);
 	const [searchExpanded, setSearchExpanded] = useState(false);
 	const [searchPreviewActive, setSearchPreviewActive] = useState(false);
@@ -530,7 +530,7 @@ export function VelionHome() {
 		activeTab === "Søk" && searchPreviewActive && !searchExpanded;
 	const homeTitle =
 		activeTab === "Søk"
-			? "Søk på nett of i velion"
+			? "Søk på nett of i verevon"
 			: activeTab === "Kunnskap"
 				? "Kunnskapsbase"
 				: displayName
@@ -556,7 +556,7 @@ export function VelionHome() {
 		if (isLaunchingChat) return;
 
 		const now = new Date();
-		const submittedText = body || "Vedlegg sendt til Velion.";
+		const submittedText = body || "Vedlegg sendt til Verevon.";
 		const nextTurn: ComposerTurn = {
 			id: `turn-${now.getTime()}`,
 			body: submittedText,
@@ -633,11 +633,11 @@ export function VelionHome() {
 			<div
 				ref={composerRef}
 				className={cn(
-					"velion-home-composer velion-fade-up velion-stagger-1 w-full transition-all duration-500 ease-out",
+					"verevon-home-composer verevon-fade-up verevon-stagger-1 w-full transition-all duration-500 ease-out",
 					searchModeExpanded
-						? "velion-home-composer-expanded mx-auto h-full max-w-[1180px]"
+						? "verevon-home-composer-expanded mx-auto h-full max-w-[1180px]"
 						: "mx-auto max-w-[820px]",
-					isLaunchingChat ? "velion-chat-launch-out" : "",
+					isLaunchingChat ? "verevon-chat-launch-out" : "",
 				)}
 			>
 				{activeTab === "Chat" ? (
@@ -719,7 +719,7 @@ export function VelionHome() {
 	);
 
 	return (
-		<div className="velion-dashboard-surface relative h-full overflow-hidden bg-transparent text-[#1A1A1A] transition-colors dark:text-[#F7F8F8]">
+		<div className="verevon-dashboard-surface relative h-full overflow-hidden bg-transparent text-[#1A1A1A] transition-colors dark:text-[#F7F8F8]">
 			<div
 				className="pointer-events-none absolute inset-0 dashboard-home-grid"
 				aria-hidden="true"
@@ -727,8 +727,8 @@ export function VelionHome() {
 
 			<div
 				className={cn(
-					"velion-home-stage relative flex h-full min-h-0 flex-col overflow-hidden",
-					isLaunchingChat ? "velion-home-launching" : "",
+					"verevon-home-stage relative flex h-full min-h-0 flex-col overflow-hidden",
+					isLaunchingChat ? "verevon-home-launching" : "",
 				)}
 			>
 				<DashboardTabs
@@ -737,21 +737,21 @@ export function VelionHome() {
 				/>
 
 				{searchModeExpanded ? (
-					<section className="velion-home-composer-section min-h-0 flex-1 overflow-hidden px-4 pb-4 pt-14 transition-[padding] duration-500">
+					<section className="verevon-home-composer-section min-h-0 flex-1 overflow-hidden px-4 pb-4 pt-14 transition-[padding] duration-500">
 						{composerContent}
 					</section>
 				) : (
 					<div
 						className={cn(
-							"velion-home-bands min-h-0 flex-1",
+							"verevon-home-bands min-h-0 flex-1",
 							searchModePreviewing
-								? "velion-home-bands-previewing"
+								? "verevon-home-bands-previewing"
 								: "",
 						)}
 					>
 						<section
 							className={cn(
-								"velion-home-header velion-home-band velion-home-band-top velion-fade-up px-4",
+								"verevon-home-header verevon-home-band verevon-home-band-top verevon-fade-up px-4",
 								searchModePreviewing
 									? "items-start pt-8 pb-3"
 									: "",
@@ -760,7 +760,7 @@ export function VelionHome() {
 							<div className="mx-auto flex w-full max-w-5xl flex-col items-center">
 								<div
 									className={cn(
-										"velion-home-plan w-full max-w-[720px]",
+										"verevon-home-plan w-full max-w-[720px]",
 										searchModePreviewing
 											? "opacity-55"
 											: "",
@@ -772,7 +772,7 @@ export function VelionHome() {
 								<h1
 									suppressHydrationWarning
 									className={cn(
-										"velion-home-title w-full max-w-[720px] font-[450] leading-none tracking-tight text-[#1A1A1A] transition-all duration-300 dark:text-[#F7F8F8]",
+										"verevon-home-title w-full max-w-[720px] font-[450] leading-none tracking-tight text-[#1A1A1A] transition-all duration-300 dark:text-[#F7F8F8]",
 										searchModePreviewing
 											? "origin-top scale-[0.78] translate-y-[-12px] opacity-50"
 											: "",
@@ -783,13 +783,13 @@ export function VelionHome() {
 							</div>
 						</section>
 
-						<section className="velion-home-composer-section velion-home-band velion-home-band-middle px-4 transition-[padding] duration-500">
+						<section className="verevon-home-composer-section verevon-home-band verevon-home-band-middle px-4 transition-[padding] duration-500">
 							{composerContent}
 						</section>
 
 						<section
 							className={cn(
-								"velion-home-cards velion-home-band velion-home-band-bottom mx-auto flex min-h-0 w-full max-w-5xl flex-col justify-start px-4 transition-opacity duration-200",
+								"verevon-home-cards verevon-home-band verevon-home-band-bottom mx-auto flex min-h-0 w-full max-w-5xl flex-col justify-start px-4 transition-opacity duration-200",
 								searchModePreviewing
 									? "pointer-events-none opacity-0"
 									: "",
@@ -797,7 +797,7 @@ export function VelionHome() {
 						>
 							<div
 								key={cardPage}
-								className="velion-home-card-grid velion-card-page grid grid-cols-1 gap-4 lg:grid-cols-3"
+								className="verevon-home-card-grid verevon-card-page grid grid-cols-1 gap-4 lg:grid-cols-3"
 							>
 								{visibleCards.map((card) => (
 									<DashboardImageCard
@@ -816,7 +816,7 @@ export function VelionHome() {
 										pageCount,
 									})
 								}
-								className="velion-home-next mx-auto flex size-12 items-center justify-center transition-transform duration-300 hover:scale-105 active:scale-95"
+								className="verevon-home-next mx-auto flex size-12 items-center justify-center transition-transform duration-300 hover:scale-105 active:scale-95"
 								aria-label="Vis neste kortside"
 								title="Vis neste kortside"
 							>
@@ -844,7 +844,7 @@ function DashboardTabs({
 	onTabChange: (tab: DashboardTab) => void;
 }) {
 	return (
-		<div className="velion-home-tabs sticky top-0 z-10 px-4">
+		<div className="verevon-home-tabs sticky top-0 z-10 px-4">
 			<div className="mx-auto flex w-full max-w-5xl justify-center">
 				<div className="inline-flex items-center gap-0.5 rounded-full bg-black/6 p-1 dark:bg-white/10">
 					{tabs.map((tab) => (
@@ -1149,7 +1149,7 @@ export function SearchPanel({
 						dispatchSearch({
 							type: "web-search-error",
 							message:
-								"Velion fant ikke en gyldig side for søket.",
+								"Verevon fant ikke en gyldig side for søket.",
 						});
 						return;
 					}
@@ -1205,8 +1205,8 @@ export function SearchPanel({
 					answer:
 						payload.answer?.trim() ||
 						(results.length
-							? `Velion fant ${results.length} relevante treff for "${trimmed}".`
-							: `Velion fant ingen sikre treff for "${trimmed}" akkurat nå.`),
+							? `Verevon fant ${results.length} relevante treff for "${trimmed}".`
+							: `Verevon fant ingen sikre treff for "${trimmed}" akkurat nå.`),
 					citations,
 				});
 			})
@@ -1535,7 +1535,7 @@ export function SearchPanel({
 
 	if (expanded) {
 		return (
-			<div className="velion-panel-in velion-search-expanded-shell relative flex h-full min-h-[520px] w-full flex-col overflow-hidden bg-transparent transition-all duration-500 ease-out">
+			<div className="verevon-panel-in verevon-search-expanded-shell relative flex h-full min-h-[520px] w-full flex-col overflow-hidden bg-transparent transition-all duration-500 ease-out">
 				<div className="shrink-0 px-5 pb-3 pt-4">
 					<form onSubmit={submit}>
 						<label
@@ -1676,7 +1676,7 @@ export function SearchPanel({
 								{activeResultTab === "Info" && webAnswer ? (
 									<section className="rounded-[22px] bg-white/58 p-4 dark:bg-white/[0.04]">
 										<p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#9A9188] dark:text-[#737780]">
-											Velion summary
+											Verevon summary
 										</p>
 										<p className="mt-2 text-[14px] leading-relaxed text-[#2E3137] dark:text-[#E9EAED]">
 											{webAnswer}
@@ -1760,7 +1760,7 @@ export function SearchPanel({
 	}
 
 	return (
-		<div className="velion-panel-in relative transition-all duration-500 ease-out">
+		<div className="verevon-panel-in relative transition-all duration-500 ease-out">
 			<form onSubmit={submit} className="relative z-[1] w-full">
 				<label className="sr-only" htmlFor="dashboard-search">
 					Søk i selskapets kunnskap
@@ -1770,12 +1770,12 @@ export function SearchPanel({
 						<button
 							type="button"
 							aria-label="Add search context"
-							className="velion-glass-input grid size-11 shrink-0 place-items-center rounded-full text-[#34363D] transition hover:shadow-[0_16px_36px_rgba(76,60,92,0.16)] dark:text-white"
+							className="verevon-glass-input grid size-11 shrink-0 place-items-center rounded-full text-[#34363D] transition hover:shadow-[0_16px_36px_rgba(76,60,92,0.16)] dark:text-white"
 						>
 							<CirclePlus className="size-4" />
 						</button>
 					</TopLayerTooltip>
-					<div className="velion-glass-input flex h-12 min-w-0 flex-1 items-center rounded-full px-4">
+					<div className="verevon-glass-input flex h-12 min-w-0 flex-1 items-center rounded-full px-4">
 						<Search className="mr-2 size-4 shrink-0 text-[#9A9188]" />
 						<input
 							id="dashboard-search"
@@ -1830,7 +1830,7 @@ export function SearchPanel({
 						id={listboxId}
 						role="listbox"
 						aria-label="Søkeforslag"
-						className="velion-glass velion-fade-up ml-[52px] mt-2 overflow-hidden rounded-[22px] p-2"
+						className="verevon-glass verevon-fade-up ml-[52px] mt-2 overflow-hidden rounded-[22px] p-2"
 					>
 						<p className="px-3 pb-1.5 pt-1 text-[12px] font-semibold text-[#504A43] dark:text-[#D4D6DC]">
 							Forslag
@@ -1897,7 +1897,7 @@ export function SearchPanel({
 
 				{/* Inline preview cards */}
 				{showPreview ? (
-					<div className="velion-fade-up ml-[52px] mt-3">
+					<div className="verevon-fade-up ml-[52px] mt-3">
 						<div className="rounded-[24px] border border-black/[0.06] bg-white px-3 py-3 shadow-[0_16px_42px_rgba(20,21,24,0.08)] dark:border-white/[0.07] dark:bg-[#1A1D24] dark:shadow-[0_18px_42px_rgba(0,0,0,0.36)]">
 							<div className="max-h-[274px] space-y-2 overflow-y-auto overscroll-contain pr-1">
 								{previewResultsVisible.map((result) => (
@@ -2010,8 +2010,8 @@ function SearchResultCard({
 						</span>
 						<span className="mt-1 block line-clamp-3 text-[13.5px] leading-relaxed text-[#6F6860] dark:text-[#AEB4C0]">
 							{result.snippet
-								? `Velion sees this as relevant to the query because the page context overlaps with the topic: ${result.snippet}`
-								: `Velion matched this source to your search and can inspect it further before using it in an answer.`}
+								? `Verevon sees this as relevant to the query because the page context overlaps with the topic: ${result.snippet}`
+								: `Verevon matched this source to your search and can inspect it further before using it in an answer.`}
 						</span>
 						<span className="mt-3 flex flex-wrap gap-1.5">
 							{[
@@ -2144,7 +2144,7 @@ function ImageResultsPanel({
 							{image.title ?? "Image result"}
 						</p>
 						<p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-[#756F68] dark:text-[#AEB4C0]">
-							Velion can use this visual to explain context,
+							Verevon can use this visual to explain context,
 							layout, product details, or place cues.
 						</p>
 					</div>
@@ -2207,7 +2207,7 @@ function VideoResultsPanel({
 							{result.title ?? result.url}
 						</h3>
 						<p className="mt-3 text-[13px] leading-relaxed text-[#756F68] dark:text-[#AEB4C0]">
-							Velion would summarize the clip, identify useful
+							Verevon would summarize the clip, identify useful
 							moments, and cite it only if the page gives enough
 							context.
 						</p>
@@ -2300,7 +2300,7 @@ function ShoppingResultsPanel({
 					AI shopping/booking guide
 				</p>
 				<p className="mt-2 text-[13.5px] leading-relaxed text-[#756F68] dark:text-[#AEB4C0]">
-					Velion compares booking references, shopping pages, similar
+					Verevon compares booking references, shopping pages, similar
 					articles, and source credibility before recommending an
 					action.
 				</p>
@@ -2343,7 +2343,7 @@ function SearchVerticalEmpty({
 }) {
 	return (
 		<div className="rounded-[24px] bg-white/58 p-4 text-[13px] text-[#756F68] dark:bg-white/[0.04] dark:text-[#AEB4C0]">
-			Velion needs more reliable {label} evidence for {query}. Try a more
+			Verevon needs more reliable {label} evidence for {query}. Try a more
 			specific place, product, brand, or source name.
 		</div>
 	);
@@ -2385,7 +2385,7 @@ function SearchInsightRail({
 				</p>
 				<p className="mt-2 line-clamp-5 text-[13px] leading-relaxed text-[#756F68] dark:text-[#AEB4C0]">
 					{answer ||
-						`Velion is organizing ${activeTab.toLowerCase()} evidence for "${query}" across sources, visuals, and useful next actions.`}
+						`Verevon is organizing ${activeTab.toLowerCase()} evidence for "${query}" across sources, visuals, and useful next actions.`}
 				</p>
 			</section>
 
@@ -2417,7 +2417,7 @@ function SearchInsightRail({
 						decoding="async"
 					/>
 					<p className="p-3 text-[12px] leading-relaxed text-[#756F68] dark:text-[#AEB4C0]">
-						Visual context can help Velion explain places, products,
+						Visual context can help Verevon explain places, products,
 						screenshots, or layout-specific details.
 					</p>
 				</section>
@@ -2431,27 +2431,27 @@ function searchRailTips(activeTab: SearchResultTab) {
 		case "Map":
 			return [
 				"Use the map view to compare location, travel context, opening hours, and booking confidence.",
-				"Velion can turn place results into a short route or visit plan when map data is available.",
+				"Verevon can turn place results into a short route or visit plan when map data is available.",
 			];
 		case "Images":
 			return [
-				"Images are treated as visual evidence, not final answers, until Velion can cite the source page.",
-				"Velion can explain product, venue, layout, or screenshot details from the image context.",
+				"Images are treated as visual evidence, not final answers, until Verevon can cite the source page.",
+				"Verevon can explain product, venue, layout, or screenshot details from the image context.",
 			];
 		case "Videos":
 			return [
 				"Video sources should be summarized with timestamps and cited source pages when available.",
-				"Velion can extract the useful moments before suggesting that a user watches the full clip.",
+				"Verevon can extract the useful moments before suggesting that a user watches the full clip.",
 			];
 		case "Shopping":
 			return [
 				"Shopping and booking results should be cross-checked against official pages and recent articles.",
-				"Velion can compare price, availability, source confidence, and similar alternatives.",
+				"Verevon can compare price, availability, source confidence, and similar alternatives.",
 			];
 		default:
 			return [
 				"Use sources to inspect where the answer came from before trusting or reusing it.",
-				"Ask a follow-up to make Velion narrow, compare, crawl, or summarize the result set.",
+				"Ask a follow-up to make Verevon narrow, compare, crawl, or summarize the result set.",
 			];
 	}
 }
@@ -2471,7 +2471,7 @@ function ExpandedSourcesList({
 					compact ? "mt-3" : "",
 				)}
 			>
-				Kilder vises når Velion har sikre treff.
+				Kilder vises når Verevon har sikre treff.
 			</p>
 		);
 	}
@@ -2511,7 +2511,7 @@ function KnowledgePanel() {
 	const [expanded, setExpanded] = useState(false);
 
 	return (
-		<div className="velion-panel-in velion-dashboard-composer-card rounded-[28px] bg-white p-5 shadow-[0_20px_60px_rgba(20,21,24,0.08)] ring-1 ring-black/[0.03] dark:bg-[#141516] dark:ring-white/[0.06]">
+		<div className="verevon-panel-in verevon-dashboard-composer-card rounded-[28px] bg-white p-5 shadow-[0_20px_60px_rgba(20,21,24,0.08)] ring-1 ring-black/[0.03] dark:bg-[#141516] dark:ring-white/[0.06]">
 			<div className="flex items-center gap-3">
 				<span className="grid size-10 place-items-center rounded-[12px] bg-[#F4F5F1] text-[#6B6560]">
 					<Sparkles className="size-4" />
@@ -2536,7 +2536,7 @@ function KnowledgePanel() {
 				</button>
 			</div>
 			{expanded ? (
-				<div className="velion-fade-up mt-4 grid gap-2 sm:grid-cols-3">
+				<div className="verevon-fade-up mt-4 grid gap-2 sm:grid-cols-3">
 					<Link
 						href={"/knowledge" as Route}
 						className="rounded-[14px] bg-[#F7F7F8] p-3 text-[12px] font-medium text-[#333] transition-colors hover:bg-[#EFEFF1]"
@@ -2583,13 +2583,13 @@ function DashboardImageCard({
 	const aboveFold = aboveFoldDashboardCardIds.has(card.id);
 
 	return (
-		<div className="velion-dashboard-card group relative h-full overflow-hidden rounded-[18px] bg-white p-2.5 shadow-[0_2px_10px_rgba(0,0,0,0.05)] transition-transform duration-300 hover:-translate-y-0.5 dark:bg-[#141516]">
-			<div className="velion-dashboard-card-label pointer-events-none absolute left-0 top-0 z-30 bg-white px-5 pb-4 pt-5 text-[11px] font-semibold tracking-wide text-[#1A1A1A] dark:bg-[#141516] dark:text-white">
+		<div className="verevon-dashboard-card group relative h-full overflow-hidden rounded-[18px] bg-white p-2.5 shadow-[0_2px_10px_rgba(0,0,0,0.05)] transition-transform duration-300 hover:-translate-y-0.5 dark:bg-[#141516]">
+			<div className="verevon-dashboard-card-label pointer-events-none absolute left-0 top-0 z-30 bg-white px-5 pb-4 pt-5 text-[11px] font-semibold tracking-wide text-[#1A1A1A] dark:bg-[#141516] dark:text-white">
 				{card.category}
 			</div>
 
 			<Link href={card.href as Route} className="block" prefetch>
-				<div className="velion-dashboard-card-media relative aspect-[4/3] overflow-hidden rounded-[15px]">
+				<div className="verevon-dashboard-card-media relative aspect-[4/3] overflow-hidden rounded-[15px]">
 					<Image
 						src={card.image ?? "/imagens/arched-corridor-1.jpeg"}
 						alt={card.title}
@@ -2600,7 +2600,7 @@ function DashboardImageCard({
 						className="object-cover transition-transform duration-700 group-hover:scale-[1.02]"
 					/>
 					<div className="absolute inset-x-0 bottom-0 z-10 h-3/5 bg-gradient-to-t from-black/70 via-black/30 to-transparent" />
-					<div className="velion-dashboard-card-copy pointer-events-none absolute inset-x-0 bottom-0 z-20 p-4 pb-16">
+					<div className="verevon-dashboard-card-copy pointer-events-none absolute inset-x-0 bottom-0 z-20 p-4 pb-16">
 						<h3 className="text-[16px] font-semibold leading-snug text-white">
 							{card.title}
 						</h3>
@@ -2614,7 +2614,7 @@ function DashboardImageCard({
 			<button
 				type="button"
 				onClick={() => onPrompt(card)}
-				className="velion-dashboard-card-action liquid-action absolute -bottom-px right-2.5 z-40 h-[86px] w-40"
+				className="verevon-dashboard-card-action liquid-action absolute -bottom-px right-2.5 z-40 h-[86px] w-40"
 				aria-label={`Start chat for ${card.title}`}
 				title={`Start chat for ${card.title}`}
 			>

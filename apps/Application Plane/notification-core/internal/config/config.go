@@ -42,7 +42,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		HTTPPort:           getEnvInt("PORT", 3140),
 		DatabaseURL:        strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		NATSURL:            strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://velion-nats:4222")))),
+		NATSURL:            strings.TrimSpace(getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://verevon-nats:4222")))),
 		NATSUser:           strings.TrimSpace(getEnv("NATS_USER", "")),
 		NATSPassword:       strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
 		ServiceName:        getEnv("SERVICE_NAME", "notification-core"),
@@ -53,7 +53,7 @@ func Load() (*Config, error) {
 		SharedNATSUser:     strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_USER", "")),
 		SharedNATSPassword: strings.TrimSpace(getEnv("NOTIFICATION_GDPR_SHARED_NATS_PASSWORD", "")),
 		DelegationKeys: map[string]string{
-			"velion-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
+			"verevon-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
 			"support-worker": strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
 		},
 	}
@@ -83,11 +83,11 @@ func Load() (*Config, error) {
 }
 
 func validateDelegationKeys(keys map[string]string) error {
-	if !validDelegationSecret(keys["velion-gateway"]) {
+	if !validDelegationSecret(keys["verevon-gateway"]) {
 		return fmt.Errorf("NOTIFICATION_GATEWAY_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
 	}
 	for serviceID, secret := range keys {
-		if serviceID == "velion-gateway" || strings.TrimSpace(secret) == "" {
+		if serviceID == "verevon-gateway" || strings.TrimSpace(secret) == "" {
 			continue
 		}
 		if !validDelegationSecret(secret) {

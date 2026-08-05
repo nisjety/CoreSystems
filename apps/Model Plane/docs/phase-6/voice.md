@@ -5,14 +5,14 @@
 Speech-in / speech-out interaction with the Model Plane. Supports push-to-talk,
 continuous VAD-gated capture, and TTS playback of agent responses.
 
-Velion v3 additionally needs a Wispr Flow-inspired dictation layer: fast
+Verevon v3 additionally needs a Wispr Flow-inspired dictation layer: fast
 speech-to-text into composer/chat/inbox fields, AI cleanup, voice commands,
 personal vocabulary, Teams transcript follow-up workflows, and enterprise
 privacy controls. This is not a code or brand clone; it is a product pattern
 adapted to CoreSystem plane boundaries.
 
 Companion v3 plan:
-`apps/Frontend Plane/velionv3/docs/voice-dictation-and-transcription-plan.md`.
+`apps/Frontend Plane/verevonv3/docs/voice-dictation-and-transcription-plan.md`.
 
 ## Transport
 
@@ -60,7 +60,7 @@ by default.
 - **Metadata**: voice IDs, licensing constraints, regional availability.
 - **Scheduling hints**: co-locate STT and main LLM call when possible.
 - **Mode exposure**: publish available quality/retention modes to the gateway
-  so Velion can show truthful UI labels.
+  so Verevon can show truthful UI labels.
 
 ## ZDR and persistence rules
 

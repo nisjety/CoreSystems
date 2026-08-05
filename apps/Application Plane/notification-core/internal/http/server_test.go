@@ -31,7 +31,7 @@ func newTestVerifier(t *testing.T) *delegation.Verifier {
 	t.Helper()
 	verifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "notification-core",
-		Keys:     map[string]string{"velion-gateway": testDelegationSecret},
+		Keys:     map[string]string{"verevon-gateway": testDelegationSecret},
 	})
 	if err != nil {
 		t.Fatalf("NewVerifier() error = %v", err)
@@ -46,7 +46,7 @@ func signTestRequest(t *testing.T, request *stdhttp.Request, body []byte, secret
 	digestBytes := sha256.Sum256(body)
 	digest := base64.RawURLEncoding.EncodeToString(digestBytes[:])
 	canonical := delegation.Canonical(delegation.CanonicalFields{
-		ServiceID:      "velion-gateway",
+		ServiceID:      "verevon-gateway",
 		Audience:       "notification-core",
 		Timestamp:      timestamp,
 		Nonce:          nonce,
@@ -60,7 +60,7 @@ func signTestRequest(t *testing.T, request *stdhttp.Request, body []byte, secret
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(canonical))
 
-	request.Header.Set(delegation.HeaderServiceID, "velion-gateway")
+	request.Header.Set(delegation.HeaderServiceID, "verevon-gateway")
 	request.Header.Set(delegation.HeaderTimestamp, timestamp)
 	request.Header.Set(delegation.HeaderNonce, nonce)
 	request.Header.Set(delegation.HeaderBodySHA256, digest)
@@ -469,7 +469,7 @@ func TestServicePrincipalsHaveExplicitNotificationTypeAllowlists(t *testing.T) {
 	if isNotificationTypeAuthorized("insight-core", "daily_brief") {
 		t.Fatal("insight-core remains authorized without an authoritative user subscription mapping")
 	}
-	if isNotificationTypeAuthorized("velion-gateway", "ticket.assigned") {
+	if isNotificationTypeAuthorized("verevon-gateway", "ticket.assigned") {
 		t.Fatal("gateway has no direct notification-dispatch workflow")
 	}
 }

@@ -31,7 +31,7 @@ import {
   SalesVisual,
   ServiceVisual,
   WorkflowVisual,
-} from "@/features/agents-v2/components/VelionAgentsVisuals";
+} from "@/features/agents-v2/components/VerevonAgentsVisuals";
 import type {
   AgentFeatureId,
   AgentRoleId,
@@ -42,7 +42,7 @@ import type {
   AgentBlueprint,
   RoleOperatingModel,
   StageSystem,
-} from "@/features/agents-v2/lib/velion-agent-page-types";
+} from "@/features/agents-v2/lib/verevon-agent-page-types";
 
 // Stage systems provide the copy and checklist for the extended-sidebar tabs.
 const roleSystems: Record<AgentRoleId, Record<AgentStageId, StageSystem>> = {
@@ -367,7 +367,7 @@ const roleFeatureWorkspaces: Record<CoreAgentRoleId, Partial<Record<AgentFeature
       primaryAction: "Review queue",
       secondaryAction: "Open routing rules",
       previewTitle: "Customer support preview",
-      previewDescription: "The preview shows how Velion answers with context, cites policy, and escalates when the promise is risky.",
+      previewDescription: "The preview shows how Verevon answers with context, cites policy, and escalates when the promise is risky.",
       checklist: ["Priority queue mapped", "Verified resolution QA required", "Human handoff rules required", "Ticket summary scoped", "Escalation reasons mapped"],
       cards: [
         { title: "Intake queue", description: "Classify support demand before answering.", items: ["Billing", "Shipping", "Security"], icon: Inbox },
@@ -459,7 +459,7 @@ const roleFeatureWorkspaces: Record<CoreAgentRoleId, Partial<Record<AgentFeature
       primaryAction: "Tune triggers",
       secondaryAction: "Open playbook",
       previewTitle: "Lead qualification preview",
-      previewDescription: "Velion engages when buying intent is visible, not after the visitor has left the page.",
+      previewDescription: "Verevon engages when buying intent is visible, not after the visitor has left the page.",
       checklist: ["Pricing trigger mapped", "Proactive greeting drafted", "Guided tour prompts mapped", "Campaign context mapped", "Low-fit path mapped"],
       cards: [
         { title: "Intent", description: "Behavior that starts a conversation.", items: ["Pricing views", "Return visit", "Security page", "High-fit account"], icon: Zap },
@@ -566,7 +566,7 @@ const roleFeatureWorkspaces: Record<CoreAgentRoleId, Partial<Record<AgentFeature
       primaryAction: "Connect orders",
       secondaryAction: "Edit return rules",
       previewTitle: "Order support preview",
-      previewDescription: "Velion checks order state before answering and starts only the allowed post-purchase path.",
+      previewDescription: "Verevon checks order state before answering and starts only the allowed post-purchase path.",
       checklist: ["Order lookup read-only", "Return portal connection planned", "Subscription rules scoped", "Damaged item flow scoped"],
       cards: [
         { title: "Order tracking", description: "Answer WISMO from live status.", items: ["Carrier", "ETA", "Delay"], icon: Search },
@@ -641,7 +641,7 @@ const roleFeatureWorkspaces: Record<CoreAgentRoleId, Partial<Record<AgentFeature
       primaryAction: "Open insights",
       secondaryAction: "Create action",
       previewTitle: "Shopper intelligence",
-      previewDescription: "Velion shows what shoppers ask before buying and what policies or products create friction.",
+      previewDescription: "Verevon shows what shoppers ask before buying and what policies or products create friction.",
       checklist: ["Intent stages planned", "Product gaps clustered", "Cart blockers ranked", "Revenue attribution planned"],
       cards: [
         { title: "Intent", description: "Understand where shoppers are.", items: ["Discovery", "Compare", "Ready"], icon: BarChart3 },
@@ -659,7 +659,7 @@ const roleOperatingModels: Record<"service" | "sales" | "ecommerce", RoleOperati
     activationLabel: "Activate service agent",
     activationStatus: "Blueprint ready for assisted launch",
     activationSummary: "Defines the support sources, ticket actions, and guarded human handoff required before activation.",
-    model: "Velion CX Reasoner",
+    model: "Verevon CX Reasoner",
     confidence: "Confidence policy required",
     automationTarget: "Live automation rate appears after launch",
     metrics: [
@@ -678,7 +678,7 @@ const roleOperatingModels: Record<"service" | "sales" | "ecommerce", RoleOperati
       { title: "Route to teammate", description: "Hands off billing, security, and angry-customer cases with a summary.", status: "Scoped", icon: Split },
     ],
     channels: [
-      { title: "Web messenger", description: "Answers authenticated and anonymous visitors from the Velion widget.", status: "Plan", icon: MessageSquareText },
+      { title: "Web messenger", description: "Answers authenticated and anonymous visitors from the Verevon widget.", status: "Plan", icon: MessageSquareText },
       { title: "Email queue", description: "Drafts policy-aware replies and escalates low-confidence threads.", status: "Review", icon: Inbox },
       { title: "Social messaging", description: "Keeps WhatsApp and Instagram replies consistent with support policy.", status: "Mapped", icon: Globe2 },
     ],
@@ -698,7 +698,7 @@ const roleOperatingModels: Record<"service" | "sales" | "ecommerce", RoleOperati
     activationLabel: "Activate sales agent",
     activationStatus: "Blueprint ready for pricing and demo pages",
     activationSummary: "Defines qualification criteria, objection handling, CRM handoff, and calendar booking before activation.",
-    model: "Velion Revenue Reasoner",
+    model: "Verevon Revenue Reasoner",
     confidence: "Qualification policy required",
     automationTarget: "Live conversion rate appears after launch",
     metrics: [
@@ -727,7 +727,7 @@ const roleOperatingModels: Record<"service" | "sales" | "ecommerce", RoleOperati
       { title: "Enterprise handoff", description: "Routes procurement, security, and legal questions to the right owner.", status: "Required", icon: BriefcaseBusiness },
     ],
     conversation: {
-      customer: "We are evaluating Velion for support automation. Can we compare plan fit and book time?",
+      customer: "We are evaluating Verevon for support automation. Can we compare plan fit and book time?",
       agent: "Yes. I can outline the plan fit, ask two qualification questions, and route you to the enterprise calendar with your context attached.",
       note: "Qualifies company size, use case, and urgency before booking a sales-owned slot.",
       quickReplies: ["Ask qualification questions", "Show plan fit", "Book enterprise demo"],
@@ -737,7 +737,7 @@ const roleOperatingModels: Record<"service" | "sales" | "ecommerce", RoleOperati
     activationLabel: "Activate ecommerce agent",
     activationStatus: "Blueprint ready for store journeys",
     activationSummary: "Defines catalog grounding, product guidance, order help, and cart recovery controls before activation.",
-    model: "Velion Commerce Reasoner",
+    model: "Verevon Commerce Reasoner",
     confidence: "Product confidence policy required",
     automationTarget: "Live assisted revenue appears after launch",
     metrics: [
@@ -835,7 +835,7 @@ export const agentBlueprints: AgentBlueprint[] = [
     shortTitle: "Chatbot",
     eyebrow: "Custom assistant",
     description: "Design a branded AI chat agent with training sources, tone, actions, and deploy settings.",
-    detailIntro: "Build a Chatbase-inspired playground for a custom Velion agent, from prompt to deployable widget.",
+    detailIntro: "Build a Chatbase-inspired playground for a custom Verevon agent, from prompt to deployable widget.",
     cta: "Build chatbot",
     accentClass: "bg-[#111111]",
     iconClass: "text-[#111111] dark:text-white",
@@ -851,7 +851,7 @@ export const agentBlueprints: AgentBlueprint[] = [
     shortTitle: "Workflow builder",
     eyebrow: "Automate operations",
     description: "Orchestrate triggers, AI steps, branches, and handoffs on a visual workflow canvas.",
-    detailIntro: "Orchestrate triggers, AI steps, branches, and handoffs without leaving the Velion workspace.",
+    detailIntro: "Orchestrate triggers, AI steps, branches, and handoffs without leaving the Verevon workspace.",
     cta: "Open workflow builder",
     accentClass: "bg-[#B94F9B]",
     iconClass: "text-[#B94F9B]",

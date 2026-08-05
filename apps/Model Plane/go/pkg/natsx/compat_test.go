@@ -12,11 +12,11 @@ func TestTranslateLegacySubject(t *testing.T) {
 		want   string
 	}{
 		{
-			legacy: "velion.agent.run.01HXYZ.event",
+			legacy: "verevon.agent.run.01HXYZ.event",
 			want:   "mp.v1.run.01HXYZ.event",
 		},
 		{
-			legacy: "velion.session.abc-123.command",
+			legacy: "verevon.session.abc-123.command",
 			want:   "mp.v1.session.abc-123.command",
 		},
 		{
@@ -61,8 +61,8 @@ func TestTranslateNewToLegacy(t *testing.T) {
 		v1   string
 		want string
 	}{
-		{"run event", "mp.v1.run.01HXYZ.event", "velion.agent.run.01HXYZ.event"},
-		{"session command", "mp.v1.session.abc-123.command", "velion.session.abc-123.command"},
+		{"run event", "mp.v1.run.01HXYZ.event", "verevon.agent.run.01HXYZ.event"},
+		{"session command", "mp.v1.session.abc-123.command", "verevon.session.abc-123.command"},
 		{"ingress usage reverse", "mp.v1.ingress.usage", "aqencia.reasoning.usage.recorded"},
 		{"ingress decision reverse", "mp.v1.ingress.decision", "aqencia.reasoning.decision.made"},
 		{"ingress quota reverse", "mp.v1.ingress.quota_exceeded", "aqencia.reasoning.quota.exceeded"},
@@ -79,10 +79,10 @@ func TestTranslateNewToLegacy(t *testing.T) {
 	}
 }
 
-func TestRoundTripVelion(t *testing.T) {
+func TestRoundTripVerevon(t *testing.T) {
 	cases := []string{
-		"velion.agent.run.01HXYZ.event",
-		"velion.session.abc-123.command",
+		"verevon.agent.run.01HXYZ.event",
+		"verevon.session.abc-123.command",
 	}
 	for _, legacy := range cases {
 		t.Run(legacy, func(t *testing.T) {

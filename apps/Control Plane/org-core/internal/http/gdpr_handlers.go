@@ -22,8 +22,8 @@ import (
 //   - is owner-gated (the caller must be an active "owner" of the org, OR a
 //     platform admin/superadmin presented via X-User-Role);
 //   - requires an explicit `confirm: true` body flag for the irreversible path;
-//   - emits a durable audit event on velion.audit.v2.control.org-core.erasure;
-//   - emits a cross-plane fan-out on velion.gdpr.erasure.requested so Model
+//   - emits a durable audit event on verevon.audit.v2.control.org-core.erasure;
+//   - emits a cross-plane fan-out on verevon.gdpr.erasure.requested so Model
 //     Plane (run history / conversations) and Data Plane can purge their side.
 //
 // The org id is taken from the path and passed to the procs as a bound
@@ -31,7 +31,7 @@ import (
 
 const (
 	// erasureAuditSubject is the durable audit subject consumed by audit-core
-	// (velion.audit.v2.control.<producer>.<event>).
+	// (verevon.audit.v2.control.<producer>.<event>).
 	erasureAuditSubject = orgcore.GDPRErasureAuditSubject
 
 	// gdprErasureFanoutSubject is the cross-plane erasure fan-out. Subscribers
@@ -152,7 +152,7 @@ func (s *Server) hardDeleteOrganization(c *gin.Context) {
 // softDeleteOrganization marks an organization deleted (reversible until the
 // retention cron purges it) via soft_delete_organization. Opens the 30-day
 // Flow C grace window: creates one org_deletion_members ledger row per
-// active member and publishes velion.org.deletion.pending.
+// active member and publishes verevon.org.deletion.pending.
 // DELETE /orgs/:id/gdpr/soft-delete   Body: { "confirm": true, "org_name": "<exact org name>" }
 func (s *Server) softDeleteOrganization(c *gin.Context) {
 	orgID := strings.TrimSpace(c.Param("id"))
@@ -200,7 +200,7 @@ func (s *Server) softDeleteOrganization(c *gin.Context) {
 
 // restoreOrganization reverses a pending soft-delete: clears deleted_at back
 // to active, wipes the organization's deletion ledger, and publishes
-// velion.org.deletion.cancelled. Owner-gated, same as the two erasure routes
+// verevon.org.deletion.cancelled. Owner-gated, same as the two erasure routes
 // above. 409 if the organization is not currently pending deletion.
 // POST /orgs/:id/gdpr/restore
 func (s *Server) restoreOrganization(c *gin.Context) {

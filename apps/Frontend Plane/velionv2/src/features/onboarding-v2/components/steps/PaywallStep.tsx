@@ -581,7 +581,7 @@ function PlanCard({
           style={{
             background: "linear-gradient(120deg, #A7E5D3, #F4C5A8, #C8B8E0, #A8C8E8, #A7E5D3)",
             backgroundSize: "260% 260%",
-            animation: "velion-paywall-ring 8s ease-in-out infinite",
+            animation: "verevon-paywall-ring 8s ease-in-out infinite",
           }}
           transition={{ type: "spring", stiffness: 420, damping: 38, mass: 0.8 }}
         />
@@ -722,7 +722,7 @@ function RecommendationProof({
   return (
     <div className="mt-4 border-t border-[#E7E5E4] pt-3 text-left">
       <p className="font-inter text-[10px] font-semibold uppercase tracking-[0.16em] text-[#777169]">
-        {locale === "nb" ? "Velion ser allerede" : "Velion already sees"}
+        {locale === "nb" ? "Verevon ser allerede" : "Verevon already sees"}
       </p>
       {sections.length > 0 && (
         <div className={cn("mt-3 grid gap-3", compact ? "grid-cols-1" : "md:grid-cols-3")}>
@@ -788,7 +788,7 @@ function cleanExpectedOutcomes(values?: PlanRecommendation["expectedOutcomes"]):
 function PaywallRingStyle() {
   return (
     <style>{`
-      @keyframes velion-paywall-ring {
+      @keyframes verevon-paywall-ring {
         0% { background-position: 0% 50%; }
         50% { background-position: 100% 50%; }
         100% { background-position: 0% 50%; }

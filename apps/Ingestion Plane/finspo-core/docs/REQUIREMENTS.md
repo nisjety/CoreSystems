@@ -35,7 +35,7 @@ finspo owns its schema and applies migrations on every boot
   automatically.
 - On a **pre-existing** volume (created before finspo existed), the database is
   missing and finspo crashes with `database "finspo" does not exist`. Two fixes:
-  - Run the build script — `build-velion-services.sh` has an idempotent
+  - Run the build script — `build-verevon-services.sh` has an idempotent
     `ensure_finspo_database` post-build hook on the Ingestion Plane stack.
   - Or create it manually:
     ```sql
@@ -72,11 +72,11 @@ returns `404 connection_not_found` until the **organization** has completed the
 Microsoft OAuth consent flow through `integration-corev2`. finspo cannot create
 this — it must already exist.
 
-How to create one (no velionv2 UI required):
+How to create one (no verevonv2 UI required):
 - `scripts/connect-microsoft.sh` — drives integration-core's
   `connect-session` endpoint, prints the Microsoft consent URL.
-- Or velion v1's existing integrations page.
-- Or the Velion v2 onboarding/integrations page.
+- Or verevon v1's existing integrations page.
+- Or the Verevon v2 onboarding/integrations page.
 
 ### Required Graph scopes
 

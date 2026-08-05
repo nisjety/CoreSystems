@@ -1,6 +1,6 @@
 # social-core
 
-> **2026-07-13 superseding update.** The current Postgres container is Docker-healthy; the July 11 corruption-only blocker below is stale. The full Go race suite passes. Worker-enforced HITL and existing Velion v3 metrics/catalog routes remain confirmed and must not be rediscovered as missing. A safe real social publication was intentionally not performed. Authenticated UI→gateway→service tenant-isolation, provider failure/idempotency, token lifecycle, and live HITL bypass evidence remain pending; the shared-key/forwarded-header authority model is a plane-wide blocker.
+> **2026-07-13 superseding update.** The current Postgres container is Docker-healthy; the July 11 corruption-only blocker below is stale. The full Go race suite passes. Worker-enforced HITL and existing Verevon v3 metrics/catalog routes remain confirmed and must not be rediscovered as missing. A safe real social publication was intentionally not performed. Authenticated UI→gateway→service tenant-isolation, provider failure/idempotency, token lifecycle, and live HITL bypass evidence remain pending; the shared-key/forwarded-header authority model is a plane-wide blocker.
 
 _Audit date: 2026-07-11. Evidence grades: **[live-curl]** host curl to :3162 · **[source-only]** read from disk · **[inspect]** `docker ps` / `docker inspect` / host TCP. Docker `exec`/`build`/`logs` are unusable this pass (containerd content store corrupted); DB/env facts read from compose + `.env` on disk._
 
@@ -45,8 +45,8 @@ Responses use typed envelopes: `{data, meta?}` on success, `{error:{code,message
 
 - **integration-corev2** (`INTEGRATION_CORE_URL`, default `http://integration-api:3026`): sole path to providers. `GET /api/v1/connections?category=social` (accounts), `POST /internal/connectors/token` (token lease per publish), `POST /api/v1/actions/execute` (metrics + catalog). Auth via `X-Internal-API-Key`. **[source-only]**
 - **application-postgres** (DB `application_plane`, user `appuser`; shared within-plane with notification-core). No cross-plane DB crossing — social-core only touches its own `social_*` tables. **[source-only/inspect]**
-- **NATS/JetStream** (`VELION_NATS_URL` → `velion-nats`, else `NATS_URL`): publishes lifecycle events on `velion.application.social.*` (account.synced, campaign.created, approval.requested/decided, post.created/scheduled, publish_job.queued/completed/failed/blocked, metrics.snapshotted). Consumers: insight-core reads real metric values via `GET /api/v1/social/metrics` after a `metrics.snapshotted` event (which carries only a count).
-- **velion-gateway-rs** (`apps/Frontend Plane/velionv3/apps/gateway/src/domains/social.rs`, `SOCIAL_CORE_URL` default `http://social-core:3162`): the browser-facing proxy for the v3 social workspace. Forwards org server-side as `x-org-id`; reads degrade to `meta.source="unavailable"` and writes return 503 when social-core is down (no fabricated data). **[source-only]**
+- **NATS/JetStream** (`VEREVON_NATS_URL` → `verevon-nats`, else `NATS_URL`): publishes lifecycle events on `verevon.application.social.*` (account.synced, campaign.created, approval.requested/decided, post.created/scheduled, publish_job.queued/completed/failed/blocked, metrics.snapshotted). Consumers: insight-core reads real metric values via `GET /api/v1/social/metrics` after a `metrics.snapshotted` event (which carries only a count).
+- **verevon-gateway-rs** (`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/social.rs`, `SOCIAL_CORE_URL` default `http://social-core:3162`): the browser-facing proxy for the v3 social workspace. Forwards org server-side as `x-org-id`; reads degrade to `meta.source="unavailable"` and writes return 503 when social-core is down (no fabricated data). **[source-only]**
 
 ## Prior findings — re-verified
 
@@ -69,9 +69,9 @@ Responses use typed envelopes: `{data, meta?}` on success, `{error:{code,message
 
 - **No genuine runtime stubs. [source-only]** The only `grep` hits for `not implemented` are honest ownership-decision comments: catalog.go / handlers.go document that **Shopify** commerce is deliberately deferred to conversation-core (a support concern, not social), and that catalog **write** ops are intentionally unexposed. These are scoping decisions with rationale, not dead placeholders.
 - **Honest config gates (not stubs):**
-  - `SNAPCHAT_LIVE_PUBLISHING` defaults **off** — the Snapchat Public Profile API is allowlist-only and needs vendor creds; with the gate off, every Snapchat attempt returns a clear `blocked` message instead of pretending to post (publisher.go:435). Same hard test-mode pattern as the Bring shipping adapter. Not set in compose → off.
-  - Metrics coverage is deliberately partial and self-documented (metrics.go:18): Meta family = real ads insights (impressions/reach/clicks/spend); LinkedIn = campaign inventory only (`campaign.status`, no reporting op exists in the actions surface yet); snapchat/tiktok/x = no actions op → skipped, never errored.
-  - Google Ads campaign workflows stay disabled until `GOOGLE_ADS_DEVELOPER_TOKEN` is supplied (config.go:38–44).
+    - `SNAPCHAT_LIVE_PUBLISHING` defaults **off** — the Snapchat Public Profile API is allowlist-only and needs vendor creds; with the gate off, every Snapchat attempt returns a clear `blocked` message instead of pretending to post (publisher.go:435). Same hard test-mode pattern as the Bring shipping adapter. Not set in compose → off.
+    - Metrics coverage is deliberately partial and self-documented (metrics.go:18): Meta family = real ads insights (impressions/reach/clicks/spend); LinkedIn = campaign inventory only (`campaign.status`, no reporting op exists in the actions surface yet); snapchat/tiktok/x = no actions op → skipped, never errored.
+    - Google Ads campaign workflows stay disabled until `GOOGLE_ADS_DEVELOPER_TOKEN` is supplied (config.go:38–44).
 - **Test doubles:** 82 `mock/fake/stub` references, all in `*_test.go` (in-memory repositories/publishers) — normal.
 
 ## Findings

@@ -1,8 +1,8 @@
-# Velion UI and Information Architecture Brief
+# Verevon UI and Information Architecture Brief
 
 ## Product Baseline
 
-Velion should feel familiar to users of Intercom, Gorgias, Zendesk, and Chatbase without becoming a copy of any one product.
+Verevon should feel familiar to users of Intercom, Gorgias, Zendesk, and Chatbase without becoming a copy of any one product.
 
 - Intercom sets the visual tone: calm, light, premium, clear.
 - Gorgias sets the inbox operating model: queue left, conversation center, customer context right.
@@ -23,7 +23,7 @@ Primary navigation:
 - Automations
 - Reports
 - Helpdesk
-- Velion Chat
+- Verevon Chat
 - Profile
 - Settings
 
@@ -32,7 +32,7 @@ Notes:
 - Keep Helpdesk separate from Inbox.
 - Present People as Contacts in the UI.
 - Keep Planner and Workspace unchanged for now.
-- Use Velion Chat for direct AI work outside the shared inbox workflow.
+- Use Verevon Chat for direct AI work outside the shared inbox workflow.
 
 ## Layout Rules
 
@@ -162,7 +162,7 @@ Tone:
 
 Purpose:
 
-- Configure how Velion agents behave and when they hand work to humans.
+- Configure how Verevon agents behave and when they hand work to humans.
 
 Core modules:
 
@@ -247,7 +247,7 @@ Design note:
 - This area should feel more Zendesk-structured than Inbox.
 - Keep Intercom softness in surfaces and spacing.
 
-### Velion Chat
+### Verevon Chat
 
 Purpose:
 

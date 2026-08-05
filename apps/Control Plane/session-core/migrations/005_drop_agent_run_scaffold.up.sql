@@ -1,6 +1,6 @@
 -- Migration 005: drop the agent-run scaffold tables (G36-cutover Step D).
 --
--- Wave 9 (§8.24 + §8.26 in `apps/Frontend Plane/velion/velion-gap.md`) moved
+-- Wave 9 (§8.24 + §8.26 in `apps/Frontend Plane/verevon/verevon-gap.md`) moved
 -- agent-run state — plan / todo / lineage / approval — to Rust session-core
 -- in the Model Plane. The corresponding repositories, service methods, and
 -- HTTP handlers were removed from CP session-core in the same wave. This

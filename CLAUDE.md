@@ -9,12 +9,12 @@ Focused planes:
 - `apps/Control Plane`
 - `apps/Model Plane`
 - `apps/Ingestion Plane`
-- `apps/Frontend Plane/velionv3`
+- `apps/Frontend Plane/verevonv3`
 
 ## Tech Stack
 - Rust: latency-sensitive runtime, retrieval, browser, protocol, gateway, and hot-path services.
 - Go: durable workflow, CRUD, registry, policy, orchestration, billing, and control services.
-- TypeScript/TSX: Velion v3 Solid/Vite frontend, Velion web app, NestJS auth-core, Convex functions, support workers.
+- TypeScript/TSX: Verevon v3 Solid/Vite frontend, Verevon web app, NestJS auth-core, Convex functions, support workers.
 - Python: imports, labs, evals, provider glue, and generated SDK tests.
 - Infra: Docker Compose stacks, Postgres, Redis/Dragonfly, NATS/JetStream, Qdrant, MinIO, Temporal, Quickwit, Convex.
 
@@ -25,7 +25,7 @@ Focused planes:
 - Provider actions go through integration-corev2's actions surface; the frozen operation/capability contract is `docs/actions-surface-operations.md`.
 - Model Plane owns reasoning, sessions/runs, inference, execution loops, capabilities, sandboxes, browser grants, and cost.
 - Application Plane owns collaborative/realtime workspace projections and notifications.
-- Frontend Plane owns Velion v3 UI plus same-origin gateway/BFF normalization.
+- Frontend Plane owns Verevon v3 UI plus same-origin gateway/BFF normalization.
 - Channel Plane is future/docs-only today; do not build against it as if runtime exists.
 - No direct database crossing between planes.
 - No independent embeddings/reranking outside isolated labs.
@@ -37,10 +37,10 @@ Focused planes:
 - Keep authority boundaries explicit in names, clients, and tests.
 - Go services usually enter through `cmd/*/main.go` and keep HTTP/gRPC under `internal/http` and `internal/grpc`.
 - Rust services usually enter through `src/main.rs` and keep cross-plane contracts in crate/service-specific modules.
-- Velion v3 root uses SolidJS/Vite with feature-sliced folders under `src/features/*`.
-- Velion v3 action contracts live in `src/shared/actions`; add or update the action contract before wiring a meaningful UI operation.
-- Velion v3 context packs live in `src/shared/context-packs`; API clients live under `src/shared/api`, `src/shared/rpc`, and `src/shared/graphrest`.
-- Velion v3 gateway domains live under `apps/gateway/src/domains/*` and must not leak upstream secrets, raw OAuth tokens, or forged scoping headers.
+- Verevon v3 root uses SolidJS/Vite with feature-sliced folders under `src/features/*`.
+- Verevon v3 action contracts live in `src/shared/actions`; add or update the action contract before wiring a meaningful UI operation.
+- Verevon v3 context packs live in `src/shared/context-packs`; API clients live under `src/shared/api`, `src/shared/rpc`, and `src/shared/graphrest`.
+- Verevon v3 gateway domains live under `apps/gateway/src/domains/*` and must not leak upstream secrets, raw OAuth tokens, or forged scoping headers.
 - API responses use typed envelopes: `{ data }`, cursor `meta`/`links`, or `{ error: { code, message, details } }`.
 
 ## Testing
@@ -54,7 +54,7 @@ Focused planes:
 ## Build And Run
 Frontend:
 ```bash
-cd "apps/Frontend Plane/velionv3"
+cd "apps/Frontend Plane/verevonv3"
 pnpm dev
 pnpm lint
 pnpm typecheck

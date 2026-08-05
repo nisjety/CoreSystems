@@ -156,7 +156,7 @@ async function callAcceptanceRouter(
   ]) {
     routerHeaders.set(name, rateLimitAddress);
   }
-  routerHeaders.set('x-velion-invitation-acceptance', internalMarker);
+  routerHeaders.set('x-verevon-invitation-acceptance', internalMarker);
   return invitationAuth.handler(
     new globalThis.Request(acceptanceRouterUrl(), {
       method: 'POST',

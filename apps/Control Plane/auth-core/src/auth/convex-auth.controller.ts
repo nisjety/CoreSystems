@@ -18,7 +18,7 @@ import { ConvexTokenService } from './convex-token.service';
  * the raw Express headers (even via `as unknown as Headers`) silently
  * fails because the plain object has no `.get()` method and thus the
  * cookie is never seen — causing every session lookup to 401. See
- * `velion/velion-gap.md` G31.
+ * `verevon/verevon-gap.md` G31.
  */
 function toWebHeaders(
   source: Record<string, string | string[] | undefined>,

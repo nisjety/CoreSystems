@@ -1,8 +1,8 @@
 // Package subscriber wires NATS subscriptions for the two event
 // subject hierarchies that audit-core persists:
 //
-//   - `velion.audit.v2.<plane>.<producer>.<event>` — security/operational events.
-//   - `velion.usage.v2.<plane>.<producer>.<op>`    — billable resource usage.
+//   - `verevon.audit.v2.<plane>.<producer>.<event>` — security/operational events.
+//   - `verevon.usage.v2.<plane>.<producer>.<op>`    — billable resource usage.
 //
 // Both are durable JetStream consumers. Successful database writes are ACKed,
 // transient store failures are NAKed for bounded redelivery, and malformed or
@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	auditSubject          = "velion.audit.v2.>"
-	usageSubject          = "velion.usage.v2.>"
-	dlqSubject            = "velion.dlq.audit-core.>"
-	streamName            = "VELION_CONTROL_OBSERVABILITY"
+	auditSubject          = "verevon.audit.v2.>"
+	usageSubject          = "verevon.usage.v2.>"
+	dlqSubject            = "verevon.dlq.audit-core.>"
+	streamName            = "VEREVON_CONTROL_OBSERVABILITY"
 	maxDeliveries         = 5
 	maxConsumerDeliveries = maxDeliveries
 	consumerHealthMaxWait = 250 * time.Millisecond
@@ -129,7 +129,7 @@ func (s *Subscriber) consumerName(kind string) string {
 }
 
 func planeSubject(kind, plane string) string {
-	return fmt.Sprintf("velion.%s.v2.%s.>", strings.TrimSpace(kind), strings.TrimSpace(plane))
+	return fmt.Sprintf("verevon.%s.v2.%s.>", strings.TrimSpace(kind), strings.TrimSpace(plane))
 }
 
 // Health reports stable durable identities and the JetStream backlog state.
@@ -287,7 +287,7 @@ func (s *Subscriber) lastAckAt(kind string) time.Time {
 func eventAuthorityMatches(kind, subject, payloadPlane, producer, event, authorityPlane string) bool {
 	parts := strings.Split(subject, ".")
 	return len(parts) == 6 &&
-		parts[0] == "velion" && parts[1] == kind && parts[2] == "v2" &&
+		parts[0] == "verevon" && parts[1] == kind && parts[2] == "v2" &&
 		parts[3] == strings.TrimSpace(payloadPlane) &&
 		parts[3] == strings.TrimSpace(authorityPlane) &&
 		parts[4] == strings.TrimSpace(producer) &&
@@ -334,10 +334,10 @@ func (s *Subscriber) deadLetter(msg *nats.Msg, kind, reason string) bool {
 			Msg("dead-letter source metadata unavailable")
 		return false
 	}
-	dlq := nats.NewMsg("velion.dlq.audit-core." + kind)
+	dlq := nats.NewMsg("verevon.dlq.audit-core." + kind)
 	dlq.Data = append([]byte(nil), msg.Data...)
-	dlq.Header.Set("Velion-Original-Subject", msg.Subject)
-	dlq.Header.Set("Velion-Dead-Letter-Reason", reason)
+	dlq.Header.Set("Verevon-Original-Subject", msg.Subject)
+	dlq.Header.Set("Verevon-Dead-Letter-Reason", reason)
 	dlq.Header.Set(nats.MsgIdHdr, deadLetterMessageID(s.bus, kind, reason, streamSequence))
 	if _, err := s.js.PublishMsg(dlq); err != nil {
 		log.Error().Err(err).Str("subject", msg.Subject).Str("reason", reason).

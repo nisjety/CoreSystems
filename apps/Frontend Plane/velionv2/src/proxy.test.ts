@@ -4,7 +4,7 @@ import { NextRequest } from "next/server"
 import { proxy } from "./proxy"
 
 function createRequest(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
-  return new NextRequest(new URL(path, "https://app.velion.test"), init)
+  return new NextRequest(new URL(path, "https://app.verevon.test"), init)
 }
 
 function expectNextResponse(response: Response) {
@@ -24,7 +24,7 @@ describe("proxy", () => {
     expect(response.status).toBe(307)
     expect(location).not.toBeNull()
 
-    const redirectUrl = new URL(location ?? "", "https://app.velion.test")
+    const redirectUrl = new URL(location ?? "", "https://app.verevon.test")
     expect(redirectUrl.pathname).toBe("/login")
     expect(redirectUrl.searchParams.get("callbackUrl")).toBe("/dashboard?tab=inbox")
   })

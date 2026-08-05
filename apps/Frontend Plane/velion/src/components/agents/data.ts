@@ -297,7 +297,7 @@ export const AGENT_DETAIL_ICONS = {
 } satisfies Record<AgentWorkspaceViewId, LucideIcon>;
 
 /**
- * Wave 8 (ui-ux-velion-gap.md §18): `getAgentById` now serves the
+ * Wave 8 (ui-ux-verevon-gap.md §18): `getAgentById` now serves the
  * demo fixtures ONLY when the caller is explicitly looking up one of
  * the well-known mock ids that ship in `MOCK_AGENTS` (e.g. so the
  * `/api/agents/seed` route can reuse them). For any other id, return

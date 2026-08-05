@@ -3,7 +3,7 @@
 // Subscribes to NATS audit + usage subjects, persists to Postgres, and
 // serves a read API at /v1/audit, /v1/usage, /v1/usage/summary. All
 // reads are org-scoped (`?org_id=...` required) — the multi-tenant
-// trust contract assumes the caller (velion) attaches the verified
+// trust contract assumes the caller (verevon) attaches the verified
 // org_id from the auth-core JWT.
 package main
 
@@ -90,7 +90,7 @@ func main() {
 		defer managed.Close()
 	}
 
-	// Retention: enforce the AUDIT_RETENTION_DAYS window the velion settings
+	// Retention: enforce the AUDIT_RETENTION_DAYS window the verevon settings
 	// UI advertises ("Audit retention 365 days"). The goroutine purges once at
 	// startup, then daily, and exits when ctx is cancelled on shutdown.
 	go runRetention(ctx, st, cfg.RetentionDays)
@@ -241,7 +241,7 @@ func loadConfig() (*config, error) {
 	}
 
 	// Retention window for both append-only tables. Defaults to 365 days to
-	// match the velion settings UI. Values below 1 are clamped to 1 so a
+	// match the verevon settings UI. Values below 1 are clamped to 1 so a
 	// misconfiguration can never purge everything on the next sweep.
 	retentionDays := 365
 	if v := os.Getenv("AUDIT_RETENTION_DAYS"); v != "" {

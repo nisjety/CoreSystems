@@ -18,7 +18,7 @@ import type {
   ChatbotAddOnId,
   ChatbotBuilderSectionId,
 } from "@/features/agents-v2/lib/agent-roles";
-import { FieldPill } from "@/features/agents-v2/components/VelionChatbotStudioPrimitives";
+import { FieldPill } from "@/features/agents-v2/components/VerevonChatbotStudioPrimitives";
 
 type StudioSection = {
   id: ChatbotBuilderSectionId;
@@ -37,7 +37,7 @@ type AddOnModal = {
   body: ReactNode;
 };
 
-export const chatbotDisplayName = "Velion Support Agent";
+export const chatbotDisplayName = "Verevon Support Agent";
 
 export const studioSections: Record<ChatbotBuilderSectionId, StudioSection> = {
   playground: {

@@ -62,7 +62,7 @@ func TestCreateSessionSupportsOAuthProviderCatalog(t *testing.T) {
 		t.Run(provider.Key, func(t *testing.T) {
 			providerContext := map[string]string(nil)
 			if provider.Key == "shopify" {
-				providerContext = map[string]string{"shop": "velion.myshopify.com"}
+				providerContext = map[string]string{"shop": "verevon.myshopify.com"}
 			}
 			result, err := service.CreateSession(context.Background(), CreateSessionInput{
 				ProviderKey:     provider.Key,
@@ -128,6 +128,58 @@ func TestCreateSessionSelectsConversionsBusinessLoginConfigForMeta(t *testing.T)
 	}
 }
 
+func TestCreateSessionSelectsStudioAdsBusinessLoginConfigForMeta(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	client := &callbackClient{}
+	service.clients["meta"] = client
+
+	if _, err := service.CreateSession(context.Background(), CreateSessionInput{
+		ProviderKey:    "meta",
+		OrganizationID: "org-1",
+		WorkspaceID:    "workspace-1",
+		UserID:         "user-1",
+		Bundles:        []string{"ads"},
+		ReturnURL:      "https://app.test/onboarding",
+	}); err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+	if got := client.lastProviderContext["business_login_config"]; got != "studio_ads" {
+		t.Fatalf("business_login_config = %q, want studio_ads for the ads bundle", got)
+	}
+}
+
+func TestCreateSessionSelectsSupportMessagingBusinessLoginConfigForMeta(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	client := &callbackClient{}
+	service.clients["meta"] = client
+
+	if _, err := service.CreateSession(context.Background(), CreateSessionInput{
+		ProviderKey:    "meta",
+		OrganizationID: "org-1",
+		WorkspaceID:    "workspace-1",
+		UserID:         "user-1",
+		Bundles:        []string{"messenger"},
+		ReturnURL:      "https://app.test/onboarding",
+	}); err != nil {
+		t.Fatalf("CreateSession error: %v", err)
+	}
+	if got := client.lastProviderContext["business_login_config"]; got != "support_messaging" {
+		t.Fatalf("business_login_config = %q, want support_messaging for the messenger bundle", got)
+	}
+}
+
 func TestCreateSessionUsesSnapchatRedirectBaseURL(t *testing.T) {
 	cfg := testOAuthConfig()
 	cfg.PublicBaseURL = "http://localhost:3026"
@@ -153,6 +205,30 @@ func TestCreateSessionUsesSnapchatRedirectBaseURL(t *testing.T) {
 	}
 	if client.lastRedirectURI != "https://connect.example.com/oauth/callback/snapchat" {
 		t.Fatalf("Snapchat redirect URI = %q, want provider-specific HTTPS callback", client.lastRedirectURI)
+	}
+}
+
+func TestCallbackURLUsesNormalizedProviderAndPublicBase(t *testing.T) {
+	service := &Service{cfg: config.Config{PublicBaseURL: "https://tunnel.example.test///"}}
+
+	tests := []struct {
+		name     string
+		provider string
+		want     string
+	}{
+		{name: "slack", provider: "slack", want: "https://tunnel.example.test/oauth/callback/slack"},
+		{name: "discord", provider: "discord", want: "https://tunnel.example.test/oauth/callback/discord"},
+		{name: "notion", provider: "notion", want: "https://tunnel.example.test/oauth/callback/notion"},
+		{name: "linkedin alias", provider: "linkedin-organization", want: "https://tunnel.example.test/oauth/callback/linkedin"},
+		{name: "x alias", provider: "twitter", want: "https://tunnel.example.test/oauth/callback/x"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := service.callbackURL(tt.provider); got != tt.want {
+				t.Fatalf("callbackURL(%q) = %q, want %q", tt.provider, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -220,6 +296,62 @@ func TestAccessTokenForConnectionRejectsDisconnectingSagaState(t *testing.T) {
 	}
 }
 
+func TestAccessTokenForConnectionMarksRevokedGrantNeedsRefresh(t *testing.T) {
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	accessToken, err := vault.Encrypt("expired-access-token", []byte("conn-revoked-google"))
+	if err != nil {
+		t.Fatalf("Encrypt access token error: %v", err)
+	}
+	refreshToken, err := vault.Encrypt("revoked-refresh-token", []byte("conn-revoked-google"))
+	if err != nil {
+		t.Fatalf("Encrypt refresh token error: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                    "conn-revoked-google",
+		ProviderKey:           "google",
+		ConnectorType:         "google-workspace",
+		OrganizationID:        "org-1",
+		UserID:                "user-1",
+		Status:                "active",
+		EncryptedAccessToken:  accessToken,
+		EncryptedRefreshToken: refreshToken,
+		AccessTokenExpiresAt:  time.Now().Add(-time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection error: %v", err)
+	}
+	service := NewService(config.Config{TokenRefreshSkew: time.Minute}, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	client := &refreshErrorClient{err: &TokenEndpointError{
+		ProviderKey: "google",
+		StatusCode:  400,
+		Code:        "invalid_grant",
+		Description: "Token has been expired or revoked.",
+	}}
+	service.clients["google"] = client
+
+	_, err = service.AccessTokenForConnection(t.Context(), "conn-revoked-google")
+	if !IsAuthorizationRefreshRequired(err) {
+		t.Fatalf("AccessTokenForConnection error = %v, want classified refresh authorization error", err)
+	}
+	saved, err := repo.GetConnection(t.Context(), "conn-revoked-google")
+	if err != nil {
+		t.Fatalf("GetConnection error: %v", err)
+	}
+	if saved.Status != "needs_refresh" {
+		t.Fatalf("connection status = %q, want needs_refresh", saved.Status)
+	}
+	if _, err := service.AccessTokenForConnection(t.Context(), "conn-revoked-google"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("second AccessTokenForConnection error = %v, want ErrNotFound", err)
+	}
+	if client.calls.Load() != 1 {
+		t.Fatalf("refresh calls = %d, want one", client.calls.Load())
+	}
+}
+
 func TestCompleteCallbackReconnectReusesConnectionAndUpgradesScopes(t *testing.T) {
 	cfg := testOAuthConfig()
 	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
@@ -243,6 +375,7 @@ func TestCompleteCallbackReconnectReusesConnectionAndUpgradesScopes(t *testing.T
 		OrganizationID:        "org-1",
 		WorkspaceID:           "workspace-1",
 		UserID:                "user-1",
+		ProviderAccountID:     "gh-user",
 		Status:                "active",
 		EncryptedAccessToken:  oldAccess,
 		EncryptedRefreshToken: oldRefresh,
@@ -302,6 +435,72 @@ func TestCompleteCallbackReconnectReusesConnectionAndUpgradesScopes(t *testing.T
 	}
 	if token.AccessToken != "new-access-token" {
 		t.Fatalf("AccessToken = %q, want new access token", token.AccessToken)
+	}
+}
+
+func TestPersistConnectionKeepsSeparateProviderAccounts(t *testing.T) {
+	cfg := testOAuthConfig()
+	vault, err := secretcrypto.NewVault([]byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("NewVault error: %v", err)
+	}
+	repo := store.NewMemoryRepository()
+	service := NewService(cfg, repo, vault, NewMicrosoftClient(MicrosoftClientConfig{}))
+	client := &callbackClient{profile: ProviderProfile{ID: "account-b", DisplayName: "Second account"}}
+	service.clients["google"] = client
+
+	if _, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID:                "conn-account-a",
+		ProviderKey:       "google",
+		ConnectorType:     "google",
+		OrganizationID:    "org-1",
+		WorkspaceID:       "workspace-1",
+		UserID:            "user-1",
+		ProviderAccountID: "account-a",
+		Status:            "active",
+	}); err != nil {
+		t.Fatalf("seed account A: %v", err)
+	}
+
+	session := store.ConnectSession{
+		ID: "session-account-b", ProviderKey: "google", ConnectorType: "google",
+		OrganizationID: "org-1", WorkspaceID: "workspace-1", UserID: "user-1",
+		Capabilities: []string{"mail.read"}, Scopes: []string{"openid"},
+	}
+	savedB, err := service.persistConnection(t.Context(), session, TokenResult{AccessToken: "token-b", ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("persist account B: %v", err)
+	}
+	if savedB.ID == "conn-account-a" {
+		t.Fatalf("different provider account reused account A connection: %q", savedB.ID)
+	}
+
+	client.profile = ProviderProfile{ID: "account-a", DisplayName: "First account"}
+	session.ID = "session-account-a-reconnect"
+	savedA, err := service.persistConnection(t.Context(), session, TokenResult{AccessToken: "token-a-new", ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatalf("persist account A reconnect: %v", err)
+	}
+	if savedA.ID != "conn-account-a" {
+		t.Fatalf("same provider account created a new connection: %q", savedA.ID)
+	}
+
+	connections, err := repo.ListConnections(t.Context(), store.ConnectionFilter{OrganizationID: "org-1", ProviderKey: "google"})
+	if err != nil {
+		t.Fatalf("ListConnections: %v", err)
+	}
+	if len(connections) != 2 {
+		t.Fatalf("connection count = %d, want 2: %#v", len(connections), connections)
+	}
+}
+
+func TestProviderAccountIdentityUsesNotionWorkspaceID(t *testing.T) {
+	profile := ProviderProfile{ID: "notion-bot-id"}
+	if got := providerAccountIdentity("notion", profile, TokenResult{Raw: map[string]any{"workspace_id": "workspace-a"}}); got != "workspace-a" {
+		t.Fatalf("Notion account identity = %q, want workspace-a", got)
+	}
+	if got := providerAccountIdentity("notion", profile, TokenResult{}); got != "notion-bot-id" {
+		t.Fatalf("Notion fallback account identity = %q, want notion-bot-id", got)
 	}
 }
 
@@ -826,6 +1025,32 @@ type countingRefreshClient struct {
 	calls     atomic.Int32
 	wait      time.Duration
 	expiresAt time.Time
+}
+
+type refreshErrorClient struct {
+	calls atomic.Int32
+	err   error
+}
+
+func (c *refreshErrorClient) AuthorizationURL(string, string, string, []string, map[string]string) (string, error) {
+	return "", nil
+}
+
+func (c *refreshErrorClient) ExchangeCode(context.Context, string, string, string, []string, map[string]string) (TokenResult, error) {
+	return TokenResult{}, nil
+}
+
+func (c *refreshErrorClient) Refresh(context.Context, string, []string, map[string]string) (TokenResult, error) {
+	c.calls.Add(1)
+	return TokenResult{}, c.err
+}
+
+func (c *refreshErrorClient) Profile(context.Context, string, map[string]string) (ProviderProfile, error) {
+	return ProviderProfile{}, nil
+}
+
+func (c *refreshErrorClient) Revoke(context.Context, string, map[string]string) error {
+	return nil
 }
 
 type revocationCountingClient struct {

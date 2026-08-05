@@ -8,11 +8,11 @@
 
 ## Scope and roles
 
-Velion maintains this register as a **processor** under **GDPR Art. 30(2)** (records
+Verevon maintains this register as a **processor** under **GDPR Art. 30(2)** (records
 of categories of processing carried out on behalf of controllers). Each customer
-(controller) maintains its own Art. 30(1) record; Velion's record supports it.
+(controller) maintains its own Art. 30(1) record; Verevon's record supports it.
 
-- **Processor:** Velion `[legal entity, org. no., address]`
+- **Processor:** Verevon `[legal entity, org. no., address]`
 - **Processor representative / privacy contact:** `[name, email]`
 - **Subprocessors:** see [Subprocessor List](./subprocessor-list.md)
 - **General security measures:** see §"Security measures" below and the [DPA](./dpa-template.md)
@@ -28,14 +28,14 @@ of categories of processing carried out on behalf of controllers). Each customer
   (`sensitive_personal` denied by default unless DPIA-authorised).
 - **Recipients / subprocessors:** Microsoft Azure OpenAI (Sweden Central).
 - **Transfers:** EEA-resident; ZDR; CLOUD Act residual disclosed ([TIA](./transfer-assessment.md)).
-- **Retention:** not retained by model provider (ZDR); Velion retains only as part
+- **Retention:** not retained by model provider (ZDR); Verevon retains only as part
   of conversation/run-history ([Retention Schedule](./retention-schedule.md)).
 - **Lawful basis (illustrative):** Art. 6(1)(b)/(f).
 
 ### PA-2 — Embeddings & retrieval (vector index over customer corpus)
 - **Purpose:** retrieval / search over the customer's own content.
 - **Data subjects / categories:** as in source documents; `customer_private`, `personal`.
-- **Subprocessors:** Microsoft Azure OpenAI (embeddings) + Velion-hosted vector store (EEA).
+- **Subprocessors:** Microsoft Azure OpenAI (embeddings) + Verevon-hosted vector store (EEA).
 - **Transfers:** EEA-resident.
 - **Retention:** embeddings tied to source document; deleted when source is deleted.
 - **Lawful basis:** Art. 6(1)(b)/(f).
@@ -50,7 +50,7 @@ of categories of processing carried out on behalf of controllers). Each customer
 ### PA-4 — Conversations & messages
 - **Purpose:** support / interaction history.
 - **Data categories:** message content; `customer_private`, `personal`.
-- **Subprocessors:** Velion-hosted (EEA).
+- **Subprocessors:** Verevon-hosted (EEA).
 - **Retention:** per [Retention Schedule](./retention-schedule.md).
 - **Lawful basis:** Art. 6(1)(b)/(f).
 
@@ -59,14 +59,14 @@ of categories of processing carried out on behalf of controllers). Each customer
   Art. 22 oversight) for autonomous agent runs.
 - **Data categories:** run steps, tool calls, human approval/rejection decisions,
   references to processed content; `customer_private`, `personal`.
-- **Subprocessors:** Velion-hosted (EEA).
+- **Subprocessors:** Verevon-hosted (EEA).
 - **Retention:** per [Retention Schedule](./retention-schedule.md) (run-history).
 - **Lawful basis:** Art. 6(1)(b)/(f); supports controller's Art. 22 safeguards.
 
 ### PA-6 — Web retrieval / crawl (Quarry egress broker)
 - **Purpose:** retrieving external web content directed by the agent.
 - **Data categories:** crawled/retrieved content, target URLs/metadata.
-- **Subprocessors:** Velion-owned egress first; external browser/proxy/unblocker
+- **Subprocessors:** Verevon-owned egress first; external browser/proxy/unblocker
   vendor(s) only when policy permits (default `allow_third_party_processing=false`).
 - **Transfers:** region-bound egress preferred; external vendor regions **TBC**.
 - **Retention:** as run artefacts ([Retention Schedule](./retention-schedule.md)).
@@ -76,7 +76,7 @@ of categories of processing carried out on behalf of controllers). Each customer
 - **Purpose:** user authentication, sessions, OAuth, 2FA, organisation membership.
 - **Data categories:** name, email, phone number, OAuth account links, passkeys,
   API keys, sessions, OAuth consents; `personal`, `credential_or_secret`.
-- **Subprocessors:** Velion-hosted (EEA); Twilio (SMS/2FA — region **TBC**).
+- **Subprocessors:** Verevon-hosted (EEA); Twilio (SMS/2FA — region **TBC**).
 - **Retention:** until account deletion; hard-delete via `gdpr_hard_delete_user`,
   anonymisation via `gdpr_anonymize_user` ([Retention Schedule](./retention-schedule.md)).
 - **Lawful basis:** Art. 6(1)(b) (account) / 6(1)(c) (security obligations).
@@ -100,7 +100,7 @@ of categories of processing carried out on behalf of controllers). Each customer
 - **Purpose:** security, integrity, accountability, and deletion verification.
 - **Data categories:** identifiers, policy references, source-trace IDs, hashes,
   status, processor decisions — **not** full content/secrets.
-- **Subprocessors:** Velion-hosted (EEA).
+- **Subprocessors:** Verevon-hosted (EEA).
 - **Retention:** **365 days** (subject to legal-hold/security exceptions).
 - **Lawful basis:** Art. 6(1)(c)/(f).
 
@@ -116,7 +116,7 @@ of categories of processing carried out on behalf of controllers). Each customer
 - **Purpose:** service health, performance, abuse prevention.
 - **Data categories:** operational metrics; minimised, ideally non-personal /
   pseudonymous.
-- **Subprocessors:** Velion-hosted (EEA).
+- **Subprocessors:** Verevon-hosted (EEA).
 - **Retention:** short ([Retention Schedule](./retention-schedule.md)).
 - **Lawful basis:** Art. 6(1)(f).
 

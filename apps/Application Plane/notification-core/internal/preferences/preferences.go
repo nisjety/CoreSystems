@@ -5,7 +5,7 @@
 // Writes also fan out to Novu via PATCH /v1/subscribers/{id}/preferences/
 // {workflowId} so cross-channel delivery respects the user's choice.
 //
-// U5-2 (ui-ux-velion-gap.md §10).
+// U5-2 (ui-ux-verevon-gap.md §10).
 package preferences
 
 import (
@@ -24,7 +24,7 @@ import (
 var ErrNotFound = errors.New("preference not found")
 
 // Preference is one row in `notification_preferences`. JSON tags match
-// velion's `Preference` type in src/lib/notifications/types.ts.
+// verevon's `Preference` type in src/lib/notifications/types.ts.
 type Preference struct {
 	OrganizationID string    `json:"organization_id"`
 	UserID         string    `json:"user_id"`

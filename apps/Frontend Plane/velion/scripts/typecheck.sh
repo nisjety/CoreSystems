@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Velion typecheck: runs `tsc --noEmit` and ignores type errors that
+# Verevon typecheck: runs `tsc --noEmit` and ignores type errors that
 # originate inside third-party `@blocksuite/...@0.19.5` package source files
 # (G12). Those packages ship a broken `dist/index.d.ts` that re-exports from
 # `../src/*.ts`, dragging unfixable third-party source into every type-check.
@@ -31,5 +31,5 @@ fi
 
 BLOCKSUITE_NOISE=$(grep -cE 'error TS' "$OUT" || echo 0)
 if [ "$BLOCKSUITE_NOISE" -gt 0 ]; then
-  echo "typecheck: 0 errors in velion source ($BLOCKSUITE_NOISE @blocksuite third-party errors ignored — see G12)"
+  echo "typecheck: 0 errors in verevon source ($BLOCKSUITE_NOISE @blocksuite third-party errors ignored — see G12)"
 fi

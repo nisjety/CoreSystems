@@ -1,15 +1,15 @@
 """
 Shared cross-plane NATS publisher for Ingestion Plane services.
 
-Publishes events to velion-nats (shared NATS broker) on velion.ingestion.*
+Publishes events to verevon-nats (shared NATS broker) on verevon.ingestion.*
 subjects for consumption by other planes (Data, Reasoning, Application).
 
 Naming convention:
-  - Cross-plane (velion-nats): velion.<plane>.<domain>.<action>
+  - Cross-plane (verevon-nats): verevon.<plane>.<domain>.<action>
   - Intra-plane (local NATS): ingestion.<domain>.<action>
-  - Notifications (plain NATS): velion.notifications.<source>.<action>
+  - Notifications (plain NATS): verevon.notifications.<source>.<action>
 
-Gracefully handles missing velion-nats — if unavailable, events are simply
+Gracefully handles missing verevon-nats — if unavailable, events are simply
 not published (no caller errors).
 """
 
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 class SharedNatsPublisher:
     """
-    Publishes cross-plane domain events to velion-nats.
+    Publishes cross-plane domain events to verevon-nats.
     
     Thread-safe async API. If NATS connection unavailable at init, gracefully
     continues without publishing.
@@ -44,7 +44,7 @@ class SharedNatsPublisher:
         Initialize shared NATS publisher.
         
         Args:
-            nats_url: NATS broker URL (e.g., "nats://velion-nats:4222")
+            nats_url: NATS broker URL (e.g., "nats://verevon-nats:4222")
             nats_token: Authentication token for shared NATS
             service_name: Source service identifier (for logging)
         """
@@ -95,8 +95,8 @@ class SharedNatsPublisher:
                     from nats.js.api import StreamConfig
                     
                     stream_config = StreamConfig(
-                        name="VELION_INGESTION",
-                        subjects=["velion.ingestion.>"],
+                        name="VEREVON_INGESTION",
+                        subjects=["verevon.ingestion.>"],
                         max_age=14 * 24 * 60 * 60,
                         max_msgs=100_000,
                         discard="old",
@@ -105,9 +105,9 @@ class SharedNatsPublisher:
                 except Exception as e:
                     # Stream might already exist
                     if "STREAM_EXISTS" not in str(e):
-                        logger.warning(f"Failed to create VELION_INGESTION stream: {e}")
+                        logger.warning(f"Failed to create VEREVON_INGESTION stream: {e}")
 
-                logger.info(f"✅ Shared NATS ({self.service_name}): VELION_INGESTION stream ready")
+                logger.info(f"✅ Shared NATS ({self.service_name}): VEREVON_INGESTION stream ready")
                 logger.info(f"✅ Connected to shared NATS ({self.service_name}): {self.nats_url}")
                 self._initialized = True
                 return True
@@ -133,7 +133,7 @@ class SharedNatsPublisher:
             "source": source,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.import.started", payload)
+        await self._publish("verevon.ingestion.import.started", payload)
 
     async def publish_import_completed(
         self,
@@ -153,7 +153,7 @@ class SharedNatsPublisher:
             "document_count": document_count,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.import.completed", payload)
+        await self._publish("verevon.ingestion.import.completed", payload)
 
     async def publish_m365_connected(
         self,
@@ -171,7 +171,7 @@ class SharedNatsPublisher:
             "provider": provider,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.m365.connected", payload)
+        await self._publish("verevon.ingestion.m365.connected", payload)
 
     async def publish_m365_disconnected(
         self,
@@ -189,7 +189,7 @@ class SharedNatsPublisher:
             "provider": provider,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.m365.disconnected", payload)
+        await self._publish("verevon.ingestion.m365.disconnected", payload)
 
     async def publish_crawl_started(
         self,
@@ -207,7 +207,7 @@ class SharedNatsPublisher:
             "crawl_id": crawl_id,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.crawl.started", payload)
+        await self._publish("verevon.ingestion.crawl.started", payload)
 
     async def publish_crawl_completed(
         self,
@@ -227,7 +227,7 @@ class SharedNatsPublisher:
             "page_count": page_count,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.crawl.completed", payload)
+        await self._publish("verevon.ingestion.crawl.completed", payload)
 
     async def publish_crawl_failed(
         self,
@@ -247,7 +247,7 @@ class SharedNatsPublisher:
             "error": error,
             "timestamp": self._iso_now(),
         }
-        await self._publish("velion.ingestion.crawl.failed", payload)
+        await self._publish("verevon.ingestion.crawl.failed", payload)
 
     async def publish_plain(self, subject: str, payload: dict[str, Any]) -> None:
         """Publish to plain NATS core (not JetStream).

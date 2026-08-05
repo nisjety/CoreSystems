@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
 /**
- * Wave 7 (velion ui-ux-velion-gap.md §17): per-agent fine-tuning proxy.
+ * Wave 7 (verevon ui-ux-verevon-gap.md §17): per-agent fine-tuning proxy.
  *
  * GET  /api/agents/{agentId}/finetune
  *   Lists past jobs for this agent (scoped to org via JWT).
@@ -64,7 +64,7 @@ export async function POST(
     // Re-stream the incoming multipart body through to the gateway.
     // We can't just forward `request.body` because we need to
     // **append** the `agent_id` field (the route URL carries it for
-    // the velion proxy, but the gateway expects it inside the body).
+    // the verevon proxy, but the gateway expects it inside the body).
     const incoming = await request.formData()
     const forwarded = new FormData()
     for (const [key, value] of incoming.entries()) {

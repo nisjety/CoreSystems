@@ -11,7 +11,7 @@ import (
 )
 
 func newUserAuthProbeRouter(t *testing.T, authHandler http.HandlerFunc) *gin.Engine {
-	return newUserAuthProbeRouterWithCredentials(t, authHandler, `[{"principal":"velion-gateway","audience":"user-core","token":"test-only-user-core-service-token","scopes":["users:read:self","users:write:self"]}]`)
+	return newUserAuthProbeRouterWithCredentials(t, authHandler, `[{"principal":"verevon-gateway","audience":"user-core","token":"test-only-user-core-service-token","scopes":["users:read:self","users:write:self"]}]`)
 }
 
 func newUserAuthProbeRouterWithCredentials(t *testing.T, authHandler http.HandlerFunc, credentials string) *gin.Engine {
@@ -76,7 +76,7 @@ func TestServiceCredentialCannotDelegateSelfFromHeaders(t *testing.T) {
 		response := httptest.NewRecorder()
 		request := httptest.NewRequest(test.method, "/whoami", nil)
 		request.Header.Set("X-Service-Token", "test-only-user-core-service-token")
-		request.Header.Set("X-Service-Id", "velion-gateway")
+		request.Header.Set("X-Service-Id", "verevon-gateway")
 		request.Header.Set("X-User-Id", "verified-at-gateway")
 		router.ServeHTTP(response, request)
 		if response.Code != test.wantStatus {
@@ -88,7 +88,7 @@ func TestServiceCredentialCannotDelegateSelfFromHeaders(t *testing.T) {
 func TestServiceCredentialCannotSelectAuthzTenantSubjectOrGrantActor(t *testing.T) {
 	router := newUserAuthProbeRouterWithCredentials(t, func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("auth-core must not be called for a service principal")
-	}, `[{"principal":"velion-gateway","audience":"user-core","token":"test-only-user-core-service-token","scopes":["authz:read","authz:write"]}]`)
+	}, `[{"principal":"verevon-gateway","audience":"user-core","token":"test-only-user-core-service-token","scopes":["authz:read","authz:write"]}]`)
 
 	handlerCalled := false
 	router.GET("/api/v1/internal/authz/visible", func(c *gin.Context) {
@@ -126,7 +126,7 @@ func TestServiceCredentialCannotSelectAuthzTenantSubjectOrGrantActor(t *testing.
 			request := httptest.NewRequest(test.method, test.target, strings.NewReader(test.body))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("X-Service-Token", "test-only-user-core-service-token")
-			request.Header.Set("X-Service-Id", "velion-gateway")
+			request.Header.Set("X-Service-Id", "verevon-gateway")
 			router.ServeHTTP(response, request)
 
 			if response.Code != http.StatusForbidden {

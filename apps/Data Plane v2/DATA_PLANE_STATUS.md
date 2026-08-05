@@ -8,7 +8,7 @@ the strict 31-method/124-shape gRPC matrix, the 28-shape HTTP matrix, and the
 six-store restrictive-ZDR final-state comparison. Anonymous/header-only tenant
 identity, spoofed-org access, unsigned JWTs/events, static shared-key user
 impersonation, permissive Control failure, and unscoped admin mutation are closed
-or fail-closed in current source. Velion v3 uses session-minted audience-bound
+or fail-closed in current source. Verevon v3 uses session-minted audience-bound
 bearers for Knowledge and GraphRAG. Retrieval retries only transient policy-token
 failures within a fixed budget and distinguishes verified denial from Control
 unavailability.
@@ -153,7 +153,7 @@ evidence rather than functional runtime acceptance.
 
 ### 2026-07-15 final isolated acceptance delta
 
-- Real Auth Core/User Core/Control fixture plus Velion browser E2E: **2/2**
+- Real Auth Core/User Core/Control fixture plus Verevon browser E2E: **2/2**
   Playwright journeys pass. One authorized user sees only its own Knowledge,
   GraphRAG nodes, and navbar retrieval results; spoofed organization headers and
   searches cannot disclose any serialized field from the second fixture.
@@ -179,7 +179,7 @@ evidence rather than functional runtime acceptance.
   unavailability. Final fmt and single-job, non-incremental strict all-target
   clippy pass; the preceding parallel attempt ended in a host SIGBUS without a
   lint diagnostic and is not counted as a code failure.
-- Velion Gateway: **288/288** tests. SPA: Node-native security gate **4/4** and
+- Verevon Gateway: **288/288** tests. SPA: Node-native security gate **4/4** and
   Vitest **68 files / 364 tests**, plus typecheck and production build. Lint has
   zero errors and one existing Solid reactivity warning.
 - Base Data Compose resolves with fresh explicit required inputs, and broker,
@@ -191,7 +191,7 @@ This section supersedes earlier 2026-07-15 checkpoint statements that Docker was
 unavailable or that the final Documents image/multi-store/browser/gRPC reruns
 were pending. Those statements remain below as chronological incident history.
 
-### 2026-07-15 Velion/GraphRAG delta
+### 2026-07-15 Verevon/GraphRAG delta
 
 - Graph: `cargo test --no-default-features` **28 passed, 1 explicitly ignored**;
   focused extractor **9/9**; strict all-target no-default-feature clippy passed.
@@ -201,7 +201,7 @@ were pending. Those statements remain below as chronological incident history.
 - Control Auth Core per-audience service registry: **12/12** focused Jest tests,
   build, and Compose security contract passed. Changed-module coverage is
   **90.19% statements, 93.84% branches, 100% functions, 89.79% lines**.
-- Velion Gateway: `cargo test --all-targets` **272/272**. SPA: **68 files / 360
+- Verevon Gateway: `cargo test --all-targets` **272/272**. SPA: **68 files / 360
   tests**, typecheck, and production build passed. Lint returned zero errors and
   one pre-existing Solid reactivity warning.
 - Data Compose config with non-secret placeholders passed. The isolated MVP

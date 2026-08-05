@@ -256,7 +256,7 @@ curl -X POST http://localhost:3013/sync \
 ### Example 2: New User → Multi-Service Setup
 
 **Flow:**
-1. User signs up in Velion
+1. User signs up in Verevon
 2. Nohu workflow triggers
 3. Workflow steps:
    - Create support ticket in Zammad
@@ -386,7 +386,7 @@ docker exec nango curl -v http://nohu-api:3014/health
    # Consider: Prometheus, ELK Stack, Datadog
    ```
 
-3. **Integration with Velion:**
+3. **Integration with Verevon:**
    - Update frontend environment variables with API endpoints
    - Create client SDKs or HTTP wrappers for services
    - Add webhook handlers for events

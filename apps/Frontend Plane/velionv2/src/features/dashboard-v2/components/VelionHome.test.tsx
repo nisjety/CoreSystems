@@ -4,7 +4,7 @@ import type { ComponentProps } from "react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SearchPanel } from "@/features/dashboard-v2/components/VelionHome";
+import { SearchPanel } from "@/features/dashboard-v2/components/VerevonHome";
 
 type SearchPanelSnapshotState = ComponentProps<
 	typeof SearchPanel
@@ -75,7 +75,7 @@ describe("SearchPanel", () => {
 									"Gravid uke 7 Embryoet er vanligvis rundt 9 mm langt pa dette stadiet.",
 							},
 						],
-						answer: "Velion fant 2 relevante treff for \"7 uker embryo\".",
+						answer: "Verevon fant 2 relevante treff for \"7 uker embryo\".",
 						citations: [],
 					},
 				});

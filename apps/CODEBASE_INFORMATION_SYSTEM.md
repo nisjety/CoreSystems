@@ -22,18 +22,18 @@ Scope:
 - `apps/Control Plane`
 - `apps/Model Plane`
 - `apps/Ingestion Plane`
-- `apps/Frontend Plane/velionv3`
+- `apps/Frontend Plane/verevonv3`
 
 Reference-only:
 - `apps/Channel Plane` remains future/docs-only.
-- `apps/Frontend Plane/velionv2` remains historical/reference unless explicitly targeted.
+- `apps/Frontend Plane/verevonv2` remains historical/reference unless explicitly targeted.
 
 Evidence used:
 - Consolidated cross-plane runtime map: `docs/CORESYSTEM_CROSS_PLANE_ARCHITECTURE_MAP.md`.
 - CodeGraph status on 2026-07-02: 11,635 indexed files, 216,888 nodes, 760,041 edges.
 - Canonical target ownership: `apps/master-ownership-matrix.md`.
 - Cross-plane privacy contract: `apps/GDPR_SUMMARY.md`.
-- Velion v3 source/docs: `apps/Frontend Plane/velionv3/README.md`, `package.json`, `vite.config.ts`, `apps/gateway/src/main.rs`, `apps/gateway/src/domains/*`, `src/shared/actions/action-registry.ts`.
+- Verevon v3 source/docs: `apps/Frontend Plane/verevonv3/README.md`, `package.json`, `vite.config.ts`, `apps/gateway/src/main.rs`, `apps/gateway/src/domains/*`, `src/shared/actions/action-registry.ts`.
 - Data Plane v2 docs/manifests: `apps/Data Plane v2/docs/gap-data.md`, `Makefile`, service manifests.
 - Ingestion docs/manifests: `apps/Ingestion Plane/Quarry-v2/docs/ARCHITECTURE.md`, `docs/CONTRACTS.md`, `docs/CROSS_PLANE_INTEGRATION.md`, service manifests.
 - Model Plane docs/manifests: `apps/Model Plane/README.md`, `docs/ARCHITECTURE.md`, `docs/CONTRACTS.md`, `docs/VERIFICATION.md`.
@@ -44,7 +44,7 @@ Evidence used:
 
 CoreSystem is a multi-plane AI customer experience platform. The architecture is a monorepo of independently runnable service stacks connected by explicit HTTP, gRPC, NATS/JetStream, Docker network, and gateway boundaries.
 
-The current active frontend target is Velion v3. Velion v3 is not the old Next.js BFF shape from Velion v2. It is a SolidJS/Vite TypeScript app at the plane root, a Rust Axum same-origin gateway under `apps/gateway`, and a separate nested Next.js web app under `apps/velion-web`.
+The current active frontend target is Verevon v3. Verevon v3 is not the old Next.js BFF shape from Verevon v2. It is a SolidJS/Vite TypeScript app at the plane root, a Rust Axum same-origin gateway under `apps/gateway`, and a separate nested Next.js web app under `apps/verevon-web`.
 
 The authority model stays unchanged:
 
@@ -66,7 +66,7 @@ Frontend presents and normalizes access.
 | L3 | Ingestion Plane | `apps/Ingestion Plane` | Quarry-v2 web/search evidence, imports, integrations, SharePoint/M365 sync |
 | L4 | Model Plane | `apps/Model Plane` | AI gateway, sessions, inference, execution loop, Temporal orchestration, capabilities |
 | L5 | Application Plane | `apps/Application Plane` | Convex workspace, realtime sync, notifications, conversation/information/social services |
-| L6 | Frontend Plane | `apps/Frontend Plane/velionv3` | Solid/Vite Velion UI, Rust same-origin gateway, nested Velion web app |
+| L6 | Frontend Plane | `apps/Frontend Plane/verevonv3` | Solid/Vite Verevon UI, Rust same-origin gateway, nested Verevon web app |
 | Future | Channel Plane | `apps/Channel Plane` | Planned widgets, adapters, public visitor conversations, inbox/handoff runtime |
 
 ## Architecture Map
@@ -75,8 +75,8 @@ The canonical live runtime map and integration-proof matrix is maintained in `do
 
 ```mermaid
 flowchart LR
-  User["User / operator"] --> Frontend["Frontend Plane: Velion v3 Solid/Vite"]
-  Frontend --> Gateway["Velion v3 Rust gateway: apps/gateway"]
+  User["User / operator"] --> Frontend["Frontend Plane: Verevon v3 Solid/Vite"]
+  Frontend --> Gateway["Verevon v3 Rust gateway: apps/gateway"]
   Frontend --> Actions["Shared action registry and context packs"]
   Gateway --> Control["Control Plane: auth/user/org/billing/session/audit"]
   Gateway --> Ingestion["Ingestion Plane: Quarry-v2/imports/integrations"]
@@ -106,7 +106,7 @@ flowchart LR
 6. Durable knowledge assets live in Data Plane: documents, chunks, embeddings, graph, wiki, source logs, retrieval traces.
 7. Reasoning lives in Model Plane: planning, synthesis, agent loops, tool selection, memory/wiki maintenance proposals.
 8. Human-facing UX lives in Frontend/Application/Channel surfaces, not in core storage or reasoning services.
-9. Browser-facing and frontend calls must pass through the Velion gateway/BFF surface; upstream secrets, OAuth tokens, and forged org/user headers must not reach the browser.
+9. Browser-facing and frontend calls must pass through the Verevon gateway/BFF surface; upstream secrets, OAuth tokens, and forged org/user headers must not reach the browser.
 
 ## Plane Details
 
@@ -161,8 +161,8 @@ Primary docs:
 Purpose: evidence capture and acquisition. It authenticates through Control Plane, captures or imports source material, and persists durable knowledge only through Data Plane contracts.
 
 Current source of truth:
-- Use `Quarry-v2` for Velion v3 web/search ingestion.
-- `Quarry/` is legacy/deferred and should not be the active target for new Velion v3 work.
+- Use `Quarry-v2` for Verevon v3 web/search ingestion.
+- `Quarry/` is legacy/deferred and should not be the active target for new Verevon v3 work.
 
 Primary services:
 - `Quarry-v2/crates/quarry-edge` - Rust public REST/SSE ingest edge.
@@ -256,9 +256,9 @@ Primary docs:
 - `apps/Application Plane/notification-core/README.md`
 - `apps/Application Plane/zammad-foundation/README.md`
 
-### Frontend Plane: Velion v3
+### Frontend Plane: Verevon v3
 
-Purpose: the current human-facing Velion workspace and frontend gateway surface.
+Purpose: the current human-facing Verevon workspace and frontend gateway surface.
 
 Primary surfaces:
 - `src/app` - Solid app routing, providers, and shell.
@@ -267,7 +267,7 @@ Primary surfaces:
 - `src/shared/context-packs` - model context packaging from route, visible records, draft input, and available actions.
 - `src/shared/api`, `src/shared/rpc`, `src/shared/graphrest` - API-first transport clients.
 - `apps/gateway` - Rust Axum same-origin gateway/BFF. It owns route normalization, upstream selection, envelopes, auth/session context, rate limiting, security headers, CORS, metrics, and cross-plane domain modules.
-- `apps/velion-web` - separate Next.js app under the Velion v3 tree. Its README currently still contains the generated Next template and needs project-specific documentation.
+- `apps/verevon-web` - separate Next.js app under the Verevon v3 tree. Its README currently still contains the generated Next template and needs project-specific documentation.
 
 Gateway domain modules include actions, agent actions/runs, AG-UI, AI, audit, auth, billing, briefs, browser, chat, cost, eval, finetune, inbox, information, ingestions, insights, integrations, knowledge, leads, MCP, monitoring, navbar, notifications, onboarding, orchestration, orgs, ownership, privacy, router policy, search, settings, shares, social, studio, and tickets.
 
@@ -281,15 +281,15 @@ Conventions:
 - Honest empty/degraded data is preferred over fabricated demo data. Gateway helpers can annotate `meta.source` for degraded responses.
 
 Primary docs:
-- `apps/Frontend Plane/velionv3/README.md`
-- `apps/Frontend Plane/velionv3/package.json`
-- `apps/Frontend Plane/velionv3/vite.config.ts`
-- `apps/Frontend Plane/velionv3/apps/gateway/Cargo.toml`
-- `apps/Frontend Plane/velionv3/apps/velion-web/package.json`
+- `apps/Frontend Plane/verevonv3/README.md`
+- `apps/Frontend Plane/verevonv3/package.json`
+- `apps/Frontend Plane/verevonv3/vite.config.ts`
+- `apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml`
+- `apps/Frontend Plane/verevonv3/apps/verevon-web/package.json`
 
 ### Channel Plane
 
-Purpose: future runtime and deployment surface for external-facing Velion agents.
+Purpose: future runtime and deployment surface for external-facing Verevon agents.
 
 Current state:
 - Docs-only stub: `apps/Channel Plane/docs/vision.md`.
@@ -299,7 +299,7 @@ Current state:
 
 ### Grounded Chat
 
-1. User sends a prompt in Velion v3.
+1. User sends a prompt in Verevon v3.
 2. The Solid UI calls same-origin API helpers and/or action registry entries.
 3. Vite dev proxy or production routing sends `/api` traffic to the Rust gateway.
 4. Gateway validates session context, strips forged scoping headers, normalizes payloads, and calls Model Plane `model-gateway`.
@@ -310,7 +310,7 @@ Current state:
 
 ### Website Ingestion To Knowledge
 
-1. User starts website crawl/onboarding/import from Velion v3.
+1. User starts website crawl/onboarding/import from Verevon v3.
 2. UI calls knowledge/onboarding/ingestion actions or gateway endpoints.
 3. Gateway calls Quarry-v2 edge, imports-core, integration-corev2, or finspo-core as the relevant Ingestion Plane boundary.
 4. Ingestion validates org/user context, fetches/crawls/imports evidence, emits run events, and stores artifacts as allowed by policy.
@@ -321,7 +321,7 @@ Current state:
 ### Studio/Social/Application Projection
 
 1. User opens Studio, Social, Inbox, Knowledge, or collaborative workspace surfaces.
-2. Velion v3 loads session/org context and calls the Rust gateway.
+2. Verevon v3 loads session/org context and calls the Rust gateway.
 3. Gateway selects Application Plane, Control Plane, Data Plane, or Ingestion Plane upstreams by domain.
 4. Application Plane may project realtime/collaborative workspace state, but lower-plane durable authorities remain the owners.
 5. Any fallback/degraded view must be labeled or represented as unavailable/planned/fallback, not fabricated as live state.
@@ -341,14 +341,14 @@ This is future scope. Channel Plane should eventually own adapter install/runtim
 | `apps/Control Plane` | Identity, org, user, billing, session, audit authority |
 | `apps/Model Plane` | Reasoning, agent runtime, model gateway, sessions, inference, execution |
 | `apps/Ingestion Plane` | Evidence capture, web/search scraping, file imports, OAuth/connectors |
-| `apps/Frontend Plane/velionv3` | Current Velion UI and gateway |
+| `apps/Frontend Plane/verevonv3` | Current Verevon UI and gateway |
 | `apps/Channel Plane` | Future external channel runtime documentation |
 
 ## Coding Conventions Detected
 
 - Monorepo, multi-stack microservices. Current manifest inventory spans Rust, Go, TypeScript/TSX, and Python across the active planes.
 - Language split: Rust for latency/parsing/retrieval/browser/protocol-heavy hot paths; Go for durable workflow, CRUD, registry, policy, scheduling; Python for labs, evals, provider glue, and imports; TypeScript/TSX for frontend/Auth/Convex/workers.
-- Entry points: Go services usually use `cmd/*/main.go`; Rust services use `src/main.rs`; Python FastAPI services use `app/main.py`; Velion v3 root uses Solid/Vite; Velion v3 gateway uses Rust Axum modules under `apps/gateway/src`.
+- Entry points: Go services usually use `cmd/*/main.go`; Rust services use `src/main.rs`; Python FastAPI services use `app/main.py`; Verevon v3 root uses Solid/Vite; Verevon v3 gateway uses Rust Axum modules under `apps/gateway/src`.
 - Tests: Go uses `*_test.go`; Rust uses crate/workspace tests; TypeScript uses `*.test.ts`, `*.test.tsx`, and Playwright `*.spec.ts`; Python SDK/labs use `test_*.py`.
 - API envelopes use `{ data }`, cursor `meta`/`links`, and `{ error: { code, message, details } }`.
 - HTTP validation failures generally map to `422`, auth failures to `401`, upstream failures to `502` or `503`.
@@ -360,7 +360,7 @@ This is future scope. Channel Plane should eventually own adapter install/runtim
 Frontend:
 
 ```bash
-cd "apps/Frontend Plane/velionv3"
+cd "apps/Frontend Plane/verevonv3"
 pnpm dev
 pnpm lint
 pnpm typecheck
@@ -423,11 +423,11 @@ docker compose up -d --build
 |---|---|
 | Understand ownership boundaries | `apps/master-ownership-matrix.md` |
 | Inspect current audit findings | `apps/CORESYSTEM_AUDIT_BACKLOG.md` |
-| Add a Velion v3 product surface | `apps/Frontend Plane/velionv3/src/features/*` and `src/app` |
-| Add a human/model action | `apps/Frontend Plane/velionv3/src/shared/actions/action-registry.ts` |
-| Add frontend API client behavior | `apps/Frontend Plane/velionv3/src/shared/api`, `src/shared/rpc`, `src/shared/graphrest` |
-| Add or change gateway/BFF behavior | `apps/Frontend Plane/velionv3/apps/gateway/src/domains/*` |
-| Change REST envelope behavior | `apps/Frontend Plane/velionv3/apps/gateway/src/envelope.rs` and frontend API clients |
+| Add a Verevon v3 product surface | `apps/Frontend Plane/verevonv3/src/features/*` and `src/app` |
+| Add a human/model action | `apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts` |
+| Add frontend API client behavior | `apps/Frontend Plane/verevonv3/src/shared/api`, `src/shared/rpc`, `src/shared/graphrest` |
+| Add or change gateway/BFF behavior | `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/*` |
+| Change REST envelope behavior | `apps/Frontend Plane/verevonv3/apps/gateway/src/envelope.rs` and frontend API clients |
 | Add auth/org/user/billing behavior | `apps/Control Plane/*-core` |
 | Add documents/retrieval/graph/wiki behavior | `apps/Data Plane v2/services/*` |
 | Add scrape/crawl/import/connectors | `apps/Ingestion Plane/Quarry-v2`, `imports-core`, `integration-corev2`, `finspo-core` |
@@ -441,8 +441,8 @@ docker compose up -d --build
 The current audit did not edit implementation code. Confirmed findings and remediation candidates live in `apps/CORESYSTEM_AUDIT_BACKLOG.md`.
 
 High-signal confirmed items from this refresh:
-- Root onboarding docs were stale to Velion v2 and have been updated to Velion v3.
-- `pnpm test` in Velion v3 fails because Vitest catches unhandled rejections from `loadStudioWorkspace` when session context lacks `orgs`.
+- Root onboarding docs were stale to Verevon v2 and have been updated to Verevon v3.
+- `pnpm test` in Verevon v3 fails because Vitest catches unhandled rejections from `loadStudioWorkspace` when session context lacks `orgs`.
 - Quarry-v2 workspace tests fail to compile where `DataPlaneIngestRequest` constructors have not been updated for `initiator_user_id` and `visibility`.
 - Data Plane Rust check passes with a cleanup warning for unused `RerankClient::new`.
 - This dated test snapshot is superseded for Model Plane release status. On 2026-07-13 the changed Go auth/cost/capability/Letta modules pass; the prior Letta memstore equality-boundary failure is fixed. Full Model Plane workspace/orchestrator/Rust release gates and live authenticated E2E remain incomplete; use `apps/Model Plane/MODEL_PLANE_STATUS.md`.
@@ -455,13 +455,13 @@ High-signal confirmed items from this refresh:
 ## Known Drift And Watch Items
 
 - `apps/Channel Plane` is intentionally future/docs-only today.
-- `apps/Frontend Plane/velionv3/apps/velion-web/README.md` is still the generated Next.js template.
-- Some older Ingestion documentation and Makefile targets still describe legacy `Quarry/`; current Velion v3 work should target `Quarry-v2`.
+- `apps/Frontend Plane/verevonv3/apps/verevon-web/README.md` is still the generated Next.js template.
+- Some older Ingestion documentation and Makefile targets still describe legacy `Quarry/`; current Verevon v3 work should target `Quarry-v2`.
 - `apps/Model Plane v2` may exist in the repository, but the focused current map is `apps/Model Plane`.
 - The worktree observed during generation had many pre-existing local changes. Never reset, clean, or revert without explicit user direction.
 - Data Plane v2 docs report Control Plane wiring as the remaining production blocker for multi-tenant deployment: `X-Org-ID` trust needs full auth-core/user-core/org-core/cost-core consultation.
-- Quarry-v2 docs identify a current exception where Velion v3 onboarding crawl handlers post to control `/v1/jobs/` directly; migrate that path to edge rather than extending it.
-- Large frontend/global styling files and fallback/preview surfaces should be audited before declaring Velion v3 feature completeness.
+- Quarry-v2 docs identify a current exception where Verevon v3 onboarding crawl handlers post to control `/v1/jobs/` directly; migrate that path to edge rather than extending it.
+- Large frontend/global styling files and fallback/preview surfaces should be audited before declaring Verevon v3 feature completeness.
 
 ## Information-System Persistence
 

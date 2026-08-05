@@ -183,7 +183,7 @@ function toBrowserUrl(value: string) {
   return new URL(value, window.location.origin).toString();
 }
 
-export function VelionAuthPage({
+export function VerevonAuthPage({
   callbackUrl: callbackUrlInput,
   initialMode = "signin",
   resetToken,
@@ -371,7 +371,7 @@ export function VelionAuthPage({
   }
 
   const rememberCookieConsent = (choice: "accepted" | "rejected") => {
-    document.cookie = `velion_cookie_consent=${choice}; path=/; max-age=31536000; SameSite=Lax`;
+    document.cookie = `verevon_cookie_consent=${choice}; path=/; max-age=31536000; SameSite=Lax`;
     dispatch({ type: "remember-cookie-consent", choice });
   };
 
@@ -450,7 +450,7 @@ function AuthBrandButton() {
   return (
     <button
       type="button"
-      aria-label="Velion"
+      aria-label="Verevon"
       className="absolute bottom-4 left-5 hidden size-11 items-center justify-center rounded-full border border-white/20 bg-[#202020] text-[20px] text-white shadow-[0_10px_26px_rgba(0,0,0,0.22)] md:flex"
     >
       N
@@ -1045,7 +1045,7 @@ function CookieConsentCard({
 }) {
   if (consent && !settingsOpen) return null;
   return (
-    <div className="velion-cookie-card absolute bottom-6 left-1/2 z-30 hidden w-[92%] -translate-x-1/2 lg:block">
+    <div className="verevon-cookie-card absolute bottom-6 left-1/2 z-30 hidden w-[92%] -translate-x-1/2 lg:block">
       <div className="rounded-full bg-background px-3 py-2 shadow-lg">
         <div className="flex items-center gap-3">
           <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#F2F3F5] text-[#6A6E78]">

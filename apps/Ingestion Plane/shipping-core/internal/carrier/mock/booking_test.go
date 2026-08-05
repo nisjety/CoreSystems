@@ -19,7 +19,7 @@ func demoRequest() carrier.BookingRequest {
 		QuoteRef:    "q1",
 		ServiceName: "Demo Standard",
 		Price:       carrier.Money{AmountCents: 13300, Currency: "NOK"},
-		From:        carrier.Address{Name: "Velion AS", PostalCode: "0150", City: "Oslo", Country: "NO", IsBusiness: true},
+		From:        carrier.Address{Name: "Verevon AS", PostalCode: "0150", City: "Oslo", Country: "NO", IsBusiness: true},
 		To:          carrier.Address{Name: "Kari", PostalCode: "7010", City: "Trondheim", Country: "NO"},
 		Package:     carrier.Package{WeightKg: 8, LengthCm: 40, WidthCm: 30, HeightCm: 20},
 		BookedBy:    "test",

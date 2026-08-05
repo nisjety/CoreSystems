@@ -1,6 +1,6 @@
-# velionv2 — dev container image (Next.js 16 + React 19).
+# verevonv2 — dev container image (Next.js 16 + React 19).
 #
-# Mirrors the velion v1 dev pattern: pnpm install once during build, stash
+# Mirrors the verevon v1 dev pattern: pnpm install once during build, stash
 # node_modules into /opt so the runtime bind-mount can rehydrate them if the
 # host's volume is empty. The compose file mounts only the source paths so
 # editing files locally triggers Next's file watcher.
@@ -23,7 +23,7 @@ RUN set -e; \
 
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prefer-offline --loglevel=error
-RUN mkdir -p /opt/velionv2-deps && cp -R node_modules /opt/velionv2-deps/node_modules
+RUN mkdir -p /opt/verevonv2-deps && cp -R node_modules /opt/verevonv2-deps/node_modules
 
 COPY . .
 

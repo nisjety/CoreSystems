@@ -23,7 +23,7 @@ func (e *ErrOrgNameMismatch) Error() string {
 
 // RestoreOrganization reverses a pending soft-delete for orgID: it clears
 // deleted_at/status back to active, wipes the org's deletion ledger, and
-// publishes velion.org.deletion.cancelled. Returns
+// publishes verevon.org.deletion.cancelled. Returns
 // ErrOrganizationNotPendingDeletion (the HTTP layer maps this to 409) if the
 // organization is not currently inside its 30-day grace window — this also
 // makes a duplicate restore request safe: the first call restores and
@@ -55,14 +55,14 @@ func (s *Service) RestoreOrganization(ctx context.Context, orgID, actorID, actor
 	return nil
 }
 
-// publishDeletionCancelled emits velion.org.deletion.cancelled. A nil shared
-// publisher (velion-nats disabled) makes this a no-op.
+// publishDeletionCancelled emits verevon.org.deletion.cancelled. A nil shared
+// publisher (verevon-nats disabled) makes this a no-op.
 func (s *Service) publishDeletionCancelled(orgID, orgName, cancelledBy string) {
 	sp := s.SharedPub()
 	if sp == nil {
 		return
 	}
-	sp.PublishPlain("velion.org.deletion.cancelled", map[string]any{
+	sp.PublishPlain("verevon.org.deletion.cancelled", map[string]any{
 		"org_id":       orgID,
 		"org_name":     orgName,
 		"cancelled_by": cancelledBy,

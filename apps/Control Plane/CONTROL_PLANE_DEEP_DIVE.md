@@ -72,7 +72,7 @@ flowchart LR
   Frontend --> Billing["billing-core"]
   Frontend --> Session["session-core"]
   Auth --> NATSLocal["local NATS streams: auth.*, user.*, organization.*, session.*"]
-  Auth --> SharedBus["shared NATS: aqencia.controlplane.*, velion.audit.v1.*"]
+  Auth --> SharedBus["shared NATS: aqencia.controlplane.*, verevon.audit.v1.*"]
   NATSLocal --> User
   NATSLocal --> Org
   NATSLocal --> Billing
@@ -90,7 +90,7 @@ flowchart LR
 There are two event layers in active use:
 
 1. Local/compatibility subjects on the Control Plane NATS: `auth.>`, `user.>`, `organization.>`, `session.>`, `billing.>`, `usage.>`.
-2. Cross-plane subjects on the shared bus: `aqencia.controlplane.>`, `velion.audit.v1.>`, `velion.usage.v1.>`, `app.session.>`, `velion.session.>`, and `velion.agent.>`.
+2. Cross-plane subjects on the shared bus: `aqencia.controlplane.>`, `verevon.audit.v1.>`, `verevon.usage.v1.>`, `app.session.>`, `verevon.session.>`, and `verevon.agent.>`.
 
 This dual namespace is deliberate during migration, but it means relationship mapping has to record both the local projection flow and the cross-plane notification flow.
 
@@ -125,7 +125,7 @@ Events:
 - Publishes compatibility events to `auth.*`.
 - Dual-publishes target simplified subjects such as `user.created`, `user.updated`, `session.created`, `organization.created`.
 - Publishes cross-plane subjects including `aqencia.controlplane.user.registered`, `aqencia.controlplane.user.signed_in`, `aqencia.controlplane.user.provider_linked`, `aqencia.controlplane.org.created`, `aqencia.controlplane.org.member_added`, and `aqencia.controlplane.org.member_removed`.
-- Publishes `velion.audit.v1.control.*` only when an `org_id` is present; pre-onboarding users without org context are intentionally skipped for audit ingestion.
+- Publishes `verevon.audit.v1.control.*` only when an `org_id` is present; pre-onboarding users without org context are intentionally skipped for audit ingestion.
 
 Maturity notes:
 
@@ -297,8 +297,8 @@ HTTP surface:
 
 Event/model bridge:
 
-- Publishes session commands to `velion.session.{sessionID}.command` for v2 and `aqencia.reasoning.session.{sessionID}.command` for v1.
-- Subscribes to agent events on `velion.agent.run.{sessionID}.event` for v2 and `aqencia.reasoning.run.{sessionID}.event` for v1.
+- Publishes session commands to `verevon.session.{sessionID}.command` for v2 and `aqencia.reasoning.session.{sessionID}.command` for v1.
+- Subscribes to agent events on `verevon.agent.run.{sessionID}.event` for v2 and `aqencia.reasoning.run.{sessionID}.event` for v1.
 - Publishes session events and `app.session.entitlements_changed`.
 - Subscribes to user/org/billing change subjects for cache invalidation.
 
@@ -331,7 +331,7 @@ HTTP surface:
 
 Events:
 
-- Queue-subscribes `velion.audit.v1.>` and `velion.usage.v1.>` under group `audit-core`.
+- Queue-subscribes `verevon.audit.v1.>` and `verevon.usage.v1.>` under group `audit-core`.
 - Malformed payloads and store errors are logged but not retried or NAKed. The code treats these as observability data where poison-pill retries should not stall the subject.
 
 Maturity notes:
@@ -359,7 +359,7 @@ Mapped and active:
 - `auth-core` -> `user-core`: auth events and internal user-service integration.
 - `auth-core` -> `org-core`: organization events and organization event middleware.
 - `auth-core` -> cross-plane consumers: `aqencia.controlplane.*` and plane-token endpoints.
-- `auth-core` -> `audit-core`: `velion.audit.v1.control.*` when org context exists.
+- `auth-core` -> `audit-core`: `verevon.audit.v1.control.*` when org context exists.
 - `user-core` -> `auth-core`: `service.authenticate` NATS request-reply and Better Auth/OAuth client paths.
 - `user-core` -> `org-core`: default `ORG_SERVICE_URL` is `http://org-core:8080`; used for session context and membership enrichment paths.
 - `org-core` -> `auth-core`/`user-core`: configured HTTP clients plus auth-event bridge.

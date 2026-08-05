@@ -1,5 +1,5 @@
 // Package gdpr subscribes quarry-control to the cross-plane GDPR erasure
-// fan-out (velion.gdpr.erasure.requested) and hard-purges this service's
+// fan-out (verevon.gdpr.erasure.requested) and hard-purges this service's
 // org-scoped crawl data when an organization is erased.
 //
 // Producers: org-core publishes this exact subject + payload shape on BOTH
@@ -23,7 +23,7 @@ import (
 )
 
 // ErasureRequestedSubject mirrors org-core's GDPRErasureFanoutSubject.
-const ErasureRequestedSubject = "velion.gdpr.erasure.requested"
+const ErasureRequestedSubject = "verevon.gdpr.erasure.requested"
 
 // OrgPurger is the store slice this consumer needs. store.DB satisfies it
 // via PurgeOrg (internal/store/gdpr_purge.go). Kept as its own narrow

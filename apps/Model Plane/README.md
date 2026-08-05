@@ -266,7 +266,7 @@ must exist and be restore-rehearsed before the first current deployment; the
 candidate cannot be its own rollback.
 
 - **PostgreSQL 16** — session-core metadata (threads, runs, checkpoints, events, memory_index)
-- **NATS JetStream** — event bus (mp.v1.* subjects), compat adapter for v2 velion.* subjects
+- **NATS JetStream** — event bus (mp.v1.* subjects), compat adapter for v2 verevon.* subjects
 - **MinIO** — artifact storage (org/{org_id}/thread/{thread_id}/run/{run_id}/artifact/{artifact_id})
 - **Redis 7** — hot cache, idempotency dedup, rate limiter state
 - **Temporal** — workflow orchestration (separate Postgres instance)

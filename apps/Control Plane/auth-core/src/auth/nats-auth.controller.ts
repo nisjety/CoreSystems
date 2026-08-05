@@ -13,7 +13,7 @@ import {
  * `Headers` instance. Better Auth's `auth.api.getSession({ headers })`
  * calls `.get('cookie')` on the headers; passing the raw Express headers
  * (even via `as unknown as Headers`) silently fails because the plain
- * object has no `.get()` method. See velion/velion-gap.md G31.
+ * object has no `.get()` method. See verevon/verevon-gap.md G31.
  */
 function toWebHeaders(
   source: Record<string, string | string[] | undefined>,

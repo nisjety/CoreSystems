@@ -239,9 +239,9 @@ docker exec data-documents-service ping -c 1 redis > /dev/null && \
     log_success "documents-service can reach redis" || \
     log_error "documents-service cannot reach redis"
 
-docker exec data-analyzer ping -c 1 velion-nats > /dev/null 2>&1 && \
-    log_success "data-analyzer can reach velion-nats" || \
-    log_error "data-analyzer cannot reach velion-nats (expected if velion-nats not running)"
+docker exec data-analyzer ping -c 1 verevon-nats > /dev/null 2>&1 && \
+    log_success "data-analyzer can reach verevon-nats" || \
+    log_error "data-analyzer cannot reach verevon-nats (expected if verevon-nats not running)"
 
 log_info "Checking service logs for errors..."
 for service in documents-service retrieval-service embedding-worker data-analyzer; do

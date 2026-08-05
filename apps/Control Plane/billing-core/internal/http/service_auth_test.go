@@ -13,7 +13,7 @@ import (
 const billingServiceTestToken = "abcdef0123456789abcdef0123456789"
 
 func billingServiceTestRegistry(scopes ...string) string {
-	raw := `[{"principal":"velion-gateway","audience":"billing-core","token":"` + billingServiceTestToken + `","scopes":[`
+	raw := `[{"principal":"verevon-gateway","audience":"billing-core","token":"` + billingServiceTestToken + `","scopes":[`
 	for index, scope := range scopes {
 		if index > 0 {
 			raw += ","
@@ -38,7 +38,7 @@ func billingRequiredServiceTestRegistry(gatewayScopes, authScopes []string) stri
 func signBillingDelegation(request *http.Request, body []byte, timestamp time.Time, nonce string) {
 	digest := serviceDelegationBodyDigest(body)
 	claims := serviceDelegationClaims{
-		Principal:  "velion-gateway",
+		Principal:  "verevon-gateway",
 		Audience:   "billing-core",
 		Timestamp:  timestamp.UTC().Format(time.RFC3339),
 		Nonce:      nonce,
@@ -90,15 +90,15 @@ func TestParseBillingServiceCredentialsFailsClosed(t *testing.T) {
 	}{
 		{name: "empty", raw: ""},
 		{name: "malformed", raw: "{"},
-		{name: "unknown field", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:self"],"extra":true}]`},
-		{name: "wrong audience", raw: `[{"principal":"velion-gateway","audience":"org-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:self"]}]`},
-		{name: "short token", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"short","scopes":["billing:account:read:self"]}]`},
-		{name: "test token", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"test-generated-secret-value-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
-		{name: "placeholder token", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"placeholder-generated-secret-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
-		{name: "change-me token", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"change-me-generated-secret-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
-		{name: "replace-with token", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"replace-with-generated-secret-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
-		{name: "unknown scope", raw: `[{"principal":"velion-gateway","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:root"]}]`},
-		{name: "duplicate principal", raw: valid[:len(valid)-1] + `,{"principal":"velion-gateway","audience":"billing-core","token":"0123456789abcdef0123456789abcdef","scopes":["billing:account:read:self"]}]`},
+		{name: "unknown field", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:self"],"extra":true}]`},
+		{name: "wrong audience", raw: `[{"principal":"verevon-gateway","audience":"org-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:self"]}]`},
+		{name: "short token", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"short","scopes":["billing:account:read:self"]}]`},
+		{name: "test token", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"test-generated-secret-value-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
+		{name: "placeholder token", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"placeholder-generated-secret-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
+		{name: "change-me token", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"change-me-generated-secret-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
+		{name: "replace-with token", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"replace-with-generated-secret-at-least-32-bytes","scopes":["billing:account:read:self"]}]`},
+		{name: "unknown scope", raw: `[{"principal":"verevon-gateway","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:root"]}]`},
+		{name: "duplicate principal", raw: valid[:len(valid)-1] + `,{"principal":"verevon-gateway","audience":"billing-core","token":"0123456789abcdef0123456789abcdef","scopes":["billing:account:read:self"]}]`},
 		{name: "duplicate token", raw: `[{"principal":"machine-a","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:any"]},{"principal":"machine-b","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:any"]}]`},
 		{name: "duplicate scope", raw: billingServiceTestRegistry("billing:account:read:self", "billing:account:read:self")},
 		{name: "self scope on machine", raw: `[{"principal":"machine-a","audience":"billing-core","token":"abcdef0123456789abcdef0123456789","scopes":["billing:account:read:self"]}]`},
@@ -175,9 +175,9 @@ func TestBillingServiceAuthRejectsLegacyPartialInvalidAndUnscopedCredentials(t *
 	}{
 		{name: "missing", want: http.StatusUnauthorized},
 		{name: "legacy key", headers: map[string]string{"X-Internal-Api-Key": billingServiceTestToken}, want: http.StatusUnauthorized},
-		{name: "partial", headers: map[string]string{"X-Service-Id": "velion-gateway"}, want: http.StatusUnauthorized},
-		{name: "wrong token", headers: map[string]string{"X-Service-Id": "velion-gateway", "X-Service-Token": "wrong"}, want: http.StatusUnauthorized},
-		{name: "missing route scope", headers: map[string]string{"X-Service-Id": "velion-gateway", "X-Service-Token": billingServiceTestToken}, want: http.StatusForbidden},
+		{name: "partial", headers: map[string]string{"X-Service-Id": "verevon-gateway"}, want: http.StatusUnauthorized},
+		{name: "wrong token", headers: map[string]string{"X-Service-Id": "verevon-gateway", "X-Service-Token": "wrong"}, want: http.StatusUnauthorized},
+		{name: "missing route scope", headers: map[string]string{"X-Service-Id": "verevon-gateway", "X-Service-Token": billingServiceTestToken}, want: http.StatusForbidden},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -288,7 +288,7 @@ func TestBillingServiceDelegationV3CrossLanguageVector(t *testing.T) {
 		t.Fatalf("body digest=%q", bodyDigest)
 	}
 	signature := serviceDelegationSignature(billingServiceTestToken, serviceDelegationClaims{
-		Principal:  "velion-gateway",
+		Principal:  "verevon-gateway",
 		Audience:   "billing-core",
 		Timestamp:  "2026-07-14T10:00:00Z",
 		Nonce:      "nonce-0123456789abcdef",

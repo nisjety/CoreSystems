@@ -48,7 +48,7 @@ func TestBridgeForwardsProvisionedControlEventsAndAcknowledges(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := legacyJS.AddStream(&nats.StreamConfig{
-		Name: "LEGACY_CONTROL", Subjects: []string{"aqencia.controlplane.>", "velion.gdpr.>"},
+		Name: "LEGACY_CONTROL", Subjects: []string{"aqencia.controlplane.>", "verevon.gdpr.>"},
 		Storage: nats.FileStorage, Duplicates: 2 * time.Minute,
 	}); err != nil {
 		t.Fatal(err)

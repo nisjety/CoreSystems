@@ -26,12 +26,13 @@ type Config struct {
 	// SharedNATSURL/SharedNATSUser/SharedNATSPassword configure a SECOND,
 	// narrowly-scoped connection to the cross-plane control-shared-nats
 	// broker (identity "conversation-core-gdpr"), used only by the GDPR
-	// org-erasure consumer (internal/consumers/org_erasure_consumer.go).
+	// privacy consumers (the org-erasure and draft-only interactive-retention
+	// consumers).
 	// Deliberately DISTINCT env var names from NATSURL's own fallback chain
 	// above, which already treats the literal name NATS_SHARED_URL as an
 	// alternate Application-Plane-LOCAL broker URL — reusing that name here
 	// would silently collide with that existing fallback. Empty
-	// SharedNATSURL disables the org-erasure consumer without affecting the
+	// SharedNATSURL disables the privacy consumers without affecting the
 	// plane-local NATS client or any other consumer.
 	SharedNATSURL      string
 	SharedNATSUser     string
@@ -54,7 +55,7 @@ type Config struct {
 	// sweep is never accidentally disabled by omission.
 	OutboundReconcileInterval   time.Duration
 	OutboundReconcileStaleAfter time.Duration
-	// FeedbackMirrorOrgID is the Velion-owned monitored organization that every
+	// FeedbackMirrorOrgID is the Verevon-owned monitored organization that every
 	// pilot-feedback submission (conversation.Service.SubmitFeedback) is
 	// mirrored into, in addition to the submitter's own org. This exists
 	// because conversation-core-go has no cross-org/platform-admin read
@@ -89,7 +90,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		HTTPPort:           getEnvInt("PORT", 3160),
 		DatabaseURL:        strings.TrimSpace(getEnv("DATABASE_URL", "")),
-		NATSURL:            strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
+		NATSURL:            strings.TrimSpace(getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
 		NATSUser:           strings.TrimSpace(getEnv("NATS_USER", "")),
 		NATSPassword:       strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
 		ServiceName:        strings.TrimSpace(getEnv("SERVICE_NAME", "conversation-core-go")),
@@ -97,7 +98,7 @@ func Load() (*Config, error) {
 		SharedNATSUser:     strings.TrimSpace(getEnv("CONVERSATION_GDPR_SHARED_NATS_USER", "")),
 		SharedNATSPassword: strings.TrimSpace(getEnv("CONVERSATION_GDPR_SHARED_NATS_PASSWORD", "")),
 		DelegationKeys: map[string]string{
-			"velion-gateway":      strings.TrimSpace(getEnv("CONVERSATION_GATEWAY_SERVICE_TOKEN", "")),
+			"verevon-gateway":      strings.TrimSpace(getEnv("CONVERSATION_GATEWAY_SERVICE_TOKEN", "")),
 			"conversation-ingest": strings.TrimSpace(getEnv("CONVERSATION_CORE_INGEST_SERVICE_TOKEN", "")),
 		},
 		// Non-fatal only when the entire integration block is unset. Any partial
@@ -168,7 +169,7 @@ func Load() (*Config, error) {
 		for name, secret := range map[string]string{
 			"INTEGRATION_INTERNAL_API_KEY":             cfg.IntegrationInternalKey,
 			"CONVERSATION_INTEGRATION_SERVICE_API_KEY": cfg.IntegrationServiceCredential,
-			"CONVERSATION_GATEWAY_SERVICE_TOKEN":       cfg.DelegationKeys["velion-gateway"],
+			"CONVERSATION_GATEWAY_SERVICE_TOKEN":       cfg.DelegationKeys["verevon-gateway"],
 			"CONVERSATION_CORE_INGEST_SERVICE_TOKEN":   cfg.DelegationKeys["conversation-ingest"],
 		} {
 			if attestationPrivateKeyEncoded == secret {
@@ -219,12 +220,12 @@ func validServiceURL(value string) bool {
 }
 
 func validateDelegationKeys(keys map[string]string) error {
-	for _, serviceID := range []string{"velion-gateway", "conversation-ingest"} {
+	for _, serviceID := range []string{"verevon-gateway", "conversation-ingest"} {
 		if !validDelegationSecret(keys[serviceID]) {
 			return fmt.Errorf("delegation token for %s must be a non-placeholder secret of at least 32 bytes", serviceID)
 		}
 	}
-	if keys["velion-gateway"] == keys["conversation-ingest"] {
+	if keys["verevon-gateway"] == keys["conversation-ingest"] {
 		return fmt.Errorf("conversation delegation tokens must be distinct per service")
 	}
 	return nil

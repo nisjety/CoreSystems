@@ -1,6 +1,6 @@
-// U6-3 (ui-ux-velion-gap.md §10): RBAC client.
+// U6-3 (ui-ux-verevon-gap.md §10): RBAC client.
 //
-// Speaks to velion's existing /api/org/[...path] catch-all proxy which
+// Speaks to verevon's existing /api/org/[...path] catch-all proxy which
 // forwards to org-core's RBAC surface (see internal/http/rbac_handlers.go
 // in org-core).
 

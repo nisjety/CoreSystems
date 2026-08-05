@@ -31,12 +31,12 @@ import {
 } from "lucide-react";
 import { useEffect, useReducer, useState } from "react";
 import {
-  VelionButton,
-  VelionIconButton,
-  VelionInput,
-  VelionSegmented,
-  VelionSegmentedButton,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonIconButton,
+  VerevonInput,
+  VerevonSegmented,
+  VerevonSegmentedButton,
+} from "@/components/ui/verevon-ui";
 import { cn } from "@/lib/utils";
 import {
   type ChatbotAddOnId,
@@ -57,20 +57,20 @@ import {
   ChannelHeroCard,
   IntegrationCard,
   SquareIconButton,
-} from "@/features/agents-v2/components/VelionChatbotStudioCards";
+} from "@/features/agents-v2/components/VerevonChatbotStudioCards";
 import {
   EmptyStateCard,
   EmptyStateInline,
   MetricCard,
   SectionHeader,
-} from "@/features/agents-v2/components/VelionChatbotStudioPrimitives";
-import { ChatbotPlaygroundSurface } from "@/features/agents-v2/components/VelionChatbotPlayground";
+} from "@/features/agents-v2/components/VerevonChatbotStudioPrimitives";
+import { ChatbotPlaygroundSurface } from "@/features/agents-v2/components/VerevonChatbotPlayground";
 import {
   allAddOnIds,
   chatbotDisplayName,
   defaultVisibleAddOns,
   studioSections,
-} from "@/features/agents-v2/lib/velion-chatbot-studio-data";
+} from "@/features/agents-v2/lib/verevon-chatbot-studio-data";
 
 type AddOnCanvasState = {
   visible: Set<ChatbotAddOnId>;
@@ -127,7 +127,7 @@ function addOnCanvasReducer(
   }
 }
 
-export function VelionChatbotStudio() {
+export function VerevonChatbotStudio() {
   const [agentSelection, setAgentSelection] = useAgentSelection();
   const [section] = useChatbotBuilderSection();
   const [selectedAddOn, setSelectedAddOn] = useChatbotAddOn();
@@ -221,24 +221,24 @@ function AnalyticsPage() {
         title="Analytics"
         description="Measure chatbot volume, topic distribution, and sentiment signals."
         action={(
-          <VelionButton radius="sm" className="px-4 text-[13px] font-semibold">
+          <VerevonButton radius="sm" className="px-4 text-[13px] font-semibold">
             <CalendarDays className="size-4" />
             Live event window
-          </VelionButton>
+          </VerevonButton>
         )}
       />
-      <VelionSegmented className="mt-8">
+      <VerevonSegmented className="mt-8">
         {tabs.map((tab) => (
-          <VelionSegmentedButton
+          <VerevonSegmentedButton
             key={tab.id}
             aria-pressed={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id)}
             className="px-4 font-semibold"
           >
             {tab.label}
-          </VelionSegmentedButton>
+          </VerevonSegmentedButton>
         ))}
-      </VelionSegmented>
+      </VerevonSegmented>
       {activeTab === "chat-count" ? (
         <>
           <div className="mt-7 grid grid-cols-1 gap-4 md:grid-cols-3">
@@ -273,10 +273,10 @@ function InsightsPage() {
         title="Insights"
         description="Review the signals that should shape chatbot improvements."
         action={(
-          <VelionButton radius="sm" className="px-4 text-[13px] font-semibold">
+          <VerevonButton radius="sm" className="px-4 text-[13px] font-semibold">
             <CalendarDays className="size-4" />
             Live event window
-          </VelionButton>
+          </VerevonButton>
         )}
       />
 
@@ -289,7 +289,7 @@ function InsightsPage() {
       <EmptyStateCard
         Icon={Sparkles}
         title="No improvement signals yet"
-        description="Velion will rank unanswered questions, missing sources, and action failures after live conversations arrive."
+        description="Verevon will rank unanswered questions, missing sources, and action failures after live conversations arrive."
       />
 
       <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,1fr)_520px]">
@@ -302,7 +302,7 @@ function InsightsPage() {
 
 function TopicsPanel() {
   return (
-    <div className="velion-panel mt-7 p-6">
+    <div className="verevon-panel mt-7 p-6">
       <h2 className="text-[20px] font-semibold">Topics</h2>
       <p className="mt-2 text-[14px] text-[#6F747D] dark:text-[#AEB4C0]">Most common subjects detected across chatbot conversations.</p>
       <EmptyStateInline Icon={Search} title="No topic clusters yet" description="Topic groups are generated from real conversations." />
@@ -318,7 +318,7 @@ function SentimentPanel() {
         ["Neutral", "0", "bg-[#F4F5F7] text-[#555B65]"],
         ["Negative", "0", "bg-[#FFF0EC] text-[#B6482C]"],
       ].map(([label, value, className]) => (
-        <div key={label} className="velion-panel p-6">
+        <div key={label} className="verevon-panel p-6">
           <div className={cn("inline-flex rounded-full px-3 py-1 text-[12px] font-semibold", className)}>{label}</div>
           <div className="mt-5 text-[34px] font-semibold">{value}</div>
           <p className="mt-3 text-[14px] leading-6 text-[#6F747D] dark:text-[#AEB4C0]">Measured from classified customer and assistant turns once live conversations are available.</p>
@@ -336,14 +336,14 @@ function FineTuningPage() {
           title="Fine-tuning"
           description="Upload supervised examples and datasets for real model fine-tuning. Use this for model weights/adapters, not prompt engineering."
           action={(
-            <VelionButton radius="sm" className="px-5 text-[13px] font-semibold">
+            <VerevonButton radius="sm" className="px-5 text-[13px] font-semibold">
               <Info className="size-5" />
               Learn more
-            </VelionButton>
+            </VerevonButton>
           )}
         />
 
-        <div className="velion-panel mt-12 p-7">
+        <div className="verevon-panel mt-12 p-7">
           <div className="flex items-center justify-between">
             <h2 className="text-[23px] font-semibold">Add files</h2>
             <ChevronDown className="size-5 rotate-180 text-[#7C828C]" />
@@ -369,7 +369,7 @@ function FineTuningPage() {
             <h2 className="text-[23px] font-semibold">Training datasets</h2>
             <div className="relative w-full sm:w-[360px]">
               <Search className="pointer-events-none absolute left-4 top-1/2 size-5 -translate-y-1/2 text-[#A0A5AE]" />
-              <VelionInput
+              <VerevonInput
                 aria-label="Search training datasets"
                 placeholder="Search…"
                 variant="compact"
@@ -399,20 +399,20 @@ function FineTuningPage() {
 
       <aside className="border-l border-[#E3E4E8] bg-[#F7F7F8] p-8 dark:border-[#2A2C31] dark:bg-[#111216] xl:-my-8 xl:-mr-7">
         <h2 className="text-[23px] font-semibold">Fine-tuning</h2>
-        <div className="velion-panel mt-8 p-5">
+        <div className="verevon-panel mt-8 p-5">
           <div className="flex items-center justify-between text-[17px] font-semibold">
             <span className="inline-flex items-center gap-3"><TestTubeDiagonal className="size-5" />0 datasets</span>
             <span>0 KB</span>
           </div>
         </div>
-        <div className="velion-panel mt-6 p-5">
+        <div className="verevon-panel mt-6 p-5">
           <div className="flex items-center justify-between text-[16px]">
             <span className="text-[#6F747D] dark:text-[#AEB4C0]">Training size</span>
             <span className="font-semibold">0 KB / 20 MB</span>
           </div>
-          <VelionButton disabled radius="sm" className="mt-6 w-full bg-[#D8DADE] text-[13px] font-semibold text-white transition-colors dark:bg-[#303238]">
+          <VerevonButton disabled radius="sm" className="mt-6 w-full bg-[#D8DADE] text-[13px] font-semibold text-white transition-colors dark:bg-[#303238]">
             Start fine-tune
-          </VelionButton>
+          </VerevonButton>
         </div>
         <div className="mt-6 flex min-h-[54px] items-center gap-3 rounded-[9px] border border-[#F0DCA6] bg-[#FFF8DC] px-4 text-[15px] font-semibold text-[#B85E16]">
           <RefreshCw className="size-5" />
@@ -440,17 +440,17 @@ function ToolsPage({ supportStatus }: { supportStatus: SupportIntegrationStatus 
           <div className="flex min-w-0 flex-1 justify-end gap-3">
             <div className="relative w-full max-w-[470px]">
               <Search className="pointer-events-none absolute left-4 top-1/2 size-5 -translate-y-1/2 text-[#6F747D]" />
-              <VelionInput
+              <VerevonInput
                 aria-label="Search tools"
                 placeholder="Search"
                 variant="compact"
                 className="pl-12 pr-4 text-[13px]"
               />
             </div>
-            <VelionButton variant="primary" radius="sm" className="shrink-0 px-6 text-[13px] font-semibold">
+            <VerevonButton variant="primary" radius="sm" className="shrink-0 px-6 text-[13px] font-semibold">
               <Plus className="size-5" />
               Create tool
-            </VelionButton>
+            </VerevonButton>
           </div>
         )}
       />
@@ -468,7 +468,7 @@ function InstallPage() {
     { title: "Email", badge: "Beta", description: "Connect your agent to an email address and let it respond to messages from your customers.", Icon: Mail, action: "Subscribe to enable" },
     { title: "Zapier", description: "Connect your agent with thousands of apps using Zapier.", Icon: Plug, action: "Subscribe to enable" },
     { title: "Slack", description: "Connect your agent to Slack, mention it, and have it reply to any message.", Icon: MessagesSquare, action: "Subscribe to enable" },
-    { title: "WordPress", description: "Install the Velion widget script through a WordPress embed or plugin wrapper.", Icon: Globe2, action: "Setup" },
+    { title: "WordPress", description: "Install the Verevon widget script through a WordPress embed or plugin wrapper.", Icon: Globe2, action: "Setup" },
     { title: "WhatsApp", description: "Connect your agent to a WhatsApp number and respond in the same thread.", Icon: MessageCircle, action: "Subscribe to enable" },
     { title: "Messenger", description: "Connect your agent to a Facebook page and let it reply to customers.", Icon: Send, action: "Subscribe to enable" },
   ];
@@ -506,10 +506,10 @@ function IntegrationsPage({ supportStatus }: { supportStatus: SupportIntegration
         title="Integrations"
         description="Connect the systems the chatbot can fetch data from. Tools then define the allowed option pool over those integrations."
         action={(
-          <VelionButton variant="primary" radius="sm" className="px-4 text-[13px] font-semibold">
+          <VerevonButton variant="primary" radius="sm" className="px-4 text-[13px] font-semibold">
             <Plus className="size-4" />
             Add integration
-          </VelionButton>
+          </VerevonButton>
         )}
       />
       <div className="mt-8 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -528,10 +528,10 @@ function LeadsPage() {
         title="Leads"
         description="Review lead submissions collected by chatbot skills and export them for follow-up."
         action={(
-          <VelionButton variant="primary" radius="sm" className="px-4 text-[13px] font-semibold">
+          <VerevonButton variant="primary" radius="sm" className="px-4 text-[13px] font-semibold">
             Export
             <Download className="size-4" />
-          </VelionButton>
+          </VerevonButton>
         )}
       />
       <div className="mt-8">
@@ -550,9 +550,9 @@ function ChatLogsPage() {
           <div className="flex items-center gap-2">
             <SquareIconButton label="Filter chat logs" Icon={Settings2} />
             <SquareIconButton label="Refresh chat logs" Icon={RefreshCw} />
-            <VelionIconButton size="lg" radius="sm" aria-label="Download chat logs" className="bg-[#111111] text-white hover:bg-[#2A2A2A] hover:text-white">
+            <VerevonIconButton size="lg" radius="sm" aria-label="Download chat logs" className="bg-[#111111] text-white hover:bg-[#2A2A2A] hover:text-white">
               <Download className="size-5" />
-            </VelionIconButton>
+            </VerevonIconButton>
           </div>
         </div>
         <div className="mt-12 space-y-3">
@@ -599,9 +599,9 @@ function SettingsPage() {
           ["Tone", "Clear, concise, and product-aware"],
           ["Fallback behavior", "Ask for clarification before handing off"],
         ].map(([label, value]) => (
-          <label key={label} className="velion-panel grid gap-3 p-5">
+          <label key={label} className="verevon-panel grid gap-3 p-5">
             <span className="text-[14px] font-semibold text-[#6F747D] dark:text-[#AEB4C0]">{label}</span>
-            <VelionInput defaultValue={value} variant="compact" className="px-4 text-[13px]" />
+            <VerevonInput defaultValue={value} variant="compact" className="px-4 text-[13px]" />
           </label>
         ))}
       </div>
@@ -611,7 +611,7 @@ function SettingsPage() {
 
 function CountryCard() {
   return (
-    <div className="velion-panel p-7">
+    <div className="verevon-panel p-7">
       <h2 className="text-[23px] font-semibold">Chats by country</h2>
       <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="relative min-h-[260px] overflow-hidden rounded-[10px] bg-[#FAFAFB] dark:bg-[#111216]">
@@ -633,17 +633,17 @@ function CountryCard() {
 
 function LeadsCard({ hideHeaderAction = false }: { hideHeaderAction?: boolean }) {
   return (
-    <div className="velion-panel p-7">
+    <div className="verevon-panel p-7">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h2 className="text-[23px] font-semibold">Leads</h2>
           <p className="mt-2 text-[15px] text-[#6F747D] dark:text-[#AEB4C0]">Submitted from lead collection skills.</p>
         </div>
         {hideHeaderAction ? null : (
-          <VelionButton variant="primary" radius="sm" className="px-4 text-[13px] font-semibold">
+          <VerevonButton variant="primary" radius="sm" className="px-4 text-[13px] font-semibold">
             Export
             <Download className="size-4" />
-          </VelionButton>
+          </VerevonButton>
         )}
       </div>
       <div className="mt-6 overflow-hidden rounded-[10px] border border-[#E8E9EC]">

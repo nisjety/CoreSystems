@@ -272,7 +272,7 @@ mod tests {
     fn formats_ranked_candidates_with_scores_and_docs() {
         let resp = RetrieveResponse {
             candidates: vec![
-                candidate("Velion onboarding flow.", "doc-1", 0.42),
+                candidate("Verevon onboarding flow.", "doc-1", 0.42),
                 candidate("Billing trial is 14 days.", "doc-2", 0.31),
             ],
             ..Default::default()
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(parsed["no_results"], false);
         assert_eq!(parsed["results"][0]["document_id"], "doc-1");
         assert!(out.contains("2 chunk(s)"));
-        assert!(out.contains("1. [score 0.420] Velion onboarding flow."));
+        assert!(out.contains("1. [score 0.420] Verevon onboarding flow."));
         assert!(out.contains("(document doc-1)"));
         assert!(out.contains("2. [score 0.310] Billing trial is 14 days."));
     }

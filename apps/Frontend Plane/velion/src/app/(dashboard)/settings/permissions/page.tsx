@@ -1,7 +1,7 @@
 import { SettingsSectionFrame } from '@/components/settings/SettingsSectionFrame'
 import { PermissionsEditor } from '@/components/settings/permissions/PermissionsEditor'
 
-// U6-3 (ui-ux-velion-gap.md §10): real RBAC editor.
+// U6-3 (ui-ux-verevon-gap.md §10): real RBAC editor.
 //
 // Replaces the previous <SettingsPlaceholderPanel> with a live editor backed
 // by org-core's role/permission surface (see internal/rbac/ in org-core).

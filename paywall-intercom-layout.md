@@ -14,8 +14,8 @@
             - generic [ref=e41]
           - paragraph [ref=e58]:
             - text: Stuck?
-            - link "support@velion.com" [ref=e59] [cursor=pointer]:
-              - /url: mailto:support@velion.com
+            - link "support@verevon.com" [ref=e59] [cursor=pointer]:
+              - /url: mailto:support@verevon.com
         - generic [ref=e60]:
           - generic [ref=e62]:
             - generic

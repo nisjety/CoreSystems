@@ -149,7 +149,7 @@ func (s *Service) Lookup(ctx context.Context, query string, limit, page int, fuz
 		return Response{}, fmt.Errorf("address: build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "VelionInformationCore/1.0")
+	req.Header.Set("User-Agent", "VerevonInformationCore/1.0")
 
 	resp, err := s.client.Do(req)
 	if err != nil {

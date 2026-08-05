@@ -51,8 +51,8 @@ routable. `mp-events::subjects` and `go/pkg/natsx` expose translation and subscr
 
 | Legacy subject | Canonical equivalent |
 |----------------|----------------------|
-| `velion.agent.run.{run_id}.event` | `mp.v1.run.{run_id}.event` |
-| `velion.session.{session_key}.command` | `mp.v1.session.{session_key}.command` |
+| `verevon.agent.run.{run_id}.event` | `mp.v1.run.{run_id}.event` |
+| `verevon.session.{session_key}.command` | `mp.v1.session.{session_key}.command` |
 | `aqencia.reasoning.reasoning.started` | `mp.v1.ingress.run_started_compat` |
 | `aqencia.reasoning.reasoning.completed` | `mp.v1.ingress.run_completed_compat` |
 | `aqencia.reasoning.usage.recorded` | `mp.v1.ingress.usage` |

@@ -183,7 +183,7 @@ export function DashboardComposer({
         ) : null}
 
         <form
-          className="velion-dashboard-composer-card velion-composer-shell ring-1 ring-black/[0.03] dark:ring-white/[0.06]"
+          className="verevon-dashboard-composer-card verevon-composer-shell ring-1 ring-black/[0.03] dark:ring-white/[0.06]"
           action={() => {
             void submitComposer();
           }}
@@ -210,20 +210,20 @@ export function DashboardComposer({
               </div>
             ) : null}
 
-            <label className="sr-only" htmlFor="velion-dashboard-input">
-              Message Velion
+            <label className="sr-only" htmlFor="verevon-dashboard-input">
+              Message Verevon
             </label>
             <textarea
               ref={textareaRef}
-              id="velion-dashboard-input"
-              aria-label="Message Velion"
+              id="verevon-dashboard-input"
+              aria-label="Message Verevon"
               aria-busy={isRecording}
               value={message}
               onChange={handleMessageChange}
               onKeyDown={handleComposerKeyDown}
               placeholder={modeAnnouncement ? "" : "How can I help you today?"}
               rows={1}
-              className="velion-dashboard-textarea w-full resize-none bg-transparent px-1 text-[#1a1a1a] placeholder:text-[#B8B4AF] focus:outline-none disabled:opacity-50 dark:text-[#F7F8F8] dark:placeholder:text-[#62666D]"
+              className="verevon-dashboard-textarea w-full resize-none bg-transparent px-1 text-[#1a1a1a] placeholder:text-[#B8B4AF] focus:outline-none disabled:opacity-50 dark:text-[#F7F8F8] dark:placeholder:text-[#62666D]"
               style={{
                 color: entities.length > 0 ? "transparent" : undefined,
                 caretColor: "currentColor",
@@ -234,7 +234,7 @@ export function DashboardComposer({
 
           {isRecording ? (
             <div className="mx-4 mb-2 h-px overflow-hidden rounded-full bg-black/6 dark:bg-white/10">
-              <div className="velion-loading-bar h-full w-1/2 rounded-full bg-linear-to-r from-orange-300 via-blue-400 to-orange-300" />
+              <div className="verevon-loading-bar h-full w-1/2 rounded-full bg-linear-to-r from-orange-300 via-blue-400 to-orange-300" />
             </div>
           ) : null}
 

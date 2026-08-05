@@ -22,6 +22,60 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// MemoryProvenance — who decided a memory was worth keeping.
+type MemoryProvenance int32
+
+const (
+	// Not recorded. Pre-provenance rows land here; never render these as stated.
+	MemoryProvenance_MEMORY_PROVENANCE_UNSPECIFIED MemoryProvenance = 0
+	// The user said it, or asked for it to be saved.
+	MemoryProvenance_MEMORY_PROVENANCE_STATED MemoryProvenance = 1
+	// A model inferred it from a conversation. Auto-accepted, but this is the
+	// class a user is most likely to want to delete.
+	MemoryProvenance_MEMORY_PROVENANCE_INFERRED MemoryProvenance = 2
+)
+
+// Enum value maps for MemoryProvenance.
+var (
+	MemoryProvenance_name = map[int32]string{
+		0: "MEMORY_PROVENANCE_UNSPECIFIED",
+		1: "MEMORY_PROVENANCE_STATED",
+		2: "MEMORY_PROVENANCE_INFERRED",
+	}
+	MemoryProvenance_value = map[string]int32{
+		"MEMORY_PROVENANCE_UNSPECIFIED": 0,
+		"MEMORY_PROVENANCE_STATED":      1,
+		"MEMORY_PROVENANCE_INFERRED":    2,
+	}
+)
+
+func (x MemoryProvenance) Enum() *MemoryProvenance {
+	p := new(MemoryProvenance)
+	*p = x
+	return p
+}
+
+func (x MemoryProvenance) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (MemoryProvenance) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_memory_proto_enumTypes[0].Descriptor()
+}
+
+func (MemoryProvenance) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_memory_proto_enumTypes[0]
+}
+
+func (x MemoryProvenance) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use MemoryProvenance.Descriptor instead.
+func (MemoryProvenance) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{0}
+}
+
 type SearchMemoryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread context for scoping.
@@ -191,7 +245,17 @@ type MemoryEntry struct {
 	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// Owning user, when known. Empty for entries that are not user-scoped
 	// (e.g. org/workspace/policy facts).
-	UserId        string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	UserId string `protobuf:"bytes,7,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// How this memory came to exist, so a person reading "what do you remember
+	// about me" can tell what they ASKED Verevon to remember from what Verevon
+	// decided to remember on its own.
+	//
+	// Three-valued rather than a bool: "stated" covers both an explicit
+	// save-memory tool call and a phrase the deterministic matcher recognised
+	// ("husk at ..."), which are equally the user's own words; "inferred" is a
+	// model's reading of a conversation; "unknown" is an older row written before
+	// provenance was recorded, and must not be presented as either.
+	Provenance    MemoryProvenance `protobuf:"varint,8,opt,name=provenance,proto3,enum=model_plane.v1.MemoryProvenance" json:"provenance,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,6 +337,13 @@ func (x *MemoryEntry) GetUserId() string {
 		return x.UserId
 	}
 	return ""
+}
+
+func (x *MemoryEntry) GetProvenance() MemoryProvenance {
+	if x != nil {
+		return x.Provenance
+	}
+	return MemoryProvenance_MEMORY_PROVENANCE_UNSPECIFIED
 }
 
 type IndexMemoryRequest struct {
@@ -802,7 +873,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x14SearchMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"\xe1\x01\n" +
+	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason\"\xa3\x02\n" +
 	"\vMemoryEntry\x12\x1b\n" +
 	"\tmemory_id\x18\x01 \x01(\tR\bmemoryId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x14\n" +
@@ -811,7 +882,10 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x05score\x18\x05 \x01(\x02R\x05score\x129\n" +
 	"\n" +
 	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x17\n" +
-	"\auser_id\x18\a \x01(\tR\x06userId\"\xae\x01\n" +
+	"\auser_id\x18\a \x01(\tR\x06userId\x12@\n" +
+	"\n" +
+	"provenance\x18\b \x01(\x0e2 .model_plane.v1.MemoryProvenanceR\n" +
+	"provenance\"\xae\x01\n" +
 	"\x12IndexMemoryRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x14\n" +
 	"\x05topic\x18\x02 \x01(\tR\x05topic\x12\x18\n" +
@@ -843,7 +917,11 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x14DeleteMemoryResponse\x12\x18\n" +
 	"\adeleted\x18\x01 \x01(\bR\adeleted\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +
-	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason2\xc7\x03\n" +
+	"\x12degradation_reason\x18\x03 \x01(\tR\x11degradationReason*s\n" +
+	"\x10MemoryProvenance\x12!\n" +
+	"\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n" +
+	"\x1aMEMORY_PROVENANCE_INFERRED\x10\x022\xc7\x03\n" +
 	"\rMemoryService\x12Y\n" +
 	"\fSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n" +
 	"\vIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n" +
@@ -865,41 +943,44 @@ func file_model_plane_v1_memory_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_memory_proto_rawDescData
 }
 
+var file_model_plane_v1_memory_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_model_plane_v1_memory_proto_goTypes = []any{
-	(*SearchMemoryRequest)(nil),   // 0: model_plane.v1.SearchMemoryRequest
-	(*SearchMemoryResponse)(nil),  // 1: model_plane.v1.SearchMemoryResponse
-	(*MemoryEntry)(nil),           // 2: model_plane.v1.MemoryEntry
-	(*IndexMemoryRequest)(nil),    // 3: model_plane.v1.IndexMemoryRequest
-	(*IndexMemoryResponse)(nil),   // 4: model_plane.v1.IndexMemoryResponse
-	(*MemoryHealthRequest)(nil),   // 5: model_plane.v1.MemoryHealthRequest
-	(*MemoryHealthResponse)(nil),  // 6: model_plane.v1.MemoryHealthResponse
-	(*ListMemoryRequest)(nil),     // 7: model_plane.v1.ListMemoryRequest
-	(*ListMemoryResponse)(nil),    // 8: model_plane.v1.ListMemoryResponse
-	(*DeleteMemoryRequest)(nil),   // 9: model_plane.v1.DeleteMemoryRequest
-	(*DeleteMemoryResponse)(nil),  // 10: model_plane.v1.DeleteMemoryResponse
-	(*timestamppb.Timestamp)(nil), // 11: google.protobuf.Timestamp
+	(MemoryProvenance)(0),         // 0: model_plane.v1.MemoryProvenance
+	(*SearchMemoryRequest)(nil),   // 1: model_plane.v1.SearchMemoryRequest
+	(*SearchMemoryResponse)(nil),  // 2: model_plane.v1.SearchMemoryResponse
+	(*MemoryEntry)(nil),           // 3: model_plane.v1.MemoryEntry
+	(*IndexMemoryRequest)(nil),    // 4: model_plane.v1.IndexMemoryRequest
+	(*IndexMemoryResponse)(nil),   // 5: model_plane.v1.IndexMemoryResponse
+	(*MemoryHealthRequest)(nil),   // 6: model_plane.v1.MemoryHealthRequest
+	(*MemoryHealthResponse)(nil),  // 7: model_plane.v1.MemoryHealthResponse
+	(*ListMemoryRequest)(nil),     // 8: model_plane.v1.ListMemoryRequest
+	(*ListMemoryResponse)(nil),    // 9: model_plane.v1.ListMemoryResponse
+	(*DeleteMemoryRequest)(nil),   // 10: model_plane.v1.DeleteMemoryRequest
+	(*DeleteMemoryResponse)(nil),  // 11: model_plane.v1.DeleteMemoryResponse
+	(*timestamppb.Timestamp)(nil), // 12: google.protobuf.Timestamp
 }
 var file_model_plane_v1_memory_proto_depIdxs = []int32{
-	11, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
-	2,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	11, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
-	2,  // 3: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	0,  // 4: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
-	3,  // 5: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
-	7,  // 6: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
-	9,  // 7: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
-	5,  // 8: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
-	1,  // 9: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
-	4,  // 10: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
-	8,  // 11: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
-	10, // 12: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
-	6,  // 13: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
-	9,  // [9:14] is the sub-list for method output_type
-	4,  // [4:9] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	12, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
+	3,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
+	12, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
+	0,  // 3: model_plane.v1.MemoryEntry.provenance:type_name -> model_plane.v1.MemoryProvenance
+	3,  // 4: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
+	1,  // 5: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
+	4,  // 6: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
+	8,  // 7: model_plane.v1.MemoryService.ListMemory:input_type -> model_plane.v1.ListMemoryRequest
+	10, // 8: model_plane.v1.MemoryService.DeleteMemory:input_type -> model_plane.v1.DeleteMemoryRequest
+	6,  // 9: model_plane.v1.MemoryService.Health:input_type -> model_plane.v1.MemoryHealthRequest
+	2,  // 10: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
+	5,  // 11: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
+	9,  // 12: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
+	11, // 13: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
+	7,  // 14: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
+	10, // [10:15] is the sub-list for method output_type
+	5,  // [5:10] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_memory_proto_init() }
@@ -912,13 +993,14 @@ func file_model_plane_v1_memory_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_memory_proto_rawDesc), len(file_model_plane_v1_memory_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_model_plane_v1_memory_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_memory_proto_depIdxs,
+		EnumInfos:         file_model_plane_v1_memory_proto_enumTypes,
 		MessageInfos:      file_model_plane_v1_memory_proto_msgTypes,
 	}.Build()
 	File_model_plane_v1_memory_proto = out.File

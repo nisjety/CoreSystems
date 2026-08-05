@@ -2,11 +2,11 @@
 
 ## Goal
 
-Complete `integration-corev2` as Velion's first-party integration platform: OAuth, tokens, provider lifecycle, safe metadata discovery, webhooks, sync orchestration, provider actions, token leases, audit, and cross-plane handoff. Nango and the old NestJS integration services become references only, not runtime dependencies.
+Complete `integration-corev2` as Verevon's first-party integration platform: OAuth, tokens, provider lifecycle, safe metadata discovery, webhooks, sync orchestration, provider actions, token leases, audit, and cross-plane handoff. Nango and the old NestJS integration services become references only, not runtime dependencies.
 
 ## Completion Definition
 
-`integration-corev2` is complete when Velion v2, finspo-core, Data Plane v2, Model Plane, and future Application Plane services can use integrations through Velion-owned APIs without Nango, raw provider-token exposure, or legacy proxy routes.
+`integration-corev2` is complete when Verevon v2, finspo-core, Data Plane v2, Model Plane, and future Application Plane services can use integrations through Verevon-owned APIs without Nango, raw provider-token exposure, or legacy proxy routes.
 
 Required properties:
 
@@ -198,11 +198,11 @@ Exit gates:
 - Replay and duplicate SCIM calls are safe.
 - Okta lifecycle actions are admin-consent gated and audited.
 
-## Phase 9: Velion V2 Integration
+## Phase 9: Verevon V2 Integration
 
 Scope:
 
-- Velion v2 uses only BFF routes backed by `integration-corev2`.
+- Verevon v2 uses only BFF routes backed by `integration-corev2`.
 - Settings shows provider readiness, connect, reconnect, disconnect, capabilities, consents, sync health.
 - Onboarding uses safe discovery and sync progress from `integration-corev2`.
 - Knowledge uses Data Plane records plus integration source state.
@@ -248,7 +248,7 @@ Scope:
 Exit gates:
 
 - No active runtime dependency on Nango.
-- No active Velion v2 caller points at old integration-core v1.
+- No active Verevon v2 caller points at old integration-core v1.
 - Compose/docs point to `integration-corev2` on `:3026`.
 - Legacy profiles are off by default.
 
@@ -260,7 +260,7 @@ Scope:
 - Verify HA behavior with multiple Go replicas and Rust normalizer replicas.
 - Ensure migrations are forward-only and deployment safe.
 - Add disaster recovery procedures for token vault, connection state, and replay events.
-- Freeze public API contracts for Velion v2 and internal planes.
+- Freeze public API contracts for Verevon v2 and internal planes.
 
 Exit gates:
 
@@ -289,5 +289,5 @@ Exit gates:
 2. Add downstream SCIM lifecycle orchestration into Control Plane/Application
    Plane.
 3. Add tracing, dashboards, richer provider metrics, and production runbooks.
-4. Run Velion v2 BFF/UI cutover tests for onboarding, settings, Knowledge,
+4. Run Verevon v2 BFF/UI cutover tests for onboarding, settings, Knowledge,
    dashboard, reconnect, disconnect, sync progress, and degraded providers.

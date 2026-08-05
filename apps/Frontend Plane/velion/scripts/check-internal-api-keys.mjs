@@ -11,7 +11,7 @@
  *   - Anything else            → console.warn, continue
  *
  * Disable the handshake (e.g. when bringing up a cluster from cold without
- * integration-api yet) by setting `VELION_INTERNAL_KEY_HANDSHAKE=skip`.
+ * integration-api yet) by setting `VEREVON_INTERNAL_KEY_HANDSHAKE=skip`.
  *
  * Keep this file dependency-free pure-JS — it must run on bare node before
  * any project deps are loaded.
@@ -23,12 +23,12 @@ const MIN_KEY_LENGTH = 32;
 const CHECKS = [
   {
     envVars: ['INTERNAL_API_KEY', 'INTERNAL_SERVICE_SECRET'],
-    purpose: 'velion → Control Plane services (user-core, auth-core, billing-core, session-core)',
+    purpose: 'verevon → Control Plane services (user-core, auth-core, billing-core, session-core)',
     required: true,
   },
   {
     envVars: ['AUTH_CORE_INTERNAL_API_KEY', 'INTEGRATION_CORE_INTERNAL_API_KEY'],
-    purpose: 'velion → integration-core (connect sessions, OAuth provider catalogue)',
+    purpose: 'verevon → integration-core (connect sessions, OAuth provider catalogue)',
     required: true,
   },
 ];
@@ -159,14 +159,14 @@ async function performHandshake(env) {
 }
 
 async function runHandshake(env) {
-  const mode = (env.VELION_INTERNAL_KEY_HANDSHAKE ?? '').toLowerCase();
+  const mode = (env.VEREVON_INTERNAL_KEY_HANDSHAKE ?? '').toLowerCase();
   if (mode === 'skip') return;
   if (env.NEXT_PHASE === 'phase-production-build') return;
-  if (env.NODE_ENV === 'test' && !env.VELION_ASSERT_KEYS_IN_TEST) return;
+  if (env.NODE_ENV === 'test' && !env.VEREVON_ASSERT_KEYS_IN_TEST) return;
 
   const report = await performHandshake(env);
   if (report.ok) {
-    console.log(`[velion startup] internal API key handshake OK (${report.succeeded.join(', ')})`);
+    console.log(`[verevon startup] internal API key handshake OK (${report.succeeded.join(', ')})`);
     return;
   }
 
@@ -179,8 +179,8 @@ async function runHandshake(env) {
     .join('\n');
 
   const header = fatal
-    ? `[velion startup] FATAL: internal API key handshake failed (NODE_ENV=${env.NODE_ENV ?? 'unset'}, mode=${mode || 'default'})`
-    : `[velion startup] WARN: internal API key handshake reported problems`;
+    ? `[verevon startup] FATAL: internal API key handshake failed (NODE_ENV=${env.NODE_ENV ?? 'unset'}, mode=${mode || 'default'})`
+    : `[verevon startup] WARN: internal API key handshake reported problems`;
 
   console[fatal ? 'error' : 'warn'](`${header}\n${formatted}`);
 
@@ -196,20 +196,20 @@ async function main() {
 
   // Skip on build / test passes.
   if (env.NEXT_PHASE === 'phase-production-build') return;
-  if (env.NODE_ENV === 'test' && !env.VELION_ASSERT_KEYS_IN_TEST) return;
+  if (env.NODE_ENV === 'test' && !env.VEREVON_ASSERT_KEYS_IN_TEST) return;
 
   // Phase 1: format validation (synchronous, decisive).
   const result = check(env);
   if (result.ok) {
-    console.log(`[velion startup] internal API keys OK (${result.resolved.join(', ')})`);
+    console.log(`[verevon startup] internal API keys OK (${result.resolved.join(', ')})`);
   } else {
     const formatted = result.problems
       .map((p) => `  - [${p.kind}] ${p.envVarNames.join(' | ')}: ${p.detail} (for: ${p.purpose})`)
       .join('\n');
     const isProduction = env.NODE_ENV === 'production';
     const header = isProduction
-      ? `[velion startup] FATAL: internal API key validation failed (NODE_ENV=production)`
-      : `[velion startup] WARN: internal API key validation failed (NODE_ENV=${env.NODE_ENV ?? 'unset'} — continuing because not production)`;
+      ? `[verevon startup] FATAL: internal API key validation failed (NODE_ENV=production)`
+      : `[verevon startup] WARN: internal API key validation failed (NODE_ENV=${env.NODE_ENV ?? 'unset'} — continuing because not production)`;
     console[isProduction ? 'error' : 'warn'](`${header}\n${formatted}`);
     if (isProduction) {
       process.exit(1);
@@ -221,7 +221,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('[velion startup] check-internal-api-keys: unexpected error:', err?.message ?? err);
+  console.error('[verevon startup] check-internal-api-keys: unexpected error:', err?.message ?? err);
   // Don't let an internal bug here block dev startup; only exit on prod.
   if (process.env.NODE_ENV === 'production') {
     process.exit(1);

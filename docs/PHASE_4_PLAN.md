@@ -1,9 +1,9 @@
-# Velion — Phase 4 "Data-Driven UI" Execution Plan
+# Verevon — Phase 4 "Data-Driven UI" Execution Plan
 
-> **Status:** Approved 2026-06-21 (recon-grounded + hardened by a 6-persona triage council). Source roadmap: `Velion-ai-first.md`. Phase 4 = a **user-mandated headline (data-driven UI)** + the bounded completions deferred from Phase 3. Gating verified green on-branch (Ownership PR-1..5 `596edfa4`, schema `b856b09d`, retrieval/documents wiring `0e0f748e`, W2 change-producer `916f3cc4`/`938c560d`/`71684b45`).
+> **Status:** Approved 2026-06-21 (recon-grounded + hardened by a 6-persona triage council). Source roadmap: `Verevon-ai-first.md`. Phase 4 = a **user-mandated headline (data-driven UI)** + the bounded completions deferred from Phase 3. Gating verified green on-branch (Ownership PR-1..5 `596edfa4`, schema `b856b09d`, retrieval/documents wiring `0e0f748e`, W2 change-producer `916f3cc4`/`938c560d`/`71684b45`).
 >
 > ## Headline
-> **Make every remaining Velion v3 surface render REAL backend data or an honest empty/Preview/Blueprint label — starting with the acute `WorkspaceSettingsPage` fabricated-security de-fake — on a shared `MeasurementState` read substrate**, plus the bounded completions (EU embedding residency, the HITL act-leg, the insights-overview proxy) that the headline makes coherent.
+> **Make every remaining Verevon v3 surface render REAL backend data or an honest empty/Preview/Blueprint label — starting with the acute `WorkspaceSettingsPage` fabricated-security de-fake — on a shared `MeasurementState` read substrate**, plus the bounded completions (EU embedding residency, the HITL act-leg, the insights-overview proxy) that the headline makes coherent.
 >
 > ## THE MULTI-XL INVARIANT (the discipline that keeps this shippable)
 > The backlog carries **five XL items** — and **ZERO of them build in Phase 4**: `A5-real-agent-config-wiring`, `B /embed public chatbot`, `C-D3c model-plane autonomous producer`, `F2 leads roller PII`, `G Tailwind→semantic-CSS rewrite`. Each is recorded as a **Phase 5** entry below, not silently dropped. **No code for any of the five may START until the Phase-4 headline (A) + F1 are live-verified.** If A slips, F1 is cut — never the headline.
@@ -11,7 +11,7 @@
 > ## THE ABSOLUTE HONESTY RULE
 > Real data, or an honest empty/Preview/Blueprint label via the shared `MeasurementState` pattern (loading/empty/preview/error/live — where **"live" never attaches to an unproduced value**, per the gold `insights-workspace.ts`). No false-security and no false-privacy claim ships without its backing gate in the same release. Every new gateway route is IDOR-clean (org+user from session, never client-supplied).
 
-Paths: gateway = `apps/Frontend Plane/velionv3/apps/gateway`; SPA = `apps/Frontend Plane/velionv3/src` (quote the space).
+Paths: gateway = `apps/Frontend Plane/verevonv3/apps/gateway`; SPA = `apps/Frontend Plane/verevonv3/src` (quote the space).
 
 ---
 
@@ -49,7 +49,7 @@ The acute breach: `securityToggles` all `enabled:true` under a "Security policy"
 
 ### `PR-3` — Cheap de-fake sweep + agents honest label + studio seed strip — deps: PR-2
 - **A4** ChatbotStudio analytics → real aggregates or "no measurement yet" (zero hardcoded `value:'0'`); **A6** studio templates honestly framed as starter templates; **A7** dashboard Weather/Traffic/News wired or relabeled (nothing implies a non-existent live feed).
-- **A5** relabel `AgentsPage` + the 861-line `velion-agent-blueprints` as **"Blueprint / not yet configured for this org"** (no Active/Private badge). Strip the gateway `studio.rs` seeded `Ava Berg`/Unsplash demo blocks → honest empty canvas.
+- **A5** relabel `AgentsPage` + the 861-line `verevon-agent-blueprints` as **"Blueprint / not yet configured for this org"** (no Active/Private badge). Strip the gateway `studio.rs` seeded `Ava Berg`/Unsplash demo blocks → honest empty canvas.
 - **DoD:** no implied-live values on any swept surface; seeded studio blocks gone; agents surface passes the 4-path honesty test; `cargo test` (studio.rs) + FE `pnpm verify` green. *(Add no new Tailwind when editing; any new empty-state component uses semantic CSS.)*
 
 ### `PR-4` — Insight non-OAuth legs + `/overview` proxy — deps: PR-3
@@ -65,7 +65,7 @@ The acute breach: `securityToggles` all `enabled:true` under a "Security policy"
 
 ### `PR-6` — HITL act-leg *(most net-new backend, LAST among IN)* — deps: PR-4
 - Add a `draft.reply`/outbound-send kind to the existing idempotent `ai_action_executor.go` via integration-corev2; **reuse the atomic approved→executed guard so a redelivered approve does NOT double-send** (dedup on `approval_id`).
-- Add the `velion.model.action.proposed` NATS subject + a generic cc-go `CreateAIAction` path + consumer so a human/hook can queue a `draft.reply` end-to-end.
+- Add the `verevon.model.action.proposed` NATS subject + a generic cc-go `CreateAIAction` path + consumer so a human/hook can queue a `draft.reply` end-to-end.
 - Emit a terminal `ai_action.send_failed` event (no silent retry-forever); audit every send with `approval_id`; **UI never claims "sent" before adapter confirmation**.
 - **DoD:** propose→approve→act flows end-to-end; redelivery does NOT double-send (dedup verified); send-failure surfaces honestly; new routes IDOR-clean; `go test` + `cargo test` green.
 

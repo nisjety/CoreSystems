@@ -1,4 +1,4 @@
-# Velion Studio Plane
+# Verevon Studio Plane
 
 **Status:** Proposed architecture and delivery baseline  
 **Last updated:** 2026-07-19  
@@ -10,7 +10,7 @@
 Studio is the place where users turn trusted business signals into approved work.
 
 It brings lead intelligence, competitor monitoring, marketing, human work
-management, design, and shipping into one coherent Velion workspace. Studio is
+management, design, and shipping into one coherent Verevon workspace. Studio is
 not a second implementation of those domains. It composes their data, actions,
 approvals, and workflows while each canonical domain remains owned by its
 existing plane and core.
@@ -62,7 +62,7 @@ a generic proxy, or a distributed monolith.
 ```mermaid
 flowchart TB
     User["User"] --> UI["Studio UI<br/>Frontend Plane"]
-    UI --> Gateway["Velion same-origin Gateway/BFF"]
+    UI --> Gateway["Verevon same-origin Gateway/BFF"]
     Gateway --> Studio["Studio Plane<br/>composition, projections, workflow state"]
 
     Studio --> Control["Control Plane<br/>identity, membership, entitlements, retention"]
@@ -76,7 +76,7 @@ flowchart TB
     Model --> Data
 ```
 
-The browser continues to call the Velion same-origin gateway. It never calls
+The browser continues to call the Verevon same-origin gateway. It never calls
 Studio Plane or another plane directly. The gateway derives the authenticated
 organization and actor, strips forged scope headers, normalizes typed envelopes,
 and obtains audience-bound service tokens.
@@ -388,7 +388,7 @@ An agent run may reference a human work item, and a human work item may show an
 agent run's progress. They remain different records with different owners.
 
 Do not attempt full Plane or AFFiNE parity before the linked-work-item workflow
-is proven useful inside Velion.
+is proven useful inside Verevon.
 
 ## Design Studio
 
@@ -410,7 +410,7 @@ Model Plane proposes typed design operations. `studio-core` validates
 authorization, schema, current revision, quota, and policy before applying an
 operation. Raw model-generated HTML is never canonical editable state.
 
-The current Velion gateway-local canvas store is a prototype. Migration must:
+The current Verevon gateway-local canvas store is a prototype. Migration must:
 
 1. preserve the current UI and response shape behind an adapter;
 2. persist projects in `studio-core`;
@@ -534,7 +534,7 @@ Responses use the CoreSystem typed envelopes:
 
 ## Actions and approvals
 
-Every meaningful operation must be registered in Velion's shared action
+Every meaningful operation must be registered in Verevon's shared action
 contract before the UI or Model Plane invokes it.
 
 Initial action families:
@@ -610,13 +610,13 @@ retries, redact dead-letter payloads, and expose reconciliation status.
 Example Studio-owned events:
 
 ```text
-velion.studio.v1.workspace.updated
-velion.studio.v1.view.saved
-velion.studio.v1.resource.linked
-velion.studio.v1.workflow.started
-velion.studio.v1.workflow.completed
-velion.studio.v1.workflow.failed
-velion.studio.v1.projection.rebuilt
+verevon.studio.v1.workspace.updated
+verevon.studio.v1.view.saved
+verevon.studio.v1.resource.linked
+verevon.studio.v1.workflow.started
+verevon.studio.v1.workflow.completed
+verevon.studio.v1.workflow.failed
+verevon.studio.v1.projection.rebuilt
 ```
 
 Studio consumes domain events but never republishes them as if Studio were the
@@ -656,7 +656,7 @@ not repositories to merge into CoreSystem.
   adopting its runtime or code requires a file-level license and architecture review.
 
 Any code reuse requires legal, security, maintenance, and dependency review.
-Prefer Velion-native contracts and selectively integrate isolated external
+Prefer Verevon-native contracts and selectively integrate isolated external
 systems through anti-corruption adapters.
 
 ## Delivery roadmap
@@ -806,7 +806,7 @@ authorized lead candidate
 ```
 
 This is the smallest end-to-end workflow that demonstrates why Studio exists.
-It exercises Velion's current strengths without pretending that CRM, market
+It exercises Verevon's current strengths without pretending that CRM, market
 intelligence, marketing automation, project management, design, and shipping
 are already complete products.
 

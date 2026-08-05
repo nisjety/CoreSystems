@@ -17,7 +17,7 @@ func TestDiscoverSlackReturnsSafeMetadata(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/auth.test":
-			_, _ = w.Write([]byte(`{"ok":true,"user":"Ima","user_id":"U1","team":"Velion","team_id":"T1"}`))
+			_, _ = w.Write([]byte(`{"ok":true,"user":"Ima","user_id":"U1","team":"Verevon","team_id":"T1"}`))
 		case "/conversations.list":
 			_, _ = w.Write([]byte(`{"ok":true,"channels":[{"id":"C1","name":"support"},{"id":"C2","name":"sales"}]}`))
 		default:
@@ -37,8 +37,8 @@ func TestDiscoverSlackReturnsSafeMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover error: %v", err)
 	}
-	if snapshot.WorkspaceName != "Velion" {
-		t.Fatalf("WorkspaceName = %q, want Velion", snapshot.WorkspaceName)
+	if snapshot.WorkspaceName != "Verevon" {
+		t.Fatalf("WorkspaceName = %q, want Verevon", snapshot.WorkspaceName)
 	}
 	if snapshot.EntityCounts["public_channels_sampled"] != 2 {
 		t.Fatalf("channel count = %d, want 2", snapshot.EntityCounts["public_channels_sampled"])
@@ -146,7 +146,7 @@ func TestDiscoverGitHubReturnsSafeRepositoryAndOrgMetadata(t *testing.T) {
 		case "/user":
 			_, _ = w.Write([]byte(`{"id":123,"login":"ima","name":"Ima"}`))
 		case "/user/repos":
-			_, _ = w.Write([]byte(`[{"full_name":"triodelab/coresystem"},{"full_name":"triodelab/velion"}]`))
+			_, _ = w.Write([]byte(`[{"full_name":"triodelab/coresystem"},{"full_name":"triodelab/verevon"}]`))
 		case "/user/orgs":
 			_, _ = w.Write([]byte(`[{"login":"triodelab"},{"login":"openai"}]`))
 		default:
@@ -250,11 +250,11 @@ func TestDiscoverMetaReturnsSafeBusinessInventory(t *testing.T) {
 		case "/me":
 			_, _ = w.Write([]byte(`{"id":"user-1","name":"Meta Admin"}`))
 		case "/me/accounts":
-			_, _ = w.Write([]byte(`{"data":[{"id":"page-1","name":"Velion Page","instagram_business_account":{"id":"ig-1","username":"velion"}}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"page-1","name":"Verevon Page","instagram_business_account":{"id":"ig-1","username":"verevon"}}]}`))
 		case "/me/adaccounts":
-			_, _ = w.Write([]byte(`{"data":[{"id":"act_1","name":"Velion Ads"}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"act_1","name":"Verevon Ads"}]}`))
 		case "/me/businesses":
-			_, _ = w.Write([]byte(`{"data":[{"id":"biz-1","name":"Velion Business","owned_whatsapp_business_accounts":{"data":[{"id":"waba-1","name":"Velion WhatsApp"}]}}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"biz-1","name":"Verevon Business","owned_whatsapp_business_accounts":{"data":[{"id":"waba-1","name":"Verevon WhatsApp"}]}}]}`))
 		default:
 			http.NotFound(w, r)
 		}

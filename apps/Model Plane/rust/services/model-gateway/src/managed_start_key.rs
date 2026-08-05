@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 
 const ENV_SECRET: &str = "MODEL_GATEWAY_MANAGED_START_KEY_SECRET";
-const DERIVATION_CONTEXT: &str = "velion/model-gateway/managed-start-key/v1";
+const DERIVATION_CONTEXT: &str = "verevon/model-gateway/managed-start-key/v1";
 const DOMAIN: &[u8] = b"managed-start-key\0";
 
 /// Holds only a derived BLAKE3 key, never the configured secret material.

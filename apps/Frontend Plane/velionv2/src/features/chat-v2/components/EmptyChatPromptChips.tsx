@@ -65,7 +65,7 @@ const overflowEmptyChatPrompts: ReadonlyArray<EmptyChatPrompt> = [
     icon: Briefcase,
   },
   {
-    label: "Velion's choice",
+    label: "Verevon's choice",
     prompt: "Choose the highest-impact next task for improving our support operations.",
     icon: WandSparkles,
   },
@@ -118,7 +118,7 @@ export function EmptyChatPromptChips({
           type="button"
           aria-label={`Use quick prompt: ${label}`}
           onClick={() => selectPrompt(prompt)}
-          className="velion-quick-chip velion-ui-focus"
+          className="verevon-quick-chip verevon-ui-focus"
         >
           <Icon className="size-4 shrink-0 text-[#858892] dark:text-[#AEB4C0]" strokeWidth={1.9} />
           <span className="whitespace-nowrap">{label}</span>
@@ -131,7 +131,7 @@ export function EmptyChatPromptChips({
           aria-expanded={moreOpen}
           aria-haspopup="menu"
           onClick={() => setMoreOpen((open) => !open)}
-          className="velion-quick-chip velion-ui-focus"
+          className="verevon-quick-chip verevon-ui-focus"
           data-state={moreOpen ? "open" : undefined}
         >
           <MoreHorizontal className="size-4 shrink-0 text-[#858892] dark:text-[#AEB4C0]" strokeWidth={1.9} />
@@ -141,7 +141,7 @@ export function EmptyChatPromptChips({
           <div
             role="menu"
             aria-label="More quick prompts"
-            className="velion-popover absolute left-1/2 top-full z-[120] mt-2 w-56 -translate-x-1/2 p-1.5"
+            className="verevon-popover absolute left-1/2 top-full z-[120] mt-2 w-56 -translate-x-1/2 p-1.5"
           >
             {overflowEmptyChatPrompts.map(({ icon: Icon, label, prompt }) => (
               <button
@@ -149,7 +149,7 @@ export function EmptyChatPromptChips({
                 type="button"
                 role="menuitem"
                 onClick={() => selectPrompt(prompt)}
-                className="velion-menu-item velion-ui-focus"
+                className="verevon-menu-item verevon-ui-focus"
               >
                 <Icon className="size-4 shrink-0 text-[#858892] dark:text-[#AEB4C0]" strokeWidth={1.9} />
                 <span>{label}</span>

@@ -234,7 +234,7 @@ subscriber, err := nats.NewSubscriber(
 ### Configuration Pattern
 
 Each subscriber needs:
-- **NATS Broker:** `nats://velion-nats:4222`
+- **NATS Broker:** `nats://verevon-nats:4222`
 - **Auth Token:** `aqencia-shared-nats-token-2026`
 - **Subject Filter:** `aqencia.controlplane.plane.*`
 - **Queue Group:** `{plane}-subscribers` (for load balancing)

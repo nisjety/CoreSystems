@@ -59,7 +59,7 @@ const COPY = {
     trialSummary:
       'Gratis lar deg teste i 14 dager uten kort. Betalte planer bruker fast månedspris pluss usage per henvendelse løst av AI.',
     system:
-      'Du er en intern rådgiver i Velion. Du svarer KUN med JSON som matcher response_format. Bruk norsk i feltene "reason" og "summary". Gjør teksten personlig: nevn organisasjonen hvis kjent, hva brukeren vil at agenten skal gjøre, nettstedet og de faktiske kildene. Ikke finn på data.',
+      'Du er en intern rådgiver i Verevon. Du svarer KUN med JSON som matcher response_format. Bruk norsk i feltene "reason" og "summary". Gjør teksten personlig: nevn organisasjonen hvis kjent, hva brukeren vil at agenten skal gjøre, nettstedet og de faktiske kildene. Ikke finn på data.',
     prompt: {
       organization: 'Organisasjon',
       size: 'Størrelse',
@@ -96,8 +96,8 @@ const COPY = {
       },
       reasonWithGoal: '{{plan}} er riktig valg for {{subject}}: dere vil {{goalPhrase}}, og vi har {{sources}} som svargrunnlag.',
       reasonWithoutGoal: '{{plan}} er riktig valg for {{subject}} fordi dere har {{sources}} som kunnskapsgrunnlag.',
-      summaryWithGoal: 'For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Dere beskrev behovet som "{{goal}}", og Velion kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.',
-      summaryWithoutGoal: 'For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Velion kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.',
+      summaryWithGoal: 'For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Dere beskrev behovet som "{{goal}}", og Verevon kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.',
+      summaryWithoutGoal: 'For {{subject}}{{teamQualifier}} gir {{plan}} mest mening. Verevon kan bygge svarene på {{sources}}. {{plan}} gir {{fit}}.',
       planFit: {
         trial: 'en trygg 14 dagers start uten kort',
         hobby: 'nok kapasitet til å validere agenten på de første kundespørsmålene',
@@ -113,7 +113,7 @@ const COPY = {
     trialSummary:
       'Free lets you test for 14 days without a card. Paid plans use a fixed monthly price plus usage per conversation resolved by AI.',
     system:
-      'You are an internal advisor at Velion. Respond ONLY with JSON matching response_format. Use English in "reason" and "summary". Make it personal: mention the organization if known, what the user wants the agent to do, the website, and the actual sources. Do not invent data.',
+      'You are an internal advisor at Verevon. Respond ONLY with JSON matching response_format. Use English in "reason" and "summary". Make it personal: mention the organization if known, what the user wants the agent to do, the website, and the actual sources. Do not invent data.',
     prompt: {
       organization: 'Organization',
       size: 'Size',
@@ -150,8 +150,8 @@ const COPY = {
       },
       reasonWithGoal: '{{plan}} is the right choice for {{subject}}: you want {{goalPhrase}}, and we have {{sources}} as the answer base.',
       reasonWithoutGoal: '{{plan}} is the right choice for {{subject}} because you have {{sources}} as the knowledge base.',
-      summaryWithGoal: 'For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. You described the need as "{{goal}}", and Velion can ground answers in {{sources}}. {{plan}} gives you {{fit}}.',
-      summaryWithoutGoal: 'For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. Velion can ground answers in {{sources}}. {{plan}} gives you {{fit}}.',
+      summaryWithGoal: 'For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. You described the need as "{{goal}}", and Verevon can ground answers in {{sources}}. {{plan}} gives you {{fit}}.',
+      summaryWithoutGoal: 'For {{subject}}{{teamQualifier}}, {{plan}} makes the most sense. Verevon can ground answers in {{sources}}. {{plan}} gives you {{fit}}.',
       planFit: {
         trial: 'a safe 14 day start without a card',
         hobby: 'enough capacity to validate the agent on the first customer questions',

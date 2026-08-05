@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G51 (velion-gap.md §8.33) — lint `.env` vs `.env.docker` for drift.
+# G51 (verevon-gap.md §8.33) — lint `.env` vs `.env.docker` for drift.
 #
 # Background: three production-impacting incidents have been traced to the
 # same pattern (§8.23 AUTH_CORE_INTERNAL_API_KEY, §8.29 billing-core
@@ -214,5 +214,5 @@ fi
 printf "\n❌ lint-env-files: %d violations across %d pairs.\n" "$violations" "$checked_pairs"
 printf "   Run with ENV_LINT_DEBUG=1 to see exempt divergences too.\n"
 printf "   To intentionally bypass during a roll-out: SKIP_ENV_LINT=1 ./scripts/lint-env-files.sh\n"
-printf "   See velion-gap.md §8.33 G51 for context on the trap this prevents.\n"
+printf "   See verevon-gap.md §8.33 G51 for context on the trap this prevents.\n"
 exit 1

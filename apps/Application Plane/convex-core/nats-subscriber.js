@@ -26,7 +26,7 @@ const CONTROL_PLANE_SUBJECTS = Object.freeze({
   organizationChanged: "aqencia.controlplane.org.changed",
   memberChanged: "aqencia.controlplane.org.member_changed",
 });
-const CONTROL_PLANE_DLQ_SUBJECT = "velion.application.dlq.convex.controlplane";
+const CONTROL_PLANE_DLQ_SUBJECT = "verevon.application.dlq.convex.controlplane";
 const CONTROL_PLANE_STREAM = "AQENCIA_CONTROLPLANE";
 const DEAD_LETTER_AFTER = 5;
 
@@ -203,7 +203,7 @@ function normalizeControlPlaneEvent(eventType, payload) {
   }
 }
 
-// W4-2 (ui-ux-velion-gap.md §13): Model Plane's orchestrator-core publishes
+// W4-2 (ui-ux-verevon-gap.md §13): Model Plane's orchestrator-core publishes
 // `mp.v1.run.{id}.event` to `model-plane-nats` (port 4222 inside its compose
 // network). Control-shared-nats and model-plane-nats are isolated clusters with
 // `routes = []`, so the subscriber needs a SECOND connection here for those
@@ -327,13 +327,13 @@ class ConvexNatsSubscriber {
         "[Convex NATS] scoped Application conversation mirror is disabled pending a dedicated projection principal",
       );
 
-      // U3-3 (ui-ux-velion-gap.md §10): Model Plane agent run lifecycle.
+      // U3-3 (ui-ux-verevon-gap.md §10): Model Plane agent run lifecycle.
       // orchestrator-core publishes RUN_STARTED / RUN_COMPLETED / RUN_FAILED
       // envelopes on `mp.v1.run.{runId}.event`. We subscribe to the
       // wildcard form so any run lands in Convex without per-run setup.
       //
       // W4-2: in production these events arrive on `model-plane-nats`,
-      // NOT `velion-nats` (the two clusters are isolated). Use the
+      // NOT `verevon-nats` (the two clusters are isolated). Use the
       // optional second connection when a scoped Model principal is present.
       if (this.ncModelPlane) {
         await this.subscribeToTopicOn(
@@ -359,7 +359,7 @@ class ConvexNatsSubscriber {
    * Subscribe to a NATS topic on the default Control shared connection.
    */
   async subscribeToTopic(topic, handler) {
-    return this.subscribeToTopicOn(this.nc, topic, handler, "velion-nats");
+    return this.subscribeToTopicOn(this.nc, topic, handler, "verevon-nats");
   }
 
   async publishDeadLetter(payload) {
@@ -395,11 +395,11 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * W4-2 (ui-ux-velion-gap.md §13): subscribe to a topic on an
+   * W4-2 (ui-ux-verevon-gap.md §13): subscribe to a topic on an
    * arbitrary NATS connection so the subscriber can multiplex across
-   * the velion + model-plane clusters. `connection` is the result of
+   * the verevon + model-plane clusters. `connection` is the result of
    * a previous `nats.connect()`; `clusterLabel` is purely cosmetic for
-   * structured logs ("velion-nats" / "model-plane-nats").
+   * structured logs ("verevon-nats" / "model-plane-nats").
    */
   async subscribeToTopicOn(connection, topic, handler, clusterLabel) {
     if (!connection) {
@@ -429,7 +429,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.controlplane.org.created event
+   * Handle verevon.controlplane.org.created event
    */
   async handleOrganizationChanged(payload) {
     const event = normalizeControlPlaneEvent("organizationChanged", payload);
@@ -438,7 +438,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.controlplane.org.member.added event
+   * Handle verevon.controlplane.org.member.added event
    */
   async handleMemberChanged(payload) {
     const event = normalizeControlPlaneEvent("memberChanged", payload);
@@ -447,7 +447,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.ingestion.import.completed event
+   * Handle verevon.ingestion.import.completed event
    */
   async handleImportCompleted(payload) {
     console.log(
@@ -469,7 +469,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.ingestion.crawl.started event
+   * Handle verevon.ingestion.crawl.started event
    * Payload: { org_id, url, crawl_id, service, metadata }
    */
   async handleCrawlStarted(payload) {
@@ -487,7 +487,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.ingestion.crawl.progress event
+   * Handle verevon.ingestion.crawl.progress event
    * Payload: { org_id, crawl_id, progress, completed, total, message }
    */
   async handleCrawlProgress(payload) {
@@ -508,7 +508,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.ingestion.crawl.completed event
+   * Handle verevon.ingestion.crawl.completed event
    * Payload: { org_id, url, crawl_id, page_count, service, metadata }
    */
   async handleCrawlCompleted(payload) {
@@ -527,7 +527,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.ingestion.crawl.failed event
+   * Handle verevon.ingestion.crawl.failed event
    * Payload: { org_id, url, crawl_id, error, service, metadata }
    */
   async handleCrawlFailed(payload) {
@@ -546,7 +546,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * Handle velion.ingestion.crawl.indexed event
+   * Handle verevon.ingestion.crawl.indexed event
    * Payload: { org_id, crawl_id, ingested_count, indexed_at }
    */
   async handleCrawlIndexed(payload) {
@@ -564,7 +564,7 @@ class ConvexNatsSubscriber {
   }
 
   /**
-   * U3-3 (ui-ux-velion-gap.md §10): Model Plane agent run lifecycle.
+   * U3-3 (ui-ux-verevon-gap.md §10): Model Plane agent run lifecycle.
    *
    * Subject: `mp.v1.run.{runId}.event` (wildcard subscription)
    * Envelope shape: standard mp.v1 wrapper produced by

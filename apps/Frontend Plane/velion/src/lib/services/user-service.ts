@@ -65,7 +65,7 @@ export interface UpdateUserData {
 
 /**
  * G18: shape returned by `/api/user/me/session-context`.
- * `onboardingStatus` drives post-login routing — see `velion-gap.md` §4.2.
+ * `onboardingStatus` drives post-login routing — see `verevon-gap.md` §4.2.
  */
 export interface SessionContext {
   userId: string
@@ -271,7 +271,7 @@ class UserServiceAPI {
 
   /**
    * G18: canonical post-login routing input. Hits user-core
-   * `/api/v1/me/session-context` via the velion proxy. Returns null on
+   * `/api/v1/me/session-context` via the verevon proxy. Returns null on
    * unauthenticated / outage so callers can fall back gracefully.
    *
    * Response shape (per zero-input enterprise roadmap):

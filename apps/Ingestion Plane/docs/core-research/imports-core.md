@@ -29,7 +29,7 @@ Non-generated source file count: 20 Python files under `app/` + 3 test files und
 
 ## Runtime shape (committed source)
 
-Entrypoint `app/main.py` (FastAPI + lifespan). Lifespan: `SELECT 1` DB probe → `run_sql_migrations()` → shared httpx client → local NATS `event_publisher` → shared cross-plane `SharedNatsPublisher` (velion-nats) → `ControlPlaneSubscriber` (velion-nats) wired to the M365 handler.
+Entrypoint `app/main.py` (FastAPI + lifespan). Lifespan: `SELECT 1` DB probe → `run_sql_migrations()` → shared httpx client → local NATS `event_publisher` → shared cross-plane `SharedNatsPublisher` (verevon-nats) → `ControlPlaneSubscriber` (verevon-nats) wired to the M365 handler.
 
 Module map:
 - `app/main.py` — routes, auth wiring.
@@ -129,7 +129,7 @@ Grep for `todo|fixme|mock|stub|fake|placeholder|not implemented|hardcod|xxx|hack
 
 Two NATS connections (matches the platform's two-token design):
 - `events.py` `event_publisher` → local `NATS_URL` (compose: `nats://nats:4222`) for intra-plane subjects (`import.started/completed`, `imports.knowledge_sync.run`).
-- `shared_nats.py` `SharedNatsPublisher` → `VELION_NATS_URL` (velion-nats), JetStream stream `VELION_INGESTION` on `velion.ingestion.>` for cross-plane consumers, plus plain-NATS `velion.notifications.import.completed`. All publishes are fire-and-forget (never break the caller). Minor doc drift: the docstring says "AQENCIA_INGESTION stream" but the code creates `VELION_INGESTION`.
+- `shared_nats.py` `SharedNatsPublisher` → `VEREVON_NATS_URL` (verevon-nats), JetStream stream `VEREVON_INGESTION` on `verevon.ingestion.>` for cross-plane consumers, plus plain-NATS `verevon.notifications.import.completed`. All publishes are fire-and-forget (never break the caller). Minor doc drift: the docstring says "AQENCIA_INGESTION stream" but the code creates `VEREVON_INGESTION`.
 - `progress.py` `ProgressHub` is in-memory per-process; SSE progress only works because jobs run in the same process (Finding 5). Won't survive horizontal scale-out.
 
 ## Visma question (out of scope for imports-core) `[source-only]`
@@ -148,7 +148,7 @@ Tests exist for **only the three Phase 3/4 modules**: `test_actions_gateway.py` 
 4. **P1 (deploy drift):** committed Phase 4 knowledge-sync route not in the running image (stale build layer). Rebuild `--no-cache` once Docker is unblocked. Finding 3. `[live-curl]`
 5. **P2 (incomplete/over-claimed):** Temporal orchestration is a no-op; jobs are non-durable in-process tasks. Finding 5. `[source-only]`
 6. **P2 (dead-end stub):** M365 provider-linked handler writes orphan `org_id=""` pending jobs and never provisions; `cleanup()` is log-only. Finding 6. `[source-only]`
-7. **P3 (cleanup):** `alembic` dep unused; `shared_nats` docstring says AQENCIA_INGESTION vs actual VELION_INGESTION; README/COMPLETION_SUMMARY overstate Temporal + test coverage. `[source-only]`
+7. **P3 (cleanup):** `alembic` dep unused; `shared_nats` docstring says AQENCIA_INGESTION vs actual VEREVON_INGESTION; README/COMPLETION_SUMMARY overstate Temporal + test coverage. `[source-only]`
 
 ## Bottom line
 

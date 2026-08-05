@@ -25,7 +25,7 @@ type WikiPageVersion struct {
 	Content   *string `json:"content,omitempty"`
 	// §16.5.4 — `SafeHTML` is set by the handler after server-side scrub
 	// (bluemonday UGC policy). Consumers SHOULD render `SafeHTML` for
-	// trusted-render contexts (Velion) and treat `Content` as raw markdown.
+	// trusted-render contexts (Verevon) and treat `Content` as raw markdown.
 	// `true` only if the scrub passed without flagging suspicious markup.
 	SafeHTML        *string         `json:"safe_html,omitempty"`
 	SafeHTMLOK      bool            `json:"safe_html_ok"`

@@ -131,17 +131,26 @@ type Config struct {
 	InstagramAuthorizationURL string
 	InstagramTokenURL         string
 	InstagramAPIBaseURL       string
-	FacebookClientID          string
-	FacebookClientSecret      string
-	FacebookAuthorizationURL  string
-	FacebookTokenURL          string
-	FacebookAPIBaseURL        string
-	SnapchatClientID          string
-	SnapchatClientSecret      string
-	SnapchatRedirectBaseURL   string
-	SnapchatAuthorizationURL  string
-	SnapchatTokenURL          string
-	SnapchatAPIBaseURL        string
+	// MetaClientID and MetaClientSecret are the credentials for the unified
+	// Meta provider (Messenger, Pages, and the Meta inbox). They deliberately
+	// remain separate from the legacy Facebook and dedicated Instagram OAuth
+	// clients: a single OAuth request can have only one client_id.
+	MetaClientID             string
+	MetaClientSecret         string
+	MetaAuthorizationURL     string
+	MetaTokenURL             string
+	MetaAPIBaseURL           string
+	FacebookClientID         string
+	FacebookClientSecret     string
+	FacebookAuthorizationURL string
+	FacebookTokenURL         string
+	FacebookAPIBaseURL       string
+	SnapchatClientID         string
+	SnapchatClientSecret     string
+	SnapchatRedirectBaseURL  string
+	SnapchatAuthorizationURL string
+	SnapchatTokenURL         string
+	SnapchatAPIBaseURL       string
 	// SnapchatBusinessAPIBaseURL is the Public Profile API host
 	// (businessapi.snapchat.com) used for organic Story/Spotlight/Saved Story
 	// content management. It is a DIFFERENT host from SnapchatAPIBaseURL
@@ -194,8 +203,17 @@ func Load() (Config, error) {
 	rawInstagramClientSecret := strings.TrimSpace(os.Getenv("INSTAGRAM_CLIENT_SECRET"))
 	facebookClientID := firstNonEmpty(rawFacebookClientID, rawInstagramClientID)
 	facebookClientSecret := firstNonEmpty(rawFacebookClientSecret, rawInstagramClientSecret)
-	instagramClientID := firstNonEmpty(rawInstagramClientID, facebookClientID)
-	instagramClientSecret := firstNonEmpty(rawInstagramClientSecret, facebookClientSecret)
+	// Instagram inbox consent belongs to a distinct Meta product/client. Falling
+	// back to Facebook credentials creates an OAuth URL that asks a Messenger
+	// app for Instagram-only permissions, which Meta rejects as invalid scopes.
+	instagramClientID := rawInstagramClientID
+	instagramClientSecret := rawInstagramClientSecret
+	metaClientID := firstNonEmpty(strings.TrimSpace(os.Getenv("META_APP_CLIENT_ID")), facebookClientID)
+	metaClientSecret := firstNonEmpty(
+		strings.TrimSpace(os.Getenv("META_APP_CLIENT_SECRET")),
+		strings.TrimSpace(os.Getenv("META_CLIENT_SECRET")),
+		facebookClientSecret,
+	)
 
 	return Config{
 		Port:                             envOr("PORT", "3026"),
@@ -235,13 +253,13 @@ func Load() (Config, error) {
 		WebhookHotPathURL:                strings.TrimRight(strings.TrimSpace(envOr("INTEGRATION_WEBHOOK_HOTPATH_URL", "")), "/"),
 		IntegrationCoreURL:               strings.TrimRight(envOr("INTEGRATION_CORE_URL", publicBaseURL), "/"),
 		PublicBaseURL:                    publicBaseURL,
-		MetaJSSDKAppID:                   strings.TrimSpace(envOr("META_JS_SDK_APP_ID", facebookClientID)),
+		MetaJSSDKAppID:                   strings.TrimSpace(envOr("META_JS_SDK_APP_ID", metaClientID)),
 		MetaJSSDKAPIVersion:              normalizeGraphAPIVersion(envOr("META_JS_SDK_API_VERSION", "v25.0")),
 		MetaJSSDKLocale:                  envOr("META_JS_SDK_LOCALE", "en_US"),
 		MetaBusinessLoginConfigID:        strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONFIG_ID")),
 		MetaBusinessLoginConfigIDs:       metaBusinessLoginConfigIDs(),
 		MetaWebhookVerifyToken:           strings.TrimSpace(os.Getenv("META_WEBHOOK_VERIFY_TOKEN")),
-		MetaWebhookSecret:                strings.TrimSpace(envOr("META_WEBHOOK_SECRET", facebookClientSecret)),
+		MetaWebhookSecret:                strings.TrimSpace(envOr("META_WEBHOOK_SECRET", metaClientSecret)),
 		MetaThreadsAPIBaseURL:            strings.TrimRight(envOr("THREADS_API_BASE_URL", "https://graph.threads.net/v1.0"), "/"),
 		EncryptionKey:                    encryptionKey,
 		AllowInMemoryStore:               envBool("INTEGRATION_ALLOW_IN_MEMORY_STORE", false),
@@ -249,15 +267,15 @@ func Load() (Config, error) {
 		NATSURL:                          envOr("NATS_URL", "nats://localhost:4222"),
 		NATSUsername:                     strings.TrimSpace(os.Getenv("NATS_USERNAME")),
 		NATSPassword:                     strings.TrimSpace(os.Getenv("NATS_PASSWORD")),
-		// NATS_TOKEN authenticates against the shared cross-plane velion-nats
-		// broker, which enforces `authorization { token: $VELION_NATS_TOKEN }`
+		// NATS_TOKEN authenticates against the shared cross-plane verevon-nats
+		// broker, which enforces `authorization { token: $VEREVON_NATS_TOKEN }`
 		// (see nats-shared.conf) rather than username/password.
-		NATSToken:                 strings.TrimSpace(envOr("NATS_TOKEN", os.Getenv("VELION_NATS_TOKEN"))),
+		NATSToken:                 strings.TrimSpace(envOr("NATS_TOKEN", os.Getenv("VEREVON_NATS_TOKEN"))),
 		NATSSubjectPrefix:         envOr("NATS_SUBJECT_PREFIX", ""),
 		RateLimitEnabled:          envBool("INTEGRATION_RATE_LIMIT_ENABLED", true),
 		RateLimitMax:              envInt("INTEGRATION_RATE_LIMIT_MAX", 120),
 		RateLimitWindow:           envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
-		TokenLeaseConsumers:       envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,velion-v2-bff,velion-v3-gateway,social-publisher"),
+		TokenLeaseConsumers:       envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
 		MicrosoftTenantID:         tenant,
 		MicrosoftClientID:         envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
 		MicrosoftClientSecret:     envOr("AZURE_CLIENT_SECRET", os.Getenv("MICROSOFT_CLIENT_SECRET")),
@@ -312,12 +330,18 @@ func Load() (Config, error) {
 		XAPIBaseURL:               envOr("X_API_BASE_URL", "https://api.x.com"),
 		InstagramClientID:         instagramClientID,
 		InstagramClientSecret:     instagramClientSecret,
-		// Graph API v25.0 is current (Graph + Marketing API version in lockstep);
-		// instagram_* scopes here are the "Instagram API with Facebook Login"
-		// flavor — instagram_basic is NOT deprecated for that product.
-		InstagramAuthorizationURL:  envOr("INSTAGRAM_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
-		InstagramTokenURL:          envOr("INSTAGRAM_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token"),
-		InstagramAPIBaseURL:        envOr("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0"),
+		// Instagram API with Instagram Login uses Instagram OAuth and the
+		// graph.instagram.com host. Facebook Login's graph.facebook.com API and
+		// instagram_* permissions are a separate product with a different token
+		// model and must not be mixed into this provider.
+		InstagramAuthorizationURL:  envOr("INSTAGRAM_AUTHORIZATION_URL", "https://www.instagram.com/oauth/authorize"),
+		InstagramTokenURL:          envOr("INSTAGRAM_TOKEN_URL", "https://api.instagram.com/oauth/access_token"),
+		InstagramAPIBaseURL:        envOr("INSTAGRAM_GRAPH_API_BASE_URL", "https://graph.instagram.com/v25.0"),
+		MetaClientID:               metaClientID,
+		MetaClientSecret:           metaClientSecret,
+		MetaAuthorizationURL:       envOr("META_AUTHORIZATION_URL", envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth")),
+		MetaTokenURL:               envOr("META_TOKEN_URL", envOr("FACEBOOK_TOKEN_URL", "https://graph.facebook.com/v25.0/oauth/access_token")),
+		MetaAPIBaseURL:             envOr("META_GRAPH_API_BASE_URL", envOr("FACEBOOK_GRAPH_API_BASE_URL", "https://graph.facebook.com/v25.0")),
 		FacebookClientID:           facebookClientID,
 		FacebookClientSecret:       facebookClientSecret,
 		FacebookAuthorizationURL:   envOr("FACEBOOK_AUTHORIZATION_URL", "https://www.facebook.com/v25.0/dialog/oauth"),
@@ -458,6 +482,12 @@ func (c Config) ValidateEmailWorkerRuntime() error {
 	if !validDedicatedServiceToken(c.ConversationIngestServiceToken) {
 		return fmt.Errorf("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must be a non-placeholder secret of at least 32 bytes")
 	}
+	if c.InternalAPIKey == "" {
+		return fmt.Errorf("INTERNAL_API_KEY is required")
+	}
+	if c.IntegrationCoreURL == "" {
+		return fmt.Errorf("INTEGRATION_CORE_URL is required")
+	}
 	return nil
 }
 
@@ -549,12 +579,19 @@ func (c Config) ValidateProvider(providerKey string) error {
 		}
 	case "instagram":
 		if c.InstagramClientID == "" {
-			return fmt.Errorf("INSTAGRAM_CLIENT_ID or FACEBOOK_CLIENT_ID is required for Instagram OAuth")
+			return fmt.Errorf("INSTAGRAM_CLIENT_ID is required for Instagram OAuth")
 		}
 		if c.InstagramClientSecret == "" {
-			return fmt.Errorf("INSTAGRAM_CLIENT_SECRET or FACEBOOK_CLIENT_SECRET is required for Instagram OAuth")
+			return fmt.Errorf("INSTAGRAM_CLIENT_SECRET is required for Instagram OAuth")
 		}
-	case "meta", "facebook", "whatsapp", "meta-ads":
+	case "meta":
+		if firstNonEmpty(c.MetaClientID, c.FacebookClientID) == "" {
+			return fmt.Errorf("META_APP_CLIENT_ID or FACEBOOK_CLIENT_ID is required for Meta OAuth")
+		}
+		if firstNonEmpty(c.MetaClientSecret, c.FacebookClientSecret) == "" {
+			return fmt.Errorf("META_APP_CLIENT_SECRET, META_CLIENT_SECRET, or FACEBOOK_CLIENT_SECRET is required for Meta OAuth")
+		}
+	case "facebook", "whatsapp", "meta-ads":
 		label := "Meta"
 		switch providerKey {
 		case "facebook":
@@ -652,8 +689,8 @@ func (c Config) ProviderReadiness() map[string][]string {
 			"X_CLIENT_SECRET": c.XClientSecret,
 		},
 		"instagram": {
-			"INSTAGRAM_CLIENT_ID or FACEBOOK_CLIENT_ID":         c.InstagramClientID,
-			"INSTAGRAM_CLIENT_SECRET or FACEBOOK_CLIENT_SECRET": c.InstagramClientSecret,
+			"INSTAGRAM_CLIENT_ID":     c.InstagramClientID,
+			"INSTAGRAM_CLIENT_SECRET": c.InstagramClientSecret,
 		},
 		"facebook": {
 			"FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID":         c.FacebookClientID,
@@ -668,8 +705,8 @@ func (c Config) ProviderReadiness() map[string][]string {
 			"FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET": c.FacebookClientSecret,
 		},
 		"meta": {
-			"FACEBOOK_CLIENT_ID or INSTAGRAM_CLIENT_ID":         c.FacebookClientID,
-			"FACEBOOK_CLIENT_SECRET or INSTAGRAM_CLIENT_SECRET": c.FacebookClientSecret,
+			"META_APP_CLIENT_ID or FACEBOOK_CLIENT_ID":                              firstNonEmpty(c.MetaClientID, c.FacebookClientID),
+			"META_APP_CLIENT_SECRET, META_CLIENT_SECRET, or FACEBOOK_CLIENT_SECRET": firstNonEmpty(c.MetaClientSecret, c.FacebookClientSecret),
 		},
 		"snapchat": {
 			"SNAPCHAT_CLIENT_ID":     c.SnapchatClientID,
@@ -882,8 +919,14 @@ func metaBusinessLoginConfigIDs() map[string]string {
 	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONFIG_ID")); id != "" {
 		ids["default"] = id
 	}
+	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_SUPPORT_MESSAGING_CONFIG_ID")); id != "" {
+		ids["support_messaging"] = id
+	}
 	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID")); id != "" {
 		ids["conversions"] = id
+	}
+	if id := strings.TrimSpace(os.Getenv("META_BUSINESS_LOGIN_STUDIO_ADS_CONFIG_ID")); id != "" {
+		ids["studio_ads"] = id
 	}
 	return ids
 }

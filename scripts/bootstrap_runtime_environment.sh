@@ -6,13 +6,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_ROOT="${CORE_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 DRY_RUN=false
 ROTATE_NATS=false
+ROTATE_MODEL_EXECUTION_KEY_ACTION=""
 
 while (( $# > 0 )); do
   case "$1" in
     --dry-run) DRY_RUN=true ;;
     --rotate-nats) ROTATE_NATS=true ;;
+    --rotate-model-execution-attestation-key=*)
+      ROTATE_MODEL_EXECUTION_KEY_ACTION="${1#*=}"
+      case "$ROTATE_MODEL_EXECUTION_KEY_ACTION" in
+        stage|promote|prune) ;;
+        *)
+          printf 'Usage: --rotate-model-execution-attestation-key=stage|promote|prune\n' >&2
+          exit 2
+          ;;
+      esac
+      ;;
     *)
-      printf 'Usage: %s [--dry-run] [--rotate-nats]\n' "$0" >&2
+      printf 'Usage: %s [--dry-run] [--rotate-nats] [--rotate-model-execution-attestation-key=stage|promote|prune]\n' "$0" >&2
       exit 2
       ;;
   esac
@@ -30,9 +41,19 @@ ROOT_ENV="$CORE_ROOT/.env"
 DATA_ENV="$CORE_ROOT/apps/Data Plane v2/.env"
 CONTROL_ENV="$CORE_ROOT/apps/Control Plane/.env"
 INGESTION_ENV="$CORE_ROOT/apps/Ingestion Plane/.env"
+# Ingestion Plane retired a shared plane-level .env for runtime purposes
+# (2026-07-17, see run-ingestion-plane.sh's own header comment): each core
+# owns its own <core>/.env, injected per-service via compose's `env_file:`.
+# INGESTION_ENV above is therefore NOT read by the actual running stack for
+# anything integration-corev2-specific — confirmed empirically: it does not
+# even exist on a live dev machine, while integration-corev2/.env does, and
+# already carries a real (not placeholder) attestation-key entry that nothing
+# in this script could have produced. Provider-write attestation provisioning
+# targets this real file directly instead.
+INTEGRATION_COREV2_ENV="$CORE_ROOT/apps/Ingestion Plane/integration-corev2/.env"
 MODEL_ENV="$CORE_ROOT/apps/Model Plane/deploy/.env"
 APPLICATION_ENV="$CORE_ROOT/apps/Application Plane/.env"
-FRONTEND_ENV="$CORE_ROOT/apps/Frontend Plane/velionv3/.env"
+FRONTEND_ENV="$CORE_ROOT/apps/Frontend Plane/verevonv3/.env"
 
 ENV_FILES=(
   "$ROOT_ENV"
@@ -303,9 +324,271 @@ GOEOF
     return 1
   fi
   upsert_env "$APPLICATION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY "$priv_b64"
-  upsert_env "$INGESTION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY "$pub_b64"
-  upsert_env "$INGESTION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID "conversation-provider-write-v1"
+  ensure_env_file "$INTEGRATION_COREV2_ENV"
+  upsert_env "$INTEGRATION_COREV2_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY "$pub_b64"
+  upsert_env "$INTEGRATION_COREV2_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID "conversation-provider-write-v1"
 }
+
+# ensure_model_execution_attestation_key — provision the model-execution
+# (execution-core, Model Plane) provider-write Ed25519 signing key as a plain
+# base64(32-byte seed). Unlike conversation-core's key above, execution-core's
+# Rust signer (ed25519-dalek) owns both ends of this key end to end, so it
+# does not need Go's seed||pub 64-byte concatenation convention — just the
+# raw seed. The matching public key + key id are recorded for
+# integration-corev2's trusted-key registry (see
+# assemble_provider_write_attestation_keys_json below).
+# generate_ed25519_seed_keypair OUT_PRIV_VAR OUT_PUB_VAR — shared generation
+# logic (openssl 3 ED25519 preferred, Go crypto/ed25519 fallback for LibreSSL
+# hosts) producing a raw base64 32-byte seed + base64 32-byte public key.
+# Writes results into the two caller-named variables (bash indirect
+# assignment) rather than returning printf'd lines, so callers do not need to
+# re-split output the way the original inline duplicate of this logic did.
+# Factored out because rotate_model_execution_attestation_key below needs the
+# exact same generation, just written to different destination variables than
+# ensure_model_execution_attestation_key's first-generation path.
+generate_ed25519_seed_keypair() {
+  # Deliberately NOT named priv_b64/pub_b64: bash locals are dynamically
+  # scoped, so printf -v "$__out_priv_var" below would silently target THIS
+  # function's own local instead of the caller's if the names collided
+  # (every caller of this function names its own output variables
+  # priv_b64/pub_b64) — caught by rotate_drive.sh's scratch test, which found
+  # ensure_model_execution_attestation_key writing an empty private key.
+  local __out_priv_var="$1" __out_pub_var="$2"
+  local _gen_priv _gen_pub _gen_check_len
+  if openssl genpkey -algorithm ED25519 -out /dev/null >/dev/null 2>&1; then
+    local _gen_pem _gen_seed_bin _gen_pub_bin
+    _gen_pem="$(mktemp)"; _gen_seed_bin="$(mktemp)"; _gen_pub_bin="$(mktemp)"
+    openssl genpkey -algorithm ED25519 -out "$_gen_pem" >/dev/null 2>&1
+    openssl pkey -in "$_gen_pem" -outform DER 2>/dev/null | tail -c 32 > "$_gen_seed_bin"
+    openssl pkey -in "$_gen_pem" -pubout -outform DER 2>/dev/null | tail -c 32 > "$_gen_pub_bin"
+    _gen_priv="$(openssl base64 -A -in "$_gen_seed_bin")"
+    _gen_pub="$(openssl base64 -A -in "$_gen_pub_bin")"
+    rm -f "$_gen_pem" "$_gen_seed_bin" "$_gen_pub_bin"
+  elif command -v go >/dev/null 2>&1; then
+    # macOS ships LibreSSL, which lacks ED25519 genpkey. Fall back to Go's
+    # crypto/ed25519, keeping only the 32-byte seed half (priv[:32]) since
+    # ed25519-dalek's SigningKey is the seed alone, not Go's concatenation.
+    local _gen_dir _gen_out
+    _gen_dir="$(mktemp -d)"
+    cat > "$_gen_dir/main.go" <<'GOEOF'
+package main
+import ("crypto/ed25519";"crypto/rand";"encoding/base64";"fmt";"os")
+func main(){pub,priv,err:=ed25519.GenerateKey(rand.Reader);if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)};fmt.Println(base64.StdEncoding.EncodeToString(priv[:32]));fmt.Println(base64.StdEncoding.EncodeToString(pub))}
+GOEOF
+    _gen_out="$(cd "$_gen_dir" && GO111MODULE=off go run main.go 2>/dev/null || true)"
+    rm -rf "$_gen_dir"
+    _gen_priv="$(printf '%s\n' "$_gen_out" | sed -n '1p')"
+    _gen_pub="$(printf '%s\n' "$_gen_out" | sed -n '2p')"
+  else
+    printf '[runtime-env] ERROR: need OpenSSL 3 (ED25519) or Go to generate the attestation key\n' >&2
+    return 1
+  fi
+  _gen_check_len="$(printf '%s' "$_gen_priv" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ' || true)"
+  if [[ "$_gen_check_len" != "32" ]]; then
+    printf '[runtime-env] ERROR: generated Ed25519 seed is %s bytes, expected 32\n' "$_gen_check_len" >&2
+    return 1
+  fi
+  printf -v "$__out_priv_var" '%s' "$_gen_priv"
+  printf -v "$__out_pub_var" '%s' "$_gen_pub"
+}
+
+ensure_model_execution_attestation_key() {
+  local current decoded_len current_kid
+  current="$(dotenv_get "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY 2>/dev/null || true)"
+  decoded_len="$(printf '%s' "$current" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ' || true)"
+  current_kid="$(dotenv_get "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID 2>/dev/null || true)"
+  # Both halves are required: attestation.rs::Attestation::from_env() reads
+  # the kid from THIS SAME file (MODEL_ENV), not from integration-corev2's —
+  # a private key with no matching local kid leaves the signer silently
+  # disabled (from_env() returns None). Caught 2026-08-04 provisioning the
+  # real dev stack: an earlier version of this function wrote the kid only to
+  # INTEGRATION_COREV2_ENV, so the private key existed but the signer never
+  # activated.
+  if [[ "$decoded_len" == "32" && -n "$current_kid" ]]; then
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log "would generate model-execution provider-write Ed25519 attestation key"
+    return 0
+  fi
+
+  local priv_b64 pub_b64
+  if [[ "$decoded_len" == "32" ]]; then
+    # Private key already valid, only the local kid is missing — reuse the
+    # existing key rather than rotating it out from under a signer that may
+    # already be running with it.
+    priv_b64="$current"
+    pub_b64="$(dotenv_get "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY 2>/dev/null || true)"
+    if [[ -z "$pub_b64" ]]; then
+      printf '[runtime-env] ERROR: %s has a valid private key but %s has no matching public key — cannot safely derive one without regenerating the pair\n' "$MODEL_ENV" "$INTEGRATION_COREV2_ENV" >&2
+      return 1
+    fi
+  else
+    generate_ed25519_seed_keypair priv_b64 pub_b64 || return 1
+  fi
+  upsert_env "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY "$priv_b64"
+  upsert_env "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID "model-execution-provider-write-v1"
+  ensure_env_file "$INTEGRATION_COREV2_ENV"
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY "$pub_b64"
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID "model-execution-provider-write-v1"
+}
+
+# --- Prod key rotation (provisioned now, not exercised in dev) -------------
+#
+# The trusted-key registry (integration-corev2's INTEGRATION_PROVIDER_WRITE_
+# ATTESTATION_KEYS_JSON) is a list keyed by kid, and each attestation JWS is
+# short-lived (30s TTL, see execution-core's attestation.rs). That makes
+# rotation additive and low-risk by construction: register the new key
+# alongside the old one, cut the signer over, wait out one TTL window (a
+# couple of minutes for safety, not days), then remove the old key. Nothing
+# below touches an active credential — it only stages a NEXT key and, later,
+# promotes/prunes it on explicit command. See the runbook in
+# verevon-roadmap.md for the full operational sequence.
+#
+# rotate_model_execution_attestation_key — stage a new keypair as NEXT
+# (distinct kid, versioned by incrementing the current active kid's trailing
+# number) without touching the active signing key. Safe to run in prod: the
+# active key keeps signing until an operator explicitly promotes NEXT.
+rotate_model_execution_attestation_key() {
+  local current_kid next_version next_kid priv_b64 pub_b64
+  current_kid="$(dotenv_get "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID 2>/dev/null || true)"
+  if [[ -z "$current_kid" ]]; then
+    printf '[runtime-env] ERROR: no active model-execution attestation key to rotate from (run ensure_model_execution_attestation_key first)\n' >&2
+    return 1
+  fi
+  if [[ "$current_kid" =~ -v([0-9]+)$ ]]; then
+    next_version=$(( BASH_REMATCH[1] + 1 ))
+  else
+    next_version=2
+  fi
+  next_kid="model-execution-provider-write-v${next_version}"
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log "would stage model-execution attestation key rotation: $current_kid -> $next_kid"
+    return 0
+  fi
+  generate_ed25519_seed_keypair priv_b64 pub_b64 || return 1
+  upsert_env "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY_NEXT "$priv_b64"
+  ensure_env_file "$INTEGRATION_COREV2_ENV"
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_NEXT "$pub_b64"
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_NEXT "$next_kid"
+  log "staged model-execution attestation key rotation: $current_kid -> $next_kid (NEXT; not yet active — run assemble_provider_write_attestation_keys_json then promote when ready)"
+}
+
+# promote_model_execution_attestation_key — cut the signer over to the staged
+# NEXT key. The prior active key moves to PREVIOUS (kept trusted, so any
+# token it already signed still verifies for its remaining TTL) rather than
+# being deleted outright; prune_model_execution_attestation_key_previous
+# removes it once the bake period has passed.
+promote_model_execution_attestation_key() {
+  local next_priv next_pub next_kid current_pub current_kid
+  next_priv="$(dotenv_get "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY_NEXT 2>/dev/null || true)"
+  next_pub="$(dotenv_get "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_NEXT 2>/dev/null || true)"
+  next_kid="$(dotenv_get "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_NEXT 2>/dev/null || true)"
+  if [[ -z "$next_priv" || -z "$next_pub" || -z "$next_kid" ]]; then
+    printf '[runtime-env] ERROR: no staged NEXT key to promote (run rotate_model_execution_attestation_key first)\n' >&2
+    return 1
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log "would promote staged model-execution attestation key $next_kid to active"
+    return 0
+  fi
+  current_pub="$(dotenv_get "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY 2>/dev/null || true)"
+  current_kid="$(dotenv_get "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID 2>/dev/null || true)"
+  if [[ -n "$current_pub" && -n "$current_kid" ]]; then
+    upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_PREVIOUS "$current_pub"
+    upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_PREVIOUS "$current_kid"
+  fi
+  upsert_env "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY "$next_priv"
+  # execution-core's own signer (attestation.rs::from_env) reads its kid from
+  # MODEL_ENV, not INTEGRATION_COREV2_ENV — both must move together or the
+  # signer keeps embedding the stale kid after a promote.
+  upsert_env "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID "$next_kid"
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY "$next_pub"
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID "$next_kid"
+  upsert_env "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY_NEXT ""
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_NEXT ""
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_NEXT ""
+  log "promoted model-execution attestation key $next_kid to active (previous key $current_kid kept trusted — prune after the bake period)"
+}
+
+# prune_model_execution_attestation_key_previous — remove the superseded key
+# from the trusted registry. Only call this after the bake period (minutes,
+# given the 30s JWS TTL — not the days typical for long-lived credentials).
+prune_model_execution_attestation_key_previous() {
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log "would prune the previous (superseded) model-execution attestation key"
+    return 0
+  fi
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_PREVIOUS ""
+  upsert_env "$INTEGRATION_COREV2_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_PREVIOUS ""
+  log "pruned the previous model-execution attestation key from the trusted registry"
+}
+
+# assemble_provider_write_attestation_keys_json — build the consumable
+# INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON array integration-corev2
+# actually reads (internal/config/config.go). Previously nothing did this:
+# the per-issuer PUBLIC_KEY/_KEY_ID vars above were written but never
+# combined, so a fresh bootstrap left this array empty and the whole
+# write-attestation mechanism unconfigured (ParseTrustedKeysJSON fails closed
+# on an empty value — this would have silently blocked conversation-core's
+# existing provider-write sends too, not just execution-core's new one).
+# Idempotent: safe to re-run whenever either key is (re)generated; includes
+# only the issuers whose public key material actually exists yet.
+# assemble_provider_write_attestation_keys_json also includes the
+# model-execution NEXT/PREVIOUS slots when present, so a staged rotation
+# (rotate_model_execution_attestation_key) is trusted immediately for
+# validation, and a just-promoted key's predecessor
+# (promote_model_execution_attestation_key) stays trusted through its bake
+# period until explicitly pruned. Each slot has its own distinct kid, so
+# multiple simultaneous model-execution entries never collide (the verifier
+# requires globally unique kids, not unique (issuer, kid) pairs — see
+# integration-corev2's ParseTrustedKeysJSON).
+assemble_provider_write_attestation_keys_json() {
+  local entries=""
+  local issuer kid_var pub_var kid pub entry
+  for issuer_spec in \
+    "conversation-core:CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:CONVERSATION_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY" \
+    "model-execution:EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID:EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY" \
+    "model-execution:EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_NEXT:EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_NEXT" \
+    "model-execution:EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID_PREVIOUS:EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PUBLIC_KEY_PREVIOUS"
+  do
+    IFS=':' read -r issuer kid_var pub_var <<< "$issuer_spec"
+    kid="$(dotenv_get "$INTEGRATION_COREV2_ENV" "$kid_var" 2>/dev/null || true)"
+    pub="$(dotenv_get "$INTEGRATION_COREV2_ENV" "$pub_var" 2>/dev/null || true)"
+    if [[ -n "$kid" && -n "$pub" ]]; then
+      entry="{\"issuer\":\"${issuer}\",\"kid\":\"${kid}\",\"public_key\":\"${pub}\"}"
+      if [[ -n "$entries" ]]; then
+        entries="${entries},${entry}"
+      else
+        entries="$entry"
+      fi
+    fi
+  done
+  if [[ -z "$entries" ]]; then
+    log "no provider-write attestation public keys generated yet; leaving INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON untouched"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    log "would assemble INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON"
+    return 0
+  fi
+  ensure_env_file "$INTEGRATION_COREV2_ENV"
+  upsert_env "$INTEGRATION_COREV2_ENV" INTEGRATION_PROVIDER_WRITE_ATTESTATION_KEYS_JSON "[${entries}]"
+}
+
+# A rotation action is a standalone operation, not a step in the full
+# provisioning sequence below: it touches only the one key it's asked to
+# touch and exits immediately, so it is safe to run against a live prod
+# environment without re-running (or risking) anything else this script does.
+# See the runbook in verevon-roadmap.md for the full operational sequence.
+if [[ -n "$ROTATE_MODEL_EXECUTION_KEY_ACTION" ]]; then
+  case "$ROTATE_MODEL_EXECUTION_KEY_ACTION" in
+    stage) rotate_model_execution_attestation_key && assemble_provider_write_attestation_keys_json ;;
+    promote) promote_model_execution_attestation_key && assemble_provider_write_attestation_keys_json ;;
+    prune) prune_model_execution_attestation_key_previous && assemble_provider_write_attestation_keys_json ;;
+  esac
+  exit $?
+fi
 
 if [[ "$DRY_RUN" == "false" ]]; then
   acquire_lock
@@ -318,7 +601,7 @@ fi
 # then silently ROTATES credentials the running fleet is still authenticating
 # with. Measured on a live deployment: with apps/{Control,Ingestion,Application}
 # Plane/.env absent, a dry run reported 24 values it would (re)configure,
-# including INTERNAL_API_KEY across six planes and VELION_NATS_TOKEN across four.
+# including INTERNAL_API_KEY across six planes and VEREVON_NATS_TOKEN across four.
 # Applying that would have broken cross-plane auth fleet-wide with no error, only
 # 401s appearing minutes later.
 #
@@ -354,8 +637,8 @@ internal_api_key="$(ensure_secret "$CONTROL_ENV" INTERNAL_API_KEY)"
 sync_value INTERNAL_API_KEY "$internal_api_key" "$ROOT_ENV" "$DATA_ENV" "$INGESTION_ENV" "$MODEL_ENV" "$APPLICATION_ENV" "$FRONTEND_ENV"
 sync_value AUTH_CORE_INTERNAL_API_KEY "$internal_api_key" "$INGESTION_ENV"
 
-velion_nats_token="$(ensure_secret "$CONTROL_ENV" VELION_NATS_TOKEN)"
-sync_value VELION_NATS_TOKEN "$velion_nats_token" "$DATA_ENV" "$INGESTION_ENV" "$APPLICATION_ENV" "$FRONTEND_ENV"
+verevon_nats_token="$(ensure_secret "$CONTROL_ENV" VEREVON_NATS_TOKEN)"
+sync_value VEREVON_NATS_TOKEN "$verevon_nats_token" "$DATA_ENV" "$INGESTION_ENV" "$APPLICATION_ENV" "$FRONTEND_ENV"
 
 # Data Plane private infrastructure and signed event domains.
 if [[ "$ROTATE_NATS" == "true" ]]; then
@@ -365,7 +648,7 @@ ensure_secret "$DATA_ENV" POSTGRES_PASSWORD >/dev/null
 ensure_secret "$DATA_ENV" DATAPLANE_DRAGONFLY_PASSWORD >/dev/null
 ensure_secret "$DATA_ENV" DATAPLANE_NATS_TOKEN >/dev/null
 ensure_secret "$DATA_ENV" QDRANT_API_KEY >/dev/null
-ensure_value "$DATA_ENV" MINIO_ROOT_USER "velion-data" >/dev/null
+ensure_value "$DATA_ENV" MINIO_ROOT_USER "verevon-data" >/dev/null
 ensure_secret "$DATA_ENV" MINIO_ROOT_PASSWORD >/dev/null
 for event_domain in documents index embedding wiki; do
   ensure_event_keypair "$event_domain"
@@ -427,7 +710,7 @@ model_nats_token="$(ensure_secret "$MODEL_ENV" MODEL_NATS_TOKEN)"
 ensure_secret "$MODEL_ENV" MODEL_DRAGONFLY_PASSWORD >/dev/null
 model_minio_user="$(dotenv_get "$MODEL_ENV" MODEL_MINIO_ROOT_USER 2>/dev/null || true)"
 if is_placeholder "$model_minio_user"; then
-  upsert_env "$MODEL_ENV" MODEL_MINIO_ROOT_USER "velion-model-$(openssl rand -hex 6)"
+  upsert_env "$MODEL_ENV" MODEL_MINIO_ROOT_USER "verevon-model-$(openssl rand -hex 6)"
 fi
 ensure_secret "$MODEL_ENV" MODEL_MINIO_ROOT_PASSWORD >/dev/null
 ensure_secret "$MODEL_ENV" AGENT_MEMORY_REDIS_PASSWORD >/dev/null
@@ -436,7 +719,7 @@ ensure_secret "$MODEL_ENV" MODEL_BRIDGE_JWT_SECRET >/dev/null
 model_ingestion_key="$(ensure_secret "$MODEL_ENV" MODEL_EXECUTION_SERVICE_API_KEY)"
 model_gateway_service_key="$(ensure_secret "$MODEL_ENV" MODEL_GATEWAY_SERVICE_API_KEY)"
 execution_core_service_key="$(ensure_secret "$MODEL_ENV" EXECUTION_CORE_SERVICE_API_KEY)"
-# inference-core reads Velion's routing policy from session-core in the
+# inference-core reads Verevon's routing policy from session-core in the
 # background; this credential lets it mint an aud=session-core service token.
 inference_routing_key="$(ensure_secret "$MODEL_ENV" INFERENCE_ROUTING_SERVICE_API_KEY)"
 # session-core mints aud=letta-bridge for durable memory and aud=inference-core
@@ -523,6 +806,16 @@ ensure_secret "$APPLICATION_ENV" APPLICATION_CONVEX_CONTROL_PROJECTION_KEY >/dev
 # provider-write receipts; integration-corev2 verifies them at runtime.
 ensure_value "$APPLICATION_ENV" CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID "conversation-provider-write-v1" >/dev/null
 ensure_ed25519_attestation_key
+
+# Model-execution provider-write attestation (Ed25519): execution-core
+# (Model Plane) signs the same attestation contract for human-approved agent
+# tool actions; integration-corev2 verifies both issuers under one registry.
+ensure_value "$MODEL_ENV" EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_KEY_ID "model-execution-provider-write-v1" >/dev/null
+ensure_model_execution_attestation_key
+
+# Combine whichever of the above keys exist into the array integration-corev2
+# actually reads. Must run after both ensure_*_attestation_key calls above.
+assemble_provider_write_attestation_keys_json
 
 # Deployment-owned registry. Each identity has its own credential and bounded
 # audience/scopes; allowAnyOrg permits internal workers to serve newly-created

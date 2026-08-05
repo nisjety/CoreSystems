@@ -2,7 +2,7 @@
 //!
 //! `org-core`'s `PublishGDPRErasureFanout` (immediate hard-delete path and
 //! the 30-day retention cron) publishes onto the shared
-//! `velion.gdpr.erasure.requested` fan-out on the cross-plane broker
+//! `verevon.gdpr.erasure.requested` fan-out on the cross-plane broker
 //! (`control-shared-nats`, stream `AQENCIA_CONTROLPLANE`). This module
 //! decides which of those events this crate must act on, and performs the
 //! actual hard-purge of the two org-scoped tables index-engine-rs — and
@@ -44,7 +44,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 
 const MAX_ID_LEN: usize = 255;
 
-/// Wire shape of one `velion.gdpr.erasure.requested` message. Producers
+/// Wire shape of one `verevon.gdpr.erasure.requested` message. Producers
 /// (`org-core`, `user-core`) do not emit the same optional field set, so
 /// only the fields this module reads are required to be present at all —
 /// everything else is optional-and-ignored rather than rejected.
@@ -65,7 +65,7 @@ pub struct OrganizationErasure {
     pub requested_by: String,
 }
 
-/// Failure decoding or validating a `velion.gdpr.erasure.requested`
+/// Failure decoding or validating a `verevon.gdpr.erasure.requested`
 /// message. Every variant is a poison condition — the caller should
 /// dead-letter (NAK) the message rather than retry it forever.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -161,23 +161,28 @@ impl PurgeSummary {
 /// rolls back, so a NAK'd redelivery retries the whole purge cleanly.
 pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Result<PurgeSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
-    let mut summary = PurgeSummary::default();
 
-    summary.index_deletion_outbox =
-        sqlx::query("DELETE FROM index_deletion_outbox WHERE org_id = $1")
-            .bind(org_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+    // Bound to locals rather than assigned onto a `default()` struct (clippy's
+    // `field_reassign_with_default`). Order between these two statements is
+    // arbitrary — see the fn doc: there is no foreign key between them, both are
+    // independently `org_id`-scoped, and both are idempotent.
+    let index_deletion_outbox = sqlx::query("DELETE FROM index_deletion_outbox WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
 
-    summary.knowledge_units = sqlx::query("DELETE FROM knowledge_units WHERE org_id = $1")
+    let knowledge_units = sqlx::query("DELETE FROM knowledge_units WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
         .rows_affected();
 
     tx.commit().await?;
-    Ok(summary)
+    Ok(PurgeSummary {
+        index_deletion_outbox,
+        knowledge_units,
+    })
 }
 
 #[cfg(test)]

@@ -99,8 +99,8 @@ func TestTranslateNewToLegacy_Parity(t *testing.T) {
 		in   string
 		want string // "" means None
 	}{
-		{"mp.v1.run.01HXYZ.event", "velion.agent.run.01HXYZ.event"},
-		{"mp.v1.session.abc-123.command", "velion.session.abc-123.command"},
+		{"mp.v1.run.01HXYZ.event", "verevon.agent.run.01HXYZ.event"},
+		{"mp.v1.session.abc-123.command", "verevon.session.abc-123.command"},
 		{"mp.v1.ingress.usage", "aqencia.reasoning.usage.recorded"},
 		{"mp.v1.ingress.decision", "aqencia.reasoning.decision.made"},
 		{"mp.v1.ingress.quota_exceeded", "aqencia.reasoning.quota.exceeded"},
@@ -151,7 +151,7 @@ func TestSubscriberSubjects_DualRead_CanonicalPlusLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	want := []string{"mp.v1.run.r1.event", "velion.agent.run.r1.event"}
+	want := []string{"mp.v1.run.r1.event", "verevon.agent.run.r1.event"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DualRead: got %v want %v", got, want)
 	}
@@ -162,7 +162,7 @@ func TestSubscriberSubjects_LegacyOnly_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	want := []string{"velion.agent.run.r1.event"}
+	want := []string{"verevon.agent.run.r1.event"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LegacyOnly: got %v want %v", got, want)
 	}

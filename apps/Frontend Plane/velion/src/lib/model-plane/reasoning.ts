@@ -11,7 +11,7 @@ type ReasoningRequest = {
   model?: string
   enable_web_search?: boolean
   /**
-   * §15 (ui-ux-velion-gap.md): agent tool-use loop. When present and
+   * §15 (ui-ux-verevon-gap.md): agent tool-use loop. When present and
    * non-empty, forwarded to the gateway's `/v1/invoke` as `tools` so
    * `tool_loop::run_tool_loop` drives the conversation with the
    * registered tool registry.
@@ -54,7 +54,7 @@ function buildRustInvokePayload(body: ReasoningRequest) {
   // and the model never saw them, so downstream JSON parsing failed.
   const responseMode = (() => {
     // Phase 3 (Model Plane token optimisations): the gateway accepts a new
-    // `terse` response_mode for telegraphic replies (max_tokens=256). Velion
+    // `terse` response_mode for telegraphic replies (max_tokens=256). Verevon
     // callers can opt in by setting `body.depth === 'terse'`; legacy values
     // continue to map as before.
     if (body.depth === 'terse') return 'terse'
@@ -197,7 +197,7 @@ export async function invokeReasoning(
     })
   }
 
-  // U2-5 (velion ui-ux-velion-gap.md §10): model-gateway's auth middleware
+  // U2-5 (verevon ui-ux-verevon-gap.md §10): model-gateway's auth middleware
   // (require_auth in model-gateway/src/auth.rs) validates an RS256 JWT
   // against auth-core's JWKS in production. We mint that token here:
   //   - When `init.cookieHeader` is provided → forward to auth-core
@@ -229,7 +229,7 @@ export async function invokeReasoning(
     ...(init?.headers ?? {}),
   }
 
-  // U2-8 (velion ui-ux-velion-gap.md §12): Deep Search routes to the
+  // U2-8 (verevon ui-ux-verevon-gap.md §12): Deep Search routes to the
   // gateway's `/v1/research` endpoint instead of `/v1/invoke`. That
   // endpoint runs a multi-step research loop (plan → fetch/search →
   // synthesize) which is what the composer's "Deep" mode advertises.

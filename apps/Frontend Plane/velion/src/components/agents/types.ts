@@ -18,7 +18,7 @@ export type AgentStatus = 'active' | 'inactive' | 'draft'
  */
 export type AgentProfile = 'chat' | 'deployed_agent'
 
-// U2-2 / U3-2 (ui-ux-velion-gap.md §10): aligned with the real Azure /
+// U2-2 / U3-2 (ui-ux-verevon-gap.md §10): aligned with the real Azure /
 // Anthropic deployments and capability-core's seeded `models` registry.
 // The previous values (`gpt-5.4-mini`, `gpt-5.4`, `claude-sonnet-4-6`,
 // `claude-opus-4-6`) were fictional names that Azure returned 404 for —
@@ -60,7 +60,7 @@ export interface PersistedAgent {
   knowledgeSources?: KnowledgeSource[]
   /** Harness profile. Absent on legacy rows — resolve via {@link resolveAgentProfile}. */
   profile?: AgentProfile
-  // Wave 9 (ui-ux-velion-gap.md §19): public embed widget config.
+  // Wave 9 (ui-ux-verevon-gap.md §19): public embed widget config.
   publicEnabled?: boolean
   publicSecret?: string
   embedTheme?: {

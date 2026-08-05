@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
-// W4-3 (ui-ux-velion-gap.md §13): the search proxy used to POST to a
+// W4-3 (ui-ux-verevon-gap.md §13): the search proxy used to POST to a
 // non-existent `/stream/chat` endpoint on the model-gateway — every
 // request returned `ai-core unavailable` and the client-side
 // `search-api.ts` silently fell back to a mock. Users hit the `/search`
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest): Promise<Response> {
       try {
         const token = await getModelPlaneTokenFromSession(request)
 
-        // /v1/invoke accepts the same shape velion's chat path uses, with
+        // /v1/invoke accepts the same shape verevon's chat path uses, with
         // browse_web=true so the gateway runs a Brave search before calling
         // the LLM and grounds the answer in fresh results. `system_prompt`
         // overrides the gateway's default and keeps the Norwegian-only,

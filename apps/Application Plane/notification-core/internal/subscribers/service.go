@@ -158,9 +158,9 @@ func (s *Service) syncToNovu(sub Subscriber, membership Membership) {
 		Locale:       sub.Locale,
 		Timezone:     sub.Timezone,
 		Data: map[string]any{
-			"velion_user_id": sub.UserID,
-			"velion_org_id":  membership.OrganizationID,
-			"velion_role":    membership.Role,
+			"verevon_user_id": sub.UserID,
+			"verevon_org_id":  membership.OrganizationID,
+			"verevon_role":    membership.Role,
 		},
 	})
 	if err != nil {
@@ -177,5 +177,5 @@ func (s *Service) syncToNovu(sub Subscriber, membership Membership) {
 func providerSubscriberID(organizationID, userID string) string {
 	canonical := strings.TrimSpace(organizationID) + "\x00" + strings.TrimSpace(userID)
 	digest := sha256.Sum256([]byte(canonical))
-	return fmt.Sprintf("velion:%x", digest)
+	return fmt.Sprintf("verevon:%x", digest)
 }

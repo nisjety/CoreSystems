@@ -144,6 +144,16 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 			providerContext["business_login_config"] = "conversions"
 		}
 	}
+	if provider.Key == "meta" && slices.Contains(input.Bundles, "messenger") {
+		if _, ok := providerContext["business_login_config"]; !ok {
+			providerContext["business_login_config"] = "support_messaging"
+		}
+	}
+	if provider.Key == "meta" && slices.Contains(input.Bundles, "ads") {
+		if _, ok := providerContext["business_login_config"]; !ok {
+			providerContext["business_login_config"] = "studio_ads"
+		}
+	}
 
 	sessionID := "cs_" + uuid.NewString()
 	state, err := RandomURLToken(32)
@@ -316,7 +326,7 @@ func (s *Service) AccessTokenForConnection(ctx context.Context, connectionID str
 	if err != nil {
 		return AccessTokenResult{}, err
 	}
-	if connection.DeletedAt != nil || (connection.Status != "active" && connection.Status != "needs_refresh") {
+	if connection.DeletedAt != nil || connection.Status != "active" {
 		return AccessTokenResult{}, store.ErrNotFound
 	}
 	return s.accessTokenForConnection(ctx, connection)
@@ -452,6 +462,9 @@ func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason
 }
 
 func (s *Service) accessTokenForConnection(ctx context.Context, connection store.Connection) (AccessTokenResult, error) {
+	if connection.DeletedAt != nil || connection.Status != "active" {
+		return AccessTokenResult{}, store.ErrNotFound
+	}
 	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
 	if err != nil {
 		return AccessTokenResult{}, err
@@ -481,10 +494,11 @@ func (s *Service) accessTokenForConnection(ctx context.Context, connection store
 }
 
 func (s *Service) callbackURL(providerKey string) string {
-	if providers.NormalizeKey(providerKey) == "snapchat" && strings.TrimSpace(s.cfg.SnapchatRedirectBaseURL) != "" {
+	normalizedProviderKey := providers.NormalizeKey(providerKey)
+	if normalizedProviderKey == "snapchat" && strings.TrimSpace(s.cfg.SnapchatRedirectBaseURL) != "" {
 		return strings.TrimRight(s.cfg.SnapchatRedirectBaseURL, "/") + "/oauth/callback/snapchat"
 	}
-	return s.cfg.PublicBaseURL + "/oauth/callback/" + providerKey
+	return strings.TrimRight(s.cfg.PublicBaseURL, "/") + "/oauth/callback/" + normalizedProviderKey
 }
 
 func (s *Service) exchangeCode(ctx context.Context, session store.ConnectSession, code, verifier string) (TokenResult, error) {
@@ -496,10 +510,23 @@ func (s *Service) exchangeCode(ctx context.Context, session store.ConnectSession
 }
 
 func (s *Service) persistConnection(ctx context.Context, session store.ConnectSession, token TokenResult) (store.Connection, error) {
+	profile := ProviderProfile{}
+	if client, ok := s.clients[session.ProviderKey]; ok {
+		// Profile lookup is best-effort. Providers without a profile endpoint
+		// retain the legacy connector-level reconnect behavior below.
+		profile, _ = client.Profile(ctx, token.AccessToken, session.ProviderContext)
+	}
+	providerAccountID := providerAccountIdentity(session.ProviderKey, profile, token)
 	connectionID := "conn_" + uuid.NewString()
 	createdAt := s.now()
 	reconnecting := false
-	existing, err := s.repo.FindActiveConnection(ctx, session.OrganizationID, session.ConnectorType)
+	existing := store.Connection{}
+	var err error
+	if providerAccountID != "" {
+		existing, err = s.repo.FindActiveConnectionByProviderAccount(ctx, session.OrganizationID, session.ConnectorType, providerAccountID)
+	} else {
+		existing, err = s.repo.FindActiveConnection(ctx, session.OrganizationID, session.ConnectorType)
+	}
 	if err == nil {
 		connectionID = existing.ID
 		createdAt = existing.CreatedAt
@@ -518,10 +545,6 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 			return store.Connection{}, err
 		}
 	}
-	profile := ProviderProfile{}
-	if client, ok := s.clients[session.ProviderKey]; ok {
-		profile, _ = client.Profile(ctx, token.AccessToken, session.ProviderContext)
-	}
 	displayName := profile.DisplayName
 	if displayName == "" {
 		displayName = session.UserEmail
@@ -529,8 +552,23 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 	if displayName == "" {
 		displayName = session.ProviderKey + " connection"
 	}
-	connectionScopes := append([]string(nil), session.Scopes...)
-	connectionCapabilities := append([]string(nil), session.Capabilities...)
+	providerContext := reconnectProviderContext(existing.ProviderContext, session.ProviderContext)
+	if providers.NormalizeKey(session.ProviderKey) == "notion" {
+		if workspaceID := strings.TrimSpace(stringValue(token.Raw["workspace_id"])); workspaceID != "" {
+			providerContext["notion_workspace_id"] = workspaceID
+		}
+		if workspaceName := strings.TrimSpace(stringValue(token.Raw["workspace_name"])); workspaceName != "" {
+			providerContext["notion_workspace_name"] = workspaceName
+		}
+	}
+	if providerEmail := strings.TrimSpace(profile.Email); providerEmail != "" {
+		// This is the provider-confirmed identity of the connected mailbox, not
+		// the Verevon user's login email. It is safe to expose as connection
+		// metadata for operator navigation, while OAuth tokens remain private.
+		providerContext["mailbox_address"] = providerEmail
+	}
+	connectionScopes := append([]string{}, session.Scopes...)
+	connectionCapabilities := append([]string{}, session.Capabilities...)
 	connectionStatus := "active"
 	if isMetaFamilyProvider(session.ProviderKey) && token.ScopesVerified {
 		connectionScopes = normalizedStrings(token.Scope)
@@ -551,9 +589,9 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		UserEmail:             session.UserEmail,
 		Status:                connectionStatus,
 		DisplayName:           displayName,
-		ProviderAccountID:     profile.ID,
+		ProviderAccountID:     providerAccountID,
 		TenantID:              profile.TenantID,
-		ProviderContext:       reconnectProviderContext(existing.ProviderContext, session.ProviderContext),
+		ProviderContext:       providerContext,
 		Capabilities:          connectionCapabilities,
 		Scopes:                connectionScopes,
 		EncryptedAccessToken:  accessToken,
@@ -597,6 +635,15 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 	return saved, nil
 }
 
+func providerAccountIdentity(providerKey string, profile ProviderProfile, token TokenResult) string {
+	if providers.NormalizeKey(providerKey) == "notion" {
+		if workspaceID := strings.TrimSpace(stringValue(token.Raw["workspace_id"])); workspaceID != "" {
+			return workspaceID
+		}
+	}
+	return strings.TrimSpace(profile.ID)
+}
+
 func (s *Service) refresh(ctx context.Context, connection store.Connection, refreshToken string) (store.Connection, string, error) {
 	client, ok := s.clients[connection.ProviderKey]
 	if !ok {
@@ -604,6 +651,12 @@ func (s *Service) refresh(ctx context.Context, connection store.Connection, refr
 	}
 	token, err := client.Refresh(ctx, refreshToken, connection.Scopes, connection.ProviderContext)
 	if err != nil {
+		if IsAuthorizationRefreshRequired(err) {
+			connection.Status = "needs_refresh"
+			if _, persistErr := s.repo.UpdateConnectionCredentials(ctx, connection); persistErr != nil {
+				return store.Connection{}, "", fmt.Errorf("mark connection needs refresh: %w", errors.Join(err, persistErr))
+			}
+		}
 		return store.Connection{}, "", err
 	}
 	encryptedAccessToken, err := s.vault.Encrypt(token.AccessToken, []byte(connection.ID))
@@ -659,7 +712,7 @@ func (s *Service) refreshIfStillExpired(ctx context.Context, connectionID string
 	if err != nil {
 		return store.Connection{}, "", err
 	}
-	if connection.DeletedAt != nil || (connection.Status != "active" && connection.Status != "needs_refresh") {
+	if connection.DeletedAt != nil || connection.Status != "active" {
 		return store.Connection{}, "", store.ErrNotFound
 	}
 	accessToken, err := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))

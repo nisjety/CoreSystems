@@ -22,7 +22,7 @@ func TestGoogleAuthorizationURLUsesOfflineAccessAndPKCE(t *testing.T) {
 		UsePKCE:          true,
 		ExtraAuthParams: map[string]string{
 			"access_type": "offline",
-			"prompt":      "consent",
+			"prompt":      "select_account consent",
 		},
 	})
 
@@ -38,11 +38,95 @@ func TestGoogleAuthorizationURLUsesOfflineAccessAndPKCE(t *testing.T) {
 	if values.Get("access_type") != "offline" {
 		t.Fatalf("access_type = %q, want offline", values.Get("access_type"))
 	}
+	if values.Get("prompt") != "select_account consent" {
+		t.Fatalf("prompt = %q, want select_account consent", values.Get("prompt"))
+	}
 	if values.Get("code_challenge") == "" {
 		t.Fatalf("missing code_challenge")
 	}
 	if values.Get("scope") != "openid email" {
 		t.Fatalf("scope = %q, want openid email", values.Get("scope"))
+	}
+}
+
+func TestGoogleProviderClientRequestsAccountSelection(t *testing.T) {
+	clients := NewProviderClients(config.Config{
+		GoogleClientID:         "google-client",
+		GoogleClientSecret:     "google-secret",
+		GoogleAuthorizationURL: "https://accounts.google.com/o/oauth2/v2/auth",
+		GoogleTokenURL:         "https://oauth2.googleapis.com/token",
+		GoogleAPIBaseURL:       "https://www.googleapis.com",
+	}, nil, nil)
+
+	rawURL, err := clients["google"].AuthorizationURL(
+		"state", "https://app.test/oauth/callback/google", "verifier", []string{"openid"}, nil,
+	)
+	if err != nil {
+		t.Fatalf("AuthorizationURL error: %v", err)
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("url parse error: %v", err)
+	}
+	if got := parsed.Query().Get("prompt"); got != "select_account consent" {
+		t.Fatalf("provider prompt = %q, want select_account consent", got)
+	}
+}
+
+func TestNotionProviderClientUsesUserOwnedAuthorization(t *testing.T) {
+	clients := NewProviderClients(config.Config{
+		NotionClientID:         "notion-client",
+		NotionClientSecret:     "notion-secret",
+		NotionAuthorizationURL: "https://api.notion.com/v1/oauth/authorize",
+		NotionTokenURL:         "https://api.notion.com/v1/oauth/token",
+		NotionAPIBaseURL:       "https://api.notion.com",
+	}, nil, nil)
+
+	rawURL, err := clients["notion"].AuthorizationURL(
+		"state", "https://app.test/oauth/callback/notion", "", nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("AuthorizationURL error: %v", err)
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("url parse error: %v", err)
+	}
+	if got := parsed.Query().Get("owner"); got != "user" {
+		t.Fatalf("owner = %q, want user", got)
+	}
+}
+
+func TestGoogleRefreshInvalidGrantIsClassifiedForReconnect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error":             "invalid_grant",
+			"error_description": "Token has been expired or revoked.",
+		})
+	}))
+	defer server.Close()
+
+	client := NewOAuth2Client(OAuth2ClientConfig{
+		ProviderKey: "google",
+		ClientID:    "client",
+		TokenURL:    server.URL,
+		HTTPClient:  server.Client(),
+	})
+	_, err := client.Refresh(t.Context(), "revoked-refresh-token", nil, nil)
+	if err == nil {
+		t.Fatal("expected revoked Google refresh token to fail")
+	}
+	if !IsAuthorizationRefreshRequired(err) {
+		t.Fatalf("IsAuthorizationRefreshRequired(%v) = false, want true", err)
+	}
+	var tokenErr *TokenEndpointError
+	if !errors.As(err, &tokenErr) {
+		t.Fatalf("error = %T, want TokenEndpointError", err)
+	}
+	if tokenErr.ProviderKey != "google" || tokenErr.StatusCode != http.StatusBadRequest || tokenErr.Code != "invalid_grant" {
+		t.Fatalf("token endpoint error = %#v, want Google invalid_grant 400", tokenErr)
 	}
 }
 
@@ -178,11 +262,11 @@ func TestShopifyAuthorizationURLRequiresShopContext(t *testing.T) {
 		t.Fatalf("expected missing shop error")
 	}
 
-	rawURL, err := client.AuthorizationURL("state", "https://app.test/callback", "", []string{"read_products", "read_content"}, map[string]string{"shop": "velion.myshopify.com"})
+	rawURL, err := client.AuthorizationURL("state", "https://app.test/callback", "", []string{"read_products", "read_content"}, map[string]string{"shop": "verevon.myshopify.com"})
 	if err != nil {
 		t.Fatalf("AuthorizationURL error: %v", err)
 	}
-	if !strings.HasPrefix(rawURL, "https://velion.myshopify.com/admin/oauth/authorize?") {
+	if !strings.HasPrefix(rawURL, "https://verevon.myshopify.com/admin/oauth/authorize?") {
 		t.Fatalf("url = %s, want shop scoped auth URL", rawURL)
 	}
 }
@@ -202,13 +286,18 @@ func TestProvidersWithoutRemoteRevocationReturnTypedUnsupportedSentinel(t *testi
 	}
 }
 
-func TestMetaFamilyClientsUseMetaRefreshModel(t *testing.T) {
+func TestMetaFamilyClientsUseTheirCorrectLoginModels(t *testing.T) {
 	clients := NewProviderClients(config.Config{
 		FacebookClientID:          "facebook-client",
 		FacebookClientSecret:      "facebook-secret",
 		FacebookAuthorizationURL:  "https://facebook.test/dialog/oauth",
 		FacebookTokenURL:          "https://facebook.test/oauth/access_token",
 		FacebookAPIBaseURL:        "https://graph.test",
+		MetaClientID:              "meta-client",
+		MetaClientSecret:          "meta-secret",
+		MetaAuthorizationURL:      "https://meta.test/dialog/oauth",
+		MetaTokenURL:              "https://meta.test/oauth/access_token",
+		MetaAPIBaseURL:            "https://meta-graph.test",
 		InstagramClientID:         "instagram-client",
 		InstagramClientSecret:     "instagram-secret",
 		InstagramAuthorizationURL: "https://instagram.test/dialog/oauth",
@@ -216,10 +305,107 @@ func TestMetaFamilyClientsUseMetaRefreshModel(t *testing.T) {
 		InstagramAPIBaseURL:       "https://graph-instagram.test",
 	}, nil, nil)
 
-	for _, provider := range []string{"meta", "facebook", "instagram", "whatsapp", "meta-ads"} {
+	for _, provider := range []string{"meta", "facebook", "whatsapp", "meta-ads"} {
 		if _, ok := clients[provider].(*MetaOAuthClient); !ok {
 			t.Fatalf("%s client = %T, want *MetaOAuthClient", provider, clients[provider])
 		}
+	}
+	if _, ok := clients["instagram"].(*InstagramBusinessLoginClient); !ok {
+		t.Fatalf("instagram client = %T, want *InstagramBusinessLoginClient", clients["instagram"])
+	}
+	metaClient := clients["meta"].(*MetaOAuthClient)
+	if metaClient.base.cfg.ClientID != "meta-client" || metaClient.base.cfg.ClientSecret != "meta-secret" {
+		t.Fatalf("unified Meta client credentials = %q/%q, want meta-client/meta-secret", metaClient.base.cfg.ClientID, metaClient.base.cfg.ClientSecret)
+	}
+	if metaClient.base.cfg.AuthorizationURL != "https://meta.test/dialog/oauth" || metaClient.base.cfg.TokenURL != "https://meta.test/oauth/access_token" || metaClient.base.cfg.APIBaseURL != "https://meta-graph.test" {
+		t.Fatalf("unified Meta endpoints = %q/%q/%q, want dedicated Meta endpoints", metaClient.base.cfg.AuthorizationURL, metaClient.base.cfg.TokenURL, metaClient.base.cfg.APIBaseURL)
+	}
+}
+
+func TestInstagramBusinessLoginUsesInstagramOAuthAndGraphEndpoints(t *testing.T) {
+	var refreshRequested bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/access_token":
+			if r.Method != http.MethodPost {
+				t.Fatalf("token method = %s, want POST", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse token form: %v", err)
+			}
+			if r.Form.Get("client_id") != "instagram-client" || r.Form.Get("client_secret") != "instagram-secret" {
+				t.Fatalf("token credentials = %q/%q", r.Form.Get("client_id"), r.Form.Get("client_secret"))
+			}
+			if r.Form.Get("redirect_uri") != "https://verevon.test/oauth/callback/instagram" {
+				t.Fatalf("redirect_uri = %q", r.Form.Get("redirect_uri"))
+			}
+			_, _ = w.Write([]byte(`{"access_token":"ig-short","expires_in":3600}`))
+		case "/v25.0/refresh_access_token":
+			refreshRequested = true
+			if r.URL.Query().Get("grant_type") != "ig_refresh_token" || r.URL.Query().Get("access_token") != "ig-short" {
+				t.Fatalf("refresh query = %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"access_token":"ig-long","expires_in":5184000}`))
+		case "/v25.0/me":
+			if r.Header.Get("Authorization") != "Bearer ig-long" {
+				t.Fatalf("profile authorization = %q", r.Header.Get("Authorization"))
+			}
+			if r.URL.Query().Get("fields") != "id,username" {
+				t.Fatalf("profile fields = %q", r.URL.Query().Get("fields"))
+			}
+			_, _ = w.Write([]byte(`{"id":"ig-user-1","username":"verevon_support"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client := NewInstagramBusinessLoginClient(OAuth2ClientConfig{
+		ProviderKey:      "instagram",
+		ClientID:         "instagram-client",
+		ClientSecret:     "instagram-secret",
+		AuthorizationURL: "https://www.instagram.com/oauth/authorize",
+		TokenURL:         server.URL + "/oauth/access_token",
+		APIBaseURL:       server.URL + "/v25.0",
+		ScopeSeparator:   ",",
+		HTTPClient:       server.Client(),
+	})
+
+	authorizeURL, err := client.AuthorizationURL("state-1", "https://verevon.test/oauth/callback/instagram", "", []string{"instagram_business_basic", "instagram_business_manage_messages"}, nil)
+	if err != nil {
+		t.Fatalf("AuthorizationURL: %v", err)
+	}
+	parsed, err := url.Parse(authorizeURL)
+	if err != nil {
+		t.Fatalf("parse authorize URL: %v", err)
+	}
+	if parsed.Host != "www.instagram.com" || parsed.Path != "/oauth/authorize" {
+		t.Fatalf("authorize endpoint = %s", parsed.String())
+	}
+	if parsed.Query().Get("scope") != "instagram_business_basic,instagram_business_manage_messages" {
+		t.Fatalf("authorize scope = %q", parsed.Query().Get("scope"))
+	}
+
+	token, err := client.ExchangeCode(t.Context(), "code-1", "https://verevon.test/oauth/callback/instagram", "", nil, nil)
+	if err != nil {
+		t.Fatalf("ExchangeCode: %v", err)
+	}
+	if token.AccessToken != "ig-short" || token.RefreshToken != "ig-short" {
+		t.Fatalf("token = %#v", token)
+	}
+	refreshed, err := client.Refresh(t.Context(), token.RefreshToken, nil, nil)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !refreshRequested || refreshed.AccessToken != "ig-long" || refreshed.RefreshToken != "ig-long" {
+		t.Fatalf("refreshed = %#v, requested = %v", refreshed, refreshRequested)
+	}
+	profile, err := client.Profile(t.Context(), refreshed.AccessToken, nil)
+	if err != nil {
+		t.Fatalf("Profile: %v", err)
+	}
+	if profile.ID != "ig-user-1" || profile.DisplayName != "verevon_support" {
+		t.Fatalf("profile = %#v", profile)
 	}
 }
 

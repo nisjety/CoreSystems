@@ -6,7 +6,7 @@
 //! batch), and a typed per-source result envelope.
 //!
 //! Scope note: wildcard expansion (`domain/*`) is the two-step `/v1/map` →
-//! `/v1/extract` flow for Velion — call `/v1/map` to discover URLs, then pass
+//! `/v1/extract` flow for Verevon — call `/v1/map` to discover URLs, then pass
 //! them here. This route owns the extract fan-out + schema enforcement.
 //!
 //! Read-only (no durable writes), org-scoped for metering, ZDR-safe.

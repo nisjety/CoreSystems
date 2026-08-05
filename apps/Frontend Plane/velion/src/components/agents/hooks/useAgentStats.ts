@@ -3,9 +3,9 @@
 import { useCallback, useEffect, useState } from 'react';
 
 /**
- * U3-9 (ui-ux-velion-gap.md §14): client hook for per-agent run stats.
+ * U3-9 (ui-ux-verevon-gap.md §14): client hook for per-agent run stats.
  *
- * The Convex side (`agentRuns:statsByAgent`) is reactive — but velion's
+ * The Convex side (`agentRuns:statsByAgent`) is reactive — but verevon's
  * `convexQuery` server helper isn't subscribed from the browser, so we
  * poll every 30 s here and refetch on demand. The cost is small (one
  * Convex query) and the UX is "live enough" for a metrics panel.

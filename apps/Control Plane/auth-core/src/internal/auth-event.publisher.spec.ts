@@ -91,7 +91,7 @@ describe('AuthEventPublisher Control audit routing', () => {
     const localPublish = jest.fn((_subject: string, payload: Uint8Array) => {
       publishedPayload = payload;
       return Promise.resolve({
-        stream: 'VELION_CONTROL_OBSERVABILITY',
+        stream: 'VEREVON_CONTROL_OBSERVABILITY',
         seq: 41,
       });
     });
@@ -100,7 +100,7 @@ describe('AuthEventPublisher Control audit routing', () => {
       jetStream: { publish: localPublish },
     });
 
-    await publisher.publishVelionAudit({
+    await publisher.publishVerevonAudit({
       occurred_at: '2026-07-15T00:00:00.000Z',
       org_id: 'org-1',
       user_id: 'user-1',
@@ -111,7 +111,7 @@ describe('AuthEventPublisher Control audit routing', () => {
 
     expect(localPublish).toHaveBeenCalledTimes(1);
     expect(localPublish).toHaveBeenCalledWith(
-      'velion.audit.v2.control.auth-core.sign_in',
+      'verevon.audit.v2.control.auth-core.sign_in',
       expect.any(Uint8Array),
       { msgID: 'session:session-1:sign_in' },
     );
@@ -135,7 +135,7 @@ describe('AuthEventPublisher Control audit routing', () => {
     Object.assign(publisher as object, { isEnabled: true, jetStream: null });
 
     await expect(
-      publisher.publishVelionAudit({
+      publisher.publishVerevonAudit({
         occurred_at: '2026-07-15T00:00:00.000Z',
         org_id: 'org-1',
         user_id: 'user-1',
@@ -159,7 +159,7 @@ describe('AuthEventPublisher Control audit routing', () => {
     });
 
     await expect(
-      publisher.publishVelionAudit({
+      publisher.publishVerevonAudit({
         occurred_at: '2026-07-15T00:00:00.000Z',
         org_id: 'org-1',
         user_id: 'user-1',
@@ -176,7 +176,7 @@ describe('AuthEventPublisher Control audit routing', () => {
         event_id: 'membership:org-1:user-1:2:role_changed',
       });
       return Promise.resolve({
-        stream: 'VELION_CONTROL_OBSERVABILITY',
+        stream: 'VEREVON_CONTROL_OBSERVABILITY',
         seq: 42,
       });
     });
@@ -189,7 +189,7 @@ describe('AuthEventPublisher Control audit routing', () => {
       jetStream: { publish },
     });
 
-    await publisher.publishVelionAudit({
+    await publisher.publishVerevonAudit({
       occurred_at: '2026-07-15T00:00:00.000Z',
       org_id: 'org-1',
       event: 'role_change',
@@ -198,7 +198,7 @@ describe('AuthEventPublisher Control audit routing', () => {
     });
 
     expect(publish).toHaveBeenCalledWith(
-      'velion.audit.v2.control.auth-core.role_change',
+      'verevon.audit.v2.control.auth-core.role_change',
       expect.any(Uint8Array),
       { msgID: 'membership:org-1:user-1:2:role_changed' },
     );
@@ -227,7 +227,7 @@ describe('AuthEventPublisher Control audit routing', () => {
     });
 
     await expect(
-      publisher.publishVelionAudit({
+      publisher.publishVerevonAudit({
         occurred_at,
         org_id: 'org-1',
         event: 'sign_in',

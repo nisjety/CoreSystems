@@ -19,7 +19,7 @@ export function SidebarSearchField({
 }) {
   return (
     <div className={cn("relative", className)}>
-      <Search className="velion-sidebar-search-icon" strokeWidth={1.8} />
+      <Search className="verevon-sidebar-search-icon" strokeWidth={1.8} />
       <input
         type="search"
         value={value}
@@ -30,7 +30,7 @@ export function SidebarSearchField({
         autoCapitalize="none"
         spellCheck={false}
         className={cn(
-          "velion-sidebar-search-input",
+          "verevon-sidebar-search-input",
           sidebarType.input,
         )}
         aria-label={ariaLabel}

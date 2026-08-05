@@ -8,7 +8,7 @@ This directory contains the current service-level research notes for Data Plane 
 ## Secure-MVP current state — 2026-07-15
 
 **Secure-MVP candidate in source; not production-ready.** The final disposable
-source build passed the real Auth/User/Control Velion journey, Playwright **2/2**,
+source build passed the real Auth/User/Control Verevon journey, Playwright **2/2**,
 HTTP **28/28**, gRPC **31 methods / 124 assertions**, supported signed broker
 delivery/redelivery, and the six-store restrictive-ZDR final-state comparison.
 The final Documents signed-claim/single/bulk/source-object guards were rebuilt

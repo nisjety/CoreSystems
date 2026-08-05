@@ -35,20 +35,20 @@ func EventSubject(eventType, resourceID string) string {
 
 // Legacy (v2) subject constants and builders for dual-write compatibility.
 const (
-	LegacyPrefix                 = "velion"
-	LegacyRunEventsWildcard      = "velion.agent.run.*.event"
-	LegacySessionCommandWildcard = "velion.session.*.command"
+	LegacyPrefix                 = "verevon"
+	LegacyRunEventsWildcard      = "verevon.agent.run.*.event"
+	LegacySessionCommandWildcard = "verevon.session.*.command"
 	LegacyAqenciaWildcard        = "aqencia.reasoning.>"
 )
 
 // LegacyRunEventSubject returns the legacy v2 subject for a run's events.
 func LegacyRunEventSubject(runID string) string {
-	return fmt.Sprintf("velion.agent.run.%s.event", runID)
+	return fmt.Sprintf("verevon.agent.run.%s.event", runID)
 }
 
 // LegacySessionCommandSubject returns the legacy v2 subject for a session's commands.
 func LegacySessionCommandSubject(sessionKey string) string {
-	return fmt.Sprintf("velion.session.%s.command", sessionKey)
+	return fmt.Sprintf("verevon.session.%s.command", sessionKey)
 }
 
 // New Model Plane v1 usage and stream subjects.

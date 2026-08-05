@@ -1,7 +1,7 @@
 import { ConvexHttpClient } from "convex/browser";
 
 /**
- * Server-side Convex client for velionv2 BFF routes. Ported from velion v1
+ * Server-side Convex client for verevonv2 BFF routes. Ported from verevon v1
  * (src/app/api/_lib/convex-client.ts) and adapted to the convex-core
  * service-key convention: every call injects `serviceKey`, which the target
  * mutation/query validates via `assertServiceKey` (see convex-core/convex/
@@ -11,10 +11,10 @@ import { ConvexHttpClient } from "convex/browser";
  * Transport: createThread/appendTurn are PUBLIC functions gated by the
  * serviceKey arg, so no admin auth is required on self-hosted Convex. We still
  * set admin auth opportunistically when CONVEX_ADMIN_KEY is present (defense in
- * depth / parity with velion v1), but its absence is not fatal.
+ * depth / parity with verevon v1), but its absence is not fatal.
  */
 
-// In-network address for the self-hosted backend. velionv2 and convex-backend
+// In-network address for the self-hosted backend. verevonv2 and convex-backend
 // share the `inter-plane-bus` docker network, so `convex-backend:3210` resolves.
 const CONVEX_API_URL =
   process.env.CONVEX_API_URL ||

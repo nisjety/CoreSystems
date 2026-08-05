@@ -89,7 +89,7 @@ with HMAC-signed delivery and replay.
 
 ### 10. Live event stream — SSE/WebSocket
 Subscribe to a job-in-progress and watch pages arrive page-by-page (used
-by Velion's onboarding live crawl).
+by Verevon's onboarding live crawl).
 - **Parity with:** Vercel Live, Sanity Live Content, Convex subscriptions.
 - **Powered by:** `quarry-edge` SSE handler + **NATS** internal event bus;
   no polling.
@@ -151,7 +151,7 @@ URL + timing + outcome — replayable and queryable.
 
 ### 17. Public REST + GraphQL contract
 Stable, versioned HTTP surface (REST resources + GraphQL for richer reads)
-that Velion and external clients talk to.
+that Verevon and external clients talk to.
 - **Parity with:** Firecrawl API, Apify API.
 - **Powered by:** `quarry-edge` (axum) for REST + SSE, `quarry-control`
   (Go + `async-graphql`) for the typed GraphQL surface.
@@ -180,7 +180,7 @@ that Velion and external clients talk to.
 | **Browserbase** | Managed headless browsers when local browser leases are constrained. |
 | **Tantivy** (embedded) | Per-tenant search index. |
 | **Temporal** | Durable workflow orchestration, schedules, retries. |
-| **NATS** | Internal event bus between Rust runtime ↔ Go orchestrator ↔ Velion. |
+| **NATS** | Internal event bus between Rust runtime ↔ Go orchestrator ↔ Verevon. |
 | **S3 / MinIO** | Artifact storage (raw HTML, screenshots, PDFs, profiles). |
 | **Postgres** | Jobs, stores, profiles, event history. |
 | **Brave / Bing / Tavily** | Pluggable web-search backends. |

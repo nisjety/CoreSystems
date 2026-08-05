@@ -198,11 +198,11 @@ func TestJetStreamInboxDeduplicatesRedelivery(t *testing.T) {
 		EventID: "audit-auth-dedupe", OccurredAt: time.Now(), OrgID: orgID,
 		Plane: "control", Producer: "auth-core", Event: "dedupe",
 	}
-	inserted, err := st.InsertAuditFromStream(ctx, audit, "primary", "velion.audit.v2.control.auth-core.dedupe", 42)
+	inserted, err := st.InsertAuditFromStream(ctx, audit, "primary", "verevon.audit.v2.control.auth-core.dedupe", 42)
 	if err != nil || !inserted {
 		t.Fatalf("first audit insert: inserted=%v err=%v", inserted, err)
 	}
-	inserted, err = st.InsertAuditFromStream(ctx, audit, "primary", "velion.audit.v2.control.auth-core.dedupe", 42)
+	inserted, err = st.InsertAuditFromStream(ctx, audit, "primary", "verevon.audit.v2.control.auth-core.dedupe", 42)
 	if err != nil || inserted {
 		t.Fatalf("duplicate audit insert: inserted=%v err=%v", inserted, err)
 	}
@@ -211,11 +211,11 @@ func TestJetStreamInboxDeduplicatesRedelivery(t *testing.T) {
 		EventID: "usage-stream-sequence", OccurredAt: time.Now(), OrgID: orgID,
 		Plane: "model", Producer: "session-core", Op: "tokens", CostCents: 1.25,
 	}
-	inserted, err = st.InsertUsageFromStream(ctx, usage, "primary", "velion.usage.v2.model.session-core.tokens", 43)
+	inserted, err = st.InsertUsageFromStream(ctx, usage, "primary", "verevon.usage.v2.model.session-core.tokens", 43)
 	if err != nil || !inserted {
 		t.Fatalf("first usage insert: inserted=%v err=%v", inserted, err)
 	}
-	inserted, err = st.InsertUsageFromStream(ctx, usage, "primary", "velion.usage.v2.model.session-core.tokens", 43)
+	inserted, err = st.InsertUsageFromStream(ctx, usage, "primary", "verevon.usage.v2.model.session-core.tokens", 43)
 	if err != nil || inserted {
 		t.Fatalf("duplicate usage insert: inserted=%v err=%v", inserted, err)
 	}
@@ -277,8 +277,8 @@ func TestLogicalAuditIdentityIsBoundToProducerAndRejectsConflictingReuse(t *test
 		Producer:   "auth-core",
 		Event:      "member_added",
 	}
-	authSubject := "velion.audit.v2.control.auth-core.member_added"
-	userSubject := "velion.audit.v2.control.user-core.member_added"
+	authSubject := "verevon.audit.v2.control.auth-core.member_added"
+	userSubject := "verevon.audit.v2.control.user-core.member_added"
 	inserted, err := st.InsertAuditFromStream(ctx, audit, sourceBus, authSubject, firstSequence)
 	if err != nil || !inserted {
 		t.Fatalf("first logical audit insert: inserted=%v err=%v", inserted, err)
@@ -292,7 +292,7 @@ func TestLogicalAuditIdentityIsBoundToProducerAndRejectsConflictingReuse(t *test
 	if _, err := st.InsertAuditFromStream(ctx, &conflict, sourceBus, authSubject, firstSequence+2); !errors.Is(err, store.ErrAuditEventConflict) {
 		t.Fatalf("conflicting logical audit reuse error = %v", err)
 	}
-	inserted, err = st.InsertAuditFromStream(ctx, audit, sourceBus, "velion.audit.v2.control.auth-core.role_changed", firstSequence+3)
+	inserted, err = st.InsertAuditFromStream(ctx, audit, sourceBus, "verevon.audit.v2.control.auth-core.role_changed", firstSequence+3)
 	if err != nil || inserted {
 		t.Fatalf("same producer/event id on a different suffix: inserted=%v err=%v", inserted, err)
 	}
@@ -337,7 +337,7 @@ func TestLogicalUsageIdempotencySurvivesNewStreamSequence(t *testing.T) {
 	orgID := fmt.Sprintf("org-logical-usage-%d", now)
 	eventID := fmt.Sprintf("usage:model:%d", now)
 	sourceBus := fmt.Sprintf("logical-usage-%d", now)
-	sourceSubject := "velion.usage.v2.model.session-core.tokens"
+	sourceSubject := "verevon.usage.v2.model.session-core.tokens"
 	firstSequence := uint64(now)
 	cleanup := func() { _, _ = pool.Exec(ctx, `DELETE FROM usage_events WHERE org_id = $1`, orgID) }
 	cleanup()
@@ -366,13 +366,13 @@ func TestLogicalUsageIdempotencySurvivesNewStreamSequence(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("logical usage rows = %d; want 1", count)
 	}
-	inserted, err = st.InsertUsageFromStream(ctx, usage, sourceBus, "velion.usage.v2.model.session-core.tokens-secondary", firstSequence+2)
+	inserted, err = st.InsertUsageFromStream(ctx, usage, sourceBus, "verevon.usage.v2.model.session-core.tokens-secondary", firstSequence+2)
 	if err != nil || inserted {
 		t.Fatalf("same producer/event id on a different suffix: inserted=%v err=%v", inserted, err)
 	}
 	otherProducer := *usage
 	otherProducer.Producer = "model-gateway"
-	inserted, err = st.InsertUsageFromStream(ctx, &otherProducer, sourceBus, "velion.usage.v2.model.model-gateway.tokens", firstSequence+3)
+	inserted, err = st.InsertUsageFromStream(ctx, &otherProducer, sourceBus, "verevon.usage.v2.model.model-gateway.tokens", firstSequence+3)
 	if err != nil || !inserted {
 		t.Fatalf("independent scoped producer was preempted: inserted=%v err=%v", inserted, err)
 	}

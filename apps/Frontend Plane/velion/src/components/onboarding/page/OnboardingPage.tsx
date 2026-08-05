@@ -9,7 +9,7 @@ import { CrawlProgressProvider } from '../CrawlProgressContext';
 import { CrawlProgressModal } from '../core/CrawlProgressModal';
 
 const STEPS = [
-  // G45 (velion-gap.md §8.31 / Slice F): the wizard is now 5 steps instead
+  // G45 (verevon-gap.md §8.31 / Slice F): the wizard is now 5 steps instead
   // of 6. The legacy `/onboarding/connect` step is deferred to a
   // post-first-value `<ConnectorConsentPrompt />` on the dashboard. The
   // route file `/onboarding/connect/page.tsx` redirects forward for any

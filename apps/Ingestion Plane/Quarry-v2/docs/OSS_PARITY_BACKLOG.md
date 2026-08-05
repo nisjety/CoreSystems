@@ -27,7 +27,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 | **`/extract`** — prompt+schema across `domain/*` wildcards | per-page StructuredExtractClient only | 🟡 | **P1** multi-URL/wildcard extract fan-out |
 | `agent` (FIRE-1) NL extraction | AgentLoop + Planner exist, not exposed as one call | 🟡 | fold into P1 `/v1/extract {prompt,schema}` |
 | media parsing (PDF/DOCX) | pdf.rs (text) | 🟡 | P2 add DOCX |
-| MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Velion** is Quarry-v2's client, not external agents |
+| MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Verevon** is Quarry-v2's client, not external agents |
 | reliability claims (96% web, P95 3.4s) | unproven | 🟡 | benchmark lens → P2 live runs |
 
 ### Tavily (LLM-optimized search/extract/crawl/map/research)
@@ -89,7 +89,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 3. **Tavily search-param parity:** `topic` (general/news/finance), `time_range`/`days`, `exact_match`,
    `chunks_per_source`, `include_answer` flag, `format=context` (token-bounded RAG context).
    *Crate:* quarry-edge `search_routes` + chunks.rs. Mostly param plumbing. *Lens:* search-first, api-design.
-   *Consumer:* shape these for **Velion**'s search/answer UX (Velion drives Quarry-v2).
+   *Consumer:* shape these for **Verevon**'s search/answer UX (Verevon drives Quarry-v2).
 
 ### P1
 5. **`/v1/extract`** — prompt+schema over `domain/*` wildcards (crawl→extract fan-out, FIRE-1-style).
@@ -109,7 +109,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 ### ⛔ Skip (out of scope for an evidence engine)
 Cloud hosting, captcha solving, 1000+ SaaS integrations, keyless public tier, reasoning/knowledge
 ownership (stays in Model/Data planes).
-**MCP server (deferred):** Velion is Quarry-v2's driver/client — Quarry serves Velion over its
+**MCP server (deferred):** Verevon is Quarry-v2's driver/client — Quarry serves Verevon over its
 REST/GraphQL surface, not external AI agents over MCP. Revisit only if third-party agent access
 becomes a goal.
 
@@ -122,7 +122,7 @@ becomes a goal.
 - Crawl glob include/exclude (#6) — add patterns to frontier scope check.
 
 ## 4. Strategic bet
-**Hybrid retrieval (#1)** + Velion-facing API parity (`/v1/map`, Tavily params, `format=context`)
-turn Quarry from "scraper with a lexical index" into the self-hosted web-context engine **Velion
+**Hybrid retrieval (#1)** + Verevon-facing API parity (`/v1/map`, Tavily params, `format=context`)
+turn Quarry from "scraper with a lexical index" into the self-hosted web-context engine **Verevon
 drives** — the Firecrawl/Tavily positioning, but org-isolated, ZDR-aware, on your own infra.
-(MCP server deferred: Velion is the client, not external agents.)
+(MCP server deferred: Verevon is the client, not external agents.)

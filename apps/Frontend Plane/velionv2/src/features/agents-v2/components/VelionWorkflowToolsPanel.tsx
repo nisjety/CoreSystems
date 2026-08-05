@@ -8,7 +8,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { VelionIconButton } from "@/components/ui/velion-ui";
+import { VerevonIconButton } from "@/components/ui/verevon-ui";
 import {
   workflowToolOptions,
   workflowToolTabOptions,
@@ -20,8 +20,8 @@ import {
   toolToCanvasNode,
   workflowToolBrandMap,
   workflowToolIconMap,
-} from "@/features/agents-v2/lib/velion-workflow-builder-data";
-import { BrandMark } from "@/features/agents-v2/components/VelionWorkflowBrandMark";
+} from "@/features/agents-v2/lib/verevon-workflow-builder-data";
+import { BrandMark } from "@/features/agents-v2/components/VerevonWorkflowBrandMark";
 
 export function WorkflowToolsPanel({ onCollapse }: { onCollapse?: () => void }) {
   const [selectedTool, setSelectedTool] = useWorkflowBuilderTool();
@@ -38,7 +38,7 @@ export function WorkflowToolsPanel({ onCollapse }: { onCollapse?: () => void }) 
   return (
     <aside
       aria-label="Workflow tools"
-      className="velion-sidebar-type flex h-full min-w-0 flex-col bg-[#F7F7F8] font-sans text-[#25272D] dark:bg-[#101114] dark:text-white"
+      className="verevon-sidebar-type flex h-full min-w-0 flex-col bg-[#F7F7F8] font-sans text-[#25272D] dark:bg-[#101114] dark:text-white"
     >
       <div className="flex h-11 shrink-0 items-center justify-between gap-3 px-1">
         <div className="flex items-center gap-2.5">
@@ -47,14 +47,14 @@ export function WorkflowToolsPanel({ onCollapse }: { onCollapse?: () => void }) 
               <span key={index} className="rounded-full border-[1.7px] border-[#17181C] dark:border-white" />
             ))}
           </span>
-          <h2 className="velion-sidebar-group-title">Tools</h2>
+          <h2 className="verevon-sidebar-group-title">Tools</h2>
         </div>
         <div className="flex items-center gap-1">
-          <VelionIconButton type="button" size="xs" radius="sm" aria-label="More workflow tools options">
+          <VerevonIconButton type="button" size="xs" radius="sm" aria-label="More workflow tools options">
             <MoreHorizontal className="size-3.5" strokeWidth={2} />
-          </VelionIconButton>
+          </VerevonIconButton>
           {onCollapse ? (
-            <VelionIconButton
+            <VerevonIconButton
               type="button"
               size="xs"
               radius="sm"
@@ -62,7 +62,7 @@ export function WorkflowToolsPanel({ onCollapse }: { onCollapse?: () => void }) 
               aria-label="Collapse workflow tools"
             >
               <X className="size-3.5" strokeWidth={2} />
-            </VelionIconButton>
+            </VerevonIconButton>
           ) : null}
         </div>
       </div>
@@ -76,12 +76,12 @@ export function WorkflowToolsPanel({ onCollapse }: { onCollapse?: () => void }) 
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
             placeholder="Search…"
-            className="velion-field-compact h-9 pl-9 pr-3 placeholder:text-[#B2B6BE] dark:placeholder:text-[#777E8B]"
+            className="verevon-field-compact h-9 pl-9 pr-3 placeholder:text-[#B2B6BE] dark:placeholder:text-[#777E8B]"
           />
         </label>
       </div>
 
-      <div className="velion-sidebar-row-strong grid grid-cols-4 border-b border-[#E1E4E8] px-1 dark:border-[#292C33]">
+      <div className="verevon-sidebar-row-strong grid grid-cols-4 border-b border-[#E1E4E8] px-1 dark:border-[#292C33]">
         {workflowToolTabOptions.map((tab) => (
           <button
             key={tab.id}
@@ -153,7 +153,7 @@ function WorkflowToolCard({
           <Bot className="size-5" strokeWidth={1.8} />
         )}
       </span>
-      <span className="velion-sidebar-row-strong mt-2.5 max-w-full">{label}</span>
+      <span className="verevon-sidebar-row-strong mt-2.5 max-w-full">{label}</span>
     </button>
   );
 }

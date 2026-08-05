@@ -6,7 +6,7 @@ package rbac
 //   2. Update any default-role seeds in migrations/002_add_enterprise_fields.up.sql
 //      that should ship with the capability.
 //   3. Update consumers that check the capability (auth-core middleware,
-//      velion guards, etc.).
+//      verevon guards, etc.).
 //
 // Capability key format: `<resource>:<action>` (lowercase, colon-separated).
 // Groups are stable user-visible labels — the UI's role editor renders one

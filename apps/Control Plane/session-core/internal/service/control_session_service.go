@@ -29,7 +29,7 @@ const ControlSessionCacheTTL = 30 * time.Second
 // snapshot write, so idle orgs age out ~this long after their last read.
 const ControlSessionOrgIndexTTL = ControlSessionCacheTTL + 30*time.Second
 
-// ControlSession is the aggregated app-context snapshot velion needs for
+// ControlSession is the aggregated app-context snapshot verevon needs for
 // post-login routing, plan gating, and entitlement-driven UI. It composes
 // user-core (identity + onboarding routing), org-core (org + entitlements),
 // and billing-core (subscription state) into one envelope.
@@ -70,7 +70,7 @@ type ControlSessionOrg struct {
 //
 // G35 (Convex projection): when `convexClient` is non-nil, `Refresh` also
 // mirrors the freshly-aggregated snapshot into Convex's `controlSessions`
-// table so velion clients subscribed via `api.controlSessions.byUser` get
+// table so verevon clients subscribed via `api.controlSessions.byUser` get
 // reactive updates without polling.
 type ControlSessionService struct {
 	userClient    *clients.UserClient
@@ -208,7 +208,7 @@ func (s *ControlSessionService) Get(ctx context.Context, userID string) (*Contro
 // Refresh re-aggregates and publishes app.session.entitlements_changed so
 // notification-core (and any future subscribers) can react. G10 Step 3.
 //
-// Callers: velion's POST /api/v1/sessions/refresh proxy, used after explicit
+// Callers: verevon's POST /api/v1/sessions/refresh proxy, used after explicit
 // plan upgrades / org switches / billing webhook acks where the snapshot is
 // known to be stale.
 func (s *ControlSessionService) Refresh(ctx context.Context, userID string) (*ControlSession, error) {
@@ -234,7 +234,7 @@ func (s *ControlSessionService) Refresh(ctx context.Context, userID string) (*Co
 		}
 	}
 
-	// G35: mirror the snapshot into Convex so velion clients subscribed via
+	// G35: mirror the snapshot into Convex so verevon clients subscribed via
 	// `api.controlSessions.byUser` get the update reactively. Best-effort;
 	// Convex outages don't fail the refresh.
 	if s.convexClient != nil {

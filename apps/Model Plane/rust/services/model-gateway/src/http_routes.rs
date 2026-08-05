@@ -25,12 +25,11 @@ use mp_contracts::model_plane::v1::{
     GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
     ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest, ListPlansRequest,
     ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
-    ListTranslationLanguagesRequest,
-    McpServer, Plan, PlanState, PlanStep, PlanStepState, RegisterMcpServerRequest,
-    ResumeRunRequest, ResumeRunResponse, RunDetail, StreamVideoGenerationContentRequest,
-    SubagentLineage, SubagentRole, SynthesizeSpeechRequest, Todo, TodoPriority, TodoState,
-    TranscribeSpeechRequest, TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest,
-    TranslationInput,
+    ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep, PlanStepState,
+    RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
+    StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole, SynthesizeSpeechRequest,
+    Todo, TodoPriority, TodoState, TranscribeSpeechRequest, TransitionPlanRequest,
+    TransitionTodoRequest, TranslateTextRequest, TranslationInput,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -1451,7 +1450,7 @@ const BROWSER_ACTION_SCHEMA: &str = r#"{
 }"#;
 
 const BROWSER_SUGGEST_SYSTEM_PROMPT: &str = concat!(
-    "You are the Model Plane browser planner for Velion. Quarry-v2 captures browser evidence; ",
+    "You are the Model Plane browser planner for Verevon. Quarry-v2 captures browser evidence; ",
     "you only decide the next browser action. Return exactly one JSON object matching the schema. ",
     "Do not request raw JavaScript evaluation, anti-bot bypass, credential entry, CAPTCHA solving, ",
     "or actions outside the current user goal. Prefer low-risk actions that reveal useful page evidence. ",
@@ -1803,26 +1802,26 @@ async fn ai_chat(
 const RECOMMEND_PLAN_MODEL_VERSION: &str = "recommend-plan-v9";
 
 const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
-    "Velion product context: Velion is both the product name and the AI worker at the center of the product. ",
-    "The software exists to configure, feed, govern, deploy, and measure Velion for each company. ",
-    "Customers are not merely installing a helpdesk with an AI add-on; they are giving Velion the company's ",
-    "website, knowledge, integrations, rules, and goals so Velion can become their source-grounded support worker. ",
-    "Velion is an AI-native competitor to Intercom, Chatbase, Gorgias, Mimir, and Zendesk: it combines ",
+    "Verevon product context: Verevon is both the product name and the AI worker at the center of the product. ",
+    "The software exists to configure, feed, govern, deploy, and measure Verevon for each company. ",
+    "Customers are not merely installing a helpdesk with an AI add-on; they are giving Verevon the company's ",
+    "website, knowledge, integrations, rules, and goals so Verevon can become their source-grounded support worker. ",
+    "Verevon is an AI-native competitor to Intercom, Chatbase, Gorgias, Mimir, and Zendesk: it combines ",
     "customer chat, support inbox, knowledge base, integrations, retrieval, graph context, workflow routing, ",
     "automation, analytics, and AI agent capabilities in one workspace. ",
     "It ingests a customer's public website and connected work systems into a Data Plane with documents, ",
     "knowledge units, vector retrieval, and graph entities/relationships. The Model Plane uses that data for ",
     "GraphRAG-style answers, scope analysis, routing suggestions, and knowledge-gap discovery. ",
-    "Velion can power a customer-facing chatbot, shared/team inbox workflows, source-grounded answers, ",
+    "Verevon can power a customer-facing chatbot, shared/team inbox workflows, source-grounded answers, ",
     "handoff/routing rules, automation ideas, SLA/reporting views, and dashboard insights about missing answers ",
-    "or next sources to connect. Velion improves support by reducing repeated manual answers, making responses ",
+    "or next sources to connect. Verevon improves support by reducing repeated manual answers, making responses ",
     "consistent across website and internal sources, surfacing gaps before launch, and suggesting the first ",
     "automations a team should validate. ",
     "Do not overpromise exact savings, guaranteed resolution rates, autonomous changes in third-party systems, ",
     "or private model training unless the input explicitly supports it. Treat expected outcomes as directional ",
     "launch estimates. ",
-    "Recommendation task: you are Velion's senior onboarding consultant writing a live AI recommendation ",
-    "for a customer who just connected their website and tools. Recommend exactly one Velion plan. ",
+    "Recommendation task: you are Verevon's senior onboarding consultant writing a live AI recommendation ",
+    "for a customer who just connected their website and tools. Recommend exactly one Verevon plan. ",
     "Plans (id -> name and terms): ",
     "trial -> Free, 0 NOK/month, 14-day trial, no card, upgrade later; ",
     "hobby -> Essential, 299 NOK/month, 4 NOK per AI-resolved inquiry, chatbot + shared inbox, website and knowledge sources, small-team/simple chatbot validation; ",
@@ -1836,14 +1835,14 @@ const RECOMMEND_PLAN_SYSTEM_PROMPT: &str = concat!(
     "Counts are authoritative: context.connectedSourceCount/context.sourceSummary.connectedSourceCount is the number of ",
     "connected source streams to call 'tilkoblede kilder'; context.sourceCount includes those connected streams plus ",
     "the website as one source. Never invent a smaller source count or reuse an older count. ",
-    "If context.websiteContent is present, it holds real title+excerpt snippets Velion just crawled from the ",
+    "If context.websiteContent is present, it holds real title+excerpt snippets Verevon just crawled from the ",
     "customer's site; read them to state concretely what the company does, sells, or serves, and reference that ",
     "in the reason/summary so the recommendation is visibly grounded in their own site — never invent facts not ",
     "present in those snippets. If context.industry is present, use it to frame the company's sector. ",
     "If context.dataPlane is present, use its graph counts, groups, sample nodes and sample edges as evidence; ",
     "do not invent document contents that are not in the JSON. ",
     "Paraphrase the user's goal and correct obvious spelling/grammar mistakes; never quote raw user input. ",
-    "Explain why this plan fits now, what Velion already appears to understand, and what the customer can expect ",
+    "Explain why this plan fits now, what Verevon already appears to understand, and what the customer can expect ",
     "in the first launch window. Expected outcomes must be rough directional estimates, not guarantees. ",
     "Avoid generic phrases such as 'select this plan', 'static FAQ', or 'you can change later'. ",
     "Be terse: prefer the fewest words that stay grounded and specific; no filler. ",
@@ -2545,25 +2544,29 @@ async fn start_oauth_connection(
             Json(json!({ "error": "MCP server did not name an authorization server" })),
         ));
     };
-    let auth_server_metadata =
-        crate::mcp_oauth::discover_authorization_server(&http, authorization_server)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "mcp oauth: authorization-server discovery failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "could not discover the authorization server's metadata" })),
-                )
-            })?;
+    let auth_server_metadata = crate::mcp_oauth::discover_authorization_server(
+        &http,
+        authorization_server,
+    )
+    .await
+    .map_err(|e| {
+        warn!(error = %e, "mcp oauth: authorization-server discovery failed");
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "could not discover the authorization server's metadata" })),
+        )
+    })?;
     let Some(registration_endpoint) = auth_server_metadata.registration_endpoint.as_deref() else {
         return Err((
             StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": "authorization server does not support dynamic client registration" })),
+            Json(
+                json!({ "error": "authorization server does not support dynamic client registration" }),
+            ),
         ));
     };
     let redirect_uri = format!(
         "{}/api/v1/mcp/servers/oauth/callback",
-        state.velion_public_origin.trim_end_matches('/')
+        state.verevon_public_origin.trim_end_matches('/')
     );
     let registration =
         crate::mcp_oauth::register_client(&http, registration_endpoint, &redirect_uri)
@@ -2612,7 +2615,7 @@ async fn start_oauth_connection(
 #[derive(Debug, Deserialize)]
 struct McpConnectBody {
     name: String,
-    /// Public HTTPS MCP server URL. Velion auto-detects whether it needs
+    /// Public HTTPS MCP server URL. Verevon auto-detects whether it needs
     /// OAuth 2.1 login (RFC 9728 `.well-known/oauth-protected-resource`) or
     /// works directly — the caller never picks a transport or auth mode.
     url: String,
@@ -2635,7 +2638,7 @@ struct McpConnectBody {
 /// returning the registered server like `mcp_register` does). No transport
 /// or auth-kind choice is ever asked for: the secure-MVP dispatch path only
 /// ever speaks HTTPS, and OAuth-vs-static is a fact about the target
-/// server, not a choice Velion's users should have to make.
+/// server, not a choice Verevon's users should have to make.
 async fn mcp_connect(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -2722,7 +2725,7 @@ async fn mcp_oauth_callback(
 ) -> Response {
     let settings_url = format!(
         "{}/settings/mcp",
-        state.velion_public_origin.trim_end_matches('/')
+        state.verevon_public_origin.trim_end_matches('/')
     );
     let fail = |reason: &str| -> Response {
         warn!(reason, "mcp oauth callback failed");
@@ -2759,9 +2762,7 @@ async fn mcp_oauth_callback(
 
     let ownership = match crate::ownership::Scope::from_wire(&pending.scope_wire) {
         crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
-        crate::ownership::Scope::User => {
-            crate::ownership::Ownership::user(pending.user_id.clone())
-        }
+        crate::ownership::Scope::User => crate::ownership::Ownership::user(pending.user_id.clone()),
     };
     // The user picked scope/visibility, never individual tool names — same
     // auto-discovery register_plain_mcp_server uses for the non-OAuth path.
@@ -2866,9 +2867,12 @@ async fn mcp_oauth_callback(
             registered.server_id.clone()
         }
     };
-    state
-        .ownership
-        .set(&pending.org_id, crate::ownership::KIND_MCP, &server_id, ownership);
+    state.ownership.set(
+        &pending.org_id,
+        crate::ownership::KIND_MCP,
+        &server_id,
+        ownership,
+    );
 
     // Tokens are stored separately from the server record, encrypted at rest
     // by capability-core — never in the gateway's own (ephemeral, plaintext)
@@ -3173,7 +3177,7 @@ fn image_input(
 }
 
 /// Speech synthesis/transcription via inference-core speech providers.
-/// Velion Flow dictation request — browser mic audio in, polished text out.
+/// Verevon Flow dictation request — browser mic audio in, polished text out.
 #[derive(serde::Deserialize)]
 pub struct AiDictateRequest {
     /// Base64 audio from the client recorder (`MediaRecorder` webm/opus typical).
@@ -3201,7 +3205,7 @@ pub struct AiDictateRequest {
 /// Versioned system prompt for the dictation cleanup pass. The version prefix
 /// keys inference-core's prompt cache, mirroring `RECOMMEND_PLAN_MODEL_VERSION`.
 const DICTATE_SYSTEM_PROMPT: &str = concat!(
-    "velion-flow-dictate-v1: You are Velion Flow, a dictation cleanup engine. ",
+    "verevon-flow-dictate-v1: You are Verevon Flow, a dictation cleanup engine. ",
     "The user message is a raw speech-to-text transcript of the user dictating. ",
     "Return ONLY the cleaned transcript text — no preamble, no quotes, no commentary. ",
     "Rules: remove filler words and false starts (um, uh, eh, hmm, altså, liksom, ",
@@ -3217,7 +3221,7 @@ const DICTATE_SYSTEM_PROMPT: &str = concat!(
 /// clean HTTP 400 here instead of a gRPC invalid-argument after upload.
 const MAX_DICTATE_AUDIO_BYTES: usize = 25 * 1024 * 1024;
 
-/// Velion Flow dictation: one round trip from mic audio to polished text.
+/// Verevon Flow dictation: one round trip from mic audio to polished text.
 /// Chains inference-core `TranscribeSpeech` (STT) and a cleanup `Infer` pass
 /// (strip fillers, punctuate, apply self-corrections). Fail-soft on the
 /// cleanup leg: a cleanup failure returns the raw transcript (`cleaned:false`)
@@ -4828,7 +4832,7 @@ fn not_found(message: &str) -> HttpJsonError {
 /// session-core (`authorize_thread_owner` returns `not_found` when the row is
 /// gone). Blanket-mapping every gRPC error to `502 Bad Gateway` made that
 /// ordinary "the thread no longer exists" state look like an upstream outage,
-/// so velionv3 chat could not tell a gone thread apart from a broken
+/// so verevonv3 chat could not tell a gone thread apart from a broken
 /// model-gateway and could not self-heal by dropping the thread. Map `NotFound`
 /// to `404` with a stable `thread_not_found` code so the SPA can evict the
 /// thread from its list, and `PermissionDenied` (cross-org / cross-user read)
@@ -5132,7 +5136,7 @@ impl FeedbackRating {
 /// §1.2).
 ///
 /// Accepts both callers of this endpoint:
-///   - **chat** (`velionv3` `chat-client.ts`): `{requestId, rating, note}` — the
+///   - **chat** (`verevonv3` `chat-client.ts`): `{requestId, rating, note}` — the
 ///     turn is resolved server-side to its durable run id and injected skills;
 ///   - **operator/agent surfaces**: `{run_id, skill_id?, from_scope?, to_scope?,
 ///     rating}` — unchanged.
@@ -5481,6 +5485,93 @@ pub struct InvokeResponse {
     pub request_id: String,
     pub content: String,
     pub model_used: String,
+    pub usage: Option<InvokeUsage>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct InvokeUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_usd: Option<f64>,
+    pub latency_ms: u64,
+    pub confidence: Option<f64>,
+}
+
+const DIRECT_INVOKE_MAX_TOKENS: u32 = 4096;
+
+fn invoke_usage(
+    content: &str,
+    input_tokens: i32,
+    output_tokens: i32,
+    cost_usd: Option<f64>,
+    latency_ms: u64,
+) -> InvokeUsage {
+    let input_tokens = u32::try_from(input_tokens).unwrap_or_default();
+    let output_tokens = u32::try_from(output_tokens).unwrap_or_default();
+    InvokeUsage {
+        input_tokens,
+        output_tokens,
+        cost_usd,
+        latency_ms,
+        confidence: crate::confidence::score(
+            content,
+            output_tokens,
+            DIRECT_INVOKE_MAX_TOKENS,
+            crate::confidence::Evidence::default(),
+        ),
+    }
+}
+
+fn cached_invoke_usage(
+    usage: Option<crate::idempotency_registry::CachedInvokeUsage>,
+) -> Option<InvokeUsage> {
+    usage.map(|usage| InvokeUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cost_usd: usage.cost_usd,
+        latency_ms: usage.latency_ms,
+        confidence: usage.confidence,
+    })
+}
+
+#[cfg(test)]
+mod invoke_response_contract_tests {
+    use super::*;
+
+    #[test]
+    fn invoke_response_serializes_server_reported_usage() {
+        let response = InvokeResponse {
+            request_id: "req-1".to_owned(),
+            content: "A bounded answer.".to_owned(),
+            model_used: "verevon-balance".to_owned(),
+            usage: Some(InvokeUsage {
+                input_tokens: 42,
+                output_tokens: 18,
+                cost_usd: Some(0.00042),
+                latency_ms: 321,
+                confidence: Some(0.78),
+            }),
+        };
+
+        let value = serde_json::to_value(response).expect("serialize invoke response");
+        assert_eq!(value["usage"]["input_tokens"], 42);
+        assert_eq!(value["usage"]["output_tokens"], 18);
+        assert_eq!(value["usage"]["cost_usd"], 0.00042);
+        assert_eq!(value["usage"]["latency_ms"], 321);
+        assert_eq!(value["usage"]["confidence"], 0.78);
+    }
+
+    #[test]
+    fn invoke_usage_is_bounded_and_labels_only_measured_values() {
+        let usage = invoke_usage("A bounded answer.", -1, 18, Some(0.00042), 321);
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 18);
+        assert_eq!(usage.cost_usd, Some(0.00042));
+        assert_eq!(usage.latency_ms, 321);
+        assert!(usage
+            .confidence
+            .is_some_and(|value| (0.0..=1.0).contains(&value)));
+    }
 }
 
 /// chat-parity §4 — cooperatively cancel an in-flight `/v1/invoke/stream`.
@@ -5974,6 +6065,13 @@ async fn invoke(
 
         return Ok(Json(InvokeResponse {
             request_id,
+            usage: Some(invoke_usage(
+                &infer_resp.content,
+                infer_resp.input_tokens,
+                infer_resp.output_tokens,
+                None,
+                u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            )),
             content: infer_resp.content,
             model_used: infer_resp.model_used,
         }));
@@ -5996,6 +6094,7 @@ async fn invoke(
                     request_id: v.request_id,
                     content: v.content,
                     model_used: v.model_used,
+                    usage: cached_invoke_usage(v.usage),
                 }));
             }
             crate::idempotency_registry::Claim::InFlight => {
@@ -6253,6 +6352,20 @@ async fn invoke(
     info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "http invoke completed");
 
     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let usage = invoke_usage(
+        &infer_resp.content,
+        infer_resp.input_tokens,
+        infer_resp.output_tokens,
+        state
+            .pricing
+            .cost_usd(
+                &infer_resp.model_used,
+                i64::from(infer_resp.input_tokens.max(0)),
+                i64::from(infer_resp.output_tokens.max(0)),
+            )
+            .await,
+        latency_ms,
+    );
 
     // Emit usage envelope
     let usage_envelope = Envelope {
@@ -6294,6 +6407,13 @@ async fn invoke(
             request_id: request_id.clone(),
             content: infer_resp.content.clone(),
             model_used: infer_resp.model_used.clone(),
+            usage: Some(crate::idempotency_registry::CachedInvokeUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cost_usd: usage.cost_usd,
+                latency_ms: usage.latency_ms,
+                confidence: usage.confidence,
+            }),
         });
     }
 
@@ -6301,6 +6421,7 @@ async fn invoke(
         request_id,
         content: infer_resp.content,
         model_used: infer_resp.model_used,
+        usage: Some(usage),
     }))
 }
 
@@ -6782,8 +6903,7 @@ mod run_owner_publish_tests {
         run_service_client::RunServiceClient,
         run_service_server::{RunService, RunServiceServer},
         CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse,
-        ListSystemRunsRequest,
-        ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
+        ListSystemRunsRequest, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
     };
     use mp_events::publisher::InMemoryPublisher;
     use std::sync::Arc;
@@ -6916,7 +7036,10 @@ mod run_owner_publish_tests {
             FeedbackRating::from_wire("positive"),
             Some(FeedbackRating::Good)
         );
-        assert_eq!(FeedbackRating::from_wire("positive").map(|r| r.as_str()), Some("good"));
+        assert_eq!(
+            FeedbackRating::from_wire("positive").map(|r| r.as_str()),
+            Some("good")
+        );
         assert_ne!(
             FeedbackRating::from_wire("positive"),
             Some(FeedbackRating::Poor)
@@ -7084,9 +7207,8 @@ mod run_owner_publish_tests {
         let registry = crate::chat_turn_registry::ChatTurnRegistry::new();
         let mut body = FeedbackBody::default();
         body.rating = "positive".to_owned();
-        let error =
-            resolve_feedback_target(&registry, &claims("org-owner", "user-owner"), &body)
-                .expect_err("neither requestId nor run_id supplied");
+        let error = resolve_feedback_target(&registry, &claims("org-owner", "user-owner"), &body)
+            .expect_err("neither requestId nor run_id supplied");
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
     }
 
@@ -7309,8 +7431,7 @@ mod session_thread_error_tests {
 
             assert_eq!(status, StatusCode::BAD_GATEWAY, "code {code:?} -> 502");
             assert_eq!(
-                body["error"],
-                "session-core list_threads failed: boom",
+                body["error"], "session-core list_threads failed: boom",
                 "code {code:?} keeps the contextual string body",
             );
         }
@@ -7362,8 +7483,7 @@ mod session_memory_error_tests {
 
             assert_eq!(status, StatusCode::BAD_GATEWAY, "code {code:?} -> 502");
             assert_eq!(
-                body["error"],
-                "session-core list_memory failed: boom",
+                body["error"], "session-core list_memory failed: boom",
                 "code {code:?} keeps the contextual string body",
             );
         }

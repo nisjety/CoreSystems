@@ -336,7 +336,7 @@ func TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs(t *testing.T) {
 	h, _ := newSchedulesServer(t)
 
 	code, env := postSchedule(t, h,
-		`{"org_id":"org_velion","target_kind":"change_monitor","target_ref":"https://example.com/pricing","preset":"daily","enabled":true}`)
+		`{"org_id":"org_verevon","target_kind":"change_monitor","target_ref":"https://example.com/pricing","preset":"daily","enabled":true}`)
 	if code != http.StatusCreated {
 		t.Fatalf("status=%d, want 201; env=%v", code, env)
 	}
@@ -358,8 +358,8 @@ func TestCreateSchedule_ChangeMonitor_EmitsWorkflowArgs(t *testing.T) {
 		t.Fatalf("args len=%d, want 1; data=%v", len(args), data)
 	}
 	arg0, _ := args[0].(map[string]any)
-	if arg0["org_id"] != "org_velion" || arg0["url"] != "https://example.com/pricing" {
-		t.Fatalf("args[0]=%v, want {org_id:org_velion, url:.../pricing}", arg0)
+	if arg0["org_id"] != "org_verevon" || arg0["url"] != "https://example.com/pricing" {
+		t.Fatalf("args[0]=%v, want {org_id:org_verevon, url:.../pricing}", arg0)
 	}
 
 	// The list view (what the reconciler reads) must carry the same shape.
@@ -381,7 +381,7 @@ func TestCreateSchedule_ChangeMonitor_BadPreset_Returns400(t *testing.T) {
 	t.Parallel()
 	h, _ := newSchedulesServer(t)
 	code, env := postSchedule(t, h,
-		`{"org_id":"org_velion","target_kind":"change_monitor","target_ref":"https://example.com","preset":"every-minute"}`)
+		`{"org_id":"org_verevon","target_kind":"change_monitor","target_ref":"https://example.com","preset":"every-minute"}`)
 	if code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400; env=%v", code, env)
 	}

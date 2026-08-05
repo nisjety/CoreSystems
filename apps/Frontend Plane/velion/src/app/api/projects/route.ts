@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server'
 import { resolveChatActor } from '../chat/_lib/session-store'
 import { convexMutation, convexQuery } from '../_lib/convex-client'
 
-// U2-14 follow-up (velion ui-ux-velion-gap.md §10): real Projects backend.
+// U2-14 follow-up (verevon ui-ux-verevon-gap.md §10): real Projects backend.
 //
 // Backs the "Add to project" picker in `ChatSettingsModal`. Previously
 // the picker rendered `SAMPLE_PROJECTS = [{title:'How to use Aquatiq'},

@@ -123,15 +123,15 @@ func (r *DocumentRepo) List(ctx context.Context, input model.ListDocumentsInput)
 }
 
 // SourceCount is one (source, document_count) row returned by the
-// per-org distinct-sources facet. Used by the velion dashboard's
-// "Sources" stat (see ui-ux-velion-gap.md §U1-2).
+// per-org distinct-sources facet. Used by the verevon dashboard's
+// "Sources" stat (see ui-ux-verevon-gap.md §U1-2).
 type SourceCount struct {
 	Source        string `json:"source"`
 	DocumentCount int    `json:"document_count"`
 }
 
 // SourcesFacet returns the distinct list of sources for an org with a
-// document count per source. Implements U1-2 (ui-ux-velion-gap.md §10):
+// document count per source. Implements U1-2 (ui-ux-verevon-gap.md §10):
 // Quarry-v2 writes every scrape into this table with its `source` URL,
 // so the dashboard's sources count = COUNT(DISTINCT source) here.
 //

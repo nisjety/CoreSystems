@@ -21,7 +21,7 @@ const webhookReceivedDurable = "conversation-core-webhook-received"
 // publishes on POST /api/v1/webhooks/:provider. It lives in the ingestion
 // namespace (not application/model), so it needs its own JetStream stream —
 // see eventing.EnsureIngestionStream.
-const webhookReceivedSubject = "velion.ingestion.integration.webhook_received"
+const webhookReceivedSubject = "verevon.ingestion.integration.webhook_received"
 
 // ingestionEvent decodes integration-corev2's events.Event envelope. Its JSON
 // tags are camelCase (organizationId, providerKey, ...) — deliberately NOT
@@ -51,24 +51,33 @@ type EventIngester interface {
 	IngestEvent(ctx context.Context, event conversation.InboundEvent) (*conversation.StoredEventResult, error)
 }
 
+// DeliveryReceiptRecorder persists a provider callback only after matching its
+// exact provider message identifier in the organization-scoped outbound ledger.
+// *conversation.Service satisfies it.
+type DeliveryReceiptRecorder interface {
+	RecordProviderDeliveryReceipt(ctx context.Context, input conversation.ProviderDeliveryReceiptInput) (bool, error)
+}
+
 // WebhookReceivedConsumer bridges the Ingestion Plane → Application Plane: when
 // integration-corev2 publishes webhook_received for a Meta WhatsApp/Messenger
-// event, this fetches the full payload, normalizes it into an InboundEvent, and
-// stores it as a conversation message — closing the inbound leg of the provider
-// messaging loop (task #24). Non-message webhook events (delivery receipts,
-// read receipts, other providers) are acked as a no-op; this consumer only
-// handles conversational inbound content.
+// event, this fetches the full payload, normalizes inbound content into
+// InboundEvents, and records only delivery callbacks that name an exact,
+// organization-scoped outbound provider message. It closes the inbound leg of
+// the provider messaging loop (task #24) without guessing delivery from a
+// generic read watermark or a provider acknowledgement.
 type WebhookReceivedConsumer struct {
 	consumer *DurableConsumer
 	fetcher  WebhookFetcher
 	ingester EventIngester
+	receipts DeliveryReceiptRecorder
 }
 
-func NewWebhookReceivedConsumer(js nats.JetStreamContext, fetcher WebhookFetcher, ingester EventIngester) *WebhookReceivedConsumer {
+func NewWebhookReceivedConsumer(js nats.JetStreamContext, fetcher WebhookFetcher, ingester EventIngester, receipts DeliveryReceiptRecorder) *WebhookReceivedConsumer {
 	return &WebhookReceivedConsumer{
 		consumer: NewDurableConsumer(js, "webhook-received"),
 		fetcher:  fetcher,
 		ingester: ingester,
+		receipts: receipts,
 	}
 }
 
@@ -102,10 +111,11 @@ func (c *WebhookReceivedConsumer) handle(msg *nats.Msg) {
 }
 
 // process decodes one webhook_received event, fetches its full payload, and —
-// if it carries a WhatsApp or Messenger message — normalizes and stores it.
-// Every other case (missing ids, unsupported provider, non-message payload,
-// invalid content) acks as a terminal no-op; only a transient fetch/store
-// error retries. It is the testable core (no NATS required).
+// if it carries inbound content — normalizes and stores it; if it carries an
+// exact provider delivery receipt, records that evidence independently. Every
+// other case (missing ids, unsupported provider, uncorrelatable callback, or
+// invalid content) acks as a terminal no-op; only a transient fetch/store error
+// retries. It is the testable core (no NATS required).
 func (c *WebhookReceivedConsumer) process(ctx context.Context, ev ingestionEvent) outcome {
 	orgID := strings.TrimSpace(ev.OrganizationID)
 	webhookEventID := stringFromData(ev.Data, "webhookEventId")
@@ -133,19 +143,36 @@ func (c *WebhookReceivedConsumer) process(ctx context.Context, ev ingestionEvent
 	}
 
 	var events []conversation.InboundEvent
+	var receipts []conversation.ProviderDeliveryReceiptInput
 	if providerKey == "slack" {
 		events, err = normalizeSlackWebhookPayload(stored.Payload)
 	} else {
 		events, err = normalizeMetaWebhookPayload(stored.Payload)
+		receipts = normalizeMetaDeliveryReceipts(stored.Payload)
 	}
 	if err != nil {
 		log.Printf("[cc-go/webhook-received] normalize payload (org=%s id=%s): %v", orgID, webhookEventID, err)
 		return outcomeAck
 	}
-	if len(events) == 0 {
-		// A real callback with no message content (status/delivery/read
-		// receipts, verification pings, bot echoes) — nothing to store.
+	if len(events) == 0 && len(receipts) == 0 {
+		// A real callback with neither inbound content nor a correlatable receipt
+		// (for example a verification ping, bot echo, or generic read watermark).
 		return outcomeAck
+	}
+
+	if c.receipts != nil {
+		for i := range receipts {
+			receipt := receipts[i]
+			receipt.OrgID = orgID
+			if _, receiptErr := c.receipts.RecordProviderDeliveryReceipt(ctx, receipt); receiptErr != nil {
+				if conversation.IsInvalidInput(receiptErr) {
+					log.Printf("[cc-go/webhook-received] invalid delivery receipt (org=%s provider=%s): %v", orgID, receipt.Provider, receiptErr)
+					continue
+				}
+				log.Printf("[cc-go/webhook-received] store delivery receipt (org=%s provider=%s): %v", orgID, receipt.Provider, receiptErr)
+				return outcomeRetry
+			}
+		}
 	}
 
 	anyStoreFailure := false
@@ -209,9 +236,9 @@ func (c *WebhookReceivedConsumer) resolveConnectionID(ctx context.Context, orgID
 // the same entry[].messaging[] shape as Messenger, so shape-sniffing alone
 // mislabels them (confirmed 2026-07-07). Payloads without a recognized object
 // fall back to shape-sniffing for backward compatibility with stored events.
-// Non-message entries (statuses, delivery, read, postback) are skipped, not
-// errored — they are valid Meta callbacks this consumer has nothing to store
-// for.
+// Non-message entries (statuses, delivery, read, postback) are skipped here,
+// not errored. Correlatable delivery evidence is extracted separately by
+// normalizeMetaDeliveryReceipts; generic read watermarks remain unrecorded.
 func normalizeMetaWebhookPayload(payload map[string]any) ([]conversation.InboundEvent, error) {
 	if payload == nil {
 		return nil, nil
@@ -237,6 +264,192 @@ func normalizeMetaWebhookPayload(payload map[string]any) ([]conversation.Inbound
 		}
 	}
 	return events, nil
+}
+
+// normalizeMetaDeliveryReceipts extracts only callbacks that name a concrete
+// outbound provider message. Messenger and Instagram read watermarks do not
+// identify a message, so they are intentionally excluded rather than guessed.
+func normalizeMetaDeliveryReceipts(payload map[string]any) []conversation.ProviderDeliveryReceiptInput {
+	if payload == nil {
+		return nil
+	}
+	object := strings.ToLower(strings.TrimSpace(stringFromMap(payload, "object")))
+	entries, _ := payload["entry"].([]any)
+	var receipts []conversation.ProviderDeliveryReceiptInput
+	for _, rawEntry := range entries {
+		entry, ok := rawEntry.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch object {
+		case "whatsapp_business_account":
+			receipts = append(receipts, normalizeWhatsAppDeliveryReceipts(entry)...)
+		case "page":
+			receipts = append(receipts, normalizeMessengerDeliveryReceipts(entry, "messenger")...)
+		case "instagram":
+			receipts = append(receipts, normalizeMessengerDeliveryReceipts(entry, "instagram")...)
+		}
+	}
+	return receipts
+}
+
+func normalizeWhatsAppDeliveryReceipts(entry map[string]any) []conversation.ProviderDeliveryReceiptInput {
+	var receipts []conversation.ProviderDeliveryReceiptInput
+	changes, _ := entry["changes"].([]any)
+	for _, rawChange := range changes {
+		change, ok := rawChange.(map[string]any)
+		if !ok {
+			continue
+		}
+		value, _ := change["value"].(map[string]any)
+		statuses, _ := value["statuses"].([]any)
+		for _, rawStatus := range statuses {
+			status, ok := rawStatus.(map[string]any)
+			if !ok {
+				continue
+			}
+			messageID := stringFromMap(status, "id")
+			occurredAt := providerReceiptTimestamp(status["timestamp"])
+			normalizedStatus := normalizeWhatsAppDeliveryStatus(stringFromMap(status, "status"))
+			if messageID == "" || occurredAt.IsZero() || normalizedStatus == "" {
+				continue
+			}
+			errorCode := ""
+			if normalizedStatus == conversation.ProviderDeliveryFailed {
+				// Meta includes errors[].code only for a failed status. Preserve
+				// that bounded numeric machine code for operator diagnosis, but
+				// never persist the provider title/message/error_data details:
+				// those may contain customer-specific material and are not needed
+				// to prove the delivery state.
+				errorCode = whatsAppFailureCode(status)
+			}
+			receipts = append(receipts, conversation.ProviderDeliveryReceiptInput{
+				Provider:          "whatsapp",
+				ProviderMessageID: messageID,
+				Status:            normalizedStatus,
+				OccurredAt:        occurredAt,
+				ErrorCode:         errorCode,
+			})
+		}
+	}
+	return receipts
+}
+
+func whatsAppFailureCode(status map[string]any) string {
+	errors, _ := status["errors"].([]any)
+	for _, rawError := range errors {
+		providerError, ok := rawError.(map[string]any)
+		if !ok {
+			continue
+		}
+		if code := numericProviderErrorCode(providerError["code"]); code != "" {
+			return code
+		}
+	}
+	return "provider_reported_failure"
+}
+
+// numericProviderErrorCode admits only a short decimal provider code. It
+// deliberately rejects provider prose and nested diagnostic objects so receipt
+// audit metadata stays content-free.
+func numericProviderErrorCode(value any) string {
+	var code string
+	switch typed := value.(type) {
+	case string:
+		code = strings.TrimSpace(typed)
+	case float64:
+		if typed != float64(int64(typed)) {
+			return ""
+		}
+		code = strconv.FormatInt(int64(typed), 10)
+	case json.Number:
+		code = typed.String()
+	default:
+		return ""
+	}
+	if len(code) == 0 || len(code) > 16 {
+		return ""
+	}
+	for _, runeValue := range code {
+		if runeValue < '0' || runeValue > '9' {
+			return ""
+		}
+	}
+	return code
+}
+
+func normalizeWhatsAppDeliveryStatus(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "delivered":
+		return conversation.ProviderDeliveryDelivered
+	case "read":
+		return conversation.ProviderDeliveryRead
+	case "failed":
+		return conversation.ProviderDeliveryFailed
+	default:
+		// "sent" is the provider's acknowledgement, already represented by
+		// the submitted outbound intent; it is not delivery evidence.
+		return ""
+	}
+}
+
+func normalizeMessengerDeliveryReceipts(entry map[string]any, provider string) []conversation.ProviderDeliveryReceiptInput {
+	var receipts []conversation.ProviderDeliveryReceiptInput
+	messaging, _ := entry["messaging"].([]any)
+	for _, rawItem := range messaging {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		delivery, ok := item["delivery"].(map[string]any)
+		if !ok {
+			continue
+		}
+		occurredAt := providerReceiptTimestamp(delivery["watermark"])
+		if occurredAt.IsZero() {
+			occurredAt = providerReceiptTimestamp(item["timestamp"])
+		}
+		messageIDs, _ := delivery["mids"].([]any)
+		if occurredAt.IsZero() || len(messageIDs) == 0 {
+			continue
+		}
+		for _, rawID := range messageIDs {
+			messageID, ok := rawID.(string)
+			if !ok || strings.TrimSpace(messageID) == "" {
+				continue
+			}
+			receipts = append(receipts, conversation.ProviderDeliveryReceiptInput{
+				Provider:          provider,
+				ProviderMessageID: strings.TrimSpace(messageID),
+				Status:            conversation.ProviderDeliveryDelivered,
+				OccurredAt:        occurredAt,
+			})
+		}
+	}
+	return receipts
+}
+
+func providerReceiptTimestamp(value any) time.Time {
+	var raw string
+	switch typed := value.(type) {
+	case string:
+		raw = typed
+	case float64:
+		raw = strconv.FormatInt(int64(typed), 10)
+	case json.Number:
+		raw = typed.String()
+	default:
+		return time.Time{}
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}
+	}
+	// Messenger watermarks are milliseconds; WhatsApp timestamps are seconds.
+	if seconds > 100_000_000_000 {
+		seconds /= 1000
+	}
+	return time.Unix(seconds, 0).UTC()
 }
 
 func normalizeWhatsAppEntry(entry map[string]any) []conversation.InboundEvent {

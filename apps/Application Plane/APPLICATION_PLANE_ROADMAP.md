@@ -49,7 +49,7 @@ As of 2026-07-13, the plane is not MVP-ready. This roadmap starts from the evide
 
 ## Gate 6 — Information, social, leads, and full verification
 
-1. Deploy information-core, Model formatter, and Velion v3 provenance changes together. Retire or migrate Velion v2 before treating it as active. Verify measured/estimated/synthetic/stale/unavailable rendering live.
+1. Deploy information-core, Model formatter, and Verevon v3 provenance changes together. Retire or migrate Verevon v2 before treating it as active. Verify measured/estimated/synthetic/stale/unavailable rendering live.
 2. Run authenticated tenant-scoped social metrics/catalog UI E2E. Regression-test worker HITL and provider failure without publishing to a real account.
 3. Preserve the current native-arm64 Brreg proof; add reproducible `linux/amd64,linux/arm64` CI, immutable digest/SBOM/provenance, and image-internal TLS/readiness verification.
 4. Run format, lint, typecheck, race/unit, integration, contract, and E2E suites; measure at least 80% for changed security/business-critical modules and report actual plane-wide gaps.

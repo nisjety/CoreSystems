@@ -83,7 +83,7 @@ mod tests {
                 .expect("subjects"),
             vec![
                 "mp.v1.run.run-1.event".to_owned(),
-                "velion.agent.run.run-1.event".to_owned(),
+                "verevon.agent.run.run-1.event".to_owned(),
             ]
         );
     }

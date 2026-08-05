@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
-// U2-15 follow-up (velion ui-ux-velion-gap.md §10): Realtime voice config.
+// U2-15 follow-up (verevon ui-ux-verevon-gap.md §10): Realtime voice config.
 //
 // The chat composer's "voice mode" surface opens a WebSocket directly to the
 // model-gateway at `GET /v1/ai/realtime`. This route does NOT proxy the

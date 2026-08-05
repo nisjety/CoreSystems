@@ -765,14 +765,14 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Publish an audit event to velion.audit.v2.control.auth-core.<event> on Control's
+   * Publish an audit event to verevon.audit.v2.control.auth-core.<event> on Control's
    * plane-local broker. Audit Core pins this broker to the control authority.
    *
    * org_id is REQUIRED by audit-core. Durable identity and producer occurrence
    * time are mandatory even when org context is absent; callers must never
    * replace them with request-time randomness.
    */
-  async publishVelionAudit(payload: {
+  async publishVerevonAudit(payload: {
     occurred_at: Date | string;
     org_id: string | undefined;
     user_id?: string;
@@ -801,7 +801,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
     if (!this.isEnabled || !this.jetStream) {
       throw new Error('Durable audit transport unavailable');
     }
-    const natsSubject = `velion.audit.v2.control.auth-core.${payload.event}`;
+    const natsSubject = `verevon.audit.v2.control.auth-core.${payload.event}`;
     const encoded = this.stringCodec.encode(
       JSON.stringify({
         occurred_at: occurredAt.toISOString(),
@@ -828,7 +828,7 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       throw new Error('Invalid durable audit PubAck');
     }
     this.logger.debug(
-      `velion.audit → ${natsSubject} (${ack.stream}:${ack.seq})`,
+      `verevon.audit → ${natsSubject} (${ack.stream}:${ack.seq})`,
     );
   }
 

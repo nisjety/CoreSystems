@@ -72,7 +72,7 @@ capability execution authority, migrations, immutable images, and live evidence.
 ## Bottom line
 
 `model-gateway` is a **real, non-mocked public boundary**, materially stronger
-than the June dive described. It is THE Velion chat entry point: `/v1/invoke`
+than the June dive described. It is THE Verevon chat entry point: `/v1/invoke`
 (unary) and `/v1/invoke/stream` (SSE) forward to inference-core over gRPC for
 completion and run an in-gateway function-calling loop for chat tools; durable
 agent/tool runs are driven by execution-core. Auth is a hardened JWKS/RS256
@@ -122,7 +122,7 @@ provider-key operational noise**, not missing functionality.
      registers a server; its tools are then auto-advertised to the model.
    - **`grep -rni visma` across the entire Model Plane returns ZERO matches.**
      No Visma MCP server is registered, seeded, or defaulted. "Test the Visma
-     MCP" is therefore **not a Model Plane / velion-chat capability today** —
+     MCP" is therefore **not a Model Plane / verevon-chat capability today** —
      the Visma Net MCP that exists is a claude.ai / Claude-Code connector
      (`visma_net_mcp`, and the `visma-salgsordre-test` skill), i.e. assistant-side
      tooling, entirely separate from the runtime the chat UI talks to. A user

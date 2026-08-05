@@ -2,7 +2,7 @@
 // that picks up `accepted` jobs from quarry-control and starts the
 // matching Temporal workflow. It's the wire that connects the
 // "POST /v1/jobs" REST entrypoint (used by quarry-edge handoff and by
-// velion's onboarding crawl preview) to the actual execution path
+// verevon's onboarding crawl preview) to the actual execution path
 // (Temporal workflows in this orchestrator).
 //
 // Without this loop, ad-hoc jobs sit forever in `accepted` because the
@@ -419,7 +419,7 @@ func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
 }
 
 func crawlInputFromJob(j job, runID string) (workflows.CrawlJobInput, error) {
-	// Accept either a single `url` (velion onboarding) or an array of
+	// Accept either a single `url` (verevon onboarding) or an array of
 	// `seeds` (richer callers).
 	seeds := stringsFrom(j.Params["seeds"])
 	if len(seeds) == 0 {

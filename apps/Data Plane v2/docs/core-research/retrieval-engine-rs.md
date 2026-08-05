@@ -22,7 +22,7 @@ call, is uncached, and maps to gRPC `Unavailable`; verified non-membership remai
 88.14%. The final all-target suite passed **212 tests with 10 explicit
 infrastructure ignores**. The shared deployment is unchanged.
 
-## 2026-07-15 Velion and inference-auth delta
+## 2026-07-15 Verevon and inference-auth delta
 
 - HTTP now requires a cryptographically verified bearer and rejects the
   fleet-shared API-key identity path. The verifier requires RS256 plus configured
@@ -35,7 +35,7 @@ infrastructure ignores**. The shared deployment is unchanged.
   and retains caller ZDR. Auth Core's new `scopesByAudience` policy prevents the
   retrieval service's `control-policy` decision scope from being reused for
   inference (and vice versa).
-- Velion's gateway mints its Data bearer from the verified session for search,
+- Verevon's gateway mints its Data bearer from the verified session for search,
   chunks, trace/source expansion, and navbar search; failure is a sanitized 503
   with no internal-key fallback. The gateway maps SPA `limit`/`kinds` to
   retrieval `top_k`/filters and maps `candidates`/`sources` back to the UI
@@ -118,7 +118,7 @@ INTERNAL_API_KEY=<redacted>
    the authoritative section above.
    - `fetch_decision` only distinguishes `Strict` vs `Permissive` semantics on a **transport-level `Err`** (connection refused/timeout). A non-2xx HTTP response (which is what actually happens here) is *unconditionally* treated as `PolicyDecision::deny("denied:no_membership")` regardless of `EnforcementMode` (`policy.rs:127-130`). So today, `strict` and `permissive` would behave identically for this specific failure mode — both deny, both for the wrong reason (looks like "not a member" in the audit log, not "policy backend is unreachable/misconfigured").
 
-2. **On the API-key path (the one the gateway actually uses), that deny is silently absorbed and never denies anything.** `velionv3`'s gateway (`apps/gateway/src/domains/knowledge/shared.rs::internal_request`) always attaches `x-internal-api-key` + `x-user-id` (+ optionally a `data-plane` audience Bearer token) on every Data Plane v2 call. In `auth_middleware` (`src/api/mod.rs:110-144`), the API-key branch is checked *before* the Bearer branch, so a request carrying both always takes the API-key path. On that path:
+2. **On the API-key path (the one the gateway actually uses), that deny is silently absorbed and never denies anything.** `verevonv3`'s gateway (`apps/gateway/src/domains/knowledge/shared.rs::internal_request`) always attaches `x-internal-api-key` + `x-user-id` (+ optionally a `data-plane` audience Bearer token) on every Data Plane v2 call. In `auth_middleware` (`src/api/mod.rs:110-144`), the API-key branch is checked *before* the Bearer branch, so a request carrying both always takes the API-key path. On that path:
    ```rust
    let decision = state.policy.resolve(&uid, &org_id).await;
    if decision.is_member {
@@ -225,7 +225,7 @@ after:  dpv2:embed:* keys = 20 (dbsize 20)
 diff: + dpv2:embed:model_plane:azure_openai:text-embedding-3-large:194b77cf...  (new key, blake3 hash of the marker query)
 ```
 
-So a caller that explicitly requests zero data retention has that query's text-hash and resulting embedding vector persisted for up to an hour in a shared Dragonfly instance (the same instance backs `velion:gw:*` gateway keys — this is not an isolated ZDR-only store). This is a genuine, live-confirmed violation of CoreSystem's architecture rule that "Zero Data Retention must propagate through any content-persisting boundary" — the embedding cache is exactly such a boundary and today it does not honor `zdr_mode`. Note this is a narrower, more specific bug than the prior pass's one-line phrasing might suggest: trace persistence (the other obvious content-persisting boundary in this service) is correctly ZDR-gated; the embedding cache specifically is not.
+So a caller that explicitly requests zero data retention has that query's text-hash and resulting embedding vector persisted for up to an hour in a shared Dragonfly instance (the same instance backs `verevon:gw:*` gateway keys — this is not an isolated ZDR-only store). This is a genuine, live-confirmed violation of CoreSystem's architecture rule that "Zero Data Retention must propagate through any content-persisting boundary" — the embedding cache is exactly such a boundary and today it does not honor `zdr_mode`. Note this is a narrower, more specific bug than the prior pass's one-line phrasing might suggest: trace persistence (the other obvious content-persisting boundary in this service) is correctly ZDR-gated; the embedding cache specifically is not.
 
 **Fix shape** (not applied): gate the `cache.get_embedding`/`cache.set_embedding` calls on `!embed_zdr` (or equivalently skip the whole cache branch and always call `embed_query` directly when `embed_zdr` is true, same as the code already does when `self.cache` is `None`).
 
@@ -284,7 +284,7 @@ Primary runtime surfaces:
 - `retrieval-engine-rs` -> Model Plane (inference-core) — query embedding via gRPC (`ModelPlaneEmbeddingClient`), the active embedding path in this deployment
 - `retrieval-engine-rs` -> Control Plane (user-service / org-core-service) — org-membership policy lookups; **currently broken** (item 1) — both endpoints reachable but 401, and the deny they produce is a no-op on the live gateway traffic path
 - `retrieval-engine-rs` -> Control Plane (user-core :3012) — per-user document visibility/ownership grants (`HttpVisibilityClient`); always-on, decoupled from `CONTROL_PLANE_ENFORCEMENT`, working correctly (fails open to empty grants, not fail-open to full access)
-- Frontend/Application/Model Plane -> `retrieval-engine-rs` — main retrieval and context assembly surface; velionv3 gateway always attaches `x-internal-api-key` + `x-user-id` (+ optional `data-plane` audience Bearer)
+- Frontend/Application/Model Plane -> `retrieval-engine-rs` — main retrieval and context assembly surface; verevonv3 gateway always attaches `x-internal-api-key` + `x-user-id` (+ optional `data-plane` audience Bearer)
 
 ## Duplicates, Redundancies, And Inactive Surfaces
 

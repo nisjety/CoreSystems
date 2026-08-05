@@ -1,5 +1,5 @@
 //! `JetStream` pull consumer for the cross-plane GDPR organization-erasure
-//! fan-out (`velion.gdpr.erasure.requested`).
+//! fan-out (`verevon.gdpr.erasure.requested`).
 //!
 //! Mirrors Data Plane v2 sibling `retrieval-engine-rs`'s `gdpr::consumer`
 //! pattern (itself modeled on Model Plane `session-core`'s `gdpr_nats.rs`):
@@ -67,7 +67,7 @@ use crate::gdpr::parse_erasure_event;
 use crate::store::GraphStore;
 
 pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
-pub const SUBJECT: &str = "velion.gdpr.erasure.requested";
+pub const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub const DURABLE_NAME: &str = "graph-index-gdpr-erasure-v1";
 
 const INBOX_PREFIX: &str = "_INBOX.GRAPH_INDEX_GDPR";

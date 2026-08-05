@@ -20,7 +20,7 @@ describe('DirectNatsService durable audit publishing', () => {
     delete process.env.AUTH_INTERNAL_SERVICE_CREDENTIALS;
   });
   const subject =
-    'velion.audit.v2.control.auth-core.plane_service_token_issued';
+    'verevon.audit.v2.control.auth-core.plane_service_token_issued';
   const payload = {
     occurred_at: '2026-07-15T00:00:00.000Z',
     event_id: 'plane-token:stable-token-artifact',
@@ -46,7 +46,7 @@ describe('DirectNatsService durable audit publishing', () => {
 
   it('resolves only after JetStream returns a valid PubAck', async () => {
     const publish = jest.fn().mockResolvedValue({
-      stream: 'VELION_CONTROL_OBSERVABILITY',
+      stream: 'VEREVON_CONTROL_OBSERVABILITY',
       seq: 17,
       duplicate: false,
     });
@@ -55,7 +55,7 @@ describe('DirectNatsService durable audit publishing', () => {
     await expect(
       service.publishAuditDurable(subject, payload),
     ).resolves.toEqual({
-      stream: 'VELION_CONTROL_OBSERVABILITY',
+      stream: 'VEREVON_CONTROL_OBSERVABILITY',
       seq: 17,
     });
     expect(publish).toHaveBeenCalledWith(subject, expect.any(Uint8Array), {
@@ -99,7 +99,7 @@ describe('DirectNatsService durable audit publishing', () => {
   it.each([
     undefined,
     { stream: '', seq: 1, duplicate: false },
-    { stream: 'VELION_CONTROL_OBSERVABILITY', seq: 0, duplicate: false },
+    { stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 0, duplicate: false },
   ])('rejects an invalid JetStream PubAck: %p', async (ack) => {
     const service = serviceWith(jest.fn().mockResolvedValue(ack));
 
@@ -121,12 +121,12 @@ describe('DirectNatsService durable audit publishing', () => {
   it.each([
     [
       'legacy subject',
-      'velion.audit.v1.control.plane_service_token_issued',
+      'verevon.audit.v1.control.plane_service_token_issued',
       payload,
     ],
     [
       'wrong producer subject',
-      'velion.audit.v2.control.billing-core.plane_service_token_issued',
+      'verevon.audit.v2.control.billing-core.plane_service_token_issued',
       payload,
     ],
     [subject, subject, { ...payload, event_id: '' }],

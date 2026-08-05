@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { Bot, FileText } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { BrandMarkId } from "@/features/agents-v2/lib/velion-workflow-builder-data";
+import type { BrandMarkId } from "@/features/agents-v2/lib/verevon-workflow-builder-data";
 
 export function BrandMark({
   brand,

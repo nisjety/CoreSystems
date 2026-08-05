@@ -339,7 +339,7 @@ func requireSessionOwner(session *domain.Session, actorUserID string) error {
 // methods, their repositories, and their HTTP handlers were removed from
 // CP session-core. Rust session-core's `orchestration_http.rs` (port
 // 28083:8083) is the new authoritative owner — see §8.24 + §8.26 of
-// `apps/Frontend Plane/velion/velion-gap.md`. The corresponding tables
+// `apps/Frontend Plane/verevon/verevon-gap.md`. The corresponding tables
 // (`plans`, `plan_steps`, `todos`, `subagent_edges`, `approvals` model-plane
 // rows) are dropped by migration `040_drop_agent_run_scaffold.up.sql`.
 

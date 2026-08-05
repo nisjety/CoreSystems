@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { PersistedAgent } from '../types';
 
 /**
- * U3-8 (ui-ux-velion-gap.md §14): unified tool catalog for the agent
+ * U3-8 (ui-ux-verevon-gap.md §14): unified tool catalog for the agent
  * workspace's "Tools" tab.
  *
  * The catalog merges two sources:

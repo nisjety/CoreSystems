@@ -364,9 +364,9 @@ Owner: gateway + Capability Core + operations. Acceptance criterion: 6.
 3. Reject/quarantine malformed transport hybrids and empty allowlists at write
    and migration time.
 4. Report Visma `not_configured`. A real outcome needs a separately deployable
-   Velion Visma MCP server, governed auth/secret reference, exact allowlist,
+   Verevon Visma MCP server, governed auth/secret reference, exact allowlist,
    discovery/health tests, HITL, and end-to-end invocation. The operator's
-   Codex/Claude connector is not a Velion runtime capability.
+   Codex/Claude connector is not a Verevon runtime capability.
 
 Exit: all RCE/SSRF/auth/tenant/secret/allowlist/timeout/HITL negative tests deny,
 and no integration is fabricated.

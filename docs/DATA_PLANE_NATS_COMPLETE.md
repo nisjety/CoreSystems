@@ -35,14 +35,14 @@ Successfully fixed import path issues and wired shared NATS publisher into all 4
 **documents-service** (Port 9401)
 ```
 ✅ Health: OK
-✅ NATS: Connected to nats://velion-nats:4222
+✅ NATS: Connected to nats://verevon-nats:4222
 ✅ Publishes: aqencia.data.document.ingested
 ```
 
 **retrieval-service** (Port 9404)
 ```
 ✅ Health: OK
-✅ NATS: Connected to nats://velion-nats:4222
+✅ NATS: Connected to nats://verevon-nats:4222
 ✅ Publishes: aqencia.data.search.executed
 ```
 
@@ -78,7 +78,7 @@ Successfully fixed import path issues and wired shared NATS publisher into all 4
 
 ### Infrastructure
 
-- **Shared NATS Broker**: `velion-nats:4222` (nats://velion-nats:4222)
+- **Shared NATS Broker**: `verevon-nats:4222` (nats://verevon-nats:4222)
 - **Auth Token**: `aqencia-shared-nats-token-2026` (token-based)
 - **Network**: `triodelab-net` (shared cross-plane network)
 - **Status**: ✅ All services connected
@@ -130,7 +130,7 @@ curl http://localhost:9404/health  # retrieval-service
 
 View NATS logs:
 ```bash
-docker logs velion-nats --tail=50
+docker logs verevon-nats --tail=50
 ```
 
 ### Issues Resolved
@@ -146,7 +146,7 @@ docker logs velion-nats --tail=50
 - Stream creation generates BadRequestError 10025 (invalid JSON) but stream is marked ready
   - Likely due to stream existing already or config format issue
   - Not affecting functionality - events are publishing successfully
-  - Can be investigated with: `docker logs velion-nats | grep AQENCIA_DATAPLANE`
+  - Can be investigated with: `docker logs verevon-nats | grep AQENCIA_DATAPLANE`
 
 ---
 

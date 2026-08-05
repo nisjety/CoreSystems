@@ -9,10 +9,10 @@ Last verified: 2026-08-01.
 
 ---
 
-## 1. What ZDR means in Velion
+## 1. What ZDR means in Verevon
 
 A **Zero Data Retention** turn is one where the user's prompt and the model's
-answer leave **nothing durable behind** — not in Velion's own stores, and not in
+answer leave **nothing durable behind** — not in Verevon's own stores, and not in
 the model provider's. It is the mode a user picks for a sensitive question they
 do not want remembered, and it is also an org-wide posture an admin can set for a
 whole tenant.
@@ -163,7 +163,7 @@ this document executable.
 
 ## 6. Summary
 
-- ZDR **enforcement inside Velion** is complete and verified across seven durable
+- ZDR **enforcement inside Verevon** is complete and verified across seven durable
   boundaries.
 - ZDR is **not usable** because no provider deployment is attested, and the gate
   correctly fails closed rather than leaking.

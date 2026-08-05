@@ -1,4 +1,4 @@
-import type { AgentBlueprint } from "@/features/agents-v2/lib/velion-agent-page-types";
+import type { AgentBlueprint } from "@/features/agents-v2/lib/verevon-agent-page-types";
 
 const rolePanelClassById: Record<"service" | "sales" | "ecommerce", string> = {
   service: "border-[#D3CEC6] bg-[#FFFDF8] dark:border-[#3B332D] dark:bg-[#191715]",

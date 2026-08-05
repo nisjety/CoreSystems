@@ -91,7 +91,7 @@ func main() {
 	qualityHandler := handler.NewQualityHandler(runner, goldenStore, scorer, checker, linter, costQuery)
 
 	// Cross-plane GDPR erasure fan-out: org-core publishes
-	// velion.gdpr.erasure.requested (explicit hard-delete AND its 30-day
+	// verevon.gdpr.erasure.requested (explicit hard-delete AND its 30-day
 	// auto-purge cron) on the shared Control-Plane bus; this hard-purges
 	// quality_eval_runs and eval_golden_judgments for that org. Runs on a
 	// SECOND, dedicated connection to the shared broker (control-shared-nats,

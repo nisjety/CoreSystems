@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
-import { VelionAgentsPage } from "@/features/agents-v2/components/VelionAgentsPage";
-import { VelionAgentsShell } from "@/features/agents-v2/components/VelionAgentsShell";
+import { VerevonAgentsPage } from "@/features/agents-v2/components/VerevonAgentsPage";
+import { VerevonAgentsShell } from "@/features/agents-v2/components/VerevonAgentsShell";
 import { getAgentSelectionFromSearch } from "@/features/agents-v2/lib/agent-roles";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Agents | Velion v2",
-  description: "Velion agent configuration.",
+  title: "Agents | Verevon v2",
+  description: "Verevon agent configuration.",
 };
 
 export default async function AgentsPage({
@@ -23,8 +23,8 @@ export default async function AgentsPage({
   );
 
   return (
-    <VelionAgentsShell initialAgentSelection={initialAgentSelection}>
-      <VelionAgentsPage />
-    </VelionAgentsShell>
+    <VerevonAgentsShell initialAgentSelection={initialAgentSelection}>
+      <VerevonAgentsPage />
+    </VerevonAgentsShell>
   );
 }

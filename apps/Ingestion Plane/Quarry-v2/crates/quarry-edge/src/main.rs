@@ -895,7 +895,7 @@ async fn main() -> anyhow::Result<()> {
     let http3_driver: Option<std::sync::Arc<dyn quarry_runtime::Driver>> = if http3_enabled {
         match quarry_runtime::http3::Http3Driver::new(
             std::time::Duration::from_secs(30),
-            "Mozilla/5.0 (compatible; QuarryBot/1.0; +https://velion.io/bot)",
+            "Mozilla/5.0 (compatible; QuarryBot/1.0; +https://verevon.io/bot)",
         ) {
             Ok(d) => {
                 tracing::info!("HTTP/3 driver enabled");

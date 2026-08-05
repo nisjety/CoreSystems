@@ -48,7 +48,7 @@ export function useIntegrationConnect(orgId?: string) {
 
     setPendingProvider(provider.key)
     setError(null)
-    setStatusMessage(`Connecting ${provider.label} to Velion...`)
+    setStatusMessage(`Connecting ${provider.label} to Verevon...`)
 
     try {
       const user = await authService.getCurrentUser()
@@ -82,7 +82,7 @@ export function useIntegrationConnect(orgId?: string) {
       if (authorizationUrl) {
         const popup = window.open(
           authorizationUrl,
-          'velion-integration-oauth',
+          'verevon-integration-oauth',
           'popup=yes,width=600,height=760,noopener,noreferrer',
         )
 
@@ -117,7 +117,7 @@ export function useIntegrationConnect(orgId?: string) {
       const syncCount = Array.isArray(payload.sync_jobs) ? payload.sync_jobs.length : 0
       setStatusMessage(
         syncCount > 0
-          ? `${provider.label} connected. Velion queued ${syncCount} sync job${syncCount === 1 ? '' : 's'} for this workspace.`
+          ? `${provider.label} connected. Verevon queued ${syncCount} sync job${syncCount === 1 ? '' : 's'} for this workspace.`
           : `${provider.label} connected.`,
       )
       await refreshIntegrationState()

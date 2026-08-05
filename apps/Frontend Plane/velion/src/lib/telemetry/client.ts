@@ -72,7 +72,7 @@ export interface TelemetryEvent {
   props?: Record<string, unknown>
 }
 
-const BUFFER_KEY = 'velion.telemetry.buffer.v1'
+const BUFFER_KEY = 'verevon.telemetry.buffer.v1'
 const ENDPOINT = '/api/telemetry/events'
 
 function readCorrelationIdHint(): string | undefined {

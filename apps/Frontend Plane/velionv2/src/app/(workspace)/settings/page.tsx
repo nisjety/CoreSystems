@@ -4,8 +4,8 @@ import { redirect } from "next/navigation";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Settings | Velion v2",
-  description: "Velion workspace and admin settings.",
+  title: "Settings | Verevon v2",
+  description: "Verevon workspace and admin settings.",
 };
 
 export default async function SettingsPage() {

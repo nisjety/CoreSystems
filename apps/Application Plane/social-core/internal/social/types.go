@@ -44,17 +44,17 @@ const (
 	AccountStatusExpired      = "expired"
 	AccountStatusError        = "error"
 
-	SubjectAccountSynced       = "velion.application.social.account.synced"
-	SubjectCampaignCreated     = "velion.application.social.campaign.created"
-	SubjectApprovalRequested   = "velion.application.social.approval.requested"
-	SubjectApprovalDecided     = "velion.application.social.approval.decided"
-	SubjectPostCreated         = "velion.application.social.post.created"
-	SubjectPostScheduled       = "velion.application.social.post.scheduled"
-	SubjectPublishJobQueued    = "velion.application.social.publish_job.queued"
-	SubjectPublishJobCompleted = "velion.application.social.publish_job.completed"
-	SubjectPublishJobFailed    = "velion.application.social.publish_job.failed"
-	SubjectPublishJobBlocked   = "velion.application.social.publish_job.blocked"
-	SubjectMetricsSnapshotted  = "velion.application.social.metrics.snapshotted"
+	SubjectAccountSynced       = "verevon.application.social.account.synced"
+	SubjectCampaignCreated     = "verevon.application.social.campaign.created"
+	SubjectApprovalRequested   = "verevon.application.social.approval.requested"
+	SubjectApprovalDecided     = "verevon.application.social.approval.decided"
+	SubjectPostCreated         = "verevon.application.social.post.created"
+	SubjectPostScheduled       = "verevon.application.social.post.scheduled"
+	SubjectPublishJobQueued    = "verevon.application.social.publish_job.queued"
+	SubjectPublishJobCompleted = "verevon.application.social.publish_job.completed"
+	SubjectPublishJobFailed    = "verevon.application.social.publish_job.failed"
+	SubjectPublishJobBlocked   = "verevon.application.social.publish_job.blocked"
+	SubjectMetricsSnapshotted  = "verevon.application.social.metrics.snapshotted"
 )
 
 var (

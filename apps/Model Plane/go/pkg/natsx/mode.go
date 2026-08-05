@@ -1,6 +1,6 @@
 // Package natsx — mode.go defines compatibility modes that control how the
 // Publisher and Subscriber wrappers bridge between the legacy subject tree
-// (velion.*, aqencia.*) and the new mp.v1.* namespace.
+// (verevon.*, aqencia.*) and the new mp.v1.* namespace.
 //
 // Modes are selected via the MP_COMPAT_MODE environment variable:
 //

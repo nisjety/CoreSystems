@@ -13,7 +13,7 @@ export const dashboardCards: DashboardCard[] = [
     id: "weather",
     category: "Weather",
     title: "Lokalt værbilde",
-    description: "Få rask status på temperatur, vind og nedbør direkte på Velion-flaten.",
+    description: "Få rask status på temperatur, vind og nedbør direkte på Verevon-flaten.",
     href: "/dashboard",
     prompt: "Oppsummer værbildet og hva teamet bør være obs på i dag.",
   },

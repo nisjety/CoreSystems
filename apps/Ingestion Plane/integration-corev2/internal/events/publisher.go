@@ -48,7 +48,7 @@ func NewNATSPublisher(cfg config.Config) (*NATSPublisher, error) {
 		nats.Timeout(5 * time.Second),
 	}
 	if cfg.NATSToken != "" {
-		// The shared cross-plane velion-nats broker enforces single-token
+		// The shared cross-plane verevon-nats broker enforces single-token
 		// authorization (see nats-shared.conf), not username/password.
 		options = append(options, nats.Token(cfg.NATSToken))
 	} else if cfg.NATSUsername != "" || cfg.NATSPassword != "" {

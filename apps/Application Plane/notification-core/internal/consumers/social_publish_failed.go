@@ -20,11 +20,11 @@ import (
 const (
 	// SubjectSocialPublishJobFailed is published by social-core
 	// (internal/social/types.go::SubjectPublishJobFailed) on the shared
-	// velion-nats bus, captured by social-core's own VELION_APPLICATION
-	// stream (velion.application.>) — no new stream is needed here, NATS
+	// verevon-nats bus, captured by social-core's own VEREVON_APPLICATION
+	// stream (verevon.application.>) — no new stream is needed here, NATS
 	// auto-binds a durable QueueSubscribe to whichever stream already covers
 	// the subject.
-	SubjectSocialPublishJobFailed = "velion.application.social.publish_job.failed"
+	SubjectSocialPublishJobFailed = "verevon.application.social.publish_job.failed"
 
 	// NotificationTypeSocialPublishJobFailed is the notification.Request.Type
 	// the runtime client uses to template the user-facing message.

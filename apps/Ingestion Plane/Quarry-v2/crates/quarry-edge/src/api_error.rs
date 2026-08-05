@@ -2,7 +2,7 @@
 //!
 //! Extends the existing `{error, code, hint}` shape with machine-actionable
 //! rate-limit fields (`window`, `retry_after_seconds`, `next_actions`) so
-//! Velion can show precise back-off UX and clients can auto-retry correctly.
+//! Verevon can show precise back-off UX and clients can auto-retry correctly.
 //! Optional fields serialize only when present, so existing consumers are
 //! unaffected.
 

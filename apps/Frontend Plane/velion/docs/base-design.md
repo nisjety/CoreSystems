@@ -2,9 +2,9 @@
 
 ---
 
-## 0. Hva Velion er
+## 0. Hva Verevon er
 
-Velion er en AI-helpdesk og kunnskapsplattform for team som vil la en agent
+Verevon er en AI-helpdesk og kunnskapsplattform for team som vil la en agent
 svare kunder og ansatte med selskapets egen kunnskap.
 
 Produktet kobler seg til kildene organisasjonen allerede bruker:
@@ -13,11 +13,11 @@ Produktet kobler seg til kildene organisasjonen allerede bruker:
 - Slack, Microsoft 365, Notion, Google Drive og andre arbeidsverktøy
 - dokumenter, tickets, e-post, chat og kunnskapsbaser
 
-Velion bygger dette om til en levende kunnskapsbase, viser relasjonene i et
+Verevon bygger dette om til en levende kunnskapsbase, viser relasjonene i et
 grafisk kunnskapskart, og lar teamet lage AI-agenter som kan svare, søke,
 rute, eskalere og rapportere uten at teamet må sette opp tung infrastruktur.
 
-Velion skal derfor føles som:
+Verevon skal derfor føles som:
 
 - et rolig kontrollrom for support og kunnskap
 - en presis agentbygger, ikke en leken chatbot-demo
@@ -61,7 +61,7 @@ Designet bygger på varme, matte og kontrollerte toner.
 Ingen harde gradienter. Ingen glossy effekter.  
 Bakgrunn skal føles fysisk – nesten som papir eller kalk.
 
-Velion sin palett har tre nivåer:
+Verevon sin palett har tre nivåer:
 
 - **Brand**: varme papirflater, presis charcoal og coral som retningslys.
 - **Product shell**: lys Linear-inspirert dashboard, sidebar og navbar.
@@ -73,23 +73,23 @@ Velion sin palett har tre nivåer:
 
 | Token | HEX | Bruk |
 |---|---:|---|
-| `velion.ink` | `#111111` | Primary buttons, definitive controls, active states |
-| `velion.ink-soft` | `#1C1C1C` | Large titles, active sidebar text, modal headings |
-| `velion.charcoal` | `#2B2B2B` | Primary body/title text on warm surfaces |
-| `velion.text` | `#3A3C44` | Dashboard/sidebar navigation text |
-| `velion.text-muted` | `#66615B` | Auth/onboarding descriptions |
-| `velion.text-subtle` | `#8A8D96` | Helper text, muted controls |
-| `velion.paper` | `#F4F1EB` | Warm page background |
-| `velion.canvas` | `#EDEBE7` | Auth/onboarding modal shell |
-| `velion.surface` | `#EAE6DF` | Warm cards, secondary panels |
-| `velion.panel` | `#FFFFFF` | Inputs, product cards, dropdown panels |
-| `velion.border` | `#D8D2C6` | Warm borders, shortcut pills |
-| `velion.border-strong` | `#C8C1B3` | Stronger warm dividers |
-| `velion.coral` | `#FF2E63` | Signature accent, active indicator, recommendation ring |
-| `velion.coral-hover` | `#FF4D7A` | CTA hover, micro feedback |
-| `velion.coral-glow` | `#FF3B5C` | Scanner line, animation glow only |
-| `velion.coral-deep` | `#8B1E3F` | Dark blend/shadow for coral visuals |
-| `velion.success` | `#10B981` | Verified, secure, connected states |
+| `verevon.ink` | `#111111` | Primary buttons, definitive controls, active states |
+| `verevon.ink-soft` | `#1C1C1C` | Large titles, active sidebar text, modal headings |
+| `verevon.charcoal` | `#2B2B2B` | Primary body/title text on warm surfaces |
+| `verevon.text` | `#3A3C44` | Dashboard/sidebar navigation text |
+| `verevon.text-muted` | `#66615B` | Auth/onboarding descriptions |
+| `verevon.text-subtle` | `#8A8D96` | Helper text, muted controls |
+| `verevon.paper` | `#F4F1EB` | Warm page background |
+| `verevon.canvas` | `#EDEBE7` | Auth/onboarding modal shell |
+| `verevon.surface` | `#EAE6DF` | Warm cards, secondary panels |
+| `verevon.panel` | `#FFFFFF` | Inputs, product cards, dropdown panels |
+| `verevon.border` | `#D8D2C6` | Warm borders, shortcut pills |
+| `verevon.border-strong` | `#C8C1B3` | Stronger warm dividers |
+| `verevon.coral` | `#FF2E63` | Signature accent, active indicator, recommendation ring |
+| `verevon.coral-hover` | `#FF4D7A` | CTA hover, micro feedback |
+| `verevon.coral-glow` | `#FF3B5C` | Scanner line, animation glow only |
+| `verevon.coral-deep` | `#8B1E3F` | Dark blend/shadow for coral visuals |
+| `verevon.success` | `#10B981` | Verified, secure, connected states |
 
 ---
 
@@ -97,27 +97,27 @@ Velion sin palett har tre nivåer:
 
 | Token | HEX | Bruk |
 |---|---:|---|
-| `velion.dashboard-sidebar` | `#F7F7F8` | Sidebar and navbar background |
-| `velion.dashboard-main` | `#FCFCFD` | Main dashboard canvas |
-| `velion.dashboard-panel` | `#FFFFFF` | Dashboard panels and cards |
-| `velion.dashboard-border` | `#E6E6E8` | Product shell border |
-| `velion.dashboard-accent` | `#5E6AD2` | Linear-style secondary accent |
-| `velion.dashboard-active` | `#F0F1F5` | Active nav row |
-| `velion.dashboard-hover` | `#F6F7F9` | Hover nav row |
-| `velion.dashboard-divider` | `#ECECF1` | Sidebar separators |
-| `velion.dashboard-input-border` | `#E2E3E9` | Search/input border |
-| `velion.sidebar-rail` | `#111318` | Dark icon tile/rail contrast |
-| `velion.sidebar-icon` | `#6B6E78` | Default sidebar icons |
-| `velion.sidebar-muted` | `#9B9EA8` | Muted sidebar icons/chevrons |
-| `velion.sidebar-placeholder` | `#B0B3BC` | Placeholder and disabled text |
-| `velion.navbar-divider` | `#E4E0D8` | Navbar vertical divider |
-| `velion.navbar-search-text` | `#5F5A52` | Search trigger text |
-| `velion.navbar-search-muted` | `#989286` | Search icon and muted warm labels |
-| `velion.navbar-pill-text` | `#615B52` | Recent-search pill text |
-| `velion.dark-sidebar` | `#191A1D` | Dark/minimized sidebar background |
-| `velion.dark-main` | `#1F2023` | Dark main product surface |
-| `velion.dark-panel` | `#202124` | Dark panels |
-| `velion.dark-border` | `#2B2D31` | Dark borders |
+| `verevon.dashboard-sidebar` | `#F7F7F8` | Sidebar and navbar background |
+| `verevon.dashboard-main` | `#FCFCFD` | Main dashboard canvas |
+| `verevon.dashboard-panel` | `#FFFFFF` | Dashboard panels and cards |
+| `verevon.dashboard-border` | `#E6E6E8` | Product shell border |
+| `verevon.dashboard-accent` | `#5E6AD2` | Linear-style secondary accent |
+| `verevon.dashboard-active` | `#F0F1F5` | Active nav row |
+| `verevon.dashboard-hover` | `#F6F7F9` | Hover nav row |
+| `verevon.dashboard-divider` | `#ECECF1` | Sidebar separators |
+| `verevon.dashboard-input-border` | `#E2E3E9` | Search/input border |
+| `verevon.sidebar-rail` | `#111318` | Dark icon tile/rail contrast |
+| `verevon.sidebar-icon` | `#6B6E78` | Default sidebar icons |
+| `verevon.sidebar-muted` | `#9B9EA8` | Muted sidebar icons/chevrons |
+| `verevon.sidebar-placeholder` | `#B0B3BC` | Placeholder and disabled text |
+| `verevon.navbar-divider` | `#E4E0D8` | Navbar vertical divider |
+| `verevon.navbar-search-text` | `#5F5A52` | Search trigger text |
+| `verevon.navbar-search-muted` | `#989286` | Search icon and muted warm labels |
+| `verevon.navbar-pill-text` | `#615B52` | Recent-search pill text |
+| `verevon.dark-sidebar` | `#191A1D` | Dark/minimized sidebar background |
+| `verevon.dark-main` | `#1F2023` | Dark main product surface |
+| `verevon.dark-panel` | `#202124` | Dark panels |
+| `verevon.dark-border` | `#2B2D31` | Dark borders |
 
 ---
 
@@ -125,13 +125,13 @@ Velion sin palett har tre nivåer:
 
 | Token | HEX | Bruk |
 |---|---:|---|
-| `velion.info` | `#3578F6` | Unread badges, informational emphasis |
-| `velion.info-bg` | `#E8F1FF` | Info badge background |
-| `velion.warning` | `#DD7A1F` | Notifications, focus ring, attention marker |
-| `velion.warning-strong` | `#B96618` | Warning text/icons on pale amber |
-| `velion.warning-bg` | `#FFF1DE` | Warning badge background |
-| `velion.danger` | `#C0402A` | Destructive actions |
-| `velion.tooltip` | `#1A1A1A` | Tooltip surface |
+| `verevon.info` | `#3578F6` | Unread badges, informational emphasis |
+| `verevon.info-bg` | `#E8F1FF` | Info badge background |
+| `verevon.warning` | `#DD7A1F` | Notifications, focus ring, attention marker |
+| `verevon.warning-strong` | `#B96618` | Warning text/icons on pale amber |
+| `verevon.warning-bg` | `#FFF1DE` | Warning badge background |
+| `verevon.danger` | `#C0402A` | Destructive actions |
+| `verevon.tooltip` | `#1A1A1A` | Tooltip surface |
 
 ---
 

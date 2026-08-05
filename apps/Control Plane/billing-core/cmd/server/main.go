@@ -99,7 +99,7 @@ func main() {
 	})
 	billingService := billing.NewService(repo, paymentAdapter, lagoAdapter, redisClient)
 
-	// Wire shared cross-plane publisher (velion-nats) independently from
+	// Wire shared cross-plane publisher (verevon-nats) independently from
 	// local controlplane-nats so cross-plane propagation still works if the
 	// local broker is temporarily unavailable.
 	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, nats.SharedCredentials{
@@ -110,7 +110,7 @@ func main() {
 	} else if sp != nil {
 		defer sp.Close()
 		billingService.SetSharedPublisher(sp)
-		log.Println("✅ billing-core connected to shared NATS (velion-nats)")
+		log.Println("✅ billing-core connected to shared NATS (verevon-nats)")
 	}
 
 	go billingService.StartRetryProcessor(ctx, billing.RetryProcessorConfig{

@@ -331,7 +331,7 @@ export default defineSchema({
       name: v.string(),
       id: v.optional(v.string()),
     }))),
-    // Wave 9 (ui-ux-velion-gap.md §19): public embed widget. When
+    // Wave 9 (ui-ux-verevon-gap.md §19): public embed widget. When
     // `publicEnabled` is true, the agent can be invoked from the
     // public-facing embed surface (`/api/embed/{agentId}/...`).
     // `publicSecret` is rotated per enable — any site embedding the
@@ -379,7 +379,7 @@ export default defineSchema({
     // clean (ChatGPT/Claude-style, harness invisible); `deployed_agent`
     // enables operator surfaces (inbox, HITL handoff, run-event feed). Optional
     // for migration — code resolves a default of `deployed_agent` when
-    // publicEnabled else `chat` (see resolveAgentProfile in velion).
+    // publicEnabled else `chat` (see resolveAgentProfile in verevon).
     profile: v.optional(v.union(
       v.literal("chat"),
       v.literal("deployed_agent"),
@@ -391,13 +391,13 @@ export default defineSchema({
     .index("by_org", ["orgId"])
     .index("by_org_and_status", ["orgId", "status"]),
 
-  // U3-3 (ui-ux-velion-gap.md §10): agent run lifecycle mirror.
+  // U3-3 (ui-ux-verevon-gap.md §10): agent run lifecycle mirror.
   //
   // The Model Plane's orchestrator-core publishes RUN_STARTED / RUN_COMPLETED
   // / RUN_FAILED envelopes on `mp.v1.run.{runId}.event` (see
   // `apps/Model Plane/go/services/orchestrator-core/cmd/activities/activities.go`).
   // The `nats-subscriber.js` service subscribes to the wildcard
-  // `mp.v1.run.*.event` and calls `upsertAgentRun` here so velion's
+  // `mp.v1.run.*.event` and calls `upsertAgentRun` here so verevon's
   // `agents/runs` UI can render lifecycle reactively (no polling).
   //
   // `runId` is the natural key (caller-supplied ULID). `agentId` is
@@ -444,13 +444,13 @@ export default defineSchema({
   // (externalUserId, externalOrgId) pair. session-core's
   // `ControlSessionService.Refresh` (and any future writer) calls the
   // `upsertControlSession` HTTP action whenever the aggregate is refreshed.
-  // Velion subscribes via `useQuery(api.controlSessions.byUser, ...)` for
+  // Verevon subscribes via `useQuery(api.controlSessions.byUser, ...)` for
   // reactive plan / entitlement / billing UI without polling.
   //
   // The full snapshot is stored as a single JSONB-style `snapshot` field so
   // the schema doesn't have to track every upstream shape change (the
   // contract is the JSON, not the Convex types). `index by_external_user`
-  // is the velion subscription target; `by_external_user_and_org` covers
+  // is the verevon subscription target; `by_external_user_and_org` covers
   // org-switch flows where the active org changes within a user.
   controlSessions: defineTable({
     externalUserId: v.string(),
@@ -634,11 +634,11 @@ export default defineSchema({
     .index("by_conversation", ["conversationId"])
     .index("by_ai_action", ["aiActionId"]),
 
-  // velionv2 search-v2 history — persisted AI answer-search threads + follow-up
+  // verevonv2 search-v2 history — persisted AI answer-search threads + follow-up
   // turns. External-ID scoped (Better Auth org/user ids) like `projects` /
   // `controlSessions` so reads need no join through organizations/users and a
   // browser can subscribe to its own rows reactively. Writes come from the
-  // velionv2 BFF via the service-key mutations below (search authority stays
+  // verevonv2 BFF via the service-key mutations below (search authority stays
   // server-side); reads are public arg-scoped queries for `useQuery`.
   searchThreads: defineTable({
     externalOrgId: v.string(),

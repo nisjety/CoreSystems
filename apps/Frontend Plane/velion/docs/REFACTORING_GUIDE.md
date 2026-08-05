@@ -1,8 +1,8 @@
-# Velion UI Refactoring Guide
+# Verevon UI Refactoring Guide
 
 ## Overview
 
-This refactoring centralizes common UI patterns, utilities, and types across the Velion application. The goal is to ensure consistency, reduce code duplication, and improve maintainability.
+This refactoring centralizes common UI patterns, utilities, and types across the Verevon application. The goal is to ensure consistency, reduce code duplication, and improve maintainability.
 
 ## New Folder Structure
 

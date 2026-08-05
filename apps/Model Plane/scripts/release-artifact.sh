@@ -84,7 +84,7 @@ MIGRATION_SOURCES=(
 CROSS_PLANE_DEPENDENCIES=(
   "control-plane|apps/Control Plane|apps/Control Plane/auth-core/.env.example"
   "data-plane-v2|apps/Data Plane v2|apps/Data Plane v2/.env.example"
-  "frontend-v3|apps/Frontend Plane/velionv3|apps/Frontend Plane/velionv3/.env.example"
+  "frontend-v3|apps/Frontend Plane/verevonv3|apps/Frontend Plane/verevonv3/.env.example"
   "ingestion-plane|apps/Ingestion Plane|apps/Ingestion Plane/.env.example"
   "application-plane|apps/Application Plane|apps/Application Plane/.env.example"
 )

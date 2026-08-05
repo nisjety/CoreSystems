@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 export function GET() {
   return NextResponse.json(
     ok({
-      service: "velionv2",
+      service: "verevonv2",
       status: "ok",
       time: new Date().toISOString(),
       checks: {

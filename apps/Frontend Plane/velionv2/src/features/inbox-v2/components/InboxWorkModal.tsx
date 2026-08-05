@@ -38,7 +38,7 @@ export type InboxModalRequest =
     primaryAction?: string;
   }
   | {
-    type: "velion";
+    type: "verevon";
     prompt?: string;
   };
 
@@ -149,13 +149,13 @@ export function InboxWorkModal({
 
   if (!modal) return null;
 
-  const title = modal.type === "velion" ? "Velion workspace" : modal.title;
-  const sizeClass = modal.type === "velion" ? "velion-modal-shell-wide" : "velion-modal-shell-md";
+  const title = modal.type === "verevon" ? "Verevon workspace" : modal.title;
+  const sizeClass = modal.type === "verevon" ? "verevon-modal-shell-wide" : "verevon-modal-shell-md";
 
   return (
     <dialog
       open
-      className="velion-modal-backdrop"
+      className="verevon-modal-backdrop"
       aria-label={title}
     >
       <button
@@ -164,16 +164,16 @@ export function InboxWorkModal({
         className="absolute inset-0 cursor-default"
         onClick={onClose}
       />
-      <div className={cn("velion-modal-shell relative z-10 max-h-[calc(100vh-104px)]", sizeClass)}>
-        <div className="velion-modal-header">
+      <div className={cn("verevon-modal-shell relative z-10 max-h-[calc(100vh-104px)]", sizeClass)}>
+        <div className="verevon-modal-header">
           <div className="min-w-0">
-            <h2 className="velion-modal-title truncate">{title}</h2>
-            <p className="velion-type-sm mt-0.5 text-[#7B7B78] dark:text-[#AEB4C0]">Inbox context stays active.</p>
+            <h2 className="verevon-modal-title truncate">{title}</h2>
+            <p className="verevon-type-sm mt-0.5 text-[#7B7B78] dark:text-[#AEB4C0]">Inbox context stays active.</p>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="velion-icon-button shrink-0"
+            className="verevon-icon-button shrink-0"
             aria-label="Close modal"
             title="Close modal"
           >
@@ -181,8 +181,8 @@ export function InboxWorkModal({
           </button>
         </div>
 
-        {modal.type === "velion" ? (
-          <VelionExecutionPanel
+        {modal.type === "verevon" ? (
+          <VerevonExecutionPanel
             agents={agents}
             groups={groups}
             initialPrompt={modal.prompt ?? ""}
@@ -205,7 +205,7 @@ function ContextWorkPanel({
   modal,
   selectedTicket,
 }: {
-  modal: Exclude<InboxModalRequest, { type: "velion" }>;
+  modal: Exclude<InboxModalRequest, { type: "verevon" }>;
   selectedTicket: ZammadTicket | null;
 }) {
   return (
@@ -239,11 +239,11 @@ function ContextWorkPanel({
             id="inbox-work-modal-note"
             rows={4}
             placeholder="Capture the action, owner, or backend payload…"
-            className="velion-textarea mt-2"
+            className="verevon-textarea mt-2"
           />
           <button
             type="button"
-            className="velion-button velion-button-primary velion-button-sm mt-3 px-3 text-[12px] font-semibold disabled:opacity-50"
+            className="verevon-button verevon-button-primary verevon-button-sm mt-3 px-3 text-[12px] font-semibold disabled:opacity-50"
           >
             {modal.primaryAction ?? "Save in inbox"}
           </button>
@@ -257,7 +257,7 @@ function ContextWorkPanel({
   );
 }
 
-function VelionExecutionPanel({
+function VerevonExecutionPanel({
   agents,
   groups,
   initialPrompt,
@@ -319,12 +319,12 @@ function VelionExecutionPanel({
     setRunningAction(actionId);
     appendLog(label, "running", "Running tool call…");
 
-    // Backend handoff: replace this client dispatcher with a server-owned Velion
+    // Backend handoff: replace this client dispatcher with a server-owned Verevon
     // tool runner that returns planned tool calls, approval scopes, audit logs,
     // and rollback metadata before committing support, calendar, commerce, or CRM work.
     try {
       if (actionId === "draft-reply") {
-        onInsertReply(buildVelionReply(selectedTicket, prompt));
+        onInsertReply(buildVerevonReply(selectedTicket, prompt));
         appendLog(label, "done", "Reply draft inserted in composer.");
       }
 
@@ -389,16 +389,16 @@ function VelionExecutionPanel({
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             rows={5}
-            placeholder="Tell Velion what outcome to handle…"
+            placeholder="Tell Verevon what outcome to handle…"
             aria-label="Inbox operator prompt"
-            className="velion-textarea"
+            className="verevon-textarea"
           />
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => void runSelectedActions()}
               disabled={!selectedTicket || runningAction !== null || selectedActionList.length === 0}
-              className="velion-button velion-button-primary velion-button-sm px-3 text-[12px] font-semibold disabled:opacity-45"
+              className="verevon-button verevon-button-primary verevon-button-sm px-3 text-[12px] font-semibold disabled:opacity-45"
             >
               <Play className="size-3.5" />
               {runningAction ? "Running…" : "Run selected"}
@@ -406,7 +406,7 @@ function VelionExecutionPanel({
             <button
               type="button"
               onClick={onClose}
-              className="velion-button velion-button-secondary velion-button-sm px-3 text-[12px] font-semibold"
+              className="verevon-button verevon-button-secondary verevon-button-sm px-3 text-[12px] font-semibold"
             >
               Keep monitoring
             </button>
@@ -447,7 +447,7 @@ function VelionExecutionPanel({
         <div className="mt-3 space-y-2">
           <ToolState label="Context" value={selectedTicket ? `#${selectedTicket.number}` : "No ticket"} icon={MessageCircle} />
           <ToolState label="Approval" value="Human supervised" icon={Settings} />
-          <ToolState label="Agent" value={agents[0] ? `${agents[0].firstname} ${agents[0].lastname}` : "Velion"} icon={Bot} />
+          <ToolState label="Agent" value={agents[0] ? `${agents[0].firstname} ${agents[0].lastname}` : "Verevon"} icon={Bot} />
         </div>
         <div className="mt-4 rounded-[12px] border border-[#E1DAD1] bg-white p-3 dark:border-[#303238] dark:bg-[#101114]">
           <div className="mb-2 flex items-center gap-2">
@@ -460,7 +460,7 @@ function VelionExecutionPanel({
           </div>
         </div>
         <p className="mt-4 text-[11px] leading-5 text-[#9C9A96]">
-          Backend handoff: Velion should execute through scoped tools with audit events, permissions, retries, and operator review.
+          Backend handoff: Verevon should execute through scoped tools with audit events, permissions, retries, and operator review.
         </p>
       </aside>
     </div>
@@ -520,7 +520,7 @@ async function scheduleFollowUp(ticket: ZammadTicket) {
   });
 }
 
-function buildVelionReply(ticket: ZammadTicket, prompt: string) {
+function buildVerevonReply(ticket: ZammadTicket, prompt: string) {
   const customer = customerName(ticket);
   const instruction = prompt.trim();
 
@@ -531,10 +531,10 @@ function buildVelionReply(ticket: ZammadTicket, prompt: string) {
     instruction ? `I am using this instruction: ${instruction}` : "I will follow up with the right team and keep this moving.",
     "",
     "Best,",
-    "Velion",
+    "Verevon",
   ].join("\n");
 }
 
 function buildInternalNote(prompt: string) {
-  return `Velion action note: ${prompt.trim() || "Review completed. Draft, follow-up, and routing actions were prepared in the inbox workspace."}`;
+  return `Verevon action note: ${prompt.trim() || "Review completed. Draft, follow-up, and routing actions were prepared in the inbox workspace."}`;
 }

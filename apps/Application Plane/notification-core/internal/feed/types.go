@@ -1,17 +1,17 @@
 // Package feed manages the per-user in-app notification feed backed by
 // the `notification_feed_items` table. We mirror provider-submitted events
-// locally so velion's /notifications page can list, count, mark-read, and
+// locally so verevon's /notifications page can list, count, mark-read, and
 // archive. Delivery is confirmed only by a callback or reconciliation.
 //
 // Wire contract: matches `Notification` + `NotificationFeed` types in
-// velion/src/lib/notifications/types.ts. Field names must stay snake_case.
+// verevon/src/lib/notifications/types.ts. Field names must stay snake_case.
 //
-// U5-2 (ui-ux-velion-gap.md §10).
+// U5-2 (ui-ux-verevon-gap.md §10).
 package feed
 
 import "time"
 
-// Channel constants. Match velion's `Notification.channel` union type.
+// Channel constants. Match verevon's `Notification.channel` union type.
 const (
 	ChannelInApp = "in_app"
 	ChannelEmail = "email"
@@ -29,7 +29,7 @@ const (
 )
 
 // Notification is the public row shape served to the frontend. Field
-// names match `Notification` in `velion/src/lib/notifications/types.ts`.
+// names match `Notification` in `verevon/src/lib/notifications/types.ts`.
 type Notification struct {
 	ID                    string         `json:"id"`
 	OrganizationID        string         `json:"organization_id"`
@@ -59,7 +59,7 @@ type Notification struct {
 	Source                string         `json:"source,omitempty"`
 }
 
-// Feed is the envelope returned by GET /notifications. Matches velion's
+// Feed is the envelope returned by GET /notifications. Matches verevon's
 // `NotificationFeed`.
 type Feed struct {
 	Notifications []Notification `json:"notifications"`

@@ -1,7 +1,7 @@
 //! NATS subject constants and helpers for the Model Plane v1 subject tree.
 //!
 //! New subject namespace: `mp.v1.*`
-//! Legacy subjects (compatibility): `velion.agent.*`, `velion.session.*`, `aqencia.reasoning.*`
+//! Legacy subjects (compatibility): `verevon.agent.*`, `verevon.session.*`, `aqencia.reasoning.*`
 
 /// Compatibility mode for cutover between legacy and v1 NATS subject trees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,26 +225,26 @@ pub const EVENT_RUN_RESUMED_AFTER_APPROVAL: &str = "run.resumed_after_approval";
 //
 // These mirror the Go `pkg/natsx` Legacy helpers in `orchestrator-core` so
 // Rust publishers and consumers can reference the same canonical strings
-// during the migration from `velion.*` to `mp.v1.*`.
+// during the migration from `verevon.*` to `mp.v1.*`.
 // ---------------------------------------------------------------------------
 
-/// Legacy subject for run events: `velion.agent.run.{run_id}.event`
+/// Legacy subject for run events: `verevon.agent.run.{run_id}.event`
 #[must_use]
 pub fn legacy_run_event_subject(run_id: &str) -> String {
-    format!("velion.agent.run.{run_id}.event")
+    format!("verevon.agent.run.{run_id}.event")
 }
 
-/// Legacy subject for session commands: `velion.session.{session_key}.command`
+/// Legacy subject for session commands: `verevon.session.{session_key}.command`
 #[must_use]
 pub fn legacy_session_command_subject(session_key: &str) -> String {
-    format!("velion.session.{session_key}.command")
+    format!("verevon.session.{session_key}.command")
 }
 
-/// Legacy wildcard for all run events: `velion.agent.run.*.event`
-pub const LEGACY_RUN_EVENTS_WILDCARD: &str = "velion.agent.run.*.event";
+/// Legacy wildcard for all run events: `verevon.agent.run.*.event`
+pub const LEGACY_RUN_EVENTS_WILDCARD: &str = "verevon.agent.run.*.event";
 
-/// Legacy wildcard for all session commands: `velion.session.*.command`
-pub const LEGACY_SESSION_COMMAND_WILDCARD: &str = "velion.session.*.command";
+/// Legacy wildcard for all session commands: `verevon.session.*.command`
+pub const LEGACY_SESSION_COMMAND_WILDCARD: &str = "verevon.session.*.command";
 
 // ---------------------------------------------------------------------------
 // Legacy aqencia.* subjects (compat window)
@@ -387,7 +387,7 @@ mod tests {
     fn legacy_run_event_subject_format() {
         assert_eq!(
             legacy_run_event_subject("01HXYZ"),
-            "velion.agent.run.01HXYZ.event"
+            "verevon.agent.run.01HXYZ.event"
         );
     }
 
@@ -395,14 +395,14 @@ mod tests {
     fn legacy_session_command_subject_format() {
         assert_eq!(
             legacy_session_command_subject("01HABC"),
-            "velion.session.01HABC.command"
+            "verevon.session.01HABC.command"
         );
     }
 
     #[test]
     fn legacy_wildcards_match_go_constants() {
-        assert_eq!(LEGACY_RUN_EVENTS_WILDCARD, "velion.agent.run.*.event");
-        assert_eq!(LEGACY_SESSION_COMMAND_WILDCARD, "velion.session.*.command");
+        assert_eq!(LEGACY_RUN_EVENTS_WILDCARD, "verevon.agent.run.*.event");
+        assert_eq!(LEGACY_SESSION_COMMAND_WILDCARD, "verevon.session.*.command");
     }
 
     #[test]
@@ -443,11 +443,11 @@ mod tests {
     #[test]
     fn translate_legacy_subject_matches_go_contract() {
         assert_eq!(
-            translate_legacy_subject("velion.agent.run.01HXYZ.event"),
+            translate_legacy_subject("verevon.agent.run.01HXYZ.event"),
             "mp.v1.run.01HXYZ.event"
         );
         assert_eq!(
-            translate_legacy_subject("velion.session.abc-123.command"),
+            translate_legacy_subject("verevon.session.abc-123.command"),
             "mp.v1.session.abc-123.command"
         );
         assert_eq!(
@@ -472,11 +472,11 @@ mod tests {
     fn translate_new_to_legacy_matches_go_contract() {
         assert_eq!(
             translate_new_to_legacy("mp.v1.run.01HXYZ.event"),
-            Some("velion.agent.run.01HXYZ.event".to_owned())
+            Some("verevon.agent.run.01HXYZ.event".to_owned())
         );
         assert_eq!(
             translate_new_to_legacy("mp.v1.session.abc-123.command"),
-            Some("velion.session.abc-123.command".to_owned())
+            Some("verevon.session.abc-123.command".to_owned())
         );
         assert_eq!(
             translate_new_to_legacy("mp.v1.ingress.usage"),
@@ -507,12 +507,12 @@ mod tests {
             subscriber_subjects("mp.v1.run.r1.event", CompatMode::DualRead).expect("dual_read"),
             vec![
                 "mp.v1.run.r1.event".to_owned(),
-                "velion.agent.run.r1.event".to_owned(),
+                "verevon.agent.run.r1.event".to_owned(),
             ]
         );
         assert_eq!(
             subscriber_subjects("mp.v1.run.r1.event", CompatMode::LegacyOnly).expect("legacy_only"),
-            vec!["velion.agent.run.r1.event".to_owned()]
+            vec!["verevon.agent.run.r1.event".to_owned()]
         );
     }
 

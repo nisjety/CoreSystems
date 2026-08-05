@@ -903,7 +903,7 @@ fn speech_http_client() -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         // Azure Speech TTS rejects requests with NO User-Agent (HTTP 400, empty
         // body). reqwest sends none by default, so set one explicitly.
-        .user_agent("velion-model-plane/1.0")
+        .user_agent("verevon-model-plane/1.0")
         .build()
         .unwrap_or_else(|_| crate::provider::provider_http_client())
 }

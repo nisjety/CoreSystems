@@ -13,7 +13,7 @@ V0" — those surfaces are now fully implemented in live code. [source-only]
 
 At startup (`cmd/server/main.go`) it: loads config, connects `application-postgres`, runs
 migrations (001–006), connects the local NATS, wires request/feed/preference/channel/subscriber
-services, optionally connects the **shared** velion-nats bus for cross-plane consumers, then
+services, optionally connects the **shared** verevon-nats bus for cross-plane consumers, then
 starts HTTP + background subscribers. [source-only]
 
 - `/health` → `200 {"service":"notification-core","status":"ok"}` [live-curl]
@@ -59,14 +59,14 @@ success; 400 validation; 502 on runtime-dispatch failure). [source-only + live-c
 Current changed callers:
 - `support-worker` uses the canonical route and typed ZDR contract with timeout/strict response checks, but is default-disabled because its workflows lack authoritative Control user/organization mapping.
 - `insight-core` notification delivery is removed/disabled until a real subscription/user mapping exists.
-- Velion v3 notification feed/preferences use the signed organization/user proxy. Navbar support returns honest 503 instead of manufacturing a self-notification.
+- Verevon v3 notification feed/preferences use the signed organization/user proxy. Navbar support returns honest 503 instead of manufacturing a self-notification.
 - Any remaining legacy/shared-key caller must migrate to an explicitly allowed service contract before deployment.
 
-Also: velion's admin health dashboard probes `notification-core:3140/healthz`
-(`apps/Frontend Plane/velion/src/app/api/admin/health/route.ts:57`) but the service only serves
+Also: verevon's admin health dashboard probes `notification-core:3140/healthz`
+(`apps/Frontend Plane/verevon/src/app/api/admin/health/route.ts:57`) but the service only serves
 `/health` — that dashboard will show notification-core as down (404). Caller-side path bug. [source-only + live-curl]
 
-The velionv3 gateway wiring is correct: `apps/gateway/src/domains/notifications.rs` and
+The verevonv3 gateway wiring is correct: `apps/gateway/src/domains/notifications.rs` and
 `navbar.rs` proxy its public `/api/v1/notifications*` surface to notification-core's
 `/notifications*` gated routes. [source-only]
 
@@ -114,10 +114,10 @@ The prior shared-bus consumers are retained as dormant code but are not started.
 - `IdentitySyncSubscriber` — `auth.user.>` + `org.member.>` → local subscriber row + Novu identify.
   (Handles member add/removal locally; unrelated to the Convex `onOrganizationMemberRemoved`
   undefined-handler bug, which is a `convex-core` issue.)
-- `SocialPublishFailedSubscriber` — `velion.application.social.publish_job.failed` from social-core
+- `SocialPublishFailedSubscriber` — `verevon.application.social.publish_job.failed` from social-core
   → user-facing notification via the same `Accept` dispatch path. Real, not decorative. [source-only]
 
-`ensureSharedConsumerStream` provisions/patches the `VELION_SHARED_CONSUMERS` stream for
+`ensureSharedConsumerStream` provisions/patches the `VEREVON_SHARED_CONSUMERS` stream for
 `auth.user.>` and `org.member.>`.
 
 ## Stub / Mock / Placeholder Audit

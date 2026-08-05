@@ -20,6 +20,7 @@ import (
 	db "shipping-core/db"
 	shippingauth "shipping-core/internal/auth"
 	"shipping-core/internal/booking"
+	"shipping-core/internal/capabilityhealth"
 	"shipping-core/internal/carrier"
 	"shipping-core/internal/carrier/bring"
 	"shipping-core/internal/carrier/dhl"
@@ -133,6 +134,7 @@ func run(logger *slog.Logger) error {
 	}()
 
 	go runTrackingRefreshLoop(ctx, bookingSvc, logger)
+	go capabilityhealth.RunHeartbeat(ctx, engine, logger)
 
 	select {
 	case err := <-serveErr:
@@ -281,7 +283,7 @@ func unverifiedLegacyEventsEnabled(legacy, insecure, isolated string) bool {
 // cross-plane side effects on the first observation of delivery: an
 // audit-trail NATS event (Control Plane alignment) and a Data Plane
 // evidence document (F8's reliability facts made retrievable/citable via
-// Velion's knowledge surface). Both are best-effort — a failure here is
+// Verevon's knowledge surface). Both are best-effort — a failure here is
 // logged, never surfaced to the tracking-refresh caller, since the
 // booking's own delivery record already landed successfully.
 type deliveryHooks struct {

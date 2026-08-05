@@ -29,11 +29,11 @@ func (s *Service) MarkReminderSent(ctx context.Context, orgID, which string) err
 	return s.repo.MarkReminderSent(ctx, orgID, which)
 }
 
-// PublishDeletionReminder emits velion.org.deletion.reminder for orgID. The
+// PublishDeletionReminder emits verevon.org.deletion.reminder for orgID. The
 // member cohort reminded is exactly the org_deletion_members ledger recorded
 // at soft-delete time (not a fresh membership lookup) — the same members who
 // received the original pending notice, even if org membership has changed
-// since. A nil shared publisher (velion-nats disabled) makes this a no-op.
+// since. A nil shared publisher (verevon-nats disabled) makes this a no-op.
 func (s *Service) PublishDeletionReminder(ctx context.Context, orgID, orgName string, daysRemaining int) {
 	var memberIDs []string
 	if entries, err := s.repo.ListDeletionLedger(ctx, orgID); err != nil {
@@ -49,7 +49,7 @@ func (s *Service) PublishDeletionReminder(ctx context.Context, orgID, orgName st
 	if sp == nil {
 		return
 	}
-	sp.PublishPlain("velion.org.deletion.reminder", map[string]any{
+	sp.PublishPlain("verevon.org.deletion.reminder", map[string]any{
 		"org_id":          orgID,
 		"org_name":        orgName,
 		"days_remaining":  daysRemaining,

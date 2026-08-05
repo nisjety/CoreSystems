@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" color="#171717" fill="currentColor">
-  <!-- Velion mark, filled. `color` is a low-priority presentation attribute:
-       used via <img> it renders brand ink (#171717); inlined into HTML any
-       CSS `color` on it or an ancestor wins, so fill follows currentColor.
-       Source of truth: src/components/home/sections/VelionMark.tsx -->
-  <path d="M28 36 H42.7 L65.1 65.1 C66.8 67.3 70.2 67.5 72.4 65 L74.4 62.7 C77.5 66.2 77 70.2 74.7 73 L63.6 84 L28 36 Z"/>
-  <path d="M78.9 36 H93.6 L74.4 61.7 L68.3 56.2 C65.9 54 66 50.7 67.8 48.5 L78.9 36 Z"/>
-</svg>

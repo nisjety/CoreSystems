@@ -45,7 +45,7 @@ function unwrapConnectPayload(payload: unknown): ConnectPayload | null {
 /**
  * POST /api/connections/create
  * Body: { provider, sources }. Resolves org + user server-side and creates a
- * Velion direct OAuth connect session via integration-corev2. This is an
+ * Verevon direct OAuth connect session via integration-corev2. This is an
  * internal service call, so integration-core's public Bearer plan gate is
  * bypassed; onboarding plan enforcement happens at the paywall.
  */

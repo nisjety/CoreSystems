@@ -123,7 +123,7 @@ function websiteIngestKey(orgId: string, url: string, maxPages: number): string 
     .update(`${orgId}:${url}:${maxPages}`)
     .digest("hex")
     .slice(0, 40);
-  return `velion-website-${digest}`;
+  return `verevon-website-${digest}`;
 }
 
 function unwrapData(value: unknown): unknown {

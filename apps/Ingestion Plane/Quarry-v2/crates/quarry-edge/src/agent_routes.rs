@@ -133,7 +133,7 @@ mod enabled {
     }
 
     /// Defense-in-depth ZDR guard for `POST /v1/agent/runs`, independent of
-    /// (and not reliant on) the Velion gateway's own `effective_profile_scope`
+    /// (and not reliant on) the Verevon gateway's own `effective_profile_scope`
     /// check. The gateway already rejects a client-supplied
     /// `{zdr: true, profileId: "<real>"}` combination before ever proxying to
     /// Quarry-edge (`fix(gateway): close ZDR bypass via explicit ephemeral

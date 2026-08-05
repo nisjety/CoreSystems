@@ -9,7 +9,7 @@ export default function SettingsMembersPage() {
     >
       <SettingsPlaceholderPanel
         title="Team membership surface"
-        copy="This workspace members view is being folded into the unified Velion settings layer. Use the team workspace to manage active members until this panel is fully connected."
+        copy="This workspace members view is being folded into the unified Verevon settings layer. Use the team workspace to manage active members until this panel is fully connected."
         ctaHref="/team"
         ctaLabel="Open team workspace"
       />

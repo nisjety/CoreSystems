@@ -27,7 +27,7 @@ import {
   type NavbarNotification,
   type NavbarProfile,
 } from "@/features/shell-v2/lib/navbar-data";
-import type { VelionRoute } from "@/features/shell-v2/lib/shell-data";
+import type { VerevonRoute } from "@/features/shell-v2/lib/shell-data";
 import { cn } from "@/lib/utils";
 import { useClientTodayKey } from "@/lib/use-client-today";
 
@@ -41,10 +41,10 @@ export function MessagesDropdown({
   onOpen: (id: string) => void;
 }) {
   return (
-    <Panel className="right-24 velion-floating-panel-md">
+    <Panel className="right-24 verevon-floating-panel-md">
       <TabHeader tabs={["All", "Messages", "Mentions"]} />
       <div className="max-h-[380px] overflow-y-auto">
-        {!configured ? <EmptyPanel text="Connect Novu to show inbox and Velion AI chat messages." /> : null}
+        {!configured ? <EmptyPanel text="Connect Novu to show inbox and Verevon AI chat messages." /> : null}
         {configured && messages.length === 0 ? <EmptyPanel text="No messages" /> : null}
         {messages.map((message, index) => (
           <MessageRow key={message.id} item={message} bordered={index < messages.length - 1} onOpen={onOpen} />
@@ -65,7 +65,7 @@ export function NotificationsDropdown({
   onOpen: (id: string) => void;
 }) {
   return (
-    <Panel className="right-14 velion-floating-panel-md">
+    <Panel className="right-14 verevon-floating-panel-md">
       <TabHeader tabs={["All", "Systems", "Unread"]} />
       <div className="max-h-[380px] overflow-y-auto">
         {!configured ? <EmptyPanel text="Connect Novu to show real notifications." /> : null}
@@ -221,7 +221,7 @@ export function CalendarDropdown({
   };
 
   return (
-    <Panel className="right-6 velion-floating-panel-md">
+    <Panel className="right-6 verevon-floating-panel-md">
       <div className="flex items-center gap-1 px-4 pb-2 pt-3">
         {(["calendar", "notes"] as const).map((tab) => (
           <button
@@ -343,7 +343,7 @@ export function ProfileDropdown({
   onSignOut: () => void;
 }) {
   return (
-    <Panel className="right-0 velion-floating-panel-sm p-2">
+    <Panel className="right-0 verevon-floating-panel-sm p-2">
       <div className="mb-2 rounded-xl bg-[#F7F7F8] px-3 py-2.5 dark:bg-[#191A1F]">
         <div className="truncate text-[13px] font-semibold text-[#111111] dark:text-white">{profile?.name ?? "Account"}</div>
         {profile?.email ? <div className="mt-0.5 truncate text-[12px] text-[#777777] dark:text-[#AEB4C0]">{profile.email}</div> : null}
@@ -353,11 +353,11 @@ export function ProfileDropdown({
       <ProfileItem href="/settings/billing" icon={CreditCard} label="Subscription" badge={planLabel} />
       <ProfileItem href="/settings/workspace" icon={Settings} label="Settings" />
       <div className="my-1 h-px bg-[#EBEBEB] dark:bg-[#2A2C31]" />
-      <button type="button" onClick={onSupport} className="velion-menu-item">
+      <button type="button" onClick={onSupport} className="verevon-menu-item">
         <HelpCircle className="size-[17px] text-[#555555] dark:text-[#AEB4C0]" strokeWidth={1.7} />
         <span className="flex-1">Help center</span>
       </button>
-      <button type="button" onClick={onSignOut} className="velion-menu-item">
+      <button type="button" onClick={onSignOut} className="verevon-menu-item">
         <LogOut className="size-[17px] text-[#555555] dark:text-[#AEB4C0]" strokeWidth={1.7} />
         <span className="flex-1">Sign out</span>
       </button>
@@ -503,12 +503,12 @@ function ProfileItem({
   label,
 }: {
   badge?: string;
-  href: VelionRoute;
+  href: VerevonRoute;
   icon: LucideIcon;
   label: string;
 }) {
   return (
-    <Link href={href as Route} className="velion-menu-item">
+    <Link href={href as Route} className="verevon-menu-item">
       <Icon className="size-[17px] text-[#555555] dark:text-[#AEB4C0]" strokeWidth={1.7} />
       <span className="flex-1">{label}</span>
       {badge ? (
@@ -530,7 +530,7 @@ function Panel({
   return (
     <div
       className={cn(
-        "velion-popover velion-floating-panel absolute top-12 z-[var(--velion-z-popover)] p-0",
+        "verevon-popover verevon-floating-panel absolute top-12 z-[var(--verevon-z-popover)] p-0",
         className,
       )}
     >
@@ -567,7 +567,7 @@ function EmptyPanel({ text }: { text: string }) {
   );
 }
 
-function PanelFooter({ href, label }: { href: VelionRoute; label: string }) {
+function PanelFooter({ href, label }: { href: VerevonRoute; label: string }) {
   return (
     <div className="border-t border-[#EBEBEB] px-4 py-2.5 dark:border-[#2A2C31]">
       <Link href={href as Route} className="block w-full py-1 text-center text-xs font-semibold text-[#555555] transition-colors hover:text-[#111111] dark:text-[#AEB4C0] dark:hover:text-white">

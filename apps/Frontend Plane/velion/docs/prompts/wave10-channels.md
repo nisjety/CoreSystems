@@ -6,25 +6,25 @@ Self-contained brief for landing per-agent deployment to WhatsApp Business, Slac
 
 ## Context
 
-Velion ships per-agent embed widgets (Wave 9) but agents are not yet reachable from external messaging channels. The closest competitive surface is Intercom Fin (Messenger/WhatsApp/email native) and Chatbase's "Connect" tab (WhatsApp/Slack/Messenger/Instagram).
+Verevon ships per-agent embed widgets (Wave 9) but agents are not yet reachable from external messaging channels. The closest competitive surface is Intercom Fin (Messenger/WhatsApp/email native) and Chatbase's "Connect" tab (WhatsApp/Slack/Messenger/Instagram).
 
-Reference the gap doc at `apps/Frontend Plane/velion/docs/ui-ux-velion-gap.md` — especially §19 (Chatbase comparison) and the `integration:` tool namespace at `apps/Model Plane/rust/services/model-gateway/src/tool_registry.rs::make_integration_placeholder`.
+Reference the gap doc at `apps/Frontend Plane/verevon/docs/ui-ux-verevon-gap.md` — especially §19 (Chatbase comparison) and the `integration:` tool namespace at `apps/Model Plane/rust/services/model-gateway/src/tool_registry.rs::make_integration_placeholder`.
 
 ### What's already in place
 
 | Capability | Where |
 |---|---|
 | Agent record with `tools`, `model`, `systemPrompt`, `publicSecret` | `apps/Application Plane/convex-core/convex/agents.ts` + `schema.ts` |
-| Public message-send (anonymous visitor → agent → SSE) | `apps/Frontend Plane/velion/src/app/api/embed/[agentId]/stream/route.ts` |
-| Internal JWT mint for org-scoped service-to-service calls | `apps/Frontend Plane/velion/src/lib/model-plane/auth-token.ts::getModelPlaneTokenInternal` |
+| Public message-send (anonymous visitor → agent → SSE) | `apps/Frontend Plane/verevon/src/app/api/embed/[agentId]/stream/route.ts` |
+| Internal JWT mint for org-scoped service-to-service calls | `apps/Frontend Plane/verevon/src/lib/model-plane/auth-token.ts::getModelPlaneTokenInternal` |
 | Existing Ingestion Plane connector runtime | `apps/Ingestion Plane/docker-compose.yml` — `connector-runtime-engine` (port 3003) + Nango bridge |
 | Integration namespace stub | `tool_registry.rs::make_integration_placeholder` (`integration:{connector}.{operation}`) returns clear "not yet wired" error |
-| Webhook receiver pattern | `apps/Frontend Plane/velion/src/app/api/external/zammad/[...path]/route.ts` (Zammad support webhook) |
+| Webhook receiver pattern | `apps/Frontend Plane/verevon/src/app/api/external/zammad/[...path]/route.ts` (Zammad support webhook) |
 
 ### What's NOT in place
 
 - No `agent.channels` field on the agent record.
-- No per-channel inbound webhook routes in velion.
+- No per-channel inbound webhook routes in verevon.
 - No outbound message senders (WhatsApp send-message, Slack chat.postMessage, Messenger Send API).
 - No subscriber identity model (the embed widget uses a browser-side UUID; channels supply real platform user ids — phone numbers, Slack user ids, etc.).
 - No threading model — channels carry "thread" semantics that we'd need to map onto our `session_key` shape.
@@ -85,9 +85,9 @@ channelConversations: defineTable({
 
 The `sessionKey` is `channel:{channel}:{agentId}:{externalThreadId}` — derived deterministically so the gateway's session-core keeps continuity across redeploys.
 
-### 2. Inbound webhook routes (velion)
+### 2. Inbound webhook routes (verevon)
 
-One route per channel under `apps/Frontend Plane/velion/src/app/api/channels/{channel}/webhook/route.ts`:
+One route per channel under `apps/Frontend Plane/verevon/src/app/api/channels/{channel}/webhook/route.ts`:
 
 | Route | Verification | Body shape |
 |---|---|---|
@@ -114,7 +114,7 @@ Total: 4 route files, each ~150 lines.
 
 ### 3. Outbound senders (shared helper)
 
-Create `apps/Frontend Plane/velion/src/lib/channels/{whatsapp,slack,messenger,instagram}.ts`. Each exposes:
+Create `apps/Frontend Plane/verevon/src/lib/channels/{whatsapp,slack,messenger,instagram}.ts`. Each exposes:
 
 ```ts
 export async function sendMessage(
@@ -132,14 +132,14 @@ Pattern matches `EmbedTab` (Wave 9):
 - 4 cards (WhatsApp / Slack / Messenger / Instagram), each with "Connect" button.
 - Connect opens an OAuth flow (Slack + Messenger/Instagram use OAuth; WhatsApp uses a manual access-token paste).
 - Connected card shows the bound channel id + a "Disconnect" button.
-- "Test message" affordance per channel — sends "Connected to Velion ✓" through the channel as a smoke check.
+- "Test message" affordance per channel — sends "Connected to Verevon ✓" through the channel as a smoke check.
 
 Backend: new `useAgentChannels` hook calling `/api/agents/[id]/channels` (CRUD on `agent.channels`).
 
 ### 5. OAuth landing pages
 
 Slack + Meta both need redirect URIs:
-- `apps/Frontend Plane/velion/src/app/(dashboard)/agents/[agentId]/channels/oauth/[provider]/callback/page.tsx`
+- `apps/Frontend Plane/verevon/src/app/(dashboard)/agents/[agentId]/channels/oauth/[provider]/callback/page.tsx`
 - Exchanges code → token, calls `/api/agents/[id]/channels` to persist.
 
 ### 6. Observability
@@ -149,7 +149,7 @@ Slack + Meta both need redirect URIs:
 
 ### 7. Cost / security guards
 
-- `CHANNELS_ENABLED` env in velion (master kill switch).
+- `CHANNELS_ENABLED` env in verevon (master kill switch).
 - Rate-limit inbound webhooks per-channel-per-minute (Cloudflare or in-process token bucket).
 - WhatsApp: respect 24-hour customer-service window (after 24h with no inbound, the agent can only send "approved templates"). Reject outbound text-message attempts past the window with a clear UI error.
 

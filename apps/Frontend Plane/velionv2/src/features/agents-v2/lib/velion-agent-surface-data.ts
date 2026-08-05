@@ -1,5 +1,5 @@
 import { CheckCircle2, Sparkles, TicketCheck } from "lucide-react";
-import type { RoleFeature } from "@/features/agents-v2/lib/velion-agent-page-types";
+import type { RoleFeature } from "@/features/agents-v2/lib/verevon-agent-page-types";
 
 export const serviceResolutionQueue = [
   { title: "Answer policy", status: "Configure sources", detail: "Reply only after an approved source or tool result supports it" },

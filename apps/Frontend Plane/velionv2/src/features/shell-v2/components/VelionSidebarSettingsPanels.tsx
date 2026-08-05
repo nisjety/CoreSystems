@@ -18,7 +18,7 @@ import {
   UsersRound,
   type LucideIcon,
 } from "lucide-react";
-import { SidebarPanelTitle } from "@/features/shell-v2/components/VelionSidebarPrimitives";
+import { SidebarPanelTitle } from "@/features/shell-v2/components/VerevonSidebarPrimitives";
 import { sidebarType } from "@/features/shell-v2/lib/sidebar-style";
 import { cn } from "@/lib/utils";
 

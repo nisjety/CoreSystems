@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Velion service builder for the core server planes.
+# Verevon service builder for the core server planes.
 #
 # Subcommands:
-#   ./build-velion-services.sh                Build/start every plane (default).
-#   ./build-velion-services.sh --no-cache     Build all buildable images without
+#   ./build-verevon-services.sh                Build/start every plane (default).
+#   ./build-verevon-services.sh --no-cache     Build all buildable images without
 #                                              Docker layer cache, then start.
-#   ./build-velion-services.sh --dry-run      Validate compose files only; no build/start.
-#   ./build-velion-services.sh --compose-bootstrap
-#                                              Called by velionv2 docker-compose.
+#   ./build-verevon-services.sh --dry-run      Validate compose files only; no build/start.
+#   ./build-verevon-services.sh --compose-bootstrap
+#                                              Called by verevonv2 docker-compose.
 #                                              Builds core planes only when they
 #                                              are not already ready.
-#   ./build-velion-services.sh --prune        Stop + remove every plane's containers,
+#   ./build-verevon-services.sh --prune        Stop + remove every plane's containers,
 #                                              volumes, and networks. Use before a
 #                                              clean rebuild. Idempotent.
-#   ./build-velion-services.sh --status       Per-plane health roll-up. Read-only.
+#   ./build-verevon-services.sh --status       Per-plane health roll-up. Read-only.
 #
 # Environment knobs:
 #   CORE_ROOT_OVERRIDE=/path/to/CoreSystem
@@ -80,14 +80,14 @@ fi
 
 # These are intentionally ordered by dependency flow:
 # Data and Ingestion first, then Model, Control, Application (Convex + Novu +
-# Affine), and finally Frontend Velion (which subscribes to Convex).
+# Affine), and finally Frontend Verevon (which subscribes to Convex).
 COMPOSE_FILES=(
   "apps/Data Plane v2/docker-compose.yml"
   "apps/Ingestion Plane/docker-compose.yml"
   "apps/Model Plane/deploy/docker-compose.yml"
   "apps/Control Plane/docker-compose.yml"
   "apps/Application Plane/docker-compose.yml"
-  "apps/Frontend Plane/velionv2/docker-compose.yml"
+  "apps/Frontend Plane/verevonv2/docker-compose.yml"
 )
 
 STACK_NAMES=(
@@ -96,7 +96,7 @@ STACK_NAMES=(
   "Model Plane"
   "Control Plane"
   "Application Plane"
-  "Frontend Plane Velion v2"
+  "Frontend Plane Verevon v2"
 )
 
 # One-shot services are removed after they exit successfully so `docker ps -a`
@@ -121,16 +121,16 @@ BOOTSTRAP_SERVICES=(
 # project before starting the explicit `model-plane` project to avoid port and
 # container-name collisions.
 #
-# The Frontend slot now stops the legacy `frontend-plane-velion` project
-# (velion v1) before standing up `frontend-plane-velionv2` so the two cannot
-# fight over host port 3000 or the `velion-nats` container name.
+# The Frontend slot now stops the legacy `frontend-plane-verevon` project
+# (verevon v1) before standing up `frontend-plane-verevonv2` so the two cannot
+# fight over host port 3000 or the `verevon-nats` container name.
 OLD_PROJECTS=(
   ""
   ""
   "deploy"
   ""
   ""
-  "frontend-plane-velion"
+  "frontend-plane-verevon"
 )
 
 # Per-stack post-build hooks (run after one-shots clear, before moving to the
@@ -190,9 +190,9 @@ run_with_timeout() {
   wait "$command_pid"
 }
 
-ensure_velion_network() {
+ensure_verevon_network() {
   # Compose files across all planes declare `inter-plane-bus` as an external
-  # network. Older versions of this script created `velion-net`, which caused
+  # network. Older versions of this script created `verevon-net`, which caused
   # `docker compose up` to fail with "network inter-plane-bus declared as
   # external, but could not be found". The shared bus is `inter-plane-bus`.
   if docker network inspect inter-plane-bus >/dev/null 2>&1; then
@@ -530,7 +530,7 @@ build_stack() {
     no_cache_runtime_ready_service_list="$(non_build_runtime_services "$compose_file" "$bootstrap_services" | xargs)"
     if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
       run docker compose -f "$compose_file" build --no-cache frontend
-      run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --no-deps --remove-orphans frontend nats
+      run env VEREVON_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --no-deps --remove-orphans frontend nats
     else
       if [[ -z "$no_cache_build_service_list" && -z "$no_cache_runtime_service_list" ]]; then
         run docker compose -f "$compose_file" up -d --remove-orphans
@@ -548,7 +548,7 @@ build_stack() {
     fi
   else
     if [[ "$index" == "$FRONTEND_STACK_INDEX" ]]; then
-      run env VELION_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --build --remove-orphans frontend nats
+      run env VEREVON_SKIP_BOOTSTRAP=1 docker compose -f "$compose_file" up -d --build --remove-orphans frontend nats
     else
       run docker compose -f "$compose_file" up -d --build --remove-orphans
     fi
@@ -645,7 +645,7 @@ SQL
 # straggling containers/volumes, and remove `inter-plane-bus`. Idempotent:
 # safe to run when nothing is up.
 prune_all() {
-  log "Pruning all velion planes (containers, volumes, network)…"
+  log "Pruning all verevon planes (containers, volumes, network)…"
   for index in "${!COMPOSE_FILES[@]}"; do
     local compose_file="${COMPOSE_FILES[$index]}"
     local stack_name="${STACK_NAMES[$index]}"
@@ -728,7 +728,7 @@ status_all() {
 compose_bootstrap() {
   local index
 
-  ensure_velion_network
+  ensure_verevon_network
   ensure_frontend_bus
 
   for index in "${!COMPOSE_FILES[@]}"; do
@@ -765,7 +765,7 @@ main() {
       ;;
   esac
 
-  ensure_velion_network
+  ensure_verevon_network
   ensure_frontend_bus
 
   for index in "${!COMPOSE_FILES[@]}"; do

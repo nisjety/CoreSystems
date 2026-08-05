@@ -12,7 +12,7 @@ this captures the **actual** service dirs / ports / container names observed on 
 | L3 | **Ingestion Plane** | `apps/Ingestion Plane` | Fetch/crawl/connectors/file-import — produces evidence, persists **through Data Plane contracts** |
 | L4 | **Model Plane** | `apps/Model Plane` | Reasoning, agents, tool choice, synthesis, memory/wiki-update proposals, browser-agent planning |
 | L5 | **Application Plane** | `apps/Application Plane` | Convex collaborative workspace + realtime sync (Affine docs) |
-| L6 | **Frontend Plane** | `apps/Frontend Plane` | `velion` (v1) + `velionv2` UI + BFF |
+| L6 | **Frontend Plane** | `apps/Frontend Plane` | `verevon` (v1) + `verevonv2` UI + BFF |
 | — | **Channel Plane** | `apps/Channel Plane` | **Docs-only stub today** — planned channel inbox (email/Slack/Teams) + voice/canvas UX |
 
 ## Decision rules (which plane owns a capability)
@@ -48,7 +48,7 @@ this captures the **actual** service dirs / ports / container names observed on 
   - **Control Plane** → app services (`auth-service`/`user-service`/`org-core`/…) + `controlplane-nats` on the bus; Postgres/Redis on `controlplane-net` only.
   - **Model Plane** → `model-gateway` on the bus with a `model-gateway` network **alias**; session/inference/execution/etc. stay on `model-plane-network`.
   - **Data Plane v2** → engines on `dpv2-net` + bus.
-  - **velionv2 (Frontend)** → on the bus; resolves `model-gateway:8080` and the control cores by container name.
-- velionv2 chat BFF (`/api/chat/stream`) → `model-gateway:8080`; ingestions BFF (`/api/ingestions/*`) → Quarry edge. Local dev `.env` points at `localhost` host ports instead — both the dev and deployed paths resolve.
-- Grounded chat now stays owner-correct: velionv2 forwards chat to Model Plane, and `model-gateway` consumes Data Plane retrieval/graph endpoints itself before streaming `grounding` + `citation` SSE back to the UI.
+  - **verevonv2 (Frontend)** → on the bus; resolves `model-gateway:8080` and the control cores by container name.
+- verevonv2 chat BFF (`/api/chat/stream`) → `model-gateway:8080`; ingestions BFF (`/api/ingestions/*`) → Quarry edge. Local dev `.env` points at `localhost` host ports instead — both the dev and deployed paths resolve.
+- Grounded chat now stays owner-correct: verevonv2 forwards chat to Model Plane, and `model-gateway` consumes Data Plane retrieval/graph endpoints itself before streaming `grounding` + `citation` SSE back to the UI.
 - Footgun to keep watching: a stack must declare `inter-plane-bus` as `external: true` (not create its own project-scoped net). All current stacks do.

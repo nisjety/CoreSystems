@@ -1,4 +1,4 @@
-# Velion — Phase 2 Execution Progress & DoD Evidence
+# Verevon — Phase 2 Execution Progress & DoD Evidence
 
 > Companion to `docs/PHASE_2_PLAN.md` (authoritative spec). One section per PR with
 > DoD evidence (commands + result) and the no-new-fakeness proof. Base: `main` @ Phase 1
@@ -27,11 +27,11 @@
 DoD checklist:
 - [x] In-flight cc-go Track-B work committed (not lost) — on `main` via `15704f00` (`internal/conversation`
       `repository.go`/`service.go`/`types.go`/`handlers.go` + `repository_test.go`/`service_test.go`).
-- [x] No-client-header-org **CI lint** strengthened in `.github/workflows/velionv3-ci.yml`
-      `fabrication-guard`: bans `fn org_id_from_headers`, asserts `x-org-id` + `x-velion-org-id`
+- [x] No-client-header-org **CI lint** strengthened in `.github/workflows/verevonv3-ci.yml`
+      `fabrication-guard`: bans `fn org_id_from_headers`, asserts `x-org-id` + `x-verevon-org-id`
       stay `STRIPPED_HEADERS` entries, and bans any `domains/` read of a client org header
-      (`get("x-(velion-)?org-id")`). **Proven red on a deliberate violation** (probe domain reading
-      `x-velion-org-id` + reintroduced helper → exit 1; STRIPPED_HEADERS removal → fail). Clean tree passes.
+      (`get("x-(verevon-)?org-id")`). **Proven red on a deliberate violation** (probe domain reading
+      `x-verevon-org-id` + reintroduced helper → exit 1; STRIPPED_HEADERS removal → fail). Clean tree passes.
 - [x] Phase 1 merged-and-green — verified green across all four stacks (evidence below).
 - [x] W2 day-15 go/no-go date on record (2026-07-05, above).
 
@@ -52,7 +52,7 @@ Green evidence (commands run on `main`):
 What shipped:
 - `internal/consumers/`: a reusable `DurableConsumer` scaffold (QueueSubscribe + Durable +
   ManualAck + AckWait + MaxAckPending(1)) — PR-3 mirrors this — and `AIActionExecutor`, an
-  in-process durable JetStream consumer on `velion.application.conversation.ai_action.reviewed`.
+  in-process durable JetStream consumer on `verevon.application.conversation.ai_action.reviewed`.
 - On `decision=approved` + `kind=ticket.classification`: load the action (`GetAIAction`), find the
   suggested ticket, **claim** it atomically (`MarkAIActionExecuted`: `status approved→executed`,
   the idempotency gate), promote suggested→open + apply routing via `Service.UpdateTicket`, emit
@@ -74,7 +74,7 @@ DoD evidence:
   duplicate delivery (sequential + 16-goroutine concurrent → exactly one promote + one emit),
   rejected/wrong-kind/foreign-org no-op, transient-error retry, promote-failure rollback, malformed-ack.
 - **Live smoke through the running stack** (cc-go rebuilt + restarted; executor logged
-  "subscribed to velion.application.conversation.ai_action.reviewed"): ingest → classify
+  "subscribed to verevon.application.conversation.ai_action.reviewed"): ingest → classify
   (suggested ticket) → approve → ticket promoted **suggested→open** + `category=billing` routing
   applied → ai_action **executed**; re-approve left it **open** (no double-apply). RESULT: PASS.
 
@@ -118,7 +118,7 @@ the audit detail — deferred, not faked.)
 On inspection the **admin erasure backend already ships** (Phase-1 D, `user-core/internal/http/gdpr_handlers.go`):
 `hardEraseUser`/`anonymizeUser`/`dsarExport` are gated by `resolveErasureActor` = **admin OR self**, so an
 admin can erase another user; hard-erase requires `confirm:true`; the `ErasureAvailable()` 503 gate fires
-when AUTH_DATABASE_URL is unset; every op emits a CP audit event + (on erase) the `velion.gdpr.erasure.requested`
+when AUTH_DATABASE_URL is unset; every op emits a CP audit event + (on erase) the `verevon.gdpr.erasure.requested`
 cross-plane fan-out. Added this increment:
 - **DSAR disclosure pinned verbatim**: extracted the Art. 15 CP-only scope notice to
   `users.DSARControlPlaneDisclosure` (used by `BuildDSARExport`) + `TestDSARDisclosureVerbatim` pins the exact
@@ -162,7 +162,7 @@ is provisioned:
 ### Done — insight-core metric subscriber (the real producer)
 - `internal/nats/client.go` + `internal/consumers/{consumer.go,metric_subscriber.go}` — a `DurableConsumer`
   scaffold mirroring PR-1 (insight-core is a separate module, so mirrored not imported) + `MetricSubscriber`
-  on `velion.application.>`. Maps conversation-core `LifecycleEvent`s by `type` →
+  on `verevon.application.>`. Maps conversation-core `LifecycleEvent`s by `type` →
   (surface=inbox, metric): `ai_action.executed`/`reviewed`, `ticket.created`/`suggested`/`resolved`,
   `conversation.created`, `message.received`/`sent`. Unknown types + missing-org are skipped (no fabricated
   metric). Idempotent: the metric id is derived from the source event id (`ins_evt_<id>_<metric>`), so a
@@ -195,7 +195,7 @@ is provisioned:
 - **US-region fabrication removed**: `AccountSettingsPage.tsx` dropped the synthetic
   `{ value: 'US', label: 'US region default' }` timezone option (it conflated residency with a timezone and
   `'US'` is not a valid IANA zone). Real IANA zones (Europe/Oslo, UTC, America/New_York, Europe/London) remain.
-- **Grep guard added**: `velionv3-ci.yml` fabrication-guard now fails on any `region default` string in the SPA.
+- **Grep guard added**: `verevonv3-ci.yml` fabrication-guard now fails on any `region default` string in the SPA.
   Verified: passes on the cleaned tree; **red on a deliberate re-introduction**.
 - **No orphaned nav**: confirmed the SPA nav (`app/shell/navigation.ts`, `features/core/lib/sidebar-navigation.ts`)
   does not point at the unbuilt engines (leads/briefs/monitoring) — nothing to remove.
@@ -251,7 +251,7 @@ The leads-core service was built, deployed, and live-verified against the REAL B
 - **Cross-org isolation**: a foreign org GETting another org's list → 404.
 - **Metered**: gateway `/leads/export.csv` gated on the billing-core `leads` entitlement (entitlement_allowed
   unit test). **Per-export audit**: leads-core logged "per-export audit enabled" (NATS connected); emits
-  `velion.audit.v1.application.lead_export` (count metadata only).
+  `verevon.audit.v1.application.lead_export` (count metadata only).
 - Deployed: `docker compose up -d --build leads-core` → healthy; migrations ran; serving :3164.
 - Environment note: the only thing NOT exercised from inside the container in the first pass was a
   network-egress edge — re-tested directly, the container DOES reach data.brreg.no (real results above).
@@ -414,7 +414,7 @@ Both fixes re-verified live (list returns the schedule; DELETE → 204 → reape
 
 ### Gateway BFF surface (product reachability) — built + static-green
 Added the recurring-monitor CREATE/LIST/DELETE seam the monitoring domain's own doc flagged as "Phase 2 (C-FULL)":
-- `velionv3/apps/gateway/src/domains/monitoring.rs`: `POST /api/v1/monitoring/schedules` (preset+SSRF-guarded url →
+- `verevonv3/apps/gateway/src/domains/monitoring.rs`: `POST /api/v1/monitoring/schedules` (preset+SSRF-guarded url →
   edge `/v1/schedules`; edge stamps org_id+created_by from the session token), `GET /api/v1/monitoring/schedules`
   (lists change_monitor schedules only), `DELETE /api/v1/monitoring/schedules/:id`. Mirrors the proven
   check/latest/history proxy pattern (quarry audience token, never a client org header). `cargo check` +
@@ -432,8 +432,8 @@ A full adversarial re-audit (one verifier per PR vs the plan DoD) flagged Phase 
 
 ### Gap 1 — W3 runtime was dark (PR-3) — ✅ CLOSED + proven with real data
 Root cause: the `insight-core` compose service (apps/Application Plane/docker-compose.yml) had no DATABASE_URL/NATS_URL/depends_on, so the deployed container took the in-memory branch and never started the metric subscriber — the code+tests were green but the durable real-event path was dark.
-Fix: wired `DATABASE_URL` (application-postgres/application_plane, mirroring leads-core), `NATS_URL=velion-nats:4222` + `NATS_TOKEN` (the bus conversation-core publishes `velion.application.>` to — its config resolves VELION_NATS_URL first), and `depends_on application-postgres`; corrected the stale "NO database and NO NATS" comment. Rebuilt the image (the running one predated the PR-3 code) + recreated.
-Proof: boot logs now show `durable metric store (Postgres) enabled` + `metric-subscriber subscribed to velion.application.> (durable=insight-core-metric-subscriber)`. The durable JetStream consumer REPLAYED real historical events into `insight_metric_events` — 12 rows from REAL lifecycle events: inbox/ai_actions_executed=2 (the exact approve→execute events from PR-1 W4 live verify), ai_actions_reviewed=3, messages_received/sent=2 each, tickets_suggested=2, social/publish_jobs_failed=1. No fabrication — every metric traces to an event a producer actually emitted. The gateway briefs.rs Preview gate (unit-tested) now reads a non-empty real-event store.
+Fix: wired `DATABASE_URL` (application-postgres/application_plane, mirroring leads-core), `NATS_URL=verevon-nats:4222` + `NATS_TOKEN` (the bus conversation-core publishes `verevon.application.>` to — its config resolves VEREVON_NATS_URL first), and `depends_on application-postgres`; corrected the stale "NO database and NO NATS" comment. Rebuilt the image (the running one predated the PR-3 code) + recreated.
+Proof: boot logs now show `durable metric store (Postgres) enabled` + `metric-subscriber subscribed to verevon.application.> (durable=insight-core-metric-subscriber)`. The durable JetStream consumer REPLAYED real historical events into `insight_metric_events` — 12 rows from REAL lifecycle events: inbox/ai_actions_executed=2 (the exact approve→execute events from PR-1 W4 live verify), ai_actions_reviewed=3, messages_received/sent=2 each, tickets_suggested=2, social/publish_jobs_failed=1. No fabrication — every metric traces to an event a producer actually emitted. The gateway briefs.rs Preview gate (unit-tested) now reads a non-empty real-event store.
 
 ### Gap 3 — E5 UI never rendered the tool NAME (PR-2) — ✅ CLOSED in code (tool name); source = honest deferral
 The backend carried the real tool name (details.tool, fixed in a05af4d8) and audit-client.ts aggregated
@@ -442,7 +442,7 @@ was never displayed. Fix: added a "Tools the AI invoked" chip row (Sparkles icon
 `workspaceActivity.tools` (real names from real tool_action rows), gated on totalEvents>0 so it never shows over
 empty. `pnpm typecheck` green. The DoD's other literal — per-connection "source" — stays a documented honest
 deferral: builtin agent tools aren't connection-bound, so attributing a source would fabricate; the UI shows
-"Attribution unavailable" rather than invent one. (Live UI render not re-verified — the velionv3 SPA stack is down.)
+"Attribution unavailable" rather than invent one. (Live UI render not re-verified — the verevonv3 SPA stack is down.)
 
 ### Doc-hygiene (audit-flagged inaccuracies) — fixed
 - gateway `domains/privacy.rs` header comment no longer falsely claims user-core enforces step-up re-auth (it
@@ -454,16 +454,16 @@ deferral: builtin agent tools aren't connection-bound, so attributing a source w
 ### Gap 2 — W6 single-org JOIN never demonstrated as one live pass (PR-6) — OPEN (operational, infra-gated)
 This is the headline DoD of PR-6 and the one genuinely-open item. All components are built + individually verified
 (leads-core live vs real Brreg; W4 approve→execute live; E5 backend + now W3 durable+real-events live), and a prior
-partial gateway run demonstrated leads-search/save/export + briefs-preview for Velion AS — but the COMPLETE chain
+partial gateway run demonstrated leads-search/save/export + briefs-preview for Verevon AS — but the COMPLETE chain
 (Brreg resolve → AI proposes → approve → W4 execute → E5/W3 in-region audit) has not been shown as a single live
-pass. It requires bringing up the Control Plane + gateway + velionv3 stacks, an authenticated session, and the
+pass. It requires bringing up the Control Plane + gateway + verevonv3 stacks, an authenticated session, and the
 'leads' billing entitlement; those stacks are currently down (and CP has known DB-password-drift fragility on
 container recreation). Not a code gap — an operational demonstration.
 
 ### Gap 2 — W6 single-org JOIN — LIVE-TESTED 2026-06-22 (real admin session, NO dev-bypass)
-Full stack brought up (Control Plane + gateway :3185 + velionv3 SPA + Application + Ingestion + Model Plane).
-Dev account wired the real way: registered `local@velion.dev` via Better Auth, marked email-verified + role=admin in
-auth_service, real sign-in → session (NO dev-bypass), created org **Velion (org_1782152609927)** via the onboarding
+Full stack brought up (Control Plane + gateway :3185 + verevonv3 SPA + Application + Ingestion + Model Plane).
+Dev account wired the real way: registered `local@verevon.dev` via Better Auth, marked email-verified + role=admin in
+auth_service, real sign-in → session (NO dev-bypass), created org **Verevon (org_1782152609927)** via the onboarding
 API (owner membership), granted the `leads` add-on + enterprise quotas via billing-core `PUT /orgs/{id}/account`
 (entitlement check now `allowed:true`). Then one pass through the gateway with that session cookie:
 
@@ -476,14 +476,14 @@ API (owner membership), granted the `leads` add-on + enterprise quotas via billi
    ingest path). No fabrication — the model decided.
 3. **Approve → execute (W4)** — `POST /api/v1/inbox/ai-actions/{id}/approve` through the gateway (real session) →
    the cc-go executor promoted the ticket **suggested → open** and applied the model's routing (billing / urgent /
-   Billing). The keystone approve→ACT, live, for Velion.
-4. **Brief (W3)** — `GET /api/v1/briefs` reflects **real Velion metrics** (inbox: ai_actions_executed 1 +
+   Billing). The keystone approve→ACT, live, for Verevon.
+4. **Brief (W3)** — `GET /api/v1/briefs` reflects **real Verevon metrics** (inbox: ai_actions_executed 1 +
    ai_actions_reviewed 1, mapped by insight-core's subscriber from the real lifecycle events), state=preview with the
    honest "real counts, no trends inferred" disclosure (below the 5-event threshold). No fabrication.
 5. **Agent acts + audited in-region** — an agentic `chat/stream` run executed tools LIVE (the loop called `fetch_url`
-   and fetched the real Brreg Enhetsregisteret page for 929369661). The **lead_export audit landed for Velion**
+   and fetched the real Brreg Enhetsregisteret page for 929369661). The **lead_export audit landed for Verevon**
    (`audit_events`: `lead_export | org_1782152609927`) — proving the audit pipeline + org-attribution work live on
-   velion-nats.
+   verevon-nats.
 
 **Open tail (env-wiring, NOT a Phase-2 code gap):** the E5 `tool_action` audit ROW for the agentic tool run is not
 yet visible via `/api/v1/audit` — execution-core/session-core's tool_action audit must reach audit-core over the
@@ -509,7 +509,7 @@ Re-running chat/stream with `features:["agentic"]` routed the turn through execu
 queryable via the gateway `GET /api/v1/audit?event=tool_action` with the real session — the REAL tool NAME, org-scoped.
 audit-core had to be reconnected to the model-plane bus first (the same boot-race restart as cc-go/insight-core).
 
-**W6 JOIN is now 7/7 legs LIVE for Velion through the gateway, no dev-bypass:** real auth → Brreg resolve +
+**W6 JOIN is now 7/7 legs LIVE for Verevon through the gateway, no dev-bypass:** real auth → Brreg resolve +
 metered export → real-model proposes → approve → W4 execute → W3 brief (real metrics, Preview-gated) → agent acts
 live (company_lookup→Brreg) → **E5 audited in-region (real tool name)**.
 
@@ -523,7 +523,7 @@ Closed the observation from the JOIN: the inline chat tool loop (`features:["too
 model-gateway WITHOUT emitting a tool_action audit — only the governed execution-core path audited. So AI tool use
 on the inline path was unauditable.
 - NEW `model-gateway/src/audit.rs`: a best-effort inline-tool audit emitter mirroring session-core's canonical
-  contract — publishes the SAME flat body to `velion.audit.v1.model.tool_action` (audit-core consumes it), with a
+  contract — publishes the SAME flat body to `verevon.audit.v1.model.tool_action` (audit-core consumes it), with a
   lazily-connected process-global NATS client (NATS_URL), an honest per-tool `data_category` map (public web/registry
   tools → `public_non_personal`, the org-knowledge tool → `customer_private`, unknown → `unclassified` — never
   fabricated), and the audit-core `AuditEvent` json shape (org_id/plane/event required). 3 unit tests.

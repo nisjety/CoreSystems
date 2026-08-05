@@ -4,7 +4,7 @@
  * Step 5 — social proof.
  *
  * Left pane: a single line of copy ("Companies that ship support with
- * Velion") + a "Continue" CTA. The page footer carries the trust
+ * Verevon") + a "Continue" CTA. The page footer carries the trust
  * messaging since the dashboard arrival animation comes next.
  *
  * Right pane: 3×2 greyscale logo wall (Slot 5). The logos are inline

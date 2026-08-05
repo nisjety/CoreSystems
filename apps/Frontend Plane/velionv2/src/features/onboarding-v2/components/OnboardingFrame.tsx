@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Onboarding · two-pane shell (ported from velion v1 OnboardingFrame).
+ * Onboarding · two-pane shell (ported from verevon v1 OnboardingFrame).
  *
  * Mirrors the auth-page chrome (cream card, 1.15fr / 0.85fr grid, rounded-24
  * border) so the post-sign-in transition feels like the same surface. The

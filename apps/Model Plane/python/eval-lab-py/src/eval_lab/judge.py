@@ -1,6 +1,6 @@
 """LLM judge: scores an answer against a rubric via the live stack itself.
 
-Judging goes through model-gateway /v1/invoke (velion-balance) with a
+Judging goes through model-gateway /v1/invoke (verevon-balance) with a
 structured-output schema, so the judge rides the same governed, priced,
 observable path as everything else — no side-channel vendor calls.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from eval_lab.client import VelionClient
+from eval_lab.client import VerevonClient
 
 _JUDGE_SCHEMA = json.dumps(
     {
@@ -23,7 +23,7 @@ _JUDGE_SCHEMA = json.dumps(
 )
 
 
-def make_judge(client: VelionClient, token: str):
+def make_judge(client: VerevonClient, token: str):
     """Build a JudgeFn bound to a client + token. Returns
     (score_0_to_5, rationale); raises on transport failure so callers can
     decide to skip-with-reason."""
@@ -35,7 +35,7 @@ def make_judge(client: VelionClient, token: str):
             f"RUBRIC:\n{rubric}\n\nANSWER:\n{answer}"
         )
         response = client.invoke_sync(
-            token, prompt, model="velion-balance", structured_output_schema=_JUDGE_SCHEMA
+            token, prompt, model="verevon-balance", structured_output_schema=_JUDGE_SCHEMA
         )
         content = str(response.get("content", ""))
         try:

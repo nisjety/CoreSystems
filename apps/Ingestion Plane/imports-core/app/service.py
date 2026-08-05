@@ -424,7 +424,7 @@ class ImportService:
                 # Notify the user who triggered the import
                 if job.user_id:
                     await nats_pub.publish_plain(
-                        "velion.notifications.import.completed",
+                        "verevon.notifications.import.completed",
                         {
                             "subscriberId": job.user_id,
                             "orgId": job.org_id,

@@ -32,14 +32,14 @@ func TestCreateCheckoutSessionBuildsNexiPayment(t *testing.T) {
 		SecretKey:            "secret-key-123",
 		CheckoutKey:          "checkout-key-pub",
 		CheckoutJSURL:        "https://test.checkout.dibspayment.eu/v1/checkout.js?v=1",
-		WebhookURL:           "https://velion.example/api/v1/billing/webhooks/nexi",
+		WebhookURL:           "https://verevon.example/api/v1/billing/webhooks/nexi",
 		WebhookAuthorization: "wh-secret",
 	})
 
 	session, err := a.CreateCheckoutSession(context.Background(), billing.CheckoutParams{
 		OrgID:      "org_abc",
 		Plan:       "standard",
-		SuccessURL: "https://app.velion/onboarding?checkout=success",
+		SuccessURL: "https://app.verevon/onboarding?checkout=success",
 	})
 	if err != nil {
 		t.Fatalf("CreateCheckoutSession: %v", err)
@@ -60,14 +60,14 @@ func TestCreateCheckoutSessionBuildsNexiPayment(t *testing.T) {
 	if amt, _ := order["amount"].(float64); int64(amt) != 99900 {
 		t.Fatalf("order.amount = %v, want 99900 (standard)", order["amount"])
 	}
-	if body["myReference"] != "org_abc:velion-standard" {
+	if body["myReference"] != "org_abc:verevon-standard" {
 		t.Fatalf("myReference = %v", body["myReference"])
 	}
 	// Nexi requires termsUrl for EmbeddedCheckout; with none configured it must
 	// be derived from the return URL's origin (never sent empty/omitted).
 	checkout, _ := body["checkout"].(map[string]any)
-	if checkout["termsUrl"] != "https://app.velion/terms" {
-		t.Fatalf("checkout.termsUrl = %v, want derived https://app.velion/terms", checkout["termsUrl"])
+	if checkout["termsUrl"] != "https://app.verevon/terms" {
+		t.Fatalf("checkout.termsUrl = %v, want derived https://app.verevon/terms", checkout["termsUrl"])
 	}
 	if checkout["integrationType"] != "EmbeddedCheckout" {
 		t.Fatalf("checkout.integrationType = %v", checkout["integrationType"])
@@ -101,7 +101,7 @@ func TestRetrieveCheckoutSessionMapsStatus(t *testing.T) {
 		if r.URL.Path != "/v1/payments/pay_123" {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"payment":{"paymentId":"pay_123","summary":{"reservedAmount":99900,"chargedAmount":99900},"orderDetails":{"amount":99900,"currency":"NOK","reference":"org_abc"},"myReference":"org_abc:velion-standard"}}`))
+		_, _ = w.Write([]byte(`{"payment":{"paymentId":"pay_123","summary":{"reservedAmount":99900,"chargedAmount":99900},"orderDetails":{"amount":99900,"currency":"NOK","reference":"org_abc"},"myReference":"org_abc:verevon-standard"}}`))
 	}))
 	defer srv.Close()
 
@@ -113,7 +113,7 @@ func TestRetrieveCheckoutSessionMapsStatus(t *testing.T) {
 	if status.Status != "charged" {
 		t.Fatalf("status = %q, want charged", status.Status)
 	}
-	if status.OrgID != "org_abc" || status.Plan != "velion-standard" {
+	if status.OrgID != "org_abc" || status.Plan != "verevon-standard" {
 		t.Fatalf("org/plan = %q/%q", status.OrgID, status.Plan)
 	}
 	if status.AmountCents != 99900 || status.Provider != "nexi" {
@@ -159,7 +159,7 @@ func TestProviderErrorDoesNotExposeResponseBody(t *testing.T) {
 
 func TestParseMyReference(t *testing.T) {
 	cases := map[string][2]string{
-		"org_1:velion-pro": {"org_1", "velion-pro"},
+		"org_1:verevon-pro": {"org_1", "verevon-pro"},
 		"org_2":            {"org_2", ""},
 		"":                 {"", ""},
 	}
@@ -178,8 +178,8 @@ func TestDeriveTermsURL(t *testing.T) {
 		successURL string
 		want       string
 	}{
-		{"configured wins", "https://velion.no/vilkar", "https://app.velion.no/x", "https://velion.no/vilkar"},
-		{"derived from origin", "", "https://app.velion.no/onboarding?checkout=success", "https://app.velion.no/terms"},
+		{"configured wins", "https://verevon.no/vilkar", "https://app.verevon.no/x", "https://verevon.no/vilkar"},
+		{"derived from origin", "", "https://app.verevon.no/onboarding?checkout=success", "https://app.verevon.no/terms"},
 		{"unparseable falls back to success url", "", "not-a-url", "not-a-url"},
 	}
 	for _, tc := range cases {
@@ -215,7 +215,7 @@ func TestNexiAdapterSupportContracts(t *testing.T) {
 		}
 	}
 	for plan, name := range map[string]string{
-		"hobby": "Velion Essential", "standard": "Velion Advanced", "pro": "Velion Expert", "enterprise": "Velion Custom", "unknown": "Velion",
+		"hobby": "Verevon Essential", "standard": "Verevon Advanced", "pro": "Verevon Expert", "enterprise": "Verevon Custom", "unknown": "Verevon",
 	} {
 		if got := checkoutPlanDisplayName(plan); got != name {
 			t.Errorf("checkoutPlanDisplayName(%q)=%q want %q", plan, got, name)

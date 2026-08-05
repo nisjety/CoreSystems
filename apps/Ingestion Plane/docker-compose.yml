@@ -208,8 +208,8 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       # GDPR org-erasure purge consumer — narrowly-scoped identity on the
-      # cross-plane control-shared-nats broker (NOT the legacy VELION_NATS_URL/
-      # VELION_NATS_TOKEN velion-nats broker used elsewhere in this plane).
+      # cross-plane control-shared-nats broker (NOT the legacy VEREVON_NATS_URL/
+      # VEREVON_NATS_TOKEN verevon-nats broker used elsewhere in this plane).
       # Absent NATS_SHARED_URL the consumer simply stays disabled.
       NATS_SHARED_URL: nats://control-shared-nats:4222
       NATS_SHARED_USER: quarry-control-gdpr
@@ -373,6 +373,13 @@ services:
       INTERNAL_API_KEY_HEADER: ${INTERNAL_API_KEY_HEADER:-X-Internal-API-Key}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:-${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no insecure default)}}
+      # JWT issuers are opaque identifiers, not Docker routes. Keep this exact
+      # value aligned with the AUTH_CORE_ISSUER used by Auth Core when minting
+      # plane tokens; a stale integration-corev2/.env value rejects otherwise
+      # valid browser audience tokens.
+      AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      PLANE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      INGESTION_AUTH_AUDIENCE: ingestion
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       ORG_CORE_SERVICE_TOKEN: ${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}
@@ -391,25 +398,25 @@ services:
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-      META_JS_SDK_APP_ID: ${META_JS_SDK_APP_ID:-${FACEBOOK_CLIENT_ID:-${INSTAGRAM_CLIENT_ID:-}}}
+      META_JS_SDK_APP_ID: ${META_JS_SDK_APP_ID:-${META_APP_CLIENT_ID:-${FACEBOOK_CLIENT_ID:-${INSTAGRAM_CLIENT_ID:-}}}}
       META_JS_SDK_API_VERSION: ${META_JS_SDK_API_VERSION:-v23.0}
       META_JS_SDK_LOCALE: ${META_JS_SDK_LOCALE:-en_US}
       META_BUSINESS_LOGIN_CONFIG_ID: ${META_BUSINESS_LOGIN_CONFIG_ID:-}
       META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID: ${META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID:-}
       NATS_ENABLED: ${NATS_ENABLED:-false}
       # Cross-plane bridge (#3): publish integration events
-      # (velion.ingestion.integration.*) DIRECTLY into the Application Plane's
+      # (verevon.ingestion.integration.*) DIRECTLY into the Application Plane's
       # app-nats (alias application-nats on inter-plane-bus), where the
-      # VELION_INGESTION JetStream stream captures them and conversation-core's
+      # VEREVON_INGESTION JetStream stream captures them and conversation-core's
       # webhook-received consumer delivers them. Uses the dedicated per-user
       # publisher principal (app-nats is per-user auth, not single-token), so
-      # NATS_TOKEN and its VELION_NATS_TOKEN fallback are both emptied to force
+      # NATS_TOKEN and its VEREVON_NATS_TOKEN fallback are both emptied to force
       # UserInfo auth (publisher.go picks token over UserInfo when a token is set).
       NATS_URL: nats://application-nats:4222
       NATS_USERNAME: ingestion-integration-publisher
       NATS_PASSWORD: ${APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD:?APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD is required}
       NATS_TOKEN: ""
-      VELION_NATS_TOKEN: ""
+      VEREVON_NATS_TOKEN: ""
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-}
       # Development fallback only. Override in shared/prod environments with `openssl rand -base64 32`.
       INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
@@ -465,7 +472,7 @@ services:
   # Migrated from Suplayer-System: carrier-adapter fleet (mock carriers by
   # default; real Bring/UPS/FedEx activate individually when their credentials
   # are present — missing creds are logged and skipped, never fatal).
-  # Joins inter-plane-bus so Model Plane tools and the Velion gateway can
+  # Joins inter-plane-bus so Model Plane tools and the Verevon gateway can
   # reach it; host port 3156 is what execution-core's host.docker.internal
   # pattern dials.
   # ============================================================
@@ -486,6 +493,11 @@ services:
       INGESTION_AUTH_AUDIENCE: ingestion
       INGESTION_SERVICE_ID: shipping-core
       SHIPPING_SERVICE_API_KEY: ${SHIPPING_SERVICE_API_KEY:-}
+      # Model Plane's capability-core, for the runtime health-attestation
+      # heartbeat (internal/capabilityhealth) that reports cap.tool.shipping.*
+      # availability from a real synthetic carrier-quote probe. Cross-plane,
+      # so it goes through the host like every other Model Plane HTTP target.
+      CAPABILITY_CORE_HTTP_URL: ${CAPABILITY_CORE_HTTP_URL:-http://host.docker.internal:8085}
       DATA_PLANE_DOCUMENTS_URL: ${DATA_PLANE_DOCUMENTS_URL:-http://dpv2-documents-api:8010}
       NATS_URL: nats://nats:4222
       NATS_TOKEN: ${INGESTION_NATS_TOKEN:?INGESTION_NATS_TOKEN is required}
@@ -496,7 +508,7 @@ services:
       BRING_CUSTOMER_NUMBER: ${BRING_CUSTOMER_NUMBER:-}
       # X-Bring-Client-URL header value (developer.bring.com/api: identifies
       # the calling service, required on every Mybring API request alongside
-      # the UID/key above). Defaults to velion.no in code if left empty.
+      # the UID/key above). Defaults to verevon.no in code if left empty.
       BRING_CLIENT_URL: ${BRING_CLIENT_URL:-}
       # Set to "true" only once bookings are meant to place REAL freight
       # orders; otherwise every Booking API call carries testIndicator=true.
@@ -620,6 +632,13 @@ services:
       EMAIL_SYNC_BACKFILL_WINDOW: ${EMAIL_SYNC_BACKFILL_WINDOW:-24h}
       EMAIL_SYNC_GRAPH_FULL_BACKFILL: ${EMAIL_SYNC_GRAPH_FULL_BACKFILL:-true}
       EMAIL_SYNC_MAX_PER_CYCLE: ${EMAIL_SYNC_MAX_PER_CYCLE:-100}
+      # Manual Support refreshes are claimed through integration-api so the
+      # queue transition and operator audit event remain authoritative.
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      # Discord inbound reads use the app bot credential, not the OAuth
+      # user's access token. Keep this explicit so a local secret supplied via
+      # the compose env files reaches the email worker.
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
     deploy:
       resources:
         limits:
@@ -920,7 +939,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # G50 (velion-gap.md §8.33): dedicated Postgres for Temporal — split out
+  # G50 (verevon-gap.md §8.33): dedicated Postgres for Temporal — split out
   # from the shared `ingestion-postgres` instance which was running with
   # only 64MB shared_buffers and hosting 6 databases (quarry, quarry_v2,
   # ingestion_plane_db, imports, integration, temporal, temporal_visibility).
@@ -1048,7 +1067,7 @@ services:
       start_period: 10s
 
   # Sonic-backed, tenant-scoped typeahead. The HTTP service is internal-only;
-  # Velion reaches it through the gateway on inter-plane-bus.
+  # Verevon reaches it through the gateway on inter-plane-bus.
   autocomplete-sonic:
     # Upstream publishes amd64 only; declare emulation explicitly on arm64
     # instead of relying on an implicit, host-dependent platform choice.
@@ -1157,7 +1176,7 @@ services:
       context: ./services/support-worker
       dockerfile: Dockerfile
     container_name: support-worker
-    # Dormant until Zammad produces velion.support.*, Model Plane auth is
+    # Dormant until Zammad produces verevon.support.*, Model Plane auth is
     # wired, and an authoritative Zammad-owner → Control user/org resolver exists.
     profiles: ["support-automation"]
     restart: unless-stopped
@@ -1165,8 +1184,8 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
-      VELION_NATS_URL: nats://velion-nats:4222
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      VEREVON_NATS_URL: nats://verevon-nats:4222
+      VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:-}
       ZAMMAD_API_URL: ${ZAMMAD_API_URL:-}
       ZAMMAD_API_TOKEN: ${ZAMMAD_API_TOKEN:-}
       AI_CORE_URL: ${SUPPORT_MODEL_PLANE_URL:-}
@@ -1360,7 +1379,7 @@ configs:
 volumes:
   ingestion-postgres-data:
     driver: local
-  # G50 (velion-gap.md §8.33): dedicated volume for the Temporal-only
+  # G50 (verevon-gap.md §8.33): dedicated volume for the Temporal-only
   # Postgres instance. Separating data files from `ingestion-postgres-data`
   # makes backup / restore / blow-away operations on Temporal independent
   # of the rest of the Ingestion Plane state.

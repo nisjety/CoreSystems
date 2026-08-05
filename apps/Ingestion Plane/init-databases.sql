@@ -103,7 +103,7 @@ CREATE DATABASE integration
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 5. Temporal databases — MOVED to a dedicated Postgres instance
---    (see velion-gap.md §8.33 G50)
+--    (see verevon-gap.md §8.33 G50)
 --
 --    Previously the `temporal` + `temporal_visibility` databases lived on
 --    this shared `ingestion-postgres` instance alongside quarry / quarry_v2

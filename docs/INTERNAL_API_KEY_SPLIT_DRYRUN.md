@@ -93,7 +93,7 @@ missing per-target key fails loud.
 
 | Caller | → Callee | Key env today | Header | Site |
 |--------|----------|---------------|--------|------|
-| **velion-gateway-rs** | auth,user,org,billing,session,audit,documents-api,retrieval,integration-corev2,imports,conversation,insight,notification,information,leads,social (ALL via one field) | `INTERNAL_API_KEY` (single `state.internal_api_key`) | `x-internal-api-key` | `upstream.rs:162` (`proxy_json`) + 11 direct `.header(...)` sites |
+| **verevon-gateway-rs** | auth,user,org,billing,session,audit,documents-api,retrieval,integration-corev2,imports,conversation,insight,notification,information,leads,social (ALL via one field) | `INTERNAL_API_KEY` (single `state.internal_api_key`) | `x-internal-api-key` | `upstream.rs:162` (`proxy_json`) + 11 direct `.header(...)` sites |
 | auth-core | user-core (HTTP+gRPC) | `INTERNAL_API_KEY \|\| INTERNAL_SERVICE_SECRET`* | `X-Internal-Api-Key` / md | convex-auth `:115`, plane-token `:271`, model-plane-token `:214`, grpc-client `:32` |
 | user-core | org-core | `INTERNAL_API_KEY \|\| INTERNAL_SERVICE_SECRET`* | `X-Internal-Api-Key` | handlers `:93`, `:141` |
 | user-core | auth-core | `INTERNAL_API_KEY \|\| INTERNAL_SERVICE_SECRET`* | body `internalApiKey` | authcore_oauth_client `:93/176` |

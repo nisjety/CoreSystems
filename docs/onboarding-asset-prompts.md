@@ -26,7 +26,7 @@ Format conventions:
 the existing auth right-pane illustration is).
 
 **Prompt**:
-> Cinematic 4-second loop showing the Velion dashboard coming alive.
+> Cinematic 4-second loop showing the Verevon dashboard coming alive.
 > Camera glides across a clean cream surface; cards slide into place —
 > a chat thread reveals an AI agent reply, a knowledge graph blooms
 > behind it, a small token-cost meter ticks up, a CSAT chart fills.
@@ -148,7 +148,7 @@ treatment. The LLM-recommended card gets a thin gradient outline
 > chrome assembles around it: sidebar slides in from the left, top
 > navbar drops in from above, knowledge graph card fades in on the
 > right, usage stats card slides up from the bottom. Final frame is
-> the empty velion dashboard with the user's org name appearing in the
+> the empty verevon dashboard with the user's org name appearing in the
 > top-left workspace switcher. Soft cream background, subtle film
 > grain. Caption fades in over the final frame: "Workspace klar."
 > (Norwegian for "Workspace ready.")

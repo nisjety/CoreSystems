@@ -1,12 +1,12 @@
 /**
- * U3-3 (ui-ux-velion-gap.md §10) — Agent run lifecycle mirror.
+ * U3-3 (ui-ux-verevon-gap.md §10) — Agent run lifecycle mirror.
  *
  * Functions:
  *   - `upsertAgentRun` (internalMutation) — called from `nats-subscriber.js`
  *     when a `mp.v1.run.{runId}.event` envelope arrives. Idempotent on
  *     `runId`; later events overwrite earlier ones (RUN_COMPLETED wins
  *     over RUN_STARTED on the same run).
- *   - `listForOrg` (query) — reactive subscription for velion's
+ *   - `listForOrg` (query) — reactive subscription for verevon's
  *     `useQuery(api.agentRuns.listForOrg, { externalOrgId, limit })`.
  *     Returns runs newest-first, capped at the supplied limit.
  *   - `getByRunId` (query) — single-run lookup for drilldowns.
@@ -143,7 +143,7 @@ export const getByRunId = query({
  * the previous value with the new `ratedAt` timestamp.
  *
  * Permission model: caller must belong to the same org as the run.
- * The HTTP route in velion (`/api/agents/runs/[runId]/rate`) validates
+ * The HTTP route in verevon (`/api/agents/runs/[runId]/rate`) validates
  * `actor.orgId === run.externalOrgId` before invoking this mutation.
  */
 const ratingValidator = v.union(
@@ -183,7 +183,7 @@ export const rate = mutation({
 });
 
 /**
- * U3-9 (ui-ux-velion-gap.md §14): aggregate run stats for a single agent.
+ * U3-9 (ui-ux-verevon-gap.md §14): aggregate run stats for a single agent.
  *
  * Returns honest, computed metrics from the agentRuns mirror — replaces the
  * hardcoded "1,248 conversations / 76.2% deflection / 1m 12s avg / 23.8%

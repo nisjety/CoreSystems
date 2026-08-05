@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-Velion v2 needs the v1 dashboard navbar interaction model: history controls, workspace breadcrumbs, centered command search, AI/chat/message/notification/calendar/profile actions, and light/dark theme switching. The v2 implementation must not embed local example records for these controls.
+Verevon v2 needs the v1 dashboard navbar interaction model: history controls, workspace breadcrumbs, centered command search, AI/chat/message/notification/calendar/profile actions, and light/dark theme switching. The v2 implementation must not embed local example records for these controls.
 
 ## Decision
 

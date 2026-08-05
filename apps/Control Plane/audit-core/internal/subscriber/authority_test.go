@@ -7,7 +7,7 @@ func TestEventAuthorityMatchesExactV2Subject(t *testing.T) {
 
 	if !eventAuthorityMatches(
 		"audit",
-		"velion.audit.v2.control.auth-core.signed_in",
+		"verevon.audit.v2.control.auth-core.signed_in",
 		"control",
 		"auth-core",
 		"signed_in",
@@ -17,7 +17,7 @@ func TestEventAuthorityMatchesExactV2Subject(t *testing.T) {
 	}
 	if !eventAuthorityMatches(
 		"usage",
-		"velion.usage.v2.model.session-core.tokens",
+		"verevon.usage.v2.model.session-core.tokens",
 		"model",
 		"session-core",
 		"tokens",
@@ -37,13 +37,13 @@ func TestEventAuthorityRejectsLegacyAndForgedSubjects(t *testing.T) {
 		event          string
 		authorityPlane string
 	}{
-		"legacy-v1":       {"velion.audit.v1.control.auth-core.signed_in", "control", "auth-core", "signed_in", "control"},
-		"wrong-plane":     {"velion.audit.v2.model.auth-core.signed_in", "control", "auth-core", "signed_in", "control"},
-		"wrong-producer":  {"velion.audit.v2.control.user-core.signed_in", "control", "auth-core", "signed_in", "control"},
-		"wrong-event":     {"velion.audit.v2.control.auth-core.role_changed", "control", "auth-core", "signed_in", "control"},
-		"extra-segment":   {"velion.audit.v2.control.auth-core.signed_in.forged", "control", "auth-core", "signed_in", "control"},
-		"empty-segment":   {"velion.audit.v2.control..signed_in", "control", "auth-core", "signed_in", "control"},
-		"wrong-authority": {"velion.audit.v2.control.auth-core.signed_in", "control", "auth-core", "signed_in", "model"},
+		"legacy-v1":       {"verevon.audit.v1.control.auth-core.signed_in", "control", "auth-core", "signed_in", "control"},
+		"wrong-plane":     {"verevon.audit.v2.model.auth-core.signed_in", "control", "auth-core", "signed_in", "control"},
+		"wrong-producer":  {"verevon.audit.v2.control.user-core.signed_in", "control", "auth-core", "signed_in", "control"},
+		"wrong-event":     {"verevon.audit.v2.control.auth-core.role_changed", "control", "auth-core", "signed_in", "control"},
+		"extra-segment":   {"verevon.audit.v2.control.auth-core.signed_in.forged", "control", "auth-core", "signed_in", "control"},
+		"empty-segment":   {"verevon.audit.v2.control..signed_in", "control", "auth-core", "signed_in", "control"},
+		"wrong-authority": {"verevon.audit.v2.control.auth-core.signed_in", "control", "auth-core", "signed_in", "model"},
 	}
 
 	for name, tc := range tests {
@@ -62,7 +62,7 @@ func TestSubscriberUsesV3ConsumerForV2AuthorityContract(t *testing.T) {
 	if got := New(nil, nil, "model", "model").consumerName("audit"); got != "audit-core-model-v3-audit" {
 		t.Fatalf("consumer name = %q", got)
 	}
-	if got := planeSubject("audit", "model"); got != "velion.audit.v2.model.>" {
+	if got := planeSubject("audit", "model"); got != "verevon.audit.v2.model.>" {
 		t.Fatalf("plane subject = %q", got)
 	}
 }

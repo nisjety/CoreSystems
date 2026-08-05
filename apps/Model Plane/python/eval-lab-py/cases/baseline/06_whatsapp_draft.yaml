@@ -1,7 +1,7 @@
 id: "06-whatsapp-draft"
 name: "WhatsApp draft-reply quality (rubric, no send)"
 prompt: "En kunde skriver på WhatsApp: 'Hei, jeg har ikke fått ordrebekreftelsen min, ordre #4521. Kan dere hjelpe?' Skriv et utkast til svar (ikke send noe)."
-model: velion-balance
+model: verevon-balance
 checks:
   judge_rubric: "A good WhatsApp support draft in Norwegian: acknowledges the missing confirmation for order 4521, apologizes briefly, states a concrete next step, professional tone, under 120 words, no fabricated order details."
   judge_floor: 3.5

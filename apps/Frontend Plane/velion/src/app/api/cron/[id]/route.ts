@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
 /**
- * U3-12 (ui-ux-velion-gap.md §14): per-cron-entry CRUD proxy.
+ * U3-12 (ui-ux-verevon-gap.md §14): per-cron-entry CRUD proxy.
  * Forwards to model-gateway `/v1/cron/{id}` (capability-core).
  */
 

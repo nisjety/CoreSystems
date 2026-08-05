@@ -121,7 +121,7 @@ func (c *Client) PostMessage(
 }
 
 // MirrorControlSession posts the aggregated Control Session snapshot to
-// convex-core's `/ingest/control-session` HTTP action so velion clients
+// convex-core's `/ingest/control-session` HTTP action so verevon clients
 // can subscribe reactively via `api.controlSessions.byUser` (G35).
 //
 // `snapshot` is the full opaque payload (ControlSession struct); we don't

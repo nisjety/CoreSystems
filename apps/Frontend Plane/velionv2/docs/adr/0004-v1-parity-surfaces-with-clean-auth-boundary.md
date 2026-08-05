@@ -6,7 +6,7 @@ Accepted.
 
 ## Context
 
-Velion v2 must preserve the strongest Velion v1 user-facing surfaces while avoiding the v1 page-level coupling between UI, auth runtime, onboarding state, dashboard chrome, and chat providers.
+Verevon v2 must preserve the strongest Verevon v1 user-facing surfaces while avoiding the v1 page-level coupling between UI, auth runtime, onboarding state, dashboard chrome, and chat providers.
 
 The first parity scope is auth, onboarding, the dashboard heart, and the AI chat input page.
 

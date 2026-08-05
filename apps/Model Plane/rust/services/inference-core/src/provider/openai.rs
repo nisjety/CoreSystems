@@ -12,7 +12,7 @@ use super::{
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 
 /// Default chat model used when a request leaves the model unspecified
-/// ("Velion Auto"). The fallback chain substitutes this when OpenAI/Azure is
+/// ("Verevon Auto"). The fallback chain substitutes this when OpenAI/Azure is
 /// the provider serving an unpinned request.
 pub(crate) const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
 

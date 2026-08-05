@@ -282,7 +282,7 @@
 
 ## L6 — Frontend Plane (Consumer-Only Layer)
 
-### velion (Next.js · :3000)
+### verevon (Next.js · :3000)
 
 | Aspect | Detail |
 |--------|--------|
@@ -298,7 +298,7 @@
 | **Allowed Dependencies** | ✅ L5 Application Plane → REST APIs |
 | **Published Events** | _None_ — static consumer |
 | **Auth Mechanism** | HTTP-only auth cookies from auth-core |
-| **Forbidden Patterns** | 🚫 Same as velion — no direct DB, no bypassing L5 |
+| **Forbidden Patterns** | 🚫 Same as verevon — no direct DB, no bypassing L5 |
 
 ---
 

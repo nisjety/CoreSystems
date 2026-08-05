@@ -25,8 +25,8 @@ import (
 // code only binds to it.
 const (
 	orgPurgeDurableConsumerName    = "documents-api-org-erasure"
-	orgPurgeDurableDeliverySubject = "_VELION.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
-	orgPurgeDLQSubject             = "velion.gdpr.erasure.dlq.documents-api-org-purge"
+	orgPurgeDurableDeliverySubject = "_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.org-erasure"
+	orgPurgeDLQSubject             = "verevon.gdpr.erasure.dlq.documents-api-org-purge"
 )
 
 // publishOrgPurgeDLQ mirrors subscriber.go's publishDLQ, addressed to this

@@ -75,8 +75,8 @@ type Service struct {
 	bcryptCost       int
 	betterAuthClient interface{}        // Better Auth client (optional, can be nil)
 	eventPublisher   interface{}        // NATS publisher (optional, can be nil)
-	sharedPublisher  SharedPublisher    // cross-plane events on velion-nats
-	auditOutbox      *auditOutbox       // durable velion.audit.v2.control.user-core.* delivery
+	sharedPublisher  SharedPublisher    // cross-plane events on verevon-nats
+	auditOutbox      *auditOutbox       // durable verevon.audit.v2.control.user-core.* delivery
 	cache            *rediscache.Client // optional, nil if Redis disabled
 	erasureStore     erasureOperationStore
 	authEraser       authErasureExecutor
@@ -954,7 +954,7 @@ func (s *Service) publishProviderLinked(ctx context.Context, userID, email, prov
 
 // GetSessionContext returns the post-login routing context for frontend.
 //
-// The optional (email, name, avatar) hints are forwarded from velion's edge
+// The optional (email, name, avatar) hints are forwarded from verevon's edge
 // gate via `X-User-{Email,Name,Avatar}` headers. They unlock auto-provisioning
 // on first sign-in: when the user exists in auth-service but not yet in
 // user-service, plain `GetByID` returns "user not found" and the entire

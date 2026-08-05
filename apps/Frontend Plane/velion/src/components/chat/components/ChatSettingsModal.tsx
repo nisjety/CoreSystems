@@ -37,7 +37,7 @@ const TONE_OPTIONS = [
   { value: 'detailed', label: 'Detailed', Icon: AlignJustify },
 ] as const;
 
-// U2-14 (ui-ux-velion-gap.md §10): skills are now fetched from
+// U2-14 (ui-ux-verevon-gap.md §10): skills are now fetched from
 // agent-core's per-org `agent_skills` table via /api/skills. The
 // previous SAMPLE_SKILLS array of three hardcoded names is gone —
 // the picker shows real skills when agent-core is up and a clear
@@ -54,7 +54,7 @@ interface SkillsListResponse {
   detail?: string
 }
 
-// U2-14 follow-up (ui-ux-velion-gap.md §10): Projects are now real per-org
+// U2-14 follow-up (ui-ux-verevon-gap.md §10): Projects are now real per-org
 // rows in the Convex `projects` table. Fetched lazily via `<ProjectsList>`
 // when the dropdown opens the projects view — keeps the main view zero-cost.
 interface ApiProject {

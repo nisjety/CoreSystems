@@ -20,7 +20,7 @@ type ServiceAuthenticationRequest = {
 };
 
 const AUTH_AUDIT_SUBJECT =
-  /^velion\.audit\.v2\.control\.auth-core\.([a-z0-9_]+)$/;
+  /^verevon\.audit\.v2\.control\.auth-core\.([a-z0-9_]+)$/;
 const AUDIT_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 
 function isServiceAuthenticationRequest(
@@ -181,7 +181,7 @@ export class DirectNatsService implements OnModuleInit, OnModuleDestroy {
    *
    * This is the LOCAL control-plane bus connection (NATS_URL → controlplane-nats),
    * where audit-core's primary core QueueSubscribe listens — NOT the shared
-   * velion-nats bus. Never throws: a missing/closed connection silently no-ops,
+   * verevon-nats bus. Never throws: a missing/closed connection silently no-ops,
    * matching SharedNatsService.publishPlain so callers stay fire-and-forget.
    */
   publishPlain(subject: string, payload: Record<string, unknown>): boolean {

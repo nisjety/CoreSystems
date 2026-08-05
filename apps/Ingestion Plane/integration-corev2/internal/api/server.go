@@ -51,7 +51,7 @@ type ServerConfig struct {
 	WriteAttestations *attestation.Verifier
 	HotPath           hotpath.WebhookNormalizer
 	// WebhookOrg resolves the owning tenant for account-wide provider
-	// webhooks (Meta/Slack callbacks carry no Velion org id). Nil-safe.
+	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
 	Logger     *zerolog.Logger
 }
@@ -375,7 +375,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		publishIntegrationEvent(c.UserContext(), cfg, "velion.ingestion.integration.connection_updated", updated, map[string]any{
+		publishIntegrationEvent(c.UserContext(), cfg, "verevon.ingestion.integration.connection_updated", updated, map[string]any{
 			"capabilities": capabilities,
 			"change":       "capabilities",
 		})
@@ -446,7 +446,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "consent_update_failed", err.Error())
 		}
-		publishIntegrationEvent(c.UserContext(), cfg, "velion.ingestion.integration.consent_changed", connection, map[string]any{
+		publishIntegrationEvent(c.UserContext(), cfg, "verevon.ingestion.integration.consent_changed", connection, map[string]any{
 			"source":  source,
 			"purpose": purpose,
 			"granted": body.Granted,
@@ -543,6 +543,44 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		job, err := createSyncJob(c.UserContext(), cfg, connection, syncJobBody{Reason: "manual", Mode: "incremental"})
 		if err != nil {
 			return apiError(c, fiber.StatusInternalServerError, "sync_queue_failed", err.Error())
+		}
+		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"success": true, "data": fiber.Map{"syncJob": job}})
+	})...)
+
+	// Inbox refresh is deliberately separate from the generic integration
+	// source-sync route. It reaches the worker which fetches the actual Gmail,
+	// Outlook, Teams, or Slack conversation stream, rather than claiming that a
+	// Data Plane metadata handoff refreshed the Support queue.
+	app.Post("/api/v1/connections/:id/inbox-sync", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
+		var body inboxSyncBody
+		if err := c.BodyParser(&body); err != nil {
+			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
+		}
+		connection, err := cfg.Repo.GetConnection(c.UserContext(), c.Params("id"))
+		if err != nil {
+			return storeError(c, err, "connection_not_found")
+		}
+		if connection.DeletedAt != nil {
+			return apiError(c, fiber.StatusNotFound, "connection_not_found", "Connection was not found.")
+		}
+		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+			return authAwareError(c, err)
+		}
+		if connection.Status != "active" {
+			return apiError(c, fiber.StatusConflict, "connection_not_active", "Reconnect this provider before refreshing its inbox.")
+		}
+		channel, supported := inboxSyncChannel(connection, body.Channel)
+		if !supported {
+			return apiError(c, fiber.StatusUnprocessableEntity, "inbox_sync_unavailable", "This connection does not have the selected inbox-read permission.")
+		}
+		job, err := createSyncJob(c.UserContext(), cfg, connection, syncJobBody{
+			Reason:        "manual_inbox_refresh",
+			Mode:          "inbox",
+			HandoffTarget: "email-worker",
+			Metadata:      map[string]any{"inboxChannel": channel},
+		})
+		if err != nil {
+			return apiError(c, fiber.StatusInternalServerError, "inbox_sync_queue_failed", "The inbox refresh could not be queued.")
 		}
 		return c.Status(fiber.StatusAccepted).JSON(fiber.Map{"success": true, "data": fiber.Map{"syncJob": job}})
 	})...)
@@ -784,7 +822,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			}
 			return apiError(c, fiber.StatusBadGateway, "webhook_normalize_failed", err.Error())
 		}
-		// Real provider callbacks carry no Velion org id; without this
+		// Real provider callbacks carry no Verevon org id; without this
 		// resolution the event is stored org-less and every downstream
 		// consumer silently drops it (2026-07-07 verification finding).
 		type delivery struct {
@@ -799,7 +837,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			eventID:        normalized.EventID,
 		}}
 		// Meta and Slack signatures authenticate the payload, not caller-supplied
-		// Velion tenant headers. Always discard any normalized org claim and bind
+		// Verevon tenant headers. Always discard any normalized org claim and bind
 		// these account-wide callbacks through provider asset ownership.
 		if webhookRequiresResolvedOrganization(providerKey) {
 			deliveries = nil
@@ -824,7 +862,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			}
 		}
 		if (len(deliveries) == 0 || deliveries[0].organizationID == "") && webhookRequiresResolvedOrganization(providerKey) {
-			// Account-wide callbacks do not carry a Velion org. A resolution
+			// Account-wide callbacks do not carry a Verevon org. A resolution
 			// miss is often transient (Graph/NATS/Postgres outage) and must be
 			// retried by the provider; accepting it would publish an org-less
 			// event that Conversation Core terminally acknowledges and drops.
@@ -859,7 +897,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			webhookEventIDs = append(webhookEventIDs, event.ID)
 			if cfg.Events != nil {
 				if err := cfg.Events.Publish(c.UserContext(), events.Event{
-					Type:           "velion.ingestion.integration.webhook_received",
+					Type:           "verevon.ingestion.integration.webhook_received",
 					OrganizationID: event.OrganizationID,
 					ConnectionID:   item.connectionID,
 					ProviderKey:    event.ProviderKey,
@@ -894,7 +932,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})...)
 
 	// GET the full stored payload for a webhook_received event by id.
-	// velion.ingestion.integration.webhook_received (published above, and at
+	// verevon.ingestion.integration.webhook_received (published above, and at
 	// the SCIM/legacy insert sites) carries only metadata (eventType,
 	// webhookEventId) so NATS messages stay small — downstream cores
 	// (conversation-core, leads-core, …) that need the actual content fetch
@@ -1050,7 +1088,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		}
 		if cfg.Events != nil {
 			_ = cfg.Events.Publish(c.UserContext(), events.Event{
-				Type:           "velion.ingestion.integration.scim_event_received",
+				Type:           "verevon.ingestion.integration.scim_event_received",
 				OrganizationID: organizationID,
 				ProviderKey:    "scim",
 				Data:           map[string]any{"eventType": eventType, "webhookEventId": event.ID},
@@ -1260,6 +1298,14 @@ type syncJobBody struct {
 	Mode         string         `json:"mode"`
 	Checkpoint   map[string]any `json:"checkpoint"`
 	Metadata     map[string]any `json:"metadata"`
+	// HandoffTarget is server-owned routing metadata. It is deliberately never
+	// decoded from a browser request: public callers cannot select an internal
+	// worker or expand their own authority.
+	HandoffTarget string `json:"-"`
+}
+
+type inboxSyncBody struct {
+	Channel string `json:"channel"`
 }
 
 type syncCancelBody struct {
@@ -1437,7 +1483,7 @@ func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conne
 			return job, fmt.Errorf("provision Meta inbox webhooks: %w", provisionErr)
 		}
 	}
-	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_started", connection, map[string]any{
+	publishIntegrationEvent(ctx, cfg, "verevon.ingestion.integration.sync_started", connection, map[string]any{
 		"syncJobId": job.ID,
 		"status":    job.Status,
 		"reason":    reason,
@@ -1447,7 +1493,7 @@ func createSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conne
 		"providerKey":  connection.ProviderKey,
 		"connectionId": connection.ID,
 	})
-	return advanceSyncJob(ctx, cfg, connection, job)
+	return advanceSyncJob(ctx, cfg, connection, job, body.HandoffTarget)
 }
 
 func hasMetaInboxCapability(capabilities []string) bool {
@@ -1505,7 +1551,7 @@ func safeSyncString(value string, maxLen int) string {
 	return value
 }
 
-func advanceSyncJob(ctx context.Context, cfg ServerConfig, connection store.Connection, job store.SyncJob) (store.SyncJob, error) {
+func advanceSyncJob(ctx context.Context, cfg ServerConfig, connection store.Connection, job store.SyncJob, requestedTarget string) (store.SyncJob, error) {
 	now := time.Now().UTC()
 	if job.StartedAt == nil {
 		job.StartedAt = &now
@@ -1515,7 +1561,7 @@ func advanceSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conn
 		"contentIngestion": "external_only",
 		"sourceContent":    "not_stored_by_integration_corev2",
 	})
-	target := syncHandoffTarget(connection)
+	target := syncHandoffTarget(connection, requestedTarget)
 	var updated store.SyncJob
 	err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
 		running, updateErr := tx.UpdateSyncJob(ctx, job)
@@ -1569,7 +1615,7 @@ func advanceSyncJob(ctx context.Context, cfg ServerConfig, connection store.Conn
 	if err != nil {
 		return store.SyncJob{}, err
 	}
-	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_handoff", connection, map[string]any{
+	publishIntegrationEvent(ctx, cfg, "verevon.ingestion.integration.sync_handoff", connection, map[string]any{
 		"syncJobId": updated.ID,
 		"status":    updated.Status,
 		"target":    target.metadata["handoffTarget"],
@@ -1585,7 +1631,22 @@ type syncHandoff struct {
 	metadata   map[string]any
 }
 
-func syncHandoffTarget(connection store.Connection) syncHandoff {
+func syncHandoffTarget(connection store.Connection, requestedTarget string) syncHandoff {
+	if strings.TrimSpace(requestedTarget) == "email-worker" {
+		return syncHandoff{
+			status:    "waiting_provider",
+			eventType: "sync.waiting_provider",
+			message:   "Inbox refresh is queued for the email worker.",
+			checkpoint: map[string]any{
+				"provider": connection.ProviderKey,
+				"adapter":  "email-worker",
+			},
+			metadata: map[string]any{
+				"handoffTarget": "email-worker",
+				"sourcePolicy":  "provider_inbox_refresh",
+			},
+		}
+	}
 	switch connection.ProviderKey {
 	case "microsoft":
 		return syncHandoff{
@@ -1676,7 +1737,7 @@ func cancelSyncJob(ctx context.Context, cfg ServerConfig, job store.SyncJob, rea
 	}
 	if cfg.Events != nil {
 		_ = cfg.Events.Publish(ctx, events.Event{
-			Type:           "velion.ingestion.integration.sync_cancelled",
+			Type:           "verevon.ingestion.integration.sync_cancelled",
 			OrganizationID: updated.OrganizationID,
 			ProviderKey:    updated.ProviderKey,
 			Data:           map[string]any{"syncJobId": updated.ID, "reason": reason},
@@ -1704,9 +1765,10 @@ func retrySyncJob(ctx context.Context, c *fiber.Ctx, cfg ServerConfig, job store
 		"retryStarted": time.Now().UTC().Format(time.RFC3339),
 	})
 	return createSyncJob(ctx, cfg, connection, syncJobBody{
-		Reason:   "retry",
-		Mode:     firstNonEmpty(job.Mode, "incremental"),
-		Metadata: metadata,
+		Reason:        "retry",
+		Mode:          firstNonEmpty(job.Mode, "incremental"),
+		Metadata:      metadata,
+		HandoffTarget: stringFromAny(job.Metadata["handoffTarget"]),
 	})
 }
 
@@ -1780,7 +1842,7 @@ func claimSyncJob(ctx context.Context, cfg ServerConfig, body syncClaimBody) (st
 		return store.SyncJob{}, err
 	}
 	if connection, lookupErr := cfg.Repo.GetConnection(ctx, job.ConnectionID); lookupErr == nil {
-		publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.sync_claimed", connection, map[string]any{
+		publishIntegrationEvent(ctx, cfg, "verevon.ingestion.integration.sync_claimed", connection, map[string]any{
 			"syncJobId": job.ID,
 			"consumer":  body.Consumer,
 			"target":    target,
@@ -1858,7 +1920,7 @@ func advanceWorkerSyncJob(ctx context.Context, cfg ServerConfig, id string, body
 	}
 	eventType, _ := workerSyncEvent(status, body.Message)
 	if connection, lookupErr := cfg.Repo.GetConnection(ctx, updated.ConnectionID); lookupErr == nil {
-		publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration."+eventType, connection, map[string]any{
+		publishIntegrationEvent(ctx, cfg, "verevon.ingestion.integration."+eventType, connection, map[string]any{
 			"syncJobId": updated.ID,
 			"consumer":  consumer,
 			"status":    status,
@@ -1906,10 +1968,38 @@ func workerSyncEvent(status, message string) (string, string) {
 
 func syncClaimTargetAllowed(target string) bool {
 	switch strings.TrimSpace(target) {
-	case "finspo-core", "data-plane-v2":
+	case "finspo-core", "data-plane-v2", "email-worker":
 		return true
 	default:
 		return false
+	}
+}
+
+// inboxSyncChannel maps the small Support request shape to a worker plan only
+// when this connection already has the corresponding provider read grant. A
+// generic provider connection is never proof that every inbox channel is
+// authorized.
+func inboxSyncChannel(connection store.Connection, requested string) (string, bool) {
+	channel := strings.ToLower(strings.TrimSpace(requested))
+	providerKey := providers.NormalizeKey(connection.ProviderKey)
+	hasGrant := func(capability, scope string) bool {
+		if slices.Contains(connection.Capabilities, capability) {
+			return true
+		}
+		return slices.ContainsFunc(connection.Scopes, func(value string) bool {
+			return strings.EqualFold(strings.TrimSpace(value), scope)
+		})
+	}
+	switch channel {
+	case "email":
+		return channel, (providerKey == "google" && hasGrant("gmail.read", "https://www.googleapis.com/auth/gmail.readonly")) ||
+			(providerKey == "microsoft" && hasGrant("mail.read", "Mail.Read"))
+	case "teams":
+		return channel, providerKey == "microsoft" && hasGrant("teams.messages.read", "ChannelMessage.Read.All")
+	case "slack":
+		return channel, providerKey == "slack" && hasGrant("channels.history", "channels:history")
+	default:
+		return "", false
 	}
 }
 
@@ -2515,7 +2605,7 @@ func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessT
 		}
 		return err
 	}
-	publishIntegrationEvent(ctx, cfg, "velion.ingestion.integration.token_lease_created", connection, map[string]any{
+	publishIntegrationEvent(ctx, cfg, "verevon.ingestion.integration.token_lease_created", connection, map[string]any{
 		"consumer":  lease.Consumer,
 		"leaseId":   lease.ID,
 		"expiresAt": lease.ExpiresAt,
@@ -3575,7 +3665,7 @@ func callbackHTML(result oauth.CallbackResult) string {
 		status = "success"
 	}
 	payload, _ := json.Marshal(map[string]string{
-		"type":         "velion.integration.connected",
+		"type":         "verevon.integration.connected",
 		"status":       status,
 		"sessionToken": result.SessionID,
 		"connectionId": result.ConnectionID,
@@ -3605,7 +3695,7 @@ func callbackHTML(result oauth.CallbackResult) string {
 	}
 	return `<!doctype html>
 <html>
-<head><meta charset="utf-8"><title>Velion integration</title></head>
+<head><meta charset="utf-8"><title>Verevon integration</title></head>
 <body style="font-family: system-ui, sans-serif; padding: 32px; max-width: 32rem;">
 <script>
 (function () {

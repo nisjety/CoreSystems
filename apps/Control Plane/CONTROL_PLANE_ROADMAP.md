@@ -28,7 +28,7 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
    - Live worker recovered three organizations and all three membership rows automatically.
 
 4. **Canonical membership routes**
-   - Velion gateway invite/accept/remove/role-change routes now target Auth Core's Better Auth organization contract.
+   - Verevon gateway invite/accept/remove/role-change routes now target Auth Core's Better Auth organization contract.
    - Org Core is a projection/domain authority, not a competing canonical membership writer.
    - Removed six legacy Org membership/role mutation registrations; live requests now return 404 while Auth's internal reconcile route remains available.
 
@@ -51,7 +51,7 @@ The production-readiness program remains in the MVP phase. Enterprise readiness 
    - Rehearsed additive migration rollback paths in isolated transactional schemas.
    - All six Control containers and the gateway are healthy.
 
-8. **Velion v3 Control contract repair**
+8. **Verevon v3 Control contract repair**
    - Added no-redirect OAuth/OIDC/SAML callback proxies that preserve only required callback query/form data, redirects, cookies, and cache/content headers.
    - Added canonical Auth invitation acceptance with same-origin invitation links and a validated `returnTo` across login, verification, 2FA, OAuth, and SSO. The Auth-owned wrapper uses the canonical trusted-origin/rate-limited Better Auth router and real adapter transactions for member creation plus active-org selection; it is idempotent for committed/lost responses and recovers only from invitation/user/email/membership-bound evidence. Better Auth's preceding invitation-status transition remains outside that transaction and is tracked below.
    - Replaced fabricated workspace state with Auth-owned organization list/switch and membership list/invite/remove/role-change flows pinned to the live active membership.
@@ -147,7 +147,7 @@ The runner is local-development only: it creates disposable interpolation values
 
 ### 1. Coordinated integration credential rollout and rotation — external operator gate
 
-The secure-MVP source, static, embedded-broker, disposable-Postgres, current-image Control, and real-authority Data/Velion contracts are green. Production execution is intentionally not claimed: an operator with integration secret-manager and deployment authority must generate pairwise-distinct values and registry files, run the non-printing preflight, deploy registries/servers before clients and consumers before producers, prove health/auth denial/PubAck/lag/outbox convergence from reviewed image digests, and only then revoke old credentials and the legacy bridge token.
+The secure-MVP source, static, embedded-broker, disposable-Postgres, current-image Control, and real-authority Data/Verevon contracts are green. Production execution is intentionally not claimed: an operator with integration secret-manager and deployment authority must generate pairwise-distinct values and registry files, run the non-printing preflight, deploy registries/servers before clients and consumers before producers, prove health/auth denial/PubAck/lag/outbox convergence from reviewed image digests, and only then revoke old credentials and the legacy bridge token.
 
 **Rollback/safety:** restore the prior scoped principal/configuration as a coordinated rollout or pause producers and retain durable outboxes. Never re-enable generic producer token fallback, print credential material, or mutate real tenant lifecycle state for a probe.
 

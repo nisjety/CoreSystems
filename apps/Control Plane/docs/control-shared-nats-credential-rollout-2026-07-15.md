@@ -2,7 +2,7 @@
 
 Status: implementation and focused broker tests are complete; production
 execution is not claimed. This runbook describes the bounded migration from the
-legacy token-only Velion broker to `control-shared-nats` without interrupting
+legacy token-only Verevon broker to `control-shared-nats` without interrupting
 non-Control consumers.
 
 Final validation evidence: the non-printing preflight accepts three valid rollout profiles and rejects 20 fail-closed cases while validating 58 pairwise-distinct credential values and 10 bounded credential/registry/key/TLS files. Auth→User TLS certificates and CA must be coordinated before the Auth client and User server rollout. No real secret-manager value was generated, read, printed, rotated, or deployed in this workspace.
@@ -16,7 +16,7 @@ Final validation evidence: the non-printing preflight accepts three valid rollou
   User server requires TLS 1.3 credentials, Auth pins the CA, and plaintext
   channels are rejected. File-backed Compose secrets are copied by a root-only
   handoff into app-owned `0600` files before either service runs as `appuser`.
-- Only `control-shared-legacy-bridge` receives `VELION_NATS_TOKEN`. Auth, User,
+- Only `control-shared-legacy-bridge` receives `VEREVON_NATS_TOKEN`. Auth, User,
   Org, Billing, and Session use scoped user/password credentials and set token
   fallback to `0` in the release Compose path.
 - Documents API consumes GDPR erasure children only as `documents-api-gdpr`.
@@ -40,7 +40,7 @@ Final validation evidence: the non-printing preflight accepts three valid rollou
   target PubAck, so durable redelivery is duplicate-safe on the legacy stream.
   `notifications.*` remains core NATS by contract and is source-ACKed only after
   a successful legacy connection flush.
-- `velion.gdpr.*` is scoped-only and is ACKed without forwarding by the
+- `verevon.gdpr.*` is scoped-only and is ACKed without forwarding by the
   compatibility bridge; deletion/security evidence must never cross to the
   legacy shared-token broker.
 - No step deletes, purges, or replaces an incompatible stream or consumer.
@@ -67,7 +67,7 @@ Also verify that the exact legacy-token scan has only the bridge wiring and the
 root environment template:
 
 ```bash
-rg -n "VELION_NATS_TOKEN" \
+rg -n "VEREVON_NATS_TOKEN" \
   auth-core user-core org-core billing-core session-core audit-core \
   docker-compose*.yml .env.example
 ```

@@ -49,7 +49,7 @@ type SourceSynced struct {
 
 // ProposalLifecycle is published on every proposal state transition
 // (created / approved / rejected / executed / failed). Consumers — e.g. the
-// velion governance dashboard — use it to reflect review state in real time.
+// verevon governance dashboard — use it to reflect review state in real time.
 type ProposalLifecycle struct {
 	OrganizationID string    `json:"organization_id"`
 	ProposalID     string    `json:"proposal_id"`

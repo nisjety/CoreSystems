@@ -25,7 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_org_deletion_members_user_id
   ON org_deletion_members (user_id);
 
 -- The two organizations columns record whether the 7-day/1-day
--- velion.org.deletion.reminder events have already fired, so the cron sweep
+-- verevon.org.deletion.reminder events have already fired, so the cron sweep
 -- never double-sends a reminder for the same org.
 ALTER TABLE organizations
   ADD COLUMN IF NOT EXISTS deletion_reminder_7d_sent_at TIMESTAMPTZ NULL,

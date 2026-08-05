@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { VelionInboxPage } from "@/features/inbox-v2/components/VelionInboxPage";
+import { VerevonInboxPage } from "@/features/inbox-v2/components/VerevonInboxPage";
 
 const ticket = {
   id: 42,
@@ -24,7 +24,7 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
   });
 }
 
-describe("VelionInboxPage", () => {
+describe("VerevonInboxPage", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -32,7 +32,7 @@ describe("VelionInboxPage", () => {
   it("renders the recreated empty inbox state when support is unavailable", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ error: "support_not_configured" }, { status: 503 }));
 
-    render(<VelionInboxPage />);
+    render(<VerevonInboxPage />);
 
     expect(screen.getByRole("heading", { name: "Inbox" })).toBeVisible();
     expect(screen.getByText("Select all")).toBeVisible();
@@ -66,7 +66,7 @@ describe("VelionInboxPage", () => {
       return jsonResponse({});
     });
 
-    render(<VelionInboxPage />);
+    render(<VerevonInboxPage />);
 
     const ticketList = await screen.findByRole("list", { name: /tickets/i });
     await user.click(await within(ticketList).findByRole("button", { name: /order marked delivered but missing/i }));

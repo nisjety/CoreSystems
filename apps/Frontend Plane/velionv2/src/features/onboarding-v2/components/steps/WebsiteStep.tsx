@@ -518,13 +518,13 @@ function SnippetDropFolder({
         onRemove={onRemove}
       />
       <style>{`
-        @keyframes velion-snippet-drop {
+        @keyframes verevon-snippet-drop {
           0% { transform: translate(var(--vx, -50%), -20%) rotate(var(--vrot, 0deg)); opacity: 0; }
           15% { opacity: 1; }
           100% { transform: translate(var(--vx, -50%), 70%) rotate(var(--vrot, 0deg)); opacity: 1; }
         }
         @media (prefers-reduced-motion: reduce) {
-          .velion-snippet { animation: none !important; opacity: 1 !important; transform: translate(-50%, 40%) !important; }
+          .verevon-snippet { animation: none !important; opacity: 1 !important; transform: translate(-50%, 40%) !important; }
         }
       `}</style>
     </div>
@@ -606,14 +606,14 @@ function SnippetCard({ card }: { card: FallingCard }) {
     left: `calc(50% + ${card.xOffsetPct}%)`,
     animationDelay: `${card.delayMs}ms`,
     animationDuration: `${card.durationMs}ms`,
-    animationName: "velion-snippet-drop",
+    animationName: "verevon-snippet-drop",
     animationTimingFunction: "ease-out",
     animationFillMode: "forwards",
     ["--vx" as string]: "-50%",
     ["--vrot" as string]: `${((card.id.length * 7) % 7) - 3}deg`,
   };
   return (
-    <div style={style} className="velion-snippet absolute top-0 will-change-transform">
+    <div style={style} className="verevon-snippet absolute top-0 will-change-transform">
       {renderCardBody(card, copy.website.kindLabels)}
     </div>
   );
@@ -801,7 +801,7 @@ function websiteActionCopy(locale: OnboardingLocale) {
       addWebsite: "Legg til nettside",
       remove: "Fjern",
       readOnly: "Kun innsyn",
-      title: "Dette fant Velion",
+      title: "Dette fant Verevon",
       pages: "Sider",
       elements: "Elementer",
       sources: "Kilder",
@@ -827,7 +827,7 @@ function websiteActionCopy(locale: OnboardingLocale) {
     addWebsite: "Add website",
     remove: "Remove",
     readOnly: "Read only",
-    title: "What Velion found",
+    title: "What Verevon found",
     pages: "Pages",
     elements: "Elements",
     sources: "Sources",

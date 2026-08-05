@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { PersistedAgent } from '../types';
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19): per-agent embed enable / disable +
+ * Wave 9 (ui-ux-verevon-gap.md §19): per-agent embed enable / disable +
  * snippet builder for the public chat-bubble widget.
  *
  * Reads `publicEnabled` + `publicSecret` from the agent record (passed
@@ -103,15 +103,15 @@ export function useAgentEmbed(agent: PersistedAgent | null): UseAgentEmbedReturn
   // browser-visible origin via `window.location.origin` when running
   // client-side; falls back to a placeholder during SSR.
   const origin =
-    typeof window !== 'undefined' ? window.location.origin : 'https://your-velion-host';
+    typeof window !== 'undefined' ? window.location.origin : 'https://your-verevon-host';
   const embedSnippet =
     agent && publicEnabled && publicSecret
       ? [
-          '<!-- Velion agent embed widget -->',
+          '<!-- Verevon agent embed widget -->',
           `<script`,
           `  src="${origin}/embed.js"`,
-          `  data-velion-agent="${agent.id}"`,
-          `  data-velion-secret="${publicSecret}"`,
+          `  data-verevon-agent="${agent.id}"`,
+          `  data-verevon-secret="${publicSecret}"`,
           `  defer`,
           `></script>`,
         ].join('\n')

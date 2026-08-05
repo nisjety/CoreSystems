@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
-// U2-12 (ui-ux-velion-gap.md §10 + Option A consolidation):
+// U2-12 (ui-ux-verevon-gap.md §10 + Option A consolidation):
 //
 // Translation proxy now hits the Model Plane v1 Rust gateway at
 // `/v1/ai/translate` (Azure Translator REST via translate_routes.rs).
@@ -11,7 +11,7 @@ import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 // Auth: gateway requires `Authorization: Bearer <token>` (the dev bypass
 // accepts any non-empty token in local dev).
 //
-// Velion request shape (unchanged from the v2 contract):
+// Verevon request shape (unchanged from the v2 contract):
 //   POST /api/ai/translate
 //   { text: string, target_language: string, source_language?: string }
 //

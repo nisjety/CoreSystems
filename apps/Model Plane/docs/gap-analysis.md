@@ -116,7 +116,7 @@ For the expanded parity plan against `Model Plane v2`, `claude-code-fork`, and t
 
 | Item | Status |
 |------|--------|
-| `velion.*` subject parity (Go ⇄ Rust) | ✅ Byte-identical constants + helpers |
+| `verevon.*` subject parity (Go ⇄ Rust) | ✅ Byte-identical constants + helpers |
 | `aqencia.*` subject parity (Go ⇄ Rust) | ✅ 5 constants + `LEGACY_AQENCIA_WILDCARD` |
 | Active legacy wildcard subscribers (Go) | ✅ `orchestrator-core/cmd/main.go:112` subscribes to `LegacyRunEventsWildcard`, `LegacySessionCommandWildcard`, `LegacyAqenciaWildcard` |
 | `CompatMode` (off / legacy_only / dual_read / dual_write) | ✅ Go `pkg/natsx/mode.go` + `compat.go` `LegacyMappings`; Rust mirror in `mp-events::subjects` |
@@ -206,7 +206,7 @@ Phase 0 freezes landed. Remaining closure is execution-focused, tracked in § 12
 
 1. ✅ **ID formats** — `mp-ids` ULID newtypes (Rust 4/4 PASS).
 2. ✅ **Event envelope required fields** — all 10 validated in 3 languages.
-3. ✅ **NATS subject registry** — `velion.*` + `aqencia.*` byte-identical Go ⇄ Rust.
+3. ✅ **NATS subject registry** — `verevon.*` + `aqencia.*` byte-identical Go ⇄ Rust.
 4. ✅ **Temporal workflow names** — canonical in `pkg/temporalreg` + `mp-events::temporal`.
 5. 🟡 **Protobuf schemas** — `buf` CI live; local `.proto` expansion pending.
 6. 🟡 **Verification gates** — 30/31 closed; PR-2.5 cross-plane vendor secret redaction open.

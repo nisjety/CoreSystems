@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { VelionWorkspaceSettingsPage } from "@/features/settings-v2/components/VelionWorkspaceSettingsPage";
+import { VerevonWorkspaceSettingsPage } from "@/features/settings-v2/components/VerevonWorkspaceSettingsPage";
 import { workspaceSettingsSections } from "@/features/settings-v2/lib/settings-sections";
 
-describe("VelionWorkspaceSettingsPage", () => {
+describe("VerevonWorkspaceSettingsPage", () => {
   it("renders a single workspace settings page with mocked workspace controls, not planning notes", () => {
-    render(<VelionWorkspaceSettingsPage section="workspace" />);
+    render(<VerevonWorkspaceSettingsPage section="workspace" />);
 
     expect(screen.getByRole("heading", { name: /workspace settings/i, level: 1 })).toBeVisible();
     expect(screen.queryByRole("heading", { name: /must have/i })).not.toBeInTheDocument();
@@ -19,7 +19,7 @@ describe("VelionWorkspaceSettingsPage", () => {
   });
 
   it("renders the members page as its own route-level section", () => {
-    render(<VelionWorkspaceSettingsPage section="members" />);
+    render(<VerevonWorkspaceSettingsPage section="members" />);
 
     expect(screen.getByRole("heading", { name: /members & roles/i, level: 1 })).toBeVisible();
     expect(screen.getByRole("textbox", { name: /invite by email/i })).toBeVisible();
@@ -29,7 +29,7 @@ describe("VelionWorkspaceSettingsPage", () => {
   });
 
   it("renders security controls on the org security page", () => {
-    render(<VelionWorkspaceSettingsPage section="org-security" />);
+    render(<VerevonWorkspaceSettingsPage section="org-security" />);
 
     expect(screen.getByRole("heading", { name: /org security/i, level: 1 })).toBeVisible();
     expect(screen.getByText("Admins must use MFA for sensitive settings.")).toBeVisible();
@@ -49,7 +49,7 @@ describe("VelionWorkspaceSettingsPage", () => {
   });
 
   it("renders billing and SSO feature stubs instead of visible guidance", () => {
-    const { rerender } = render(<VelionWorkspaceSettingsPage section="billing" />);
+    const { rerender } = render(<VerevonWorkspaceSettingsPage section="billing" />);
 
     expect(screen.getByRole("heading", { name: /billing/i, level: 1 })).toBeVisible();
     expect(screen.getByRole("heading", { name: /invoice history/i })).toBeVisible();
@@ -57,7 +57,7 @@ describe("VelionWorkspaceSettingsPage", () => {
     expect(screen.getByRole("button", { name: /download csv/i })).toBeVisible();
     expect(screen.queryByText("Current plan, renewal date, and upgrade path")).not.toBeInTheDocument();
 
-    rerender(<VelionWorkspaceSettingsPage section="sso" />);
+    rerender(<VerevonWorkspaceSettingsPage section="sso" />);
 
     expect(screen.getByRole("heading", { name: /sso/i, level: 1 })).toBeVisible();
     expect(screen.getByRole("heading", { name: /connection test/i })).toBeVisible();

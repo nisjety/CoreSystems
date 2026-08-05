@@ -13,7 +13,7 @@ import { OnboardingFrame } from "./OnboardingFrame";
 import { useOnboardingMachine } from "../lib/onboarding-machine";
 import { organizationExists } from "../lib/onboarding-service";
 
-export function VelionOnboardingPage() {
+export function VerevonOnboardingPage() {
   const machine = useOnboardingMachine();
   const searchParams = useSearchParams();
   const checkoutHandled = useRef(false);

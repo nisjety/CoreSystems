@@ -1,8 +1,8 @@
 # Ingestion Plane - Direct Port Mapping
 
 **Status:** ✅ Runtime ports in base compose, optional UI/admin ports in overlay  
-**Networks:** `ingestion-net` for local infra, `velion-net`/`inter-plane-bus` for cross-plane traffic
-**Shared NATS:** `velion-nats`
+**Networks:** `ingestion-net` for local infra, `verevon-net`/`inter-plane-bus` for cross-plane traffic
+**Shared NATS:** `verevon-nats`
 
 > **Verified 2026-07-11** against `docker-compose.yml`, `docker-compose.ui.yml`, live `docker ps`, and host `curl`. The prior March-30 table was materially wrong: there is **no `:8090` Quarry API** (Quarry-v2 is `quarry-edge` on `127.0.0.1:8082` + `quarry-control` on `:8081`), the NATS host port is **`4224`** (not `4222`), Dragonfly is **not** host-published, and `shipping-core`/`finspo-api`/`webhook-normalizer` were missing entirely. Corrected below. Ports/host-bindings can still drift — re-check against the compose files before relying on any single row.
 
@@ -64,10 +64,10 @@ temporal:7233
 qdrant:6333
 qdrant:6334
 connector-runtime-engine:3003
-velion-nats:4222
+verevon-nats:4222
 ```
 
-Cross-plane calls should use `velion-net` plus service names such as `ai-core:50051` and `velion-nats:4222`.
+Cross-plane calls should use `verevon-net` plus service names such as `ai-core:50051` and `verevon-nats:4222`.
 
 ---
 

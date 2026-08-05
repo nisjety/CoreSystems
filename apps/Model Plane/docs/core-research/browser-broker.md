@@ -94,7 +94,7 @@ the host in dev/base; the production overlay does `ports: !reset []`
 
 - Proto contract: `model_plane.v1.BrowserBroker` (`AcquireGrant`, `RevokeGrant`,
   `ValidateGrant`, `Health`) — generated Go (`go/gen/...`), Rust
-  (`mp-contracts`), and TS (`velion` legacy) stubs all exist. [source-only]
+  (`mp-contracts`), and TS (`verevon` legacy) stubs all exist. [source-only]
 - `orchestrator-core` (Go): `BROWSER_BROKER_ADDR` (default `browser-broker:9095`);
   `grpcclient` dials and closes the conn but **calls no grant method**. [source-only]
 - `model-gateway` (Rust): `state.rs` builds `browser_client: BrowserBrokerClient<Channel>`

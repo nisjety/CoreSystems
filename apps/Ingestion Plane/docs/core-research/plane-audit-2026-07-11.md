@@ -15,7 +15,7 @@ Verified with **host-side curl + source/config reading only**, because Docker's 
 
 ### Headline: the shipping-time defect is now FIXED IN SOURCE (deploy pending)
 
-The user's opening complaint — velion chat can't answer "shipping time Oslo→Trondheim" — traced to a live-confirmed **Bring delivery-time parsing defect** in shipping-core: `/api/quotes` returned real Bring prices but `transit_days:0` and `0001-01-01` for every Bring product, because `internal/carrier/bring/wire.go` modelled only `alternativeDeliveryDates[]` while Bring returns the promise at the **top level** of `expectedDelivery` (`workingDays` / `formattedExpectedDeliveryDate` / structured `expectedDeliveryDate`). The large uncommitted shipping-core transformation left the Bring adapter untouched, so the defect was still live.
+The user's opening complaint — verevon chat can't answer "shipping time Oslo→Trondheim" — traced to a live-confirmed **Bring delivery-time parsing defect** in shipping-core: `/api/quotes` returned real Bring prices but `transit_days:0` and `0001-01-01` for every Bring product, because `internal/carrier/bring/wire.go` modelled only `alternativeDeliveryDates[]` while Bring returns the promise at the **top level** of `expectedDelivery` (`workingDays` / `formattedExpectedDeliveryDate` / structured `expectedDeliveryDate`). The large uncommitted shipping-core transformation left the Bring adapter untouched, so the defect was still live.
 
 **Fixed this pass (2026-07-11):** `wire.go` now models the top-level fields + a structured-date fallback; `bring.go`'s `toDomainQuote` prefers the top-level promise and falls back to `alternativeDeliveryDates[0]` only when the top level is absent; a new `parseBringDeliveryDate` helper resolves the formatted `dd.MM.yyyy` string with a structured year/month/day fallback for localized strings. Two production-shaped tests were added (`TestAdapter_Quote_ParsesTopLevelExpectedDelivery`, `TestAdapter_Quote_FallsBackToStructuredDate`) — the old test had encoded the bug by using the `alternativeDeliveryDates` shape in its fixture. `go build`/`go vet`/`go test ./...` all green (8/8 Bring quote tests pass). **Not yet live**: the running shipping-core image is from 2026-07-04 and cannot be rebuilt until the Docker content store is repaired.
 
@@ -23,13 +23,13 @@ The user's opening complaint — velion chat can't answer "shipping time Oslo→
 
 | Service | State | Key findings |
 |---|---|---|
-| **shipping-core** :3156 | Live, real, 1 fix applied | Bring delivery-time defect **fixed in source** (above). Still open: no auth/authz/tenant/rate-limit/ZDR on the router (`/api/quotes`, `/api/carriers`, and the whole booking lifecycle serve 200 with no credential) `[live-curl]`; carrier provenance still `is_mock`-only (reports `is_mock:false` for sandbox DHL/FedEx/UPS — only Bring is production) `[live-curl]`; deploy drift (reliability + recommend routes 404 in the 2026-07-04 image though wired in source); compose block never maps `AUTH_CORE_URL`/`MODEL_GATEWAY_URL`/`INTERNAL_API_KEY`/`NATS_URL`/`DATA_PLANE_*`, so the new modelplane/recommend/dataplane/events features stay inert even after rebuild. The 5 new subdirs (modelplane, recommend, reliability, events, dataplane) are **real, tested implementations, not stubs**. shipping-core does NOT self-expose as a Model Plane tool — velion chat reaches it via Model Plane `execution-core/src/shipping_tools.rs` → `SHIPPING_CORE_URL` :3156. |
+| **shipping-core** :3156 | Live, real, 1 fix applied | Bring delivery-time defect **fixed in source** (above). Still open: no auth/authz/tenant/rate-limit/ZDR on the router (`/api/quotes`, `/api/carriers`, and the whole booking lifecycle serve 200 with no credential) `[live-curl]`; carrier provenance still `is_mock`-only (reports `is_mock:false` for sandbox DHL/FedEx/UPS — only Bring is production) `[live-curl]`; deploy drift (reliability + recommend routes 404 in the 2026-07-04 image though wired in source); compose block never maps `AUTH_CORE_URL`/`MODEL_GATEWAY_URL`/`INTERNAL_API_KEY`/`NATS_URL`/`DATA_PLANE_*`, so the new modelplane/recommend/dataplane/events features stay inert even after rebuild. The 5 new subdirs (modelplane, recommend, reliability, events, dataplane) are **real, tested implementations, not stubs**. shipping-core does NOT self-expose as a Model Plane tool — verevon chat reaches it via Model Plane `execution-core/src/shipping_tools.rs` → `SHIPPING_CORE_URL` :3156. |
 | **Quarry-v2** :8082/:8081 | Live, fetch real; posture unsafe | Scrape/fetch path is genuinely real (`/v1/scrape` returned extracted markdown + artifacts) `[live-curl]`. **3 unsafe dev-posture findings still stand**: `QUARRY_EDGE_AUTH_DEV_BYPASS=1` (any non-empty bearer accepted), `QUARRY_INTERNAL_HMAC_REQUIRED=0` (control accepts unsigned `/v1/*`), quarry-control host-published on `0.0.0.0:8081` — together an **unauthenticated LAN-reachable durable control plane (HIGH)**. Web search returns **zero results** — bundled SearXNG's engines all fail (`HTTP connection error`), a SearXNG egress problem, not Quarry code (corrects the 2026-07-10 claim that SearXNG results came back). Non-durable in-memory artifact/index/queue backends live in the edge. Temporal schedule/backfill still stubbed. Resolved since baseline: edge 500s now 0/12h (was 62), `/v1/sources` now real org-scoped CRUD, `DataPlaneIngestRequest` contract 21/21. Uncommitted ZDR gRPC hardening not yet in images. |
 | **integration-corev2** :3026 | Live, real | `/health/detailed` 200 (20 providers, all capabilities up); `/api/v1/connections` correctly 401s; GitHub webhook signature verification **re-confirmed fail-closed** (HMAC-SHA256, constant-time). **Visma is ABSENT from the 20-provider catalog** — the user's "test the Visma MCP" cannot be done through integration-corev2. Shipping is catalog-metadata only (no action dispatch). Uncommitted `DataPlaneServiceToken` handoff hardening (shared key + caller `X-Org-ID` → scoped Bearer JWT, no forwarded identity headers) is safe, respects the collision lock, and is currently dormant. |
 | **imports-core** :3025 | **Live outage + misconfig** | **Every DB-touching endpoint 500s right now** (`GET job` and authenticated upload; non-DB endpoints 200) — leading cause a stale asyncpg pool after ingestion-postgres restarted under a 3-day-old imports-api container; fix = restart imports-api (unconfirmable — `docker logs` blocked) `[live-curl]`. `DOCUMENT_SERVICE_URL=http://mock-document-service:3030` points at a **non-existent host**, so imports never reach Data Plane v2 (violates "persist via Data Plane contracts only") `[source+live]`. IDOR: job GET/SSE read routes have no auth/org-scoping `[source-only]`. Committed Phase 4 knowledge-sync not in the running image (stale build). Temporal orchestration is a no-op (in-process asyncio tasks). M365 handler is a dead-end stub writing orphan `org_id=""` jobs. |
 | **finspo-core** :3130 | Live, strongest-shaped | SharePoint Graph delta-sync is **genuinely implemented + test-covered** (delta pagination/cursor resume, tombstones, ACL capture, scheduler, real PDF extraction), persists only through Data Plane documents-api, ZDR-stamped, auth enforced before every handler (stronger than imports-core), destructive execution hard-gated off. Uncommitted `DataPlaneServiceToken` rename is complete, not WIP. One warning: `/ready` reports the finspo Postgres pool timed out (503) though ingestion-postgres is healthy — likely a stale pool on the degraded host. Not on the headline path; not a Model Plane tool. |
-| **autocomplete-core** :3219 | **Down — cannot start** | Real, fully-tested Rust/Axum typeahead sidecar (Sonic + SQLite + NATS JetStream, per-org isolation), but **entirely absent from the fleet**: the ROOT monorepo compose (not the Ingestion compose) gates it + quarry-sonic on `${AUTOCOMPLETE_INTERNAL_TOKEN:?}` and `${SONIC_PASSWORD:?}`, which the root `.env` never sets, so `compose up` aborts before creating them. Even if started, its NATS consumer points at a non-existent `quarry-nats` host on the wrong network, so the index would stay empty. Net user effect: the velionv3 searchbar returns empty suggestions on every keystroke, silently masked by the gateway's degrade-to-empty handler. |
-| **support-worker** | Live but inert | Real Temporal worker + NATS→Temporal bridge for Zammad support-ticket automation (no stubs in src), but **functionally dead-ended**: no producer publishes `velion.support.*`, no Zammad is deployed, `classifyActivity` targets a phantom `ai-core:8001`, `patchZammad` targets an absent host with an empty token, and the notify path 404s on notification-core. Alive but receives no input and no path can complete. |
+| **autocomplete-core** :3219 | **Down — cannot start** | Real, fully-tested Rust/Axum typeahead sidecar (Sonic + SQLite + NATS JetStream, per-org isolation), but **entirely absent from the fleet**: the ROOT monorepo compose (not the Ingestion compose) gates it + quarry-sonic on `${AUTOCOMPLETE_INTERNAL_TOKEN:?}` and `${SONIC_PASSWORD:?}`, which the root `.env` never sets, so `compose up` aborts before creating them. Even if started, its NATS consumer points at a non-existent `quarry-nats` host on the wrong network, so the index would stay empty. Net user effect: the verevonv3 searchbar returns empty suggestions on every keystroke, silently masked by the gateway's degrade-to-empty handler. |
+| **support-worker** | Live but inert | Real Temporal worker + NATS→Temporal bridge for Zammad support-ticket automation (no stubs in src), but **functionally dead-ended**: no producer publishes `verevon.support.*`, no Zammad is deployed, `classifyActivity` targets a phantom `ai-core:8001`, `patchZammad` targets an absent host with an empty token, and the notify path 404s on notification-core. Alive but receives no input and no path can complete. |
 
 ### Cross-plane / headline resolution
 
@@ -58,7 +58,7 @@ The verification distinguished:
 - configured providers from live token/API usability;
 - production carrier APIs from vendor sandboxes and local mocks;
 - current working-tree source from the older running images; and
-- a route being implemented from Velion chat actually receiving that tool.
+- a route being implemented from Verevon chat actually receiving that tool.
 
 Secrets were read only indirectly where an internal authenticated read was necessary. No key, token, customer number, account identifier, organization identifier, connection identifier, or user content was printed or added to this document.
 
@@ -90,7 +90,7 @@ curl -sS http://127.0.0.1:3162/health
 # Non-mutating shipping inventory and quote
 curl -sS http://127.0.0.1:3156/api/carriers
 curl -sS -H 'Content-Type: application/json' \
-  --data-binary '{"from":{"name":"Velion Test","postal_code":"0150","city":"Oslo","country":"NO","is_business":true},"to":{"name":"Velion Test","postal_code":"7010","city":"Trondheim","country":"NO","is_business":true},"package":{"weight_kg":5,"length_cm":30,"width_cm":20,"height_cm":15,"dangerous_good":false},"segment":"b2b"}' \
+  --data-binary '{"from":{"name":"Verevon Test","postal_code":"0150","city":"Oslo","country":"NO","is_business":true},"to":{"name":"Verevon Test","postal_code":"7010","city":"Trondheim","country":"NO","is_business":true},"package":{"weight_kg":5,"length_cm":30,"width_cm":20,"height_cm":15,"dangerous_good":false},"segment":"b2b"}' \
   http://127.0.0.1:3156/api/quotes
 
 # Auth boundary checks
@@ -114,7 +114,7 @@ The quote used a 5 kg, `30 x 20 x 15 cm`, non-dangerous B2B parcel from Oslo `01
 |---|---|---|
 | Shipping health/readiness | 200 / DB `ok` | Process and shipping database reachable. |
 | Shipping carrier inventory | 200 without auth | Eight adapters: four explicit mocks and four credential-backed adapters. |
-| Shipping quote, direct and through Velion gateway | 200 without auth | 15 options; Bring/DHL/UPS returned rates, FedEx returned a sanitized authorization error. |
+| Shipping quote, direct and through Verevon gateway | 200 without auth | 15 options; Bring/DHL/UPS returned rates, FedEx returned a sanitized authorization error. |
 | Shipping reliability and recommendation | 404 in running images | Routes exist in current source but are absent from the deployed binaries. |
 | Integration detailed health | 200 | Reports OAuth, token broker, discovery, actions and webhook hot path enabled. |
 | Integration connections without auth | 401 | External authentication gate works for this surface. |
@@ -181,7 +181,7 @@ Social Core's Integration-backed account path is real. Three of four observed ac
 | Image | Created | Revision label | Observed drift |
 |---|---|---|---|
 | `ingestion-plane-shipping-core:latest` | 2026-07-04 | absent | Current-source reliability/recommendation routes return 404. |
-| `frontend-plane-velionv3-gateway:latest` | 2026-07-08 | absent | Current-source reliability/recommendation proxy routes return 404. |
+| `frontend-plane-verevonv3-gateway:latest` | 2026-07-08 | absent | Current-source reliability/recommendation proxy routes return 404. |
 | `ingestion-plane-integration-api:latest` | 2026-07-07 | absent | Live behavior verified, exact source revision unprovable. |
 | `ingestion-plane-imports-api:latest` | 2026-07-04 | absent | Live behavior verified, exact source revision unprovable. |
 | `ingestion-plane-quarry-edge:latest` | 2026-07-09 | absent | Live search/fetch verified under dev auth bypass. |
@@ -205,7 +205,7 @@ Every image should carry an OCI revision label and expose build revision/config 
 
 ### Updated remediation order
 
-1. Add authentication, organization ownership and authorization to all shipping routes before any booking lifecycle is enabled through Velion.
+1. Add authentication, organization ownership and authorization to all shipping routes before any booking lifecycle is enabled through Verevon.
 2. Fix Bring top-level expected-delivery parsing and add a production-shaped fixture.
 3. Add explicit production/sandbox/mock provenance to every carrier response and AI citation.
 4. Rebuild shipping-core and gateway from a revision-labelled commit; verify reliability/recommendation routes after deployment.
@@ -218,7 +218,7 @@ Every image should carry an OCI revision label and expose build revision/config 
 
 ### Current Shape
 
-Ingestion Plane owns evidence capture and acquisition. `Quarry-v2` is the active web/search ingestion target for Velion v3. Legacy `Quarry/` references still exist in tooling/docs and should not be used for new Velion v3 work.
+Ingestion Plane owns evidence capture and acquisition. `Quarry-v2` is the active web/search ingestion target for Verevon v3. Legacy `Quarry/` references still exist in tooling/docs and should not be used for new Verevon v3 work.
 
 ### Commands Run
 
@@ -248,13 +248,13 @@ Additional validations run against the local Ingestion runtime:
 | GitHub webhook without signature | Fail | `/api/v1/webhooks/github` returned 200 accepted with no signature. |
 | GitHub webhook with invalid signature | Fail | `/api/v1/webhooks/github` returned 200 accepted with `sha256=invalid`. |
 | Quarry control job registry | Open risk | Host `/v1/jobs` on control returns 200 under rollout mode. |
-| Quarry edge job registry | Protected/unproven | Host `/v1/jobs` on edge returns 401 without edge auth/HMAC context. Velion onboarding still calls control directly in source. |
+| Quarry edge job registry | Protected/unproven | Host `/v1/jobs` on edge returns 401 without edge auth/HMAC context. Verevon onboarding still calls control directly in source. |
 
 ### High-Confidence Findings
 
 | Priority | Finding | Evidence | Recommended action |
 |---|---|---|---|
-| P0 | Velion v3 onboarding still has a documented direct `quarry-control` path that bypasses `quarry-edge`. | `Quarry-v2/docs/ARCHITECTURE.md` says onboarding crawl handlers post to control `/v1/jobs/` directly and work only while HMAC rollout mode trusts private-network calls. | Migrate onboarding crawl handlers to `quarry-edge` and block direct cross-plane control calls. |
+| P0 | Verevon v3 onboarding still has a documented direct `quarry-control` path that bypasses `quarry-edge`. | `Quarry-v2/docs/ARCHITECTURE.md` says onboarding crawl handlers post to control `/v1/jobs/` directly and work only while HMAC rollout mode trusts private-network calls. | Migrate onboarding crawl handlers to `quarry-edge` and block direct cross-plane control calls. |
 | P0 | Integration API accepts GitHub webhooks with missing or invalid signatures in the live environment. | Updated smoke script fails because `/api/v1/webhooks/github` returns 200 accepted for both no signature and invalid signature. | Require configured provider webhook secrets or reject unsigned provider webhooks by default. |
 | P1 | Quarry-v2 tests fail to compile after Data Plane ingest contract expansion. | `crates/quarry-core/tests/contracts.rs:231` and `crates/quarry-runtime/src/ingest_client.rs:380` construct `DataPlaneIngestRequest` without `initiator_user_id` and `visibility`. | Update constructors and contract tests with explicit initiator/visibility behavior. |
 | P1 | Top-level Ingestion Makefile still targets legacy `Quarry`. | `apps/Ingestion Plane/Makefile` uses `cd Quarry` for setup/dev/test and docs output. | Update targets to Quarry-v2 or explicitly label legacy commands. |
@@ -286,7 +286,7 @@ Additional validations run against the local Ingestion runtime:
 ### Recommended Remediation Order
 
 1. Patch Quarry-v2 `DataPlaneIngestRequest` constructors and rerun `cargo test --workspace`.
-2. Move Velion onboarding crawl jobs through `quarry-edge`.
+2. Move Verevon onboarding crawl jobs through `quarry-edge`.
 3. Update top-level Ingestion Makefile/help output away from legacy `Quarry`.
 4. Verify HMAC-required deployment behavior.
 5. Run endpoint and connector/import service tests.

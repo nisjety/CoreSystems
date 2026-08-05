@@ -71,7 +71,7 @@ export class InternalOAuthController {
       access_token: token.accessToken,
       refresh_token: token.refreshToken,
       scope: token.scope,
-      // G41 (velion-gap.md §8.30): `expiresAt` is typed `Date | null` but the
+      // G41 (verevon-gap.md §8.30): `expiresAt` is typed `Date | null` but the
       // underlying `sqlClient` driver returns ISO strings at runtime for
       // `TIMESTAMPTZ` columns, so `.toISOString()` blows up. Coerce to a
       // canonical ISO string defensively — accept either shape and skip on

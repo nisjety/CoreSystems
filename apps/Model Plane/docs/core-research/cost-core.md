@@ -106,7 +106,7 @@ Config (from `deploy/docker-compose.yml`, service `cost-core`): [source-only]
   misconfiguration.
 - `NATS_URL: nats://model-plane-nats-1:4222`
 - Joins `inter-plane-bus` with aliases `model-plane-cost-core-1` / `cost-core`
-  so the Velion gateway cost dashboard can reach the HTTP API.
+  so the Verevon gateway cost dashboard can reach the HTTP API.
 - Entrypoint applies `0001` + `0002` migrations via `psql` on boot when
   `DATABASE_URL` is set (no `schema_migrations` ledger; idempotent SQL).
 
@@ -118,7 +118,7 @@ Producers → cost-core:
   `POST /api/v1/budget/check` (`rust/services/model-gateway/src/{pricing,budget}.rs`).
 - **inference-core** (Rust) intent layer calls `POST /api/v1/budget/check`
   (`provider/intent.rs`, `provider/fallback.rs`, `config.rs cost_core_url`).
-- The Velion gateway cost/usage dashboard reads the query endpoints over the
+- The Verevon gateway cost/usage dashboard reads the query endpoints over the
   inter-plane-bus.
 
 cost-core → Postgres (`cost_entries`, `model_pricing`) and → NATS (subscribe).

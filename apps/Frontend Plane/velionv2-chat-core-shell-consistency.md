@@ -12,7 +12,7 @@
         - navigation "Workspace sections" [ref=e84] [box=0,108,60,647]
         - generic [ref=e114] [box=0,755,60,201]
     - main [ref=e132] [box=0,0,1800,956]:
-      - region "Velion chat workspace" [ref=e135] [box=60,56,1740,900]:
+      - region "Verevon chat workspace" [ref=e135] [box=60,56,1740,900]:
         - generic [ref=e136] [box=60,56,1740,58]
         - generic [ref=e216] [box=490,138,880,557]
         - generic [ref=e292] [box=550,814,760,127]

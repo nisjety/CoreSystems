@@ -71,7 +71,7 @@ except Exception:
 | Data Plane authz | `check_org_access()` via gRPC to org-core | ✅ Secure | Fail-closed on error |
 | Data Plane quotas | `org_quotas` table, plan-based limits | ✅ Secure | Per-org enforcement |
 | GDPR deletion | `gdpr_hard_delete_organization` PL/pgSQL function | ⚠️ Partial | See Section 4 |
-| NATS events | Dual-publish: controlplane-nats + velion-nats (JetStream) | ✅ Functional | 6 event types |
+| NATS events | Dual-publish: controlplane-nats + verevon-nats (JetStream) | ✅ Functional | 6 event types |
 | Cache invalidation | NATS-driven on org lifecycle events | ⚠️ Review | See Section 3.3 |
 
 ### 2.2 org-core SQL Isolation (Verified)
@@ -112,7 +112,7 @@ Cache keys follow a strict namespacing convention:
 - Subjects: `organization.>`, `user.>`, `session.>`, `billing.>`, `usage.>`, `auth.>`
 - Consumer: org-core BridgeSubscriber listens on `auth.>`
 
-**Cross-Plane (velion-nats, JetStream):**
+**Cross-Plane (verevon-nats, JetStream):**
 - Stream: `AQENCIA_CONTROLPLANE`
 - Subjects: `aqencia.controlplane.org.*`
 - Limits: 100K messages, 14-day retention, 60s dedup window
@@ -130,7 +130,7 @@ Cache keys follow a strict namespacing convention:
 5. `org.member_added`
 6. `org.member_removed`
 
-**Graceful Degradation:** If velion-nats is unavailable at startup, Data Plane continues serving without live quota updates — security is maintained because the gRPC auth chain is independent of NATS.
+**Graceful Degradation:** If verevon-nats is unavailable at startup, Data Plane continues serving without live quota updates — security is maintained because the gRPC auth chain is independent of NATS.
 
 ### 2.5 Data Plane Auth Chain (Verified)
 

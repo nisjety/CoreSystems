@@ -29,7 +29,7 @@ use tonic::{Request, Response, Status};
 use tracing::warn;
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
+    OwnerIntent, VerifiedIdentity, authorize_operation, authorize_owner_row, identity,
 };
 use crate::orchestration_store as store;
 use crate::store::Pool;
@@ -489,6 +489,85 @@ fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<
     Ok(())
 }
 
+const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 16 * 1024;
+
+/// Validate a retained continuation as an exact, approval-scoped action
+/// description. It cannot carry reusable credentials; execution remains
+/// unavailable until a service-only dispatcher obtains separate authority.
+#[allow(clippy::result_large_err)]
+fn validate_continuation_descriptor(
+    raw: &str,
+    req: &proto::CreateApprovalRequest,
+) -> Result<Option<JsonValue>, Status> {
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.len() > MAX_CONTINUATION_DESCRIPTOR_BYTES {
+        return Err(Status::invalid_argument(
+            "continuation descriptor is too large",
+        ));
+    }
+    let value: JsonValue = serde_json::from_str(raw)
+        .map_err(|_| Status::invalid_argument("continuation descriptor must be JSON"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| Status::invalid_argument("continuation descriptor must be an object"))?;
+    if object.get("version").and_then(JsonValue::as_u64) != Some(1) {
+        return Err(Status::invalid_argument(
+            "unsupported continuation descriptor version",
+        ));
+    }
+    for (key, expected) in [
+        ("run_id", req.run_id.as_str()),
+        ("org_id", req.org_id.as_str()),
+        ("user_id", req.user_id.as_str()),
+    ] {
+        if object.get(key).and_then(JsonValue::as_str) != Some(expected) {
+            return Err(Status::permission_denied(
+                "continuation descriptor scope mismatch",
+            ));
+        }
+    }
+    if object.get("action_kind").and_then(JsonValue::as_str) != Some("tool_call") {
+        return Err(Status::invalid_argument(
+            "continuation descriptor action kind is invalid",
+        ));
+    }
+    let fingerprint = object
+        .get("action_fingerprint")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Status::invalid_argument(
+            "continuation descriptor fingerprint is invalid",
+        ));
+    }
+    if descriptor_contains_secret_key(&value) {
+        return Err(Status::invalid_argument(
+            "continuation descriptor must not contain credentials",
+        ));
+    }
+    Ok(Some(value))
+}
+
+fn descriptor_contains_secret_key(value: &JsonValue) -> bool {
+    const FORBIDDEN: &[&str] = &[
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "password",
+    ];
+    match value {
+        JsonValue::Object(object) => object.iter().any(|(key, child)| {
+            FORBIDDEN.contains(&key.to_ascii_lowercase().as_str())
+                || descriptor_contains_secret_key(child)
+        }),
+        JsonValue::Array(values) => values.iter().any(descriptor_contains_secret_key),
+        _ => false,
+    }
+}
+
 /// Approval delivery is an internal service-to-service capability, never a
 /// user-facing approval read/write shortcut. The worker identity is derived
 /// from the verified JWT and the tenant is pinned before any outbox query.
@@ -920,6 +999,7 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         // the browser-specific companions carrying which action/why.
         orchestration_event::Event::BrowserActionApprovalRequired(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserActionDecided(p) => Some(&p.run_id),
+        orchestration_event::Event::ApprovalContinuationVerified(p) => Some(&p.run_id),
     }
 }
 
@@ -1285,6 +1365,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             let kind = approval_kind_to_str(req.kind)
                 .ok_or_else(|| Status::invalid_argument("invalid approval kind"))?;
+            let continuation_descriptor =
+                validate_continuation_descriptor(&req.continuation_descriptor_json, &req)?;
 
             // Honor a caller-supplied id (matrix §4.1) so an upstream cache
             // (the gateway ApprovalStore) stays aligned with the durable
@@ -1312,6 +1394,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             }
             if !req.step_id.is_empty() {
                 metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
+            }
+            if let Some(descriptor) = continuation_descriptor {
+                metadata_map.insert("continuation_descriptor".to_owned(), descriptor);
             }
             let metadata = JsonValue::Object(metadata_map);
 
@@ -1454,7 +1539,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             &req.decision_reason,
                         ) => {}
                     Some(_) => {
-                        return Err(Status::failed_precondition("approval is already decided"))
+                        return Err(Status::failed_precondition("approval is already decided"));
                     }
                     None => return Err(Status::not_found("approval not found")),
                 }
@@ -1528,6 +1613,209 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         result
     }
 
+    async fn get_approval_continuation(
+        &self,
+        request: Request<proto::GetApprovalContinuationRequest>,
+    ) -> Result<Response<proto::GetApprovalContinuationResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetApprovalContinuationResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            let worker_id = authorize_approval_delivery_worker(&caller, &req.org_id)?;
+            let descriptor = crate::approval_delivery::load_active_continuation_descriptor(
+                &self.pool,
+                &req.org_id,
+                &worker_id,
+                &req.delivery_id,
+                &req.approval_id,
+                &req.lease_token,
+            )
+            .await
+            .map_err(|error| {
+                warn!(error = %error, "approval continuation lookup unavailable");
+                Status::internal("approval continuation lookup unavailable")
+            })?;
+            let response = match descriptor {
+                Some(descriptor) => proto::GetApprovalContinuationResponse {
+                    available: true,
+                    continuation_descriptor_json: serde_json::to_string(&descriptor)
+                        .map_err(|_| Status::data_loss("stored continuation is invalid"))?,
+                },
+                None => proto::GetApprovalContinuationResponse {
+                    available: false,
+                    continuation_descriptor_json: String::new(),
+                },
+            };
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("get_approval_continuation", started, result.is_ok());
+        result
+    }
+
+    async fn record_approval_continuation_started(
+        &self,
+        request: Request<proto::RecordApprovalContinuationStartedRequest>,
+    ) -> Result<Response<proto::RecordApprovalContinuationStartedResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::RecordApprovalContinuationStartedResponse>, Status> =
+            async {
+                let caller = identity(&request)?;
+                let req = request.into_inner();
+                let worker_id = authorize_approval_delivery_worker(&caller, &req.org_id)?;
+                let receipt = crate::approval_delivery::record_continuation_started(
+                    &self.pool,
+                    &req.org_id,
+                    &worker_id,
+                    &req.delivery_id,
+                    &req.approval_id,
+                    &req.lease_token,
+                )
+                .await
+                .map_err(|error| {
+                    warn!(error = %error, "approval continuation receipt unavailable");
+                    Status::internal("approval continuation receipt unavailable")
+                })?;
+                let response = match receipt {
+                    Some(receipt) => proto::RecordApprovalContinuationStartedResponse {
+                        receipt_id: receipt.receipt_id,
+                        already_started: receipt.already_started,
+                    },
+                    None => proto::RecordApprovalContinuationStartedResponse {
+                        receipt_id: String::new(),
+                        already_started: false,
+                    },
+                };
+                Ok(Response::new(response))
+            }
+            .await;
+        record_metrics(
+            "record_approval_continuation_started",
+            started,
+            result.is_ok(),
+        );
+        result
+    }
+
+    async fn record_approval_continuation_outcome(
+        &self,
+        request: Request<proto::RecordApprovalContinuationOutcomeRequest>,
+    ) -> Result<Response<proto::RecordApprovalContinuationOutcomeResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::RecordApprovalContinuationOutcomeResponse>, Status> =
+            async {
+                let caller = identity(&request)?;
+                let req = request.into_inner();
+                let worker_id = authorize_approval_delivery_worker(&caller, &req.org_id)?;
+                let outcome = match proto::ApprovalContinuationOutcome::try_from(req.outcome) {
+                    Ok(proto::ApprovalContinuationOutcome::Completed) => {
+                        crate::approval_delivery::ContinuationOutcome::Completed
+                    }
+                    Ok(proto::ApprovalContinuationOutcome::Failed) => {
+                        crate::approval_delivery::ContinuationOutcome::Failed
+                    }
+                    Ok(proto::ApprovalContinuationOutcome::Cancelled) => {
+                        crate::approval_delivery::ContinuationOutcome::Cancelled
+                    }
+                    Ok(proto::ApprovalContinuationOutcome::Unspecified) | Err(_) => {
+                        return Err(Status::invalid_argument(
+                            "continuation outcome must be completed, failed, or cancelled",
+                        ));
+                    }
+                };
+                // Verified Outcome Foundation (verevon-roadmap.md §3b): optional,
+                // absent for a caller that doesn't yet produce one.
+                // VERIFICATION_STATUS_UNSPECIFIED is treated the same as an
+                // absent field — a caller sending it explicitly has not
+                // performed any judgment, so it must not be stored as a claim.
+                let verification_status = req.verification.as_ref().and_then(|v| {
+                    match proto::VerificationStatus::try_from(v.status) {
+                        Ok(proto::VerificationStatus::Unknown) => Some("unknown"),
+                        Ok(proto::VerificationStatus::VerifiedSuccess) => Some("verified_success"),
+                        Ok(proto::VerificationStatus::VerifiedFailure) => Some("verified_failure"),
+                        Ok(proto::VerificationStatus::PartiallyVerified) => {
+                            Some("partially_verified")
+                        }
+                        Ok(proto::VerificationStatus::Unspecified) | Err(_) => None,
+                    }
+                });
+                let verification =
+                    verification_status
+                        .zip(req.verification.as_ref())
+                        .map(|(status, v)| crate::approval_delivery::VerificationFields {
+                            status,
+                            method: &v.method,
+                            reason: &v.reason,
+                        });
+                let result = crate::approval_delivery::record_continuation_outcome(
+                    &self.pool,
+                    &req.org_id,
+                    &worker_id,
+                    &req.delivery_id,
+                    &req.approval_id,
+                    &req.receipt_id,
+                    &req.lease_token,
+                    outcome,
+                    &req.provider_receipt_id,
+                    &req.failure_code,
+                    verification,
+                )
+                .await
+                .map_err(|error| {
+                    warn!(error = %error, "approval continuation outcome unavailable");
+                    Status::internal("approval continuation outcome unavailable")
+                })?;
+                // Verified Outcome Foundation (verevon-roadmap.md §3b): surface
+                // the verification live on the run's own event stream — but
+                // only for a FRESH write (never on the already_finalized
+                // no-op replay path) and only when the caller actually
+                // produced one (an older worker's outcome has none to show).
+                if let (Some(result), Some(req_verification)) =
+                    (result.as_ref(), req.verification.as_ref())
+                {
+                    if result.recorded && !result.run_id.is_empty() {
+                        broadcast_event(
+                            &self.events_tx,
+                            &self.replay,
+                            proto::OrchestrationEvent {
+                                event_id: String::new(),
+                                at: Some(now_ts()),
+                                event: Some(
+                                    orchestration_event::Event::ApprovalContinuationVerified(
+                                        orchestration_event::ApprovalContinuationVerified {
+                                            run_id: result.run_id.clone(),
+                                            delivery_id: req.delivery_id.clone(),
+                                            approval_id: req.approval_id.clone(),
+                                            receipt_id: req.receipt_id.clone(),
+                                            verification: Some(req_verification.clone()),
+                                        },
+                                    ),
+                                ),
+                            },
+                        );
+                    }
+                }
+                let response = match result {
+                    Some(result) => proto::RecordApprovalContinuationOutcomeResponse {
+                        recorded: result.recorded,
+                        already_finalized: result.already_finalized,
+                    },
+                    None => proto::RecordApprovalContinuationOutcomeResponse {
+                        recorded: false,
+                        already_finalized: false,
+                    },
+                };
+                Ok(Response::new(response))
+            }
+            .await;
+        record_metrics(
+            "record_approval_continuation_outcome",
+            started,
+            result.is_ok(),
+        );
+        result
+    }
+
     async fn acknowledge_approval_delivery(
         &self,
         request: Request<proto::AcknowledgeApprovalDeliveryRequest>,
@@ -1545,9 +1833,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     Ok(proto::ApprovalDeliveryAcknowledgement::Terminal) => {
                         crate::approval_delivery::DeliveryAcknowledgement::Terminal
                     }
+                    Ok(proto::ApprovalDeliveryAcknowledgement::Settled) => {
+                        crate::approval_delivery::DeliveryAcknowledgement::Settled
+                    }
                     Ok(proto::ApprovalDeliveryAcknowledgement::Unspecified) | Err(_) => {
                         return Err(Status::invalid_argument(
-                            "approval delivery acknowledgement must be retry or terminal",
+                            "approval delivery acknowledgement must be retry, terminal, or settled",
                         ));
                     }
                 };
@@ -1556,8 +1847,6 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req.lease_token,
             )
             .map_err(|_| Status::invalid_argument("invalid approval delivery lease"))?;
-            crate::approval_delivery::validate_failure_code(&req.failure_code)
-                .map_err(|_| Status::invalid_argument("invalid approval delivery failure code"))?;
             let acknowledged = crate::approval_delivery::acknowledge_delivery(
                 &self.pool,
                 &req.org_id,
@@ -1566,6 +1855,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &req.lease_token,
                 acknowledgement,
                 &req.failure_code,
+                &req.continuation_receipt_id,
             )
             .await
             .map_err(|error| {
@@ -1579,6 +1869,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     terminal: acknowledged.terminal,
                     attempt: acknowledged.attempt,
                     next_attempt_at: acknowledged.next_attempt_at.map(ts),
+                    settled: acknowledged.settled,
                 },
                 // Do not distinguish a stale/mismatched lease from an exact
                 // retry. Both must be idempotent no-ops and must reveal no
@@ -1588,10 +1879,13 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     terminal: false,
                     attempt: 0,
                     next_attempt_at: None,
+                    settled: false,
                 },
             };
             let acknowledgement_state = if response.acknowledged {
-                if response.terminal {
+                if response.settled {
+                    "settled"
+                } else if response.terminal {
                     "terminal"
                 } else {
                     "retry"
@@ -1658,9 +1952,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     "parent_run_id and child_run_id are required",
                 ));
             }
-            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate).await?;
-            authorize_run_owner(&self.pool, &caller, &req.parent_run_id, OwnerIntent::Mutate).await?;
-            authorize_run_owner(&self.pool, &caller, &req.child_run_id, OwnerIntent::Mutate).await?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                .await?;
+            authorize_run_owner(&self.pool, &caller, &req.parent_run_id, OwnerIntent::Mutate)
+                .await?;
+            authorize_run_owner(&self.pool, &caller, &req.child_run_id, OwnerIntent::Mutate)
+                .await?;
             let role_str = subagent_role_to_str(req.role);
 
             store::attach_subagent(
@@ -1842,6 +2139,43 @@ mod tests {
                 .unwrap_err()
                 .code(),
             tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn continuation_descriptor_requires_exact_scope_and_rejects_credentials() {
+        let req = proto::CreateApprovalRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            ..Default::default()
+        };
+        let valid = serde_json::json!({
+            "version": 1,
+            "run_id": "run-1",
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "input": { "subject": "Hello" },
+        })
+        .to_string();
+        assert!(validate_continuation_descriptor(&valid, &req).is_ok());
+
+        let wrong_org = valid.replace("\"org-1\"", "\"org-2\"");
+        assert_eq!(
+            validate_continuation_descriptor(&wrong_org, &req)
+                .expect_err("cross-org descriptor must fail")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let credential = valid.replace("\"subject\":\"Hello\"", "\"access_token\":\"secret\"");
+        assert_eq!(
+            validate_continuation_descriptor(&credential, &req)
+                .expect_err("credentials must never be persisted")
+                .code(),
+            tonic::Code::InvalidArgument
         );
     }
 

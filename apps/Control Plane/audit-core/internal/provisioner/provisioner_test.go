@@ -108,7 +108,7 @@ func TestProvisionIsIdempotentAndPreservesLegacyConsumer(t *testing.T) {
 	}
 	if _, err := js.AddStream(&nats.StreamConfig{
 		Name:     StreamName,
-		Subjects: []string{"velion.audit.v1.>", "velion.usage.v1.>", DLQSubject},
+		Subjects: []string{"verevon.audit.v1.>", "verevon.usage.v1.>", DLQSubject},
 		Storage:  nats.FileStorage,
 	}); err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestProvisionIsIdempotentAndPreservesLegacyConsumer(t *testing.T) {
 		Durable:        legacy,
 		DeliverSubject: "_INBOX.LEGACY",
 		DeliverGroup:   legacy,
-		FilterSubject:  "velion.audit.v1.>",
+		FilterSubject:  "verevon.audit.v1.>",
 		AckPolicy:      nats.AckExplicitPolicy,
 	}); err != nil {
 		t.Fatal(err)
@@ -137,8 +137,8 @@ func TestProvisionIsIdempotentAndPreservesLegacyConsumer(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantSubjects := []string{
-		"velion.audit.v1.control.>", "velion.usage.v1.control.>",
-		"velion.audit.v2.control.>", "velion.usage.v2.control.>",
+		"verevon.audit.v1.control.>", "verevon.usage.v1.control.>",
+		"verevon.audit.v2.control.>", "verevon.usage.v2.control.>",
 		DLQSubject,
 	}
 	if !reflect.DeepEqual(info.Config.Subjects, wantSubjects) {
@@ -246,8 +246,8 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(info.Config.Subjects, []string{
-		"aqencia.controlplane.>", "notifications.>", "velion.session.>",
-		"aqencia.reasoning.session.>", "velion.agent.>",
+		"aqencia.controlplane.>", "notifications.>", "verevon.session.>",
+		"aqencia.reasoning.session.>", "verevon.agent.>",
 		"aqencia.reasoning.run.>", "app.session.>", ConvexControlDLQSubject,
 		GDPRErasureRequestedSubject, GDPRErasureDLQSubject, GDPROwnershipTransferredSubject,
 		DocumentsOrgPurgeDLQSubject, OrgDeletionSubjectWildcard,
@@ -302,6 +302,18 @@ func TestProvisionControlSharedRuntimeIsIdempotent(t *testing.T) {
 		conversationGDPRConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
 		conversationGDPRConsumer.Config.MaxDeliver != 20 {
 		t.Fatalf("unexpected conversation-core org-erasure consumer: %+v", conversationGDPRConsumer.Config)
+	}
+	wantedConversationRetention := conversationInteractiveRetentionConsumerConfig()
+	conversationRetentionConsumer, err := js.ConsumerInfo(ControlSharedStreamName, wantedConversationRetention.Durable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversationRetentionConsumer.Config.DeliverSubject != wantedConversationRetention.DeliverSubject ||
+		conversationRetentionConsumer.Config.DeliverGroup != wantedConversationRetention.DeliverGroup ||
+		conversationRetentionConsumer.Config.FilterSubject != InteractiveRetentionEnabledSubject ||
+		conversationRetentionConsumer.Config.AckPolicy != nats.AckExplicitPolicy ||
+		conversationRetentionConsumer.Config.MaxDeliver != 20 {
+		t.Fatalf("unexpected conversation-core interactive-retention consumer: %+v", conversationRetentionConsumer.Config)
 	}
 
 	wantedDocumentsOrgErasure := documentsOrgErasureConsumerConfig()
@@ -490,9 +502,9 @@ func TestProvisionApplicationRuntimeStreamIsIdempotent(t *testing.T) {
 		}
 	}
 	for stream, subjects := range map[string][]string{
-		ApplicationEventsStreamName:    {"velion.application.>"},
-		ApplicationModelStreamName:     {"velion.model.>"},
-		ApplicationIngestionStreamName: {"velion.ingestion.>"},
+		ApplicationEventsStreamName:    {"verevon.application.>"},
+		ApplicationModelStreamName:     {"verevon.model.>"},
+		ApplicationIngestionStreamName: {"verevon.ingestion.>"},
 	} {
 		info, infoErr := js.StreamInfo(stream)
 		if infoErr != nil {

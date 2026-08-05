@@ -18,7 +18,7 @@
 //! limit, which is the harder failure — it surfaces as a context-length
 //! rejection and a compaction retry, or as silent truncation by the provider.
 //!
-//! Velion's real payloads are the under-charging case: Norwegian text, order
+//! Verevon's real payloads are the under-charging case: Norwegian text, order
 //! numbers, dates, amounts, and JSON tool results all pack more tokens per byte
 //! than the 4:1 assumption. `len()` makes it worse still by counting BYTES — æ,
 //! ø and å are two bytes each in UTF-8, so the divisor is applied to an already

@@ -52,7 +52,7 @@ class CaseSpec(BaseModel, frozen=True):
     id: str
     name: str
     prompt: str
-    model: str | None = None  # velion-budget | velion-balance | velion-genius
+    model: str | None = None  # verevon-budget | verevon-balance | verevon-genius
     profile: str = "chat"  # "chat" | "deployed_agent"
     features: list[str] = Field(
         default_factory=lambda: ["usage", "tools", "citations"]

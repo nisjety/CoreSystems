@@ -84,7 +84,7 @@ func TestAuditOutboxRejectsInvalidAuthorityAndPayload(t *testing.T) {
 	for name, row := range map[string]AuditOutboxRow{
 		"missing id":     {Subject: ErasureAuditSubject, Payload: []byte(`{}`)},
 		"long id":        {EventID: strings.Repeat("x", 129), Subject: ErasureAuditSubject, Payload: []byte(`{}`)},
-		"forged subject": {EventID: "id", Subject: "velion.audit.v2.control.auth-core.erasure", Payload: []byte(`{}`)},
+		"forged subject": {EventID: "id", Subject: "verevon.audit.v2.control.auth-core.erasure", Payload: []byte(`{}`)},
 		"bad payload":    {EventID: "id", Subject: ErasureAuditSubject, Payload: []byte(`nope`)},
 	} {
 		t.Run(name, func(t *testing.T) {

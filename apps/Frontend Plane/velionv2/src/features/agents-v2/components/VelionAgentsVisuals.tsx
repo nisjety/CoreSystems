@@ -79,7 +79,7 @@ export function ServiceVisual({ large = false }: AgentVisualProps) {
             <span className="grid size-5 place-items-center rounded-[5px] bg-[#111111] text-white">
               <Sparkles className="size-3" />
             </span>
-            <span className="text-[10px] font-semibold text-[#24262D]">Velion Service</span>
+            <span className="text-[10px] font-semibold text-[#24262D]">Verevon Service</span>
           </div>
           <span className="size-1.5 rounded-full bg-[#12B76A]" />
         </div>
@@ -179,7 +179,7 @@ export function ChatbotVisual({ large = false }: AgentVisualProps) {
             <span className="grid size-5 place-items-center rounded-full bg-[#111111] text-white">
               <Sparkles className="size-3" />
             </span>
-            <span className="text-[9px] font-semibold text-[#24262D] dark:text-white">Velion Chatbot</span>
+            <span className="text-[9px] font-semibold text-[#24262D] dark:text-white">Verevon Chatbot</span>
           </div>
           <CircleDashed className="size-3 text-[#9AA0AA]" />
         </div>
@@ -224,7 +224,7 @@ export function WorkflowVisual({ large = false }: AgentVisualProps) {
 
       {large ? (
         <div className="absolute bottom-5 left-[39%] flex w-[34%] items-center gap-2 rounded-full border border-[#E5E6EA] bg-white px-3 py-2 text-[10px] text-[#9196A1] shadow-sm dark:border-[#2B2D33] dark:bg-[#17181C]">
-          Describe your workflow to Velion
+          Describe your workflow to Verevon
           <span className="ml-auto grid size-5 place-items-center rounded-full bg-[#111111] text-white">
             <Send className="size-3" />
           </span>

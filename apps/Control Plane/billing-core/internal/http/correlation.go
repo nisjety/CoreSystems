@@ -10,7 +10,7 @@ import (
 
 // correlationMiddleware honours an inbound X-Correlation-Id, mints one if
 // absent, exposes it as `correlation_id` on the gin context, and echoes it
-// back in the response header. G15 in velion-gap.md.
+// back in the response header. G15 in verevon-gap.md.
 func correlationMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cid := strings.TrimSpace(c.GetHeader("X-Correlation-Id"))

@@ -81,7 +81,7 @@ set_convex_env "CONVEX_CONTROL_PROJECTION_KEY" "$CONVEX_CONTROL_PROJECTION_KEY"
 set_convex_env "CONVEX_RECONCILIATION_KEY" "$CONVEX_RECONCILIATION_KEY"
 set_convex_env "AI_CORE_URL" "${AI_CORE_URL:-http://ai-core:8000}"
 # Canonical Control Plane service names are `org-core` + `auth-core`
-# (velion-gap.md G7). The legacy `org-core-service` / `auth-service`
+# (verevon-gap.md G7). The legacy `org-core-service` / `auth-service`
 # aliases still resolve in docker-compose but are being phased out.
 set_convex_env "ORG_CORE_URL" "${ORG_CORE_URL:-http://org-core:8080}"
 set_convex_env "AUTH_SERVER_URL" "${AUTH_SERVER_URL:-http://auth-core:3011}"
@@ -89,11 +89,11 @@ set_convex_env "AUTH_SERVER_URL" "${AUTH_SERVER_URL:-http://auth-core:3011}"
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.
 #
-# Rationale (velion ui-ux-velion-gap.md §10 + this fix):
+# Rationale (verevon ui-ux-verevon-gap.md §10 + this fix):
 # `npx convex dev` only pushes changes when source files mutate. When the
 # `convex-backend` container is recreated (or its SQLite volume is wiped)
 # its function registry comes up empty — `dev`'s file-watcher won't see
-# any changes to push, so velion gets "Could not find public function for
+# any changes to push, so verevon gets "Could not find public function for
 # 'controlSessions:byUser'" until something edits a file under convex/.
 #
 # Running `convex deploy` first guarantees the backend's registry matches

@@ -24,7 +24,7 @@ provided_compose=$(cd "$(dirname "$BROKER_COMPOSE_FILE")" && pwd)/$(basename "$B
 compose=(docker compose --project-name "$BROKER_COMPOSE_PROJECT" -f "$BROKER_COMPOSE_FILE" --profile gdpr)
 stream="AQENCIA_CONTROLPLANE"
 consumer="documents-api-gdpr-erasure-v1"
-subject="velion.gdpr.erasure.requested"
+subject="verevon.gdpr.erasure.requested"
 
 fail() {
   echo "FAIL: $1" >&2

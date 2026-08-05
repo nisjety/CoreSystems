@@ -268,7 +268,7 @@ export function Navigation({
     return section.panelGroups.reduce<ResolvedPanelGroup[]>((accumulator, group) => {
       const resolvedItems = group.items.reduce<ResolvedPanelItem[]>((itemsAccumulator, item) => {
         // U7-1: drop mock-only items (status: 'coming-soon') from the
-        // rendered sidebar unless NEXT_PUBLIC_VELION_PREVIEW_ROUTES is set.
+        // rendered sidebar unless NEXT_PUBLIC_VEREVON_PREVIEW_ROUTES is set.
         // The existing empty-group skip below removes any panel-group
         // whose items all get filtered out, so the layout stays clean.
         if (!isNavItemVisibleInCurrentBuild(item)) {

@@ -12,14 +12,14 @@ import {
   Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { VelionButton, VelionIconButton } from "@/components/ui/velion-ui";
+import { VerevonButton, VerevonIconButton } from "@/components/ui/verevon-ui";
 import type { WorkflowBuilderToolId } from "@/features/agents-v2/lib/agent-roles";
 import {
   type CanvasNodeId,
   type WorkflowNode,
   workflowNodes,
-} from "@/features/agents-v2/lib/velion-workflow-builder-data";
-import { BrandMark } from "@/features/agents-v2/components/VelionWorkflowBrandMark";
+} from "@/features/agents-v2/lib/verevon-workflow-builder-data";
+import { BrandMark } from "@/features/agents-v2/components/VerevonWorkflowBrandMark";
 
 export function WorkflowTopBar() {
   return (
@@ -41,13 +41,13 @@ export function WorkflowTopBar() {
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <VelionButton variant="secondary" size="xs" radius="pill" className="px-3 font-semibold">
+          <VerevonButton variant="secondary" size="xs" radius="pill" className="px-3 font-semibold">
             <Play className="size-3.5 fill-current" strokeWidth={1.8} />
             <span className="hidden sm:inline">Test Run</span>
-          </VelionButton>
-          <VelionButton variant="primary" size="xs" radius="pill" className="px-4 font-semibold">
+          </VerevonButton>
+          <VerevonButton variant="primary" size="xs" radius="pill" className="px-4 font-semibold">
             Publish
-          </VelionButton>
+          </VerevonButton>
         </div>
       </div>
     </header>
@@ -170,13 +170,13 @@ export function WorkflowPromptComposer() {
         defaultValue=""
         className="min-w-0 flex-1 bg-transparent text-[13px] font-medium text-[#2E3138] outline-none placeholder:text-[#A7ABB3] dark:text-white dark:placeholder:text-[#797F8A]"
       />
-      <VelionIconButton type="button" radius="pill" aria-label="Expand composer" className="shrink-0">
+      <VerevonIconButton type="button" radius="pill" aria-label="Expand composer" className="shrink-0">
         <Maximize2 className="size-3.5" strokeWidth={2} />
-      </VelionIconButton>
-      <VelionIconButton type="button" radius="pill" aria-label="Dictate workflow prompt" className="shrink-0">
+      </VerevonIconButton>
+      <VerevonIconButton type="button" radius="pill" aria-label="Dictate workflow prompt" className="shrink-0">
         <Mic className="size-4" strokeWidth={2} />
-      </VelionIconButton>
-      <VelionIconButton
+      </VerevonIconButton>
+      <VerevonIconButton
         type="submit"
         size="md"
         radius="pill"
@@ -184,7 +184,7 @@ export function WorkflowPromptComposer() {
         className="shrink-0 bg-[#252528] text-white shadow-[0_10px_26px_rgba(0,0,0,0.22)] hover:bg-[#050505] hover:text-white dark:bg-white dark:text-[#111111]"
       >
         <Send className="size-3.5" strokeWidth={2.1} />
-      </VelionIconButton>
+      </VerevonIconButton>
     </form>
   );
 }

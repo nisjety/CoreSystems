@@ -46,12 +46,12 @@ export function HistoryPanel({
   return createPortal(
     <div
       data-composer-floating-panel="true"
-      className="velion-popover velion-popover-up velion-floating-panel velion-floating-panel-sm velion-floating-panel-compact"
+      className="verevon-popover verevon-popover-up verevon-floating-panel verevon-floating-panel-sm verevon-floating-panel-compact"
       style={{
         position: "fixed",
         bottom: position.bottom,
         right: position.right,
-        zIndex: "var(--velion-z-popover)",
+        zIndex: "var(--verevon-z-popover)",
         maxHeight: position.maxHeight,
         transformOrigin: "bottom right",
       }}
@@ -74,14 +74,14 @@ export function HistoryPanel({
                     key={turn.id}
                     type="button"
                     onClick={onClose}
-                    className="velion-menu-row text-left"
+                    className="verevon-menu-row text-left"
                   >
                     <MessageSquare className="size-4 shrink-0 text-[#333] dark:text-[#F7F8F8]" strokeWidth={1.7} />
                     <span className="min-w-0 flex-1">
-                      <span className="velion-menu-label block truncate">{turn.body || "Untitled"}</span>
-                      <span className="velion-menu-meta block truncate">{turn.model}</span>
+                      <span className="verevon-menu-label block truncate">{turn.body || "Untitled"}</span>
+                      <span className="verevon-menu-meta block truncate">{turn.model}</span>
                     </span>
-                    <span className="velion-menu-meta shrink-0 text-[#bbb]">{formatTurnTime(turn, group.isToday)}</span>
+                    <span className="verevon-menu-meta shrink-0 text-[#bbb]">{formatTurnTime(turn, group.isToday)}</span>
                   </button>
                 ))}
               </div>
@@ -93,10 +93,10 @@ export function HistoryPanel({
         <Link
           href={"/chat" as Route}
           onClick={onClose}
-          className="velion-menu-row text-left"
+          className="verevon-menu-row text-left"
         >
           <LayoutGrid className="size-4 shrink-0 text-[#333] dark:text-[#F7F8F8]" strokeWidth={1.7} />
-          <span className="velion-menu-label">View all conversations</span>
+          <span className="verevon-menu-label">View all conversations</span>
         </Link>
       </div>
     </div>,
@@ -170,21 +170,21 @@ export function SettingsPanel({
   return createPortal(
     <div
       data-composer-floating-panel="true"
-      className="velion-popover velion-popover-side velion-floating-panel velion-floating-panel-xs velion-floating-panel-compact"
+      className="verevon-popover verevon-popover-side verevon-floating-panel verevon-floating-panel-xs verevon-floating-panel-compact"
       style={{
         position: "fixed",
         top: position.top,
         left: position.left,
-        zIndex: "var(--velion-z-popover)",
+        zIndex: "var(--verevon-z-popover)",
         transformOrigin: "top left",
       }}
     >
       <div className="overflow-y-auto p-2" style={{ maxHeight: position.maxHeight }}>
         {view === "main" ? (
-          <div className="velion-settings-view">
-            <div className="velion-menu-row">
+          <div className="verevon-settings-view">
+            <div className="verevon-menu-row">
               <Mic className="size-[17px] shrink-0 text-[#333] dark:text-[#F7F8F8]" strokeWidth={1.7} />
-              <span className="velion-menu-label min-w-0 flex-1 truncate">
+              <span className="verevon-menu-label min-w-0 flex-1 truncate">
                 Voice language
               </span>
               <select
@@ -290,11 +290,11 @@ function SettingsSubView({
   title: string;
 }) {
   return (
-    <div className="velion-settings-view">
+    <div className="verevon-settings-view">
       <button
         type="button"
         onClick={onBack}
-        className="velion-menu-row mb-0.5 gap-2 text-[#888]"
+        className="verevon-menu-row mb-0.5 gap-2 text-[#888]"
       >
         <ArrowLeft className="size-3.5" strokeWidth={1.8} />
         <span className="text-[12px] font-medium">{title}</span>
@@ -478,17 +478,17 @@ function RemoteSettingsList({
           <button
             key={item.id}
             type="button"
-            className="velion-menu-row text-left"
+            className="verevon-menu-row text-left"
           >
             <span className="grid size-7 shrink-0 place-items-center rounded-xl bg-black/[0.04] dark:bg-white/10">
               <Briefcase className="size-3.5 text-[#555] dark:text-[#D3D7DE]" />
             </span>
             <span className="min-w-0 flex-1">
-              <span className="velion-menu-label block truncate">{item.name}</span>
-              {item.description ? <span className="velion-menu-meta mt-0.5 block line-clamp-2 text-[#888]">{item.description}</span> : null}
+              <span className="verevon-menu-label block truncate">{item.name}</span>
+              {item.description ? <span className="verevon-menu-meta mt-0.5 block line-clamp-2 text-[#888]">{item.description}</span> : null}
             </span>
             {typeof item.connected === "boolean" ? (
-              <span className="velion-menu-meta shrink-0 font-medium text-[#888]">{item.connected ? "Manage" : "Open"}</span>
+              <span className="verevon-menu-meta shrink-0 font-medium text-[#888]">{item.connected ? "Manage" : "Open"}</span>
             ) : null}
           </button>
         ))
@@ -496,12 +496,12 @@ function RemoteSettingsList({
       <div className="mx-2 my-1 h-px bg-black/8 dark:bg-white/10" />
       <Link
         href={manageHref}
-        className="velion-menu-row text-left"
+        className="verevon-menu-row text-left"
       >
         <span className="grid size-7 shrink-0 place-items-center rounded-xl bg-black/[0.04] dark:bg-white/10">
           <Briefcase className="size-3.5 text-[#555] dark:text-[#D3D7DE]" />
         </span>
-        <span className="velion-menu-label">{manageLabel}</span>
+        <span className="verevon-menu-label">{manageLabel}</span>
       </Link>
     </>
   );
@@ -523,10 +523,10 @@ function ComposerMenuRow({
       type="button"
       onClick={onClick}
       title={label}
-      className="velion-menu-row text-left"
+      className="verevon-menu-row text-left"
     >
       {icon ? <span className="shrink-0 text-[#333] dark:text-[#F7F8F8]">{icon}</span> : null}
-      <span className="velion-menu-label min-w-0 flex-1 truncate">{label}</span>
+      <span className="verevon-menu-label min-w-0 flex-1 truncate">{label}</span>
       {right}
     </button>
   );

@@ -194,9 +194,9 @@ func (h *DocumentHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, doc)
 }
 
-// Sources implements U1-2 (velion ui-ux-velion-gap.md §10): returns the
+// Sources implements U1-2 (verevon ui-ux-verevon-gap.md §10): returns the
 // distinct sources for an org with a per-source document count. The
-// velion dashboard's "Sources count" stat reads this — Quarry v2 writes
+// verevon dashboard's "Sources count" stat reads this — Quarry v2 writes
 // every scrape into Data Plane v2 with its source URL, so the answer to
 // "how many sources do I have" lives here, not in Quarry.
 func (h *DocumentHandler) Sources(w http.ResponseWriter, r *http.Request) {

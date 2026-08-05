@@ -32,7 +32,7 @@ Three things changed materially since the 2026-06-07 note, which called it
 
 - **Language/framework**: Rust 2021 (rust-version 1.85), Axum 0.7, Tokio.
   ~1,687 LoC across `src/{main,lib,app,config,routes,store,sonic,ingest,events,normalization,error}.rs`.
-- **Role**: tenant-scoped search-as-you-type suggestions for the Velion search
+- **Role**: tenant-scoped search-as-you-type suggestions for the Verevon search
   box. It does **not** run search or generate answers — it is input-assistance
   in front of Quarry.
 - **HTTP surface** (`src/routes.rs`): `GET /health`, `GET /ready`,
@@ -61,7 +61,7 @@ Three things changed materially since the 2026-06-07 note, which called it
 - **Declared in the ROOT compose** `/docker-compose.yml`, not the plane compose:
   - `autocomplete-core` — build `./apps/Ingestion Plane/autocomplete-core`,
     `container_name: autocomplete-core`, **`ports: "3219:3219"`**, network
-    `aquatiq-local` (external → `velion-net`), `depends_on: [quarry-nats, quarry-sonic]`,
+    `aquatiq-local` (external → `verevon-net`), `depends_on: [quarry-nats, quarry-sonic]`,
     healthcheck `wget http://localhost:3219/health`. [source-only]
   - `quarry-sonic` — the Sonic index, same network, config from
     `autocomplete-core/deploy/sonic.template.cfg` with `SONIC_PASSWORD` injected. [source-only]
@@ -76,7 +76,7 @@ Three things changed materially since the 2026-06-07 note, which called it
 - **[state]** Of 92 running containers, **neither `autocomplete-core` nor
   `quarry-sonic` exists** (not running, not even stopped). `quarry-edge`,
   `quarry-control`, `quarry-orchestrator` are up; the typeahead pair is not.
-- The velionv3 gateway consequently returns an **empty** suggestions list for
+- The verevonv3 gateway consequently returns an **empty** suggestions list for
   every searchbar keystroke today (it degrades silently — see below).
 
 ### Root cause it can't start (CRITICAL)
@@ -98,9 +98,9 @@ Verification already calls this out).
 ### NATS wiring mismatch (would still fail after env fix)
 
 **[state + source-only]** Even with the env set, the event pipeline is broken:
-- `autocomplete-core` is on network **`velion-net`** and its `NATS_URL`
+- `autocomplete-core` is on network **`verevon-net`** and its `NATS_URL`
   defaults to `${QUARRY_EDGE_NATS_URL:-nats://quarry-nats:4222}`. There is **no
-  `quarry-nats` container** (running NATS: `ingestion-nats`, `velion-nats`,
+  `quarry-nats` container** (running NATS: `ingestion-nats`, `verevon-nats`,
   `controlplane-nats`, `app-nats`, `model-plane-nats-1`, `data-plane-v2-nats-1`).
 - The **publisher** `quarry-edge` runs on networks **`ingestion-net` +
   `inter-plane-bus`** and connects to alias `nats` (`nats://nats:4222`) inside
@@ -111,7 +111,7 @@ Verification already calls this out).
   must point at the NATS that actually holds `QUARRY_EVENTS`, and
   `autocomplete-core` must share that network (e.g. join `inter-plane-bus`).
 - The **Sonic** wiring, by contrast, is internally consistent:
-  `SONIC_ADDR=quarry-sonic:1491`, both declared on `velion-net`.
+  `SONIC_ADDR=quarry-sonic:1491`, both declared on `verevon-net`.
 
 ## Is the upstream event contract real? Yes.
 
@@ -126,9 +126,9 @@ payload field names (`org_id`, `user_id`, `query`, `provider`, `result_count` /
 **intentionally inactive** (Quarry's `page_fetched` fires before title metadata
 exists) — a documented future gap, not a defect.
 
-## Gateway consumer (velionv3)
+## Gateway consumer (verevonv3)
 
-**[source-only]** `apps/Frontend Plane/velionv3/apps/gateway/src/domains/search.rs::search_suggestions`
+**[source-only]** `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs::search_suggestions`
 implements `GET /api/v1/search/suggestions` → `{AUTOCOMPLETE_CORE_URL}/v1/suggestions`
 with `bearer_auth(AUTOCOMPLETE_INTERNAL_TOKEN)` and `x-org-id` derived from the
 **validated session** (never a client header), 1.5s timeout. It **always
@@ -136,9 +136,9 @@ degrades to `{ "suggestions": [] }`** (never an error) when `q` < 2 chars, the
 token/URL is empty, or the upstream is non-2xx. `AUTOCOMPLETE_CORE_URL` defaults
 to `http://autocomplete-core:3219`. Net effect today: the searchbar dropdown is
 silently empty, which is resilient but masks the outage. Note this also means
-the gateway must be on `velion-net` to resolve `autocomplete-core`, and needs
+the gateway must be on `verevon-net` to resolve `autocomplete-core`, and needs
 `AUTOCOMPLETE_INTERNAL_TOKEN` in its own env or it short-circuits to empty.
-(README still lists "Velion server-side proxy route" as pending — that is now
+(README still lists "Verevon server-side proxy route" as pending — that is now
 implemented; the README is stale on that one line.)
 
 ## Security / auth notes
@@ -189,11 +189,11 @@ baseline.
    actually holds `QUARRY_EVENTS` and put `autocomplete-core` on a shared
    network with the Quarry publisher (`inter-plane-bus`), or point it at
    `ingestion-nats`. Without this the Sonic index stays permanently empty.
-3. Ensure the velionv3 gateway carries `AUTOCOMPLETE_INTERNAL_TOKEN` and sits on
-   `velion-net`, else suggestions silently stay empty even once the service is up.
+3. Ensure the verevonv3 gateway carries `AUTOCOMPLETE_INTERNAL_TOKEN` and sits on
+   `verevon-net`, else suggestions silently stay empty even once the service is up.
 4. Make `authorize()` fail-closed (reject when no token configured) as
    defense-in-depth.
-5. Correct the README line that lists the Velion proxy route as "pending".
+5. Correct the README line that lists the Verevon proxy route as "pending".
 6. Add a live smoke test (push → suggestion round-trip against a real Sonic) to
    the plane's test-endpoints so the outage would be caught, not masked by the
    gateway's empty-list degradation.

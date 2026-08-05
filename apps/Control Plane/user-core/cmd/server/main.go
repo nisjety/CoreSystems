@@ -201,7 +201,7 @@ func main() {
 	var natsPublisher *nats.Publisher
 	var sharedPublisher *nats.SharedPublisher
 
-	// Shared velion-nats should not depend on local controlplane-nats health.
+	// Shared verevon-nats should not depend on local controlplane-nats health.
 	if sp, spErr := nats.NewSharedPublisher(cfg.NATS.SharedURL, nats.SharedCredentials{
 		User: cfg.NATS.SharedUser, Password: cfg.NATS.SharedPass,
 		Token: cfg.NATS.SharedToken, AllowTokenFallback: cfg.NATS.SharedAllowTokenFallback,
@@ -210,7 +210,7 @@ func main() {
 	} else if sp != nil {
 		sharedPublisher = sp
 		defer sp.Close()
-		log.Println("✅ Connected to shared NATS (velion-nats)")
+		log.Println("✅ Connected to shared NATS (verevon-nats)")
 	}
 
 	log.Printf("Connecting to NATS: %s", natsURL)
@@ -310,9 +310,9 @@ func main() {
 	}
 
 	// Wire the local control-plane bus (controlplane-nats) as the audit
-	// publisher so velion.audit.v1.control.* (erasure/DSAR) events reach
+	// publisher so verevon.audit.v1.control.* (erasure/DSAR) events reach
 	// audit-core's primary subscription. Kept separate from the shared
-	// velion-nats bus, which carries cross-plane domain/ACL/fan-out events.
+	// verevon-nats bus, which carries cross-plane domain/ACL/fan-out events.
 	if natsClient != nil {
 		userService.SetAuditPublisher(natsClient)
 		log.Println("✅ user-core audit events wired to local control-plane bus (controlplane-nats)")

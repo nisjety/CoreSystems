@@ -4,7 +4,7 @@ import { resolveChatActor } from '@/app/api/chat/_lib/session-store'
 import { convexQuery } from '@/app/api/_lib/convex-client'
 
 /**
- * U3-9 (ui-ux-velion-gap.md §14): per-agent run statistics.
+ * U3-9 (ui-ux-verevon-gap.md §14): per-agent run statistics.
  *
  * Reads the Convex `agentRuns` mirror (populated by `convex-subscriber` from
  * orchestrator-core's `mp.v1.run.*.event` NATS subjects per U3-3 / W4-2) and

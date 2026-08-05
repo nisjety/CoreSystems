@@ -49,7 +49,7 @@ services:
 
   gateway:
     build:
-      context: ../Frontend Plane/velionv3/apps/gateway
+      context: ../Frontend Plane/verevonv3/apps/gateway
       dockerfile: Dockerfile
       args:
         SOURCE_REVISION: ${SOURCE_REVISION:?required}
@@ -83,12 +83,12 @@ services:
       EMBEDDING_ENGINE_URL: http://embedding-engine:9202
       QUICKWIT_ADAPTER_URL: http://quickwit-adapter:9204
       WIKI_STORE_URL: http://wiki-store:8011
-      VELION_PUBLIC_ORIGIN: ${REAL_AUTHORITY_PUBLIC_ORIGIN:?required}
-      VELION_ALLOWED_ORIGINS: ${REAL_AUTHORITY_PUBLIC_ORIGIN:?required}
+      VEREVON_PUBLIC_ORIGIN: ${REAL_AUTHORITY_PUBLIC_ORIGIN:?required}
+      VEREVON_ALLOWED_ORIGINS: ${REAL_AUTHORITY_PUBLIC_ORIGIN:?required}
       ALLOW_DEV_AUTH_BYPASS: "0"
       ALLOW_DEV_ACTOR_HEADERS: "0"
       GATEWAY_CACHE_REDIS_URL: redis://:${DATAPLANE_DRAGONFLY_PASSWORD:?required}@dragonfly:6379/4
-      RUST_LOG: warn,velion_gateway_rs=info
+      RUST_LOG: warn,verevon_gateway_rs=info
     networks:
       - dpv2-net
       - inter-plane-bus

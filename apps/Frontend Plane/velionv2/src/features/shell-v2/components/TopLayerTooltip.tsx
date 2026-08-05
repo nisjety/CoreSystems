@@ -78,7 +78,7 @@ export function TopLayerTooltip({
             <span
               ref={tooltipRef}
               className={cn(
-                "velion-top-layer-tooltip pointer-events-none fixed z-[var(--velion-z-tooltip)] whitespace-nowrap rounded-[12px] border border-[#E7E7EA] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#3A3C44] opacity-0 shadow-[0_12px_34px_rgba(17,17,17,0.16)] transition-opacity duration-150 dark:border-[#2A2C31] dark:bg-[#17181C] dark:text-[#F7F8F8]",
+                "verevon-top-layer-tooltip pointer-events-none fixed z-[var(--verevon-z-tooltip)] whitespace-nowrap rounded-[12px] border border-[#E7E7EA] bg-white px-3 py-1.5 text-[11px] font-semibold text-[#3A3C44] opacity-0 shadow-[0_12px_34px_rgba(17,17,17,0.16)] transition-opacity duration-150 dark:border-[#2A2C31] dark:bg-[#17181C] dark:text-[#F7F8F8]",
                 position ? "opacity-100" : "",
               )}
               style={{

@@ -148,9 +148,9 @@ export const sharedNavItems: SharedNavItem[] = [
             defaultLabel: 'Tasks',
             href: '/tasks',
             icon: ListChecks,
-            // U7-1 (ui-ux-velion-gap.md §U7): `/tasks` renders hardcoded
+            // U7-1 (ui-ux-verevon-gap.md §U7): `/tasks` renders hardcoded
             // sample data from `dashboard/product-section-pages.tsx`. Hidden
-            // from production sidebar (set NEXT_PUBLIC_VELION_PREVIEW_ROUTES=1
+            // from production sidebar (set NEXT_PUBLIC_VEREVON_PREVIEW_ROUTES=1
             // to surface as a dimmed "Soon" item for stakeholder demos).
             status: 'coming-soon',
             description: 'Your assigned tasks and to-dos.',
@@ -180,7 +180,7 @@ export const sharedNavItems: SharedNavItem[] = [
   {
     id: 'messages',
     labelKey: 'messages',
-    defaultLabel: 'Velion Chat',
+    defaultLabel: 'Verevon Chat',
     href: '/chat',
     icon: MessageSquare,
     description: 'AI chat, operator drafting, and exploratory conversations outside the shared inbox.',
@@ -248,7 +248,7 @@ export const sharedNavItems: SharedNavItem[] = [
         defaultLabel: 'Lifecycle',
         showHeader: true,
         items: [
-          // U3-4 (ui-ux-velion-gap.md §14): these lifecycle items are
+          // U3-4 (ui-ux-verevon-gap.md §14): these lifecycle items are
           // valid per-agent surfaces (`/agents/{id}/train` etc.) but
           // **don't make sense without an agent selected** — the
           // top-level `/agents/{slug}` route just falls through to the
@@ -558,7 +558,7 @@ export const sharedNavItems: SharedNavItem[] = [
         labelKey: 'knowledgeCore',
         defaultLabel: 'Knowledge',
         items: [
-          // Wave 11 (ui-ux-velion-gap.md §19/wave11-knowledge): new IA.
+          // Wave 11 (ui-ux-verevon-gap.md §19/wave11-knowledge): new IA.
           // Replaces the stale Documents/Sources/API-integrations/Training
           // quartet. Graph + Wiki are Wave 11.C surfaces — their pages
           // 404 when `KNOWLEDGE_GRAPH_ENABLED`/`_WIKI_ENABLED` is unset,
@@ -962,7 +962,7 @@ const navTranslations: Record<string, Record<string, string>> = {
     actions: 'Actions',
     inbox: 'Inbox',
     yourInbox: 'Your inbox',
-    messages: 'Velion Chat',
+    messages: 'Verevon Chat',
     chatLogs: 'Chat logs',
     supportOps: 'Support ops',
     escalations: 'Escalations',
@@ -1220,7 +1220,7 @@ export function getActiveSidebarItem(pathname: string): SharedNavPanelItem | nul
 
 // ── U7-1 ────────────────────────────────────────────────────────────────────
 //
-// `ui-ux-velion-gap.md §U7` flagged 15 mock-only routes — pages that render
+// `ui-ux-verevon-gap.md §U7` flagged 15 mock-only routes — pages that render
 // hardcoded sample data and have no `/api/*` proxy or real upstream call.
 // Today every one of them appears in the sidebar with `status: 'coming-soon'`
 // (so the click is disabled and a "Soon" pill renders), but they still
@@ -1228,7 +1228,7 @@ export function getActiveSidebarItem(pathname: string): SharedNavPanelItem | nul
 //
 // The closure: filter `status === 'coming-soon'` items out of the rendered
 // sidebar by default, AND drop groups that become empty after the filter so
-// the layout stays clean. A `NEXT_PUBLIC_VELION_PREVIEW_ROUTES=1` env flag
+// the layout stays clean. A `NEXT_PUBLIC_VEREVON_PREVIEW_ROUTES=1` env flag
 // re-surfaces them as the historical "Soon" preview pills — useful for
 // stakeholder demos and the design-review build.
 //
@@ -1241,7 +1241,7 @@ export function getActiveSidebarItem(pathname: string): SharedNavPanelItem | nul
 //   3. The pinned-bottom items (Profile, Settings, Helpdesk, Search) are
 //      live and the filter is a no-op for them.
 const PREVIEW_ROUTES_FLAG_VALUE = (
-  process.env.NEXT_PUBLIC_VELION_PREVIEW_ROUTES ?? ''
+  process.env.NEXT_PUBLIC_VEREVON_PREVIEW_ROUTES ?? ''
 )
   .trim()
   .toLowerCase();
@@ -1297,7 +1297,7 @@ export function filterVisibleGroups(
 }
 
 // Top-level sections whose `href` points at a route that currently renders
-// hardcoded mock data (per `ui-ux-velion-gap.md §U7`). The section's panel
+// hardcoded mock data (per `ui-ux-verevon-gap.md §U7`). The section's panel
 // items may not all be mock individually, but the *landing page* the icon
 // jumps to is — so hiding the icon prevents a click that lands on stale
 // scaffolding. When all the section's panel items are also coming-soon,

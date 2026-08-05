@@ -4,12 +4,12 @@ import { useRef, useState } from "react";
 import { ArrowUpRight, FileUp, FolderPlus, Globe2, HardDriveUpload } from "lucide-react";
 
 import {
-  VelionButton,
-  VelionInput,
-  VelionModal,
-  VelionModalClose,
-  VelionModalTitle,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonInput,
+  VerevonModal,
+  VerevonModalClose,
+  VerevonModalTitle,
+} from "@/components/ui/verevon-ui";
 
 type ConnectProvider = {
   detail: string;
@@ -83,15 +83,15 @@ export function KnowledgeAddSourceModal({
   }
 
   return (
-    <VelionModal label="Add knowledge source" size="wide" className="p-5">
+    <VerevonModal label="Add knowledge source" size="wide" className="p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <VelionModalTitle>Add source</VelionModalTitle>
+          <VerevonModalTitle>Add source</VerevonModalTitle>
           <p className="mt-2 max-w-2xl text-[13px] leading-5 text-[#666B64] dark:text-[#AEB4C0]">
             Upload files through imports-core, open new integration auth flows, or register a SharePoint drive for Finspo sync.
           </p>
         </div>
-        <VelionModalClose onClick={onClose} aria-label="Close add source">Esc</VelionModalClose>
+        <VerevonModalClose onClick={onClose} aria-label="Close add source">Esc</VerevonModalClose>
       </div>
 
       <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(320px,0.95fr)]">
@@ -130,7 +130,7 @@ export function KnowledgeAddSourceModal({
           </div>
 
           <div className="mt-4">
-            <VelionButton
+            <VerevonButton
               radius="sm"
               variant="primary"
               className="px-3"
@@ -139,7 +139,7 @@ export function KnowledgeAddSourceModal({
             >
               <HardDriveUpload className="size-4" />
               Import selected files
-            </VelionButton>
+            </VerevonButton>
           </div>
         </section>
 
@@ -194,7 +194,7 @@ export function KnowledgeAddSourceModal({
             label="Website URL"
             value={websiteCrawl.url}
             onChange={(value) => setWebsiteCrawl((current) => ({ ...current, url: value }))}
-            placeholder="https://docs.velion.ai"
+            placeholder="https://docs.verevon.ai"
           />
           <Field
             label="Max pages"
@@ -205,7 +205,7 @@ export function KnowledgeAddSourceModal({
         </div>
 
         <div className="mt-4">
-          <VelionButton
+          <VerevonButton
             radius="sm"
             variant="primary"
             className="px-3"
@@ -214,7 +214,7 @@ export function KnowledgeAddSourceModal({
           >
             <Globe2 className="size-4" />
             Start crawl
-          </VelionButton>
+          </VerevonButton>
         </div>
       </section>
 
@@ -271,7 +271,7 @@ export function KnowledgeAddSourceModal({
         </div>
 
         <div className="mt-4">
-          <VelionButton
+          <VerevonButton
             radius="sm"
             variant="primary"
             className="px-3"
@@ -280,10 +280,10 @@ export function KnowledgeAddSourceModal({
           >
             <FolderPlus className="size-4" />
             Register and sync
-          </VelionButton>
+          </VerevonButton>
         </div>
       </section>
-    </VelionModal>
+    </VerevonModal>
   );
 }
 
@@ -301,7 +301,7 @@ function Field({
   return (
     <label className="space-y-1.5">
       <span className="text-[12px] font-medium text-[#555A52] dark:text-[#AEB4C0]">{label}</span>
-      <VelionInput
+      <VerevonInput
         value={value}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}

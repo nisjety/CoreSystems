@@ -9,7 +9,7 @@ import { expect, test } from "@playwright/test"
  *
  * Requires a working auth backend so the server can generate + verify the
  * ceremony: either Control Plane mode (auth-core reachable via the /api/auth
- * proxy) or standalone mode (velionv2's own Better Auth + a Postgres
+ * proxy) or standalone mode (verevonv2's own Better Auth + a Postgres
  * DATABASE_URL). Marked `fixme` until run against such a stack and the login
  * selectors are validated. Run with `pnpm test:e2e`.
  */

@@ -1,7 +1,7 @@
 // Package gdpr implements data-quality-go's slice of the cross-plane GDPR
 // organization-erasure fan-out.
 //
-// org-core publishes ErasureRequestedSubject ("velion.gdpr.erasure.requested")
+// org-core publishes ErasureRequestedSubject ("verevon.gdpr.erasure.requested")
 // on the shared Control-Plane bus (control-shared-nats, stream
 // AQENCIA_CONTROLPLANE) from two trigger paths that share one payload shape
 // (apps/Control Plane/org-core/internal/org/gdpr_erasure_fanout.go's
@@ -41,7 +41,7 @@ import (
 
 // ErasureRequestedSubject mirrors org-core's GDPRErasureFanoutSubject /
 // audit-core provisioner's GDPRErasureRequestedSubject constant.
-const ErasureRequestedSubject = "velion.gdpr.erasure.requested"
+const ErasureRequestedSubject = "verevon.gdpr.erasure.requested"
 
 // OrgPurger is the narrow surface HandleOrgErasure needs: hard-delete every
 // org-scoped quality-evaluation row for one org. *PostgresOrgPurger satisfies

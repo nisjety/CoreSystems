@@ -1,6 +1,6 @@
 -- 010_onboarding_state — server-side onboarding state for G3 + G16.
 --
--- Today's onboarding flow (velion's `onboarding-service.ts`) keeps the
+-- Today's onboarding flow (verevon's `onboarding-service.ts`) keeps the
 -- multi-step wizard state in `localStorage`. That breaks two things:
 --   1. Refresh on a different device loses progress (G3).
 --   2. There is no server record of which step the user is on (G16) — the
@@ -8,7 +8,7 @@
 --      which is fragile and only mirrors `onboarding_current_step` when the
 --      client remembered to call `saveCurrentStep`.
 --
--- Add two columns to `users` so velion can mirror state on every step
+-- Add two columns to `users` so verevon can mirror state on every step
 -- transition and on cancel/complete:
 --
 --   `onboarding_step`  — current wizard step name (free-form text; the

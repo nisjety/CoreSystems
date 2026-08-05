@@ -168,11 +168,15 @@ impl PageRunner {
             ));
         }
 
-        // DNS-time SSRF guard: resolve host and block private/loopback/link-local
-        // ranges before we hand the URL to the driver (TOCTOU-resistant).
-        if !self.security.allow_private_hosts() {
-            crate::dns_guard::guard_url(requested_url).await?;
-        }
+        // Resolve and inspect the target before we hand it to a driver. Static
+        // fetch receives this exact address set through FetchHints and pins its
+        // transport resolver to it, so the connection cannot perform a second
+        // hostname lookup after this public-address check.
+        let resolved_target = if !self.security.allow_private_hosts() {
+            Some(crate::dns_guard::resolve_public_url(requested_url).await?)
+        } else {
+            None
+        };
 
         // Fetch — gated by the per-host scheduler when configured.
         // The slot permit is held only for the duration of the fetch
@@ -199,6 +203,7 @@ impl PageRunner {
             render: self.render.clone(),
             org_id: self.org_id.clone().unwrap_or_default(),
             privacy: self.privacy.clone().with_zdr(self.zdr),
+            resolved_target,
             ..FetchHints::default()
         };
         let fetch_result = self
@@ -396,7 +401,7 @@ impl PageRunner {
         // /v1/internal/run_page HTTP response carries it back to the
         // orchestrator (which then re-emits a `branding_extracted`
         // event to control's per-job event log). The second path is
-        // what reaches velion's onboarding wizard when NATS fan-out is
+        // what reaches verevon's onboarding wizard when NATS fan-out is
         // disabled. UTF-8 conversion is best-effort — binary responses
         // (images, PDFs) skip both paths cleanly.
         let branding_json: Option<serde_json::Value> = match std::str::from_utf8(&resp.body) {

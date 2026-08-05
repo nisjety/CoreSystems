@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail } from "./runs_pbjs";
+import { CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail } from "./runs_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -46,6 +46,24 @@ export const RunService = {
       name: "CancelRun",
       I: CancelRunRequest,
       O: CancelRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * ListSystemRuns — org-scoped listing of runs with no human owner.
+     *
+     * ListRuns is thread-scoped, and a run created by a durable workflow lives in
+     * a thread that same workflow owns, so no person's thread listing can ever
+     * reach it. Without this RPC a system-initiated run is unreachable by
+     * construction even when fully authorized. Read-only: system runs are
+     * org-readable (their content is by construction the org-visible set) but
+     * mutable only by the workload that owns them.
+     *
+     * @generated from rpc model_plane.v1.RunService.ListSystemRuns
+     */
+    listSystemRuns: {
+      name: "ListSystemRuns",
+      I: ListSystemRunsRequest,
+      O: ListRunsResponse,
       kind: MethodKind.Unary,
     },
     /**

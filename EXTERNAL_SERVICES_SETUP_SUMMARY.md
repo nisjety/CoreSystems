@@ -277,7 +277,7 @@ lsof -i :3014  # Nohu
 1. **Start the services:** `./scripts/start_external_services.sh`
 2. **Test connectivity:** `./scripts/check_external_services_health.sh`
 3. **Read the detailed guide:** [EXTERNAL_SERVICES_SETUP.md](docs/EXTERNAL_SERVICES_SETUP.md)
-4. **Integrate with Frontend:** Update Velion to call these APIs
+4. **Integrate with Frontend:** Update Verevon to call these APIs
 5. **Set up monitoring:** Add logging/monitoring for production
 
 ---

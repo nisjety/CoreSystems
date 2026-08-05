@@ -51,7 +51,7 @@ message RunAgentRequest {
   // Acting user identifier.
   string user_id = 5;
 
-  // Requested model (empty / "velion-*" lets inference-core's intent layer
+  // Requested model (empty / "verevon-*" lets inference-core's intent layer
   // resolve a concrete model).
   string model = 6;
 

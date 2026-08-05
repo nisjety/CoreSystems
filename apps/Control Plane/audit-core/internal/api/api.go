@@ -269,7 +269,7 @@ func (a *API) summariseUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // ingestAudit accepts a single AuditEvent JSON body from an internal
-// service caller (e.g. the velionv2 BFF) and persists it via the same
+// service caller (e.g. the verevonv2 BFF) and persists it via the same
 // path the NATS subscriber uses. Validation and normalization
 // (occurred_at default, outcome default "ok", required-field checks)
 // are performed by AuditEvent.Validate(), which DecodeAudit already

@@ -15,16 +15,32 @@ import (
 )
 
 const (
-	AttestationType                    = "velion.provider-write-attestation+jwt"
+	AttestationType                    = "verevon.provider-write-attestation+jwt"
 	AuthorizationHumanIntent           = "human_intent"
 	AuthorizationHumanApprovedAIAction = "human_approved_ai_action"
 
-	requiredIssuer   = "conversation-core"
 	requiredAudience = "integration-corev2"
 	maxCompactJWS    = 16 * 1024
 )
 
 var ErrInvalid = errors.New("invalid provider-write attestation")
+
+// supportedIssuers is the closed set of presenter services integration-corev2
+// trusts to sign provider-write attestations. Each entry needs its own
+// registered key (see ParseTrustedKeysJSON) before it can actually verify —
+// this set only bounds which issuer strings are even eligible to register
+// one. conversation-core signs human-approved Inbox/Ticketing sends;
+// model-execution (execution-core, Model Plane) signs human-approved agent
+// tool actions. Adding a new presenter means adding it here AND provisioning
+// its key; neither alone is sufficient.
+var supportedIssuers = map[string]bool{
+	"conversation-core": true,
+	"model-execution":   true,
+}
+
+func isSupportedIssuer(issuer string) bool {
+	return supportedIssuers[issuer]
+}
 
 type Header struct {
 	Algorithm string `json:"alg"`
@@ -91,10 +107,16 @@ type TrustedKey struct {
 }
 
 type Verifier struct {
-	keys map[string]ed25519.PublicKey
+	keys map[string]TrustedKey
 	now  func() time.Time
 }
 
+// ParseTrustedKeysJSON decodes the deployment-supplied trusted-key registry.
+// Key ids are required to be globally unique across issuers (not just within
+// one issuer's keys): Verify looks a compact JWS's signing key up by kid
+// alone, before it has decoded (and so before it can trust) the claimed
+// issuer, so two issuers sharing a kid would let one silently shadow the
+// other's key in the verifier's lookup table.
 func ParseTrustedKeysJSON(raw string) ([]TrustedKey, error) {
 	if strings.TrimSpace(raw) == "" || len(raw) > 64*1024 {
 		return nil, fmt.Errorf("%w: trusted keys are required", ErrInvalid)
@@ -107,9 +129,9 @@ func ParseTrustedKeysJSON(raw string) ([]TrustedKey, error) {
 		return nil, fmt.Errorf("%w: trusted key count must be between 1 and 32", ErrInvalid)
 	}
 	keys := make([]TrustedKey, 0, len(encoded))
-	seen := make(map[string]struct{}, len(encoded))
+	seenKeyIDs := make(map[string]struct{}, len(encoded))
 	for _, candidate := range encoded {
-		if candidate.Issuer != requiredIssuer {
+		if !isSupportedIssuer(candidate.Issuer) {
 			return nil, fmt.Errorf("%w: unsupported issuer", ErrInvalid)
 		}
 		if !validIdentifier(candidate.KeyID, 128) || placeholder(candidate.KeyID) {
@@ -119,11 +141,10 @@ func ParseTrustedKeysJSON(raw string) ([]TrustedKey, error) {
 		if err != nil || len(publicKey) != ed25519.PublicKeySize || allBytesEqual(publicKey) {
 			return nil, fmt.Errorf("%w: invalid Ed25519 public key", ErrInvalid)
 		}
-		identity := candidate.Issuer + "\x00" + candidate.KeyID
-		if _, duplicate := seen[identity]; duplicate {
-			return nil, fmt.Errorf("%w: duplicate issuer and key id", ErrInvalid)
+		if _, duplicate := seenKeyIDs[candidate.KeyID]; duplicate {
+			return nil, fmt.Errorf("%w: duplicate key id", ErrInvalid)
 		}
-		seen[identity] = struct{}{}
+		seenKeyIDs[candidate.KeyID] = struct{}{}
 		keys = append(keys, TrustedKey{
 			Issuer: candidate.Issuer, KeyID: candidate.KeyID, PublicKey: append(ed25519.PublicKey(nil), publicKey...),
 		})
@@ -131,10 +152,16 @@ func ParseTrustedKeysJSON(raw string) ([]TrustedKey, error) {
 	return keys, nil
 }
 
+// NewVerifier indexes by KeyID alone (see ParseTrustedKeysJSON); a caller that
+// builds keys by hand rather than through ParseTrustedKeysJSON is responsible
+// for the same global-kid-uniqueness invariant, since a duplicate here simply
+// keeps the last entry.
 func NewVerifier(keys []TrustedKey, now func() time.Time) *Verifier {
-	keyMap := make(map[string]ed25519.PublicKey, len(keys))
+	keyMap := make(map[string]TrustedKey, len(keys))
 	for _, key := range keys {
-		keyMap[key.Issuer+"\x00"+key.KeyID] = append(ed25519.PublicKey(nil), key.PublicKey...)
+		keyMap[key.KeyID] = TrustedKey{
+			Issuer: key.Issuer, KeyID: key.KeyID, PublicKey: append(ed25519.PublicKey(nil), key.PublicKey...),
+		}
 	}
 	if now == nil {
 		now = time.Now
@@ -158,12 +185,12 @@ func (v *Verifier) Verify(compact string, binding Binding) (Verified, error) {
 	if err := decodeStrictJSON(headerJSON, &header); err != nil || header.Algorithm != "EdDSA" || header.Type != AttestationType || !validIdentifier(header.KeyID, 128) {
 		return Verified{}, ErrInvalid
 	}
-	publicKey, ok := v.keys[requiredIssuer+"\x00"+header.KeyID]
+	trusted, ok := v.keys[header.KeyID]
 	if !ok {
 		return Verified{}, ErrInvalid
 	}
 	signature, err := base64.RawURLEncoding.Strict().DecodeString(segments[2])
-	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(publicKey, []byte(segments[0]+"."+segments[1]), signature) {
+	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(trusted.PublicKey, []byte(segments[0]+"."+segments[1]), signature) {
 		return Verified{}, ErrInvalid
 	}
 	claimsJSON, err := base64.RawURLEncoding.Strict().DecodeString(segments[1])
@@ -176,6 +203,12 @@ func (v *Verifier) Verify(compact string, binding Binding) (Verified, error) {
 	}
 	var claimFields map[string]json.RawMessage
 	if err := json.Unmarshal(claimsJSON, &claimFields); err != nil {
+		return Verified{}, ErrInvalid
+	}
+	// The signing key is trusted for exactly one issuer; a claims payload
+	// signed with this key but claiming a different issuer is rejected here,
+	// before any of its other fields are trusted.
+	if claims.Issuer != trusted.Issuer {
 		return Verified{}, ErrInvalid
 	}
 	if err := validateClaims(claims, claimFields, binding, v.now().UTC()); err != nil {
@@ -220,7 +253,7 @@ func validateClaims(claims Claims, fields map[string]json.RawMessage, binding Bi
 		return fmt.Errorf("%w: caller payload digest mismatch", ErrInvalid)
 	}
 	nowUnix := now.Unix()
-	if claims.Version != 1 || claims.Issuer != requiredIssuer || claims.Audience != requiredAudience ||
+	if claims.Version != 1 || claims.Audience != requiredAudience ||
 		claims.PresenterService != binding.PresenterService || claims.OrganizationID != binding.OrganizationID ||
 		claims.ConnectionID != binding.ConnectionID || claims.ProviderKey != binding.ProviderKey ||
 		claims.Operation != strings.TrimSpace(binding.Operation) || claims.PayloadSHA256 != digest ||

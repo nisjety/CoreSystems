@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS user_audit_outbox (
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (length(event_id) BETWEEN 1 AND 128),
-    CHECK (subject LIKE 'velion.audit.v2.control.user-core.%')
+    CHECK (subject LIKE 'verevon.audit.v2.control.user-core.%')
 );
 
 CREATE INDEX IF NOT EXISTS user_audit_outbox_pending_idx

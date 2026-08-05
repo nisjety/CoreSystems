@@ -1,4 +1,4 @@
-.PHONY: up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell velion-net go-tidy
+.PHONY: up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unverified)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -16,7 +16,7 @@ cp-env:
 # inter-plane-bus is the cross-plane shared network. The historical target name
 # remains for command compatibility and is used only by the explicit connected
 # target; the default Compose file creates a private local network itself.
-velion-net:
+verevon-net:
 	@docker network inspect "$(INTER_PLANE_BUS_NETWORK)" >/dev/null 2>&1 || \
 		(echo "Creating $(INTER_PLANE_BUS_NETWORK) (local stub)..." && docker network create "$(INTER_PLANE_BUS_NETWORK)")
 

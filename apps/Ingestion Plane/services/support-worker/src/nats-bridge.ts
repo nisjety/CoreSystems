@@ -15,7 +15,7 @@ import { slaCountdown } from './workflows/sla';
 import { notifyAgentActivity } from './activities/notify-agent';
 
 const TASK_QUEUE = 'support-task-queue';
-const STREAM = 'VELION_SUPPORT';
+const STREAM = 'VEREVON_SUPPORT';
 const CONSUMER = 'support-worker';
 const sc = StringCodec();
 
@@ -48,8 +48,8 @@ function slaDeadlineMs(event: ZammadTicketEvent): number | null {
 // ─── Stream + consumer bootstrap ───────────────────────────────────────────────
 
 /**
- * Creates the VELION_SUPPORT JetStream stream if it doesn't exist. The durable
- * consumer binds to it (filter `velion.support.>`), so the stream must exist
+ * Creates the VEREVON_SUPPORT JetStream stream if it doesn't exist. The durable
+ * consumer binds to it (filter `verevon.support.>`), so the stream must exist
  * first — otherwise `consumers.add` fails with "stream not found" (404), which
  * crash-loops the worker. Idempotent — safe to call on every startup.
  */
@@ -60,14 +60,14 @@ async function ensureStream(jsm: JetStreamManager): Promise<void> {
   } catch {
     await jsm.streams.add({
       name: STREAM,
-      subjects: ['velion.support.>'],
+      subjects: ['verevon.support.>'],
     });
     console.log(`[nats-bridge] Created JetStream stream "${STREAM}".`);
   }
 }
 
 /**
- * Creates the durable pull consumer on VELION_SUPPORT if it doesn't exist.
+ * Creates the durable pull consumer on VEREVON_SUPPORT if it doesn't exist.
  * Idempotent — safe to call on every startup.
  */
 async function ensureConsumer(jsm: JetStreamManager): Promise<void> {
@@ -78,7 +78,7 @@ async function ensureConsumer(jsm: JetStreamManager): Promise<void> {
     await jsm.consumers.add(STREAM, {
       name: CONSUMER,
       durable_name: CONSUMER,
-      filter_subject: 'velion.support.>',
+      filter_subject: 'verevon.support.>',
       ack_policy: AckPolicy.Explicit,
       deliver_policy: DeliverPolicy.New,
     });
@@ -89,9 +89,9 @@ async function ensureConsumer(jsm: JetStreamManager): Promise<void> {
 // ─── Main bridge ─────────────────────────────────────────────────────────────
 
 /**
- * Connect to NATS with bounded exponential backoff. The `velion-nats`
- * container lives in the Frontend Plane Velion compose stack, which boots
- * after the Ingestion Plane stack — so `getaddrinfo ENOTFOUND velion-nats`
+ * Connect to NATS with bounded exponential backoff. The `verevon-nats`
+ * container lives in the Frontend Plane Verevon compose stack, which boots
+ * after the Ingestion Plane stack — so `getaddrinfo ENOTFOUND verevon-nats`
  * is expected during cold-boot of the full system. This retry loop keeps
  * the worker alive (Temporal connection stays healthy) until NATS comes up,
  * instead of crash-looping the whole process.
@@ -103,16 +103,16 @@ async function connectWithRetry(): Promise<NatsConnection> {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      const connectOpts = config.VELION_NATS_TOKEN
+      const connectOpts = config.VEREVON_NATS_TOKEN
         ? {
-            servers: config.VELION_NATS_URL,
-            token: config.VELION_NATS_TOKEN,
+            servers: config.VEREVON_NATS_URL,
+            token: config.VEREVON_NATS_TOKEN,
             reconnect: true,
             maxReconnectAttempts: -1,
             reconnectTimeWait: 5_000,
           }
         : {
-            servers: config.VELION_NATS_URL,
+            servers: config.VEREVON_NATS_URL,
             reconnect: true,
             maxReconnectAttempts: -1,
             reconnectTimeWait: 5_000,
@@ -134,7 +134,7 @@ export async function startNatsBridge(
   temporalClient: TemporalClient,
 ): Promise<() => Promise<void>> {
   const nc: NatsConnection = await connectWithRetry();
-  console.log('[nats-bridge] Connected to', config.VELION_NATS_URL);
+  console.log('[nats-bridge] Connected to', config.VEREVON_NATS_URL);
 
   const jsm: JetStreamManager = await nc.jetstreamManager();
   const js: JetStreamClient = nc.jetstream();
@@ -179,22 +179,22 @@ async function handleMessage(
 ): Promise<void> {
   const ticketId = event.ticket.id;
 
-  if (subject === 'velion.support.ticket.created') {
+  if (subject === 'verevon.support.ticket.created') {
     await handleTicketCreated(ticketId, event, client);
     return;
   }
 
-  if (subject === 'velion.support.article.added') {
+  if (subject === 'verevon.support.article.added') {
     await handleArticleAdded(ticketId, event, client);
     return;
   }
 
-  if (subject === 'velion.support.ticket.assigned') {
+  if (subject === 'verevon.support.ticket.assigned') {
     await handleTicketAssigned(ticketId, event);
     return;
   }
 
-  // velion.support.ticket.updated and velion.support.sla.breach handled
+  // verevon.support.ticket.updated and verevon.support.sla.breach handled
   // downstream — no extra routing needed here.
 }
 

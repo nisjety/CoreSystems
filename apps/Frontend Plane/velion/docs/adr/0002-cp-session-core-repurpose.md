@@ -2,9 +2,9 @@
 
 - **Status**: accepted
 - **Date**: 2026-05-09
-- **Closes**: velion-gap.md G10 (decision); implementation tracked separately
+- **Closes**: verevon-gap.md G10 (decision); implementation tracked separately
 - **Supersedes**: none
-- **Owners**: Control Plane (auth-core, user-core, org-core, billing-core, session-core), Application Plane (convex-core, notification-core), Frontend Plane (velion)
+- **Owners**: Control Plane (auth-core, user-core, org-core, billing-core, session-core), Application Plane (convex-core, notification-core), Frontend Plane (verevon)
 
 ---
 
@@ -24,7 +24,7 @@ weight: schema duplication, NATS subject overlap, and operational confusion
 (`docker compose logs session-core` requires the operator to remember which
 plane they care about).
 
-Meanwhile, velion has a recurring need for a single endpoint that returns the
+Meanwhile, verevon has a recurring need for a single endpoint that returns the
 full **app-context snapshot** for the calling user — identity + active org +
 entitlements + billing state + onboarding step — so the front-end can route
 post-login, gate features by plan, render quota banners, and subscribe
@@ -49,7 +49,7 @@ CP session-core becomes the canonical **Control Session** authority:
   snapshot.
 - Caches snapshots in `application-redis` keyed by `(user_id, org_id)`, TTL
   ~30s, invalidated on NATS events from any of the four authorities.
-- Mirrors snapshots into Convex (`Application Plane/convex-core`) so velion
+- Mirrors snapshots into Convex (`Application Plane/convex-core`) so verevon
   can subscribe reactively for plan gating and quota banners.
 - Emits `app.session.upserted`, `app.session.org_switched`,
   `app.session.entitlements_changed`, `app.session.quota_warning` for
@@ -59,7 +59,7 @@ CP session-core becomes the canonical **Control Session** authority:
 
 **Pros**:
 - Removes the dual-ownership confusion (one service, one purpose).
-- Gives velion a single endpoint (`GET /api/v1/sessions/current`) to
+- Gives verevon a single endpoint (`GET /api/v1/sessions/current`) to
   replace today's 3-call fan-out.
 - NATS subject space gets cleaner: `session.*` becomes Model Plane only;
   `app.session.*` is Control Plane only.
@@ -93,7 +93,7 @@ the user/org/billing aggregate.
 
 ### Option C — Merge agent-run state into Model Plane session-core directly; delete CP session-core entirely
 
-CP session-core is removed. Velion calls Model Plane session-core for
+CP session-core is removed. Verevon calls Model Plane session-core for
 agent-run data, and the user/org/billing aggregate lives in user-core
 (extended with a session-context endpoint that already exists).
 
@@ -119,7 +119,7 @@ Rationale:
 - Fixes the naming confusion at the root.
 - Centralises the user/org/billing aggregate in one well-placed service
   (Layer 1 of the pyramid, alongside the four authorities it aggregates).
-- Gives velion + convex-core + notification-core a clean dependency
+- Gives verevon + convex-core + notification-core a clean dependency
   surface (one HTTP endpoint, one NATS subject space, one Convex
   projection).
 - Eliminates schema duplication between CP and Model Plane.
@@ -127,7 +127,7 @@ Rationale:
 ## Consequences
 
 **Wins**:
-- Velion's `needsOnboarding()` + active-org resolution + plan gating + quota
+- Verevon's `needsOnboarding()` + active-org resolution + plan gating + quota
   banners all source from one place. Post-login routing becomes a single
   fetch.
 - NATS subject ownership becomes unambiguous: `session.*` belongs to Model
@@ -144,7 +144,7 @@ Rationale:
 - All consumers of CP session-core's agent-run endpoints must be
   re-pointed at Model Plane session-core. Grep-able list:
   `session-core-service:3017/v1/{plans,todos,lineage,sessions/.../approvals}`.
-- Velion's existing usage of `/me/session-context` (chat session-store,
+- Verevon's existing usage of `/me/session-context` (chat session-store,
   active-org helper, profile hooks) must migrate to the new
   `/api/v1/sessions/current` once it lands. Backwards-compat is a 1-line
   forward in user-core during the transition.
@@ -159,7 +159,7 @@ Tracked as a multi-PR migration. **Order matters** — each step must be
 green before the next.
 
 1. **Stand up the new service surface** behind a feature flag:
-   - `cp-session-core` (renamed, new port `:3013` per velion-gap.md §2.2)
+   - `cp-session-core` (renamed, new port `:3013` per verevon-gap.md §2.2)
    - HTTP routes:
      - `GET /api/v1/sessions/current` (uses X-User-Id from internal proxy)
      - `POST /api/v1/sessions/refresh` (cache-bust hook for plan upgrade,
@@ -192,7 +192,7 @@ green before the next.
    `app.session.entitlements_changed` and `app.session.quota_warning` for
    email + Convex toast delivery.
 
-6. **Migrate velion** server routes that need plan/quota context to
+6. **Migrate verevon** server routes that need plan/quota context to
    `/api/v1/sessions/current`. Existing `/api/user/me/session-context`
    stays as a deprecated alias for one release cycle.
 
@@ -214,7 +214,7 @@ green before the next.
 9. **Documentation**:
    - Update `apps/Control Plane/CONTROL_PLANE_ARCHITECTURE.md` (currently
      says session-core owns plans/todos/lineage — that becomes Model Plane).
-   - Update `velion-gap.md` §2 (Tri-Plane Session Model) — remove the "(planned repurpose)" qualifier.
+   - Update `verevon-gap.md` §2 (Tri-Plane Session Model) — remove the "(planned repurpose)" qualifier.
 
 ## Implementation notes
 
@@ -222,12 +222,12 @@ green before the next.
   service. Do not rename. The path is what people grep for, and renaming
   breaks too many env defaults across the monorepo. The semantic meaning
   shifts; the path name stays.
-- **Port**: `:3013` is the proposed new HTTP port per velion-gap.md §2.2.
+- **Port**: `:3013` is the proposed new HTTP port per verevon-gap.md §2.2.
   Today CP session-core listens on `:3017`. Either renumber or keep `:3017`
   for the new service (less churn). Recommend keeping `:3017`.
-- **Feature flag**: `CONTROL_SESSION_AUTHORITY_ENABLED=true` env on velion
-  + the new service. Off → velion uses the legacy `/me/session-context`
-  path; on → velion uses `/api/v1/sessions/current`.
+- **Feature flag**: `CONTROL_SESSION_AUTHORITY_ENABLED=true` env on verevon
+  + the new service. Off → verevon uses the legacy `/me/session-context`
+  path; on → verevon uses `/api/v1/sessions/current`.
 - **Don't break correlation IDs**: every new endpoint must carry the
   `correlationMiddleware` from G15 so traces continue working.
 - **Test gate**: 80% coverage on the new aggregator; the legacy fallback
@@ -235,8 +235,8 @@ green before the next.
 
 ## References
 
-- `velion-gap.md` §2.2 Repurposing CP `session-core`
-- `velion-gap.md` G10 entry
+- `verevon-gap.md` §2.2 Repurposing CP `session-core`
+- `verevon-gap.md` G10 entry
 - `apps/Control Plane/CONTROL_PLANE_ARCHITECTURE.md`
 - `apps/Application Plane/APPLICATION_PLANE_ARCHITECTURE.md`
 - `apps/Model Plane/rust/services/session-core/src/main.rs` (canonical

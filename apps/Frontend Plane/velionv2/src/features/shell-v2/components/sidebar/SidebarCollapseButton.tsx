@@ -10,7 +10,7 @@ export function SidebarCollapseButton({ onCollapse }: { onCollapse: () => void }
       type="button"
       onClick={onCollapse}
       className={cn(
-        "velion-sidebar-collapse-button",
+        "verevon-sidebar-collapse-button",
         sidebarFocusClass,
       )}
       aria-label="Collapse sidebar"

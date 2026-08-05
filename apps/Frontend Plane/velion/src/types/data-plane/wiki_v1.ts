@@ -97,7 +97,7 @@ export const listMaintenanceIssuesResponseSchema = z.object({
 });
 export type ListMaintenanceIssuesResponse = z.infer<typeof listMaintenanceIssuesResponseSchema>;
 
-// ─── velion UI-facing aggregates ──────────────────────────────────────────
+// ─── verevon UI-facing aggregates ──────────────────────────────────────────
 
 /**
  * Light row shape used by the wiki page-tree sidebar.

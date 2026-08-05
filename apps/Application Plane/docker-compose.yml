@@ -1,966 +1,1028 @@
 name: application-plane
 
 x-service-hardening: &service-hardening
-  init: true
-  security_opt:
-    - no-new-privileges:true
-  cap_drop:
-    - ALL
+    init: true
+    security_opt:
+        - no-new-privileges:true
+    cap_drop:
+        - ALL
 
 x-build-metadata: &build-metadata
-  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
-  BUILD_DATE: ${BUILD_DATE:-unknown}
+    SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+    BUILD_DATE: ${BUILD_DATE:-unknown}
 
 services:
-  # ============================================================================
-  # 1) Convex Backend - runtime + sqlite storage
-  # ============================================================================
+    # ============================================================================
+    # 1) Convex Backend - runtime + sqlite storage
+    # ============================================================================
 
-  convex-backend:
-    image: ghcr.io/get-convex/convex-backend@sha256:104b8bc70e29b31fa4a57551596090bfc9eedc3d1f27fd4b8cd8d0e782b9b070
-    container_name: convex-backend
-    restart: unless-stopped
-    init: true
-    stop_signal: SIGTERM
-    stop_grace_period: 20s
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3210:3210"  # Backend API
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3211:3211"  # HTTP Actions
-    volumes:
-      - convex-data:/data
-      - ./convex-core/convex:/app/convex:ro
-    environment:
-      # Instance configuration
-      CONVEX_INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
-      CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
-      INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
-      INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
+    convex-backend:
+        image: ghcr.io/get-convex/convex-backend@sha256:104b8bc70e29b31fa4a57551596090bfc9eedc3d1f27fd4b8cd8d0e782b9b070
+        container_name: convex-backend
+        restart: unless-stopped
+        init: true
+        stop_signal: SIGTERM
+        stop_grace_period: 20s
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3210:3210" # Backend API
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3211:3211" # HTTP Actions
+        volumes:
+            - convex-data:/data
+            - ./convex-core/convex:/app/convex:ro
+        environment:
+            # Instance configuration
+            CONVEX_INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
+            CONVEX_INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
+            INSTANCE_SECRET: ${CONVEX_INSTANCE_SECRET:?CONVEX_INSTANCE_SECRET must be set}
+            INSTANCE_NAME: ${CONVEX_INSTANCE_NAME:-coresystem-local}
 
-      # Database configuration
-      CONVEX_STORAGE_TYPE: sqlite
-      CONVEX_SQLITE_PATH: /data/convex.db
+            # Database configuration
+            CONVEX_STORAGE_TYPE: sqlite
+            CONVEX_SQLITE_PATH: /data/convex.db
 
-      # Service URLs (cross-plane via inter-plane-bus)
-      AI_CORE_URL: ${AI_CORE_URL:-http://model-gateway:8080}
-      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
-      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
-      AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-core:3011}
+            # Service URLs (cross-plane via inter-plane-bus)
+            AI_CORE_URL: ${AI_CORE_URL:-http://model-gateway:8080}
+            MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
+            ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+            AUTH_SERVER_URL: ${AUTH_SERVER_URL:-http://auth-core:3011}
 
-      # Auth configuration
-      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
-      JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
+            # Auth configuration
+            JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+            JWT_ISSUER: ${JWT_ISSUER:-auth.coresystem.local}
 
-      # Logging
-      RUST_LOG: ${RUST_LOG:-info}
-      CONVEX_LOG_FORMAT: json
-      CONVEX_DISABLE_BEACON: "true"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "1.0"
-        reservations:
-          memory: 256M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:3210/version"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
+            # Logging
+            RUST_LOG: ${RUST_LOG:-info}
+            CONVEX_LOG_FORMAT: json
+            CONVEX_DISABLE_BEACON: "true"
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 512M
+                    cpus: "1.0"
+                reservations:
+                    memory: 256M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test: ["CMD", "curl", "-f", "http://127.0.0.1:3210/version"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+            start_period: 30s
 
-  # ============================================================================
-  # 2) Convex Dashboard - UI
-  # ============================================================================
+    # ============================================================================
+    # 2) Convex Dashboard - UI
+    # ============================================================================
 
-  convex-dashboard:
-    image: ghcr.io/get-convex/convex-dashboard@sha256:60b04b339d6cd6623057b03e5275329a20011051907ec5e689a38a401cfdc409
-    container_name: convex-dashboard
-    restart: unless-stopped
-    init: true
-    stop_signal: SIGTERM
-    stop_grace_period: 15s
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6791:6791"
-    environment:
-      CONVEX_BACKEND_URL: http://convex-backend:3210
-      NODE_ENV: ${NODE_ENV:-development}
-    networks:
-      - app-net
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      convex-backend:
-        condition: service_healthy
+    convex-dashboard:
+        image: ghcr.io/get-convex/convex-dashboard@sha256:60b04b339d6cd6623057b03e5275329a20011051907ec5e689a38a401cfdc409
+        container_name: convex-dashboard
+        restart: unless-stopped
+        init: true
+        stop_signal: SIGTERM
+        stop_grace_period: 15s
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6791:6791"
+        environment:
+            CONVEX_BACKEND_URL: http://convex-backend:3210
+            NODE_ENV: ${NODE_ENV:-development}
+        networks:
+            - app-net
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            convex-backend:
+                condition: service_healthy
 
-  # ============================================================================
-  # 3) Convex schema deployer/watcher
-  # ============================================================================
+    # ============================================================================
+    # 3) Convex schema deployer/watcher
+    # ============================================================================
 
-  convex-gateway:
-    build:
-      context: ./convex-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: convex-gateway
-    restart: unless-stopped
-    init: true
-    stop_signal: SIGTERM
-    stop_grace_period: 15s
-    env_file:
-      - ./convex-core/.env.local
-    environment:
-      CONVEX_BACKEND_URL: http://convex-backend:3210
-      CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
-      CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
-      CONVEX_RECONCILIATION_KEY: ${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}
-    networks:
-      - app-net
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'convex dev' >/dev/null && wget --quiet --tries=1 -O /dev/null http://convex-backend:3210/version || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
-        reservations:
-          memory: 128M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      convex-backend:
-        condition: service_healthy
+    convex-gateway:
+        build:
+            context: ./convex-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: convex-gateway
+        restart: unless-stopped
+        init: true
+        stop_signal: SIGTERM
+        stop_grace_period: 15s
+        env_file:
+            - ./convex-core/.env.local
+        environment:
+            CONVEX_BACKEND_URL: http://convex-backend:3210
+            CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
+            CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
+            CONVEX_RECONCILIATION_KEY: ${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}
+        networks:
+            - app-net
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "pgrep -f 'convex dev' >/dev/null && wget --quiet --tries=1 -O /dev/null http://convex-backend:3210/version || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 60s
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+                reservations:
+                    memory: 128M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            convex-backend:
+                condition: service_healthy
 
-  # ============================================================================
-  # 4) Convex Subscriber - sync fra Control Plane NATS
-  # ============================================================================
+    # ============================================================================
+    # 4) Convex Subscriber - sync fra Control Plane NATS
+    # ============================================================================
 
-  convex-subscriber:
-    build:
-      context: ./convex-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: convex-subscriber
-    restart: unless-stopped
-    init: true
-    stop_signal: SIGTERM
-    stop_grace_period: 15s
-    command: ["node", "nats-subscriber.js"]
-    healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'nats-subscriber' || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    env_file:
-      - ./convex-core/.env.local
-    environment:
-      # Auth-canonical Control projections use a scoped, pre-provisioned
-      # consumer on the Control shared broker.
-      CONVEX_BACKEND_URL: http://convex-backend:3210
-      CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
-      NATS_URL: nats://control-shared-nats:4222
-      NATS_USER: application-convex-control
-      NATS_PASSWORD: ${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:?APPLICATION_CONVEX_CONTROL_NATS_PASSWORD must be set}
-      # W4-2 (ui-ux-velion-gap.md §13): Model Plane orchestrator-core
-      # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
-      # (model-nats). The subscriber dual-connects here so the
-      # agent run lifecycle mirror actually receives events in prod.
-      # `model-nats` is the stable alias on `inter-plane-bus`.
-      MODEL_PLANE_NATS_URL: nats://model-nats:4222
-      MODEL_PLANE_NATS_USER: application-convex-model
-      MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD must be set}
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      nats:
-        condition: service_healthy
-      convex-backend:
-        condition: service_healthy
+    convex-subscriber:
+        build:
+            context: ./convex-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: convex-subscriber
+        restart: unless-stopped
+        init: true
+        stop_signal: SIGTERM
+        stop_grace_period: 15s
+        command: ["node", "nats-subscriber.js"]
+        healthcheck:
+            test: ["CMD-SHELL", "pgrep -f 'nats-subscriber' || exit 1"]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 30s
+        env_file:
+            - ./convex-core/.env.local
+        environment:
+            # Auth-canonical Control projections use a scoped, pre-provisioned
+            # consumer on the Control shared broker.
+            CONVEX_BACKEND_URL: http://convex-backend:3210
+            CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
+            NATS_URL: nats://control-shared-nats:4222
+            NATS_USER: application-convex-control
+            NATS_PASSWORD: ${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:?APPLICATION_CONVEX_CONTROL_NATS_PASSWORD must be set}
+            # W4-2 (ui-ux-verevon-gap.md §13): Model Plane orchestrator-core
+            # publishes `mp.v1.run.*.event` to its own isolated NATS cluster
+            # (model-nats). The subscriber dual-connects here so the
+            # agent run lifecycle mirror actually receives events in prod.
+            # `model-nats` is the stable alias on `inter-plane-bus`.
+            MODEL_PLANE_NATS_URL: nats://model-nats:4222
+            MODEL_PLANE_NATS_USER: application-convex-model
+            MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_CONVEX_MODEL_NATS_PASSWORD:?APPLICATION_CONVEX_MODEL_NATS_PASSWORD must be set}
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            nats:
+                condition: service_healthy
+            convex-backend:
+                condition: service_healthy
 
-  # velionv3 and the Rust onboarding gateway now live in
-  # `apps/Frontend Plane/velionv3/docker-compose.yml`.
+    # verevonv3 and the Rust onboarding gateway now live in
+    # `apps/Frontend Plane/verevonv3/docker-compose.yml`.
 
-  # ============================================================================
-  # 6) AFFiNE Core — First-party planner workspace boundary
-  # ============================================================================
+    # ============================================================================
+    # 6) AFFiNE Core — First-party planner workspace boundary
+    # ============================================================================
 
-  # 7) AFFiNE Runtime — internal vendor runtime
-  # ============================================================================
+    # 7) AFFiNE Runtime — internal vendor runtime
+    # ============================================================================
 
-  affine-runtime:
-    image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
-    container_name: affine-runtime
-    profiles: ["affine"]
-    restart: unless-stopped
-    init: true
-    stop_signal: SIGTERM
-    stop_grace_period: 20s
-    depends_on:
-      application-postgres:
-        condition: service_healthy
-      application-dragonfly:
-        condition: service_healthy
-      affine-runtime-migration:
-        condition: service_completed_successfully
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:47810:3010"
-    environment:
-      NODE_ENV: production
-      DEPLOYMENT_TYPE: selfhosted
-      AFFINE_SERVER_HTTPS: "false"
-      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@application-postgres:5432/affine
-      REDIS_SERVER_HOST: application-dragonfly
-      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}
-      AFFINE_INDEXER_ENABLED: "false"
-    volumes:
-      - affine-uploads:/root/.affine/storage
-      - affine-config:/root/.affine/config
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "1.0"
-        reservations:
-          memory: 256M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          node -e "fetch('http://127.0.0.1:3010/info').then((response) =>
-          process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
+    affine-runtime:
+        image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
+        container_name: affine-runtime
+        profiles: ["affine"]
+        restart: unless-stopped
+        init: true
+        stop_signal: SIGTERM
+        stop_grace_period: 20s
+        depends_on:
+            application-postgres:
+                condition: service_healthy
+            application-dragonfly:
+                condition: service_healthy
+            affine-runtime-migration:
+                condition: service_completed_successfully
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:47810:3010"
+        environment:
+            NODE_ENV: production
+            DEPLOYMENT_TYPE: selfhosted
+            AFFINE_SERVER_HTTPS: "false"
+            DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@application-postgres:5432/affine
+            REDIS_SERVER_HOST: application-dragonfly
+            REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}
+            AFFINE_INDEXER_ENABLED: "false"
+        volumes:
+            - affine-uploads:/root/.affine/storage
+            - affine-config:/root/.affine/config
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 512M
+                    cpus: "1.0"
+                reservations:
+                    memory: 256M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - >-
+                    node -e "fetch('http://127.0.0.1:3010/info').then((response) =>
+                    process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+            interval: 10s
+            timeout: 5s
+            retries: 12
+            start_period: 20s
 
-  affine-runtime-migration:
-    image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
-    container_name: affine-runtime-migration
-    profiles: ["affine"]
-    command: ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
-    depends_on:
-      application-postgres:
-        condition: service_healthy
-      application-dragonfly:
-        condition: service_healthy
-    environment:
-      NODE_ENV: production
-      DEPLOYMENT_TYPE: selfhosted
-      AFFINE_SERVER_HTTPS: "false"
-      DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@application-postgres:5432/affine
-      REDIS_SERVER_HOST: application-dragonfly
-      REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}
-      AFFINE_INDEXER_ENABLED: "false"
-    volumes:
-      - affine-uploads:/root/.affine/storage
-      - affine-config:/root/.affine/config
-    networks:
-      - app-net
-      - inter-plane-bus
+    affine-runtime-migration:
+        image: ghcr.io/toeverything/affine@sha256:74baac632031260f8c1c8ba34d9734b5addba0b8e72d6d9b9721e39f77738e94
+        container_name: affine-runtime-migration
+        profiles: ["affine"]
+        command: ["sh", "-c", "node ./scripts/self-host-predeploy.js"]
+        depends_on:
+            application-postgres:
+                condition: service_healthy
+            application-dragonfly:
+                condition: service_healthy
+        environment:
+            NODE_ENV: production
+            DEPLOYMENT_TYPE: selfhosted
+            AFFINE_SERVER_HTTPS: "false"
+            DATABASE_URL: postgresql://affine:${AFFINE_POSTGRES_PASSWORD:?AFFINE_POSTGRES_PASSWORD must be set}@application-postgres:5432/affine
+            REDIS_SERVER_HOST: application-dragonfly
+            REDIS_SERVER_PASSWORD: ${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}
+            AFFINE_INDEXER_ENABLED: "false"
+        volumes:
+            - affine-uploads:/root/.affine/storage
+            - affine-config:/root/.affine/config
+        networks:
+            - app-net
+            - inter-plane-bus
 
-  # ============================================================================
-  # 8) Notification Core — First-party notification boundary
-  # Persists request state, emits lifecycle events, and hands off to a hidden
-  # Novu-compatible runtime on app-net.
-  # ============================================================================
+    # ============================================================================
+    # 8) Notification Core — First-party notification boundary
+    # Persists request state, emits lifecycle events, and hands off to a hidden
+    # Novu-compatible runtime on app-net.
+    # ============================================================================
 
-  application-postgres:
-    image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
-    container_name: application-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}
-      POSTGRES_PASSWORD: ${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}
-      POSTGRES_DB: ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=200"]
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:9540:5432"
-    volumes:
-      - application-postgres-data:/var/lib/postgresql/data
-    networks:
-      - app-net
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "1.0"
-        reservations:
-          memory: 256M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}} -d ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    application-postgres:
+        image: postgres:16.14-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        container_name: application-postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}
+            POSTGRES_PASSWORD: ${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}
+            POSTGRES_DB: ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+        command:
+            [
+                "postgres",
+                "-c",
+                "shared_buffers=256MB",
+                "-c",
+                "max_connections=200",
+            ]
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:9540:5432"
+        volumes:
+            - application-postgres-data:/var/lib/postgresql/data
+        networks:
+            - app-net
+        deploy:
+            resources:
+                limits:
+                    memory: 512M
+                    cpus: "1.0"
+                reservations:
+                    memory: 256M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "pg_isready -U ${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}} -d ${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
 
-  application-dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0@sha256:84b1009aee0b68327758bce8e99ed514f782d713353acc46caf5738feaa481d6
-    container_name: application-dragonfly
-    restart: unless-stopped
-    command:
-      - "--requirepass=${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}"
-      - "--cache_mode=true"
-      - "--maxmemory=256mb"
-      - "--proactor_threads=1"
-      - "--dir=/data"
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6480:6379"
-    volumes:
-      - application-dragonfly-data:/data
-    networks:
-      - app-net
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-          cpus: "0.5"
-        reservations:
-          memory: 128M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    application-dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0@sha256:84b1009aee0b68327758bce8e99ed514f782d713353acc46caf5738feaa481d6
+        container_name: application-dragonfly
+        restart: unless-stopped
+        command:
+            - "--requirepass=${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}"
+            - "--cache_mode=true"
+            - "--maxmemory=256mb"
+            - "--proactor_threads=1"
+            - "--dir=/data"
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:6480:6379"
+        volumes:
+            - application-dragonfly-data:/data
+        networks:
+            - app-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.5"
+                reservations:
+                    memory: 128M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "redis-cli",
+                    "-a",
+                    "${APPLICATION_PLANE_DRAGONFLY_PASSWORD:?APPLICATION_PLANE_DRAGONFLY_PASSWORD must be set}",
+                    "ping",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  conversation-core-go:
-    env_file:
-      - ./conversation-core/.env
-    <<: *service-hardening
-    build:
-      context: ./conversation-core/conversation-core-go
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: conversation-core-go
-    restart: unless-stopped
-    environment:
-      PORT: "3160"
-      SERVICE_NAME: conversation-core-go
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      CONVERSATION_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
-      CONVERSATION_CORE_INGEST_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must be set for signed ingest delegation}
-      VELION_NATS_URL: nats://application-nats:4222
-      NATS_USER: application-conversation
-      NATS_PASSWORD: ${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD must be set}
-      # Ingestion Plane outbound client: draft.reply sends (task #22) and the
-      # webhook_received inbound consumer (task #24) both need this to reach
-      # integration-corev2 across the shared inter-plane-bus network. The
-      # durable key is restricted to the internal webhook-event lookup.
-      INTEGRATION_BASE_URL: ${INTEGRATION_BASE_URL:-http://integration-api:3026}
-      INTEGRATION_INTERNAL_API_KEY: ${INTEGRATION_INTERNAL_API_KEY:?INTEGRATION_INTERNAL_API_KEY must be explicitly provisioned for integration-corev2}
-      # Tenant action/list routes reject the legacy key above. conversation-core
-      # exchanges this distinct durable identity for an org-bound, short-lived
-      # aud=ingestion token and sends only Authorization: Bearer downstream.
-      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
-      CONVERSATION_INTEGRATION_SERVICE_ID: ${CONVERSATION_INTEGRATION_SERVICE_ID:-conversation-core}
-      CONVERSATION_INTEGRATION_SERVICE_API_KEY: ${CONVERSATION_INTEGRATION_SERVICE_API_KEY:?CONVERSATION_INTEGRATION_SERVICE_API_KEY must be provisioned in the Auth Core service-principal registry}
-      # Effect-bound Ed25519 proof required by integration-corev2 for every
-      # provider mutation. Only the matching public key leaves this service.
-      CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
-      CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID must match the integration-corev2 verifier key ring}
-      # Cross-plane GDPR org-erasure consumer: a SECOND, narrowly-scoped NATS
-      # identity (conversation-core-gdpr) on the shared Control-Plane broker,
-      # kept distinct from VELION_NATS_URL/NATS_USER/NATS_PASSWORD above
-      # (application-nats, the plane-local broker). Deliberately NOT named
-      # NATS_SHARED_URL — config.go's NATSURL fallback chain already treats
-      # that literal name as an alternate plane-local broker URL.
-      CONVERSATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
-      CONVERSATION_GDPR_SHARED_NATS_USER: conversation-core-gdpr
-      CONVERSATION_GDPR_SHARED_NATS_PASSWORD: ${CONVERSATION_CORE_GDPR_NATS_PASSWORD:?CONVERSATION_CORE_GDPR_NATS_PASSWORD is required}
-    depends_on:
-      jetstream-provisioner:
-        condition: service_completed_successfully
-      nats:
-        condition: service_healthy
-      application-postgres:
-        condition: service_healthy
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${CONVERSATION_CORE_GO_HOST_PORT:-3160}:3160"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3160/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    conversation-core-go:
+        env_file:
+            - ./conversation-core/.env
+        <<: *service-hardening
+        build:
+            context: ./conversation-core/conversation-core-go
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: conversation-core-go
+        restart: unless-stopped
+        environment:
+            PORT: "3160"
+            SERVICE_NAME: conversation-core-go
+            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            CONVERSATION_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
+            CONVERSATION_CORE_INGEST_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must be set for signed ingest delegation}
+            VEREVON_NATS_URL: nats://application-nats:4222
+            NATS_USER: application-conversation
+            NATS_PASSWORD: ${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD must be set}
+            # Ingestion Plane outbound client: draft.reply sends (task #22) and the
+            # webhook_received inbound consumer (task #24) both need this to reach
+            # integration-corev2 across the shared inter-plane-bus network. The
+            # durable key is restricted to the internal webhook-event lookup.
+            INTEGRATION_BASE_URL: ${INTEGRATION_BASE_URL:-http://integration-api:3026}
+            INTEGRATION_INTERNAL_API_KEY: ${INTEGRATION_INTERNAL_API_KEY:?INTEGRATION_INTERNAL_API_KEY must be explicitly provisioned for integration-corev2}
+            # Tenant action/list routes reject the legacy key above. conversation-core
+            # exchanges this distinct durable identity for an org-bound, short-lived
+            # aud=ingestion token and sends only Authorization: Bearer downstream.
+            AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+            CONVERSATION_INTEGRATION_SERVICE_ID: ${CONVERSATION_INTEGRATION_SERVICE_ID:-conversation-core}
+            CONVERSATION_INTEGRATION_SERVICE_API_KEY: ${CONVERSATION_INTEGRATION_SERVICE_API_KEY:?CONVERSATION_INTEGRATION_SERVICE_API_KEY must be provisioned in the Auth Core service-principal registry}
+            # Effect-bound Ed25519 proof required by integration-corev2 for every
+            # provider mutation. Only the matching public key leaves this service.
+            CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
+            CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID must match the integration-corev2 verifier key ring}
+            # Cross-plane privacy consumers: a SECOND, narrowly-scoped NATS
+            # identity (conversation-core-gdpr) on the shared Control-Plane broker
+            # binds the hard org-erasure and draft-only ZDR cleanup consumers,
+            # kept distinct from VEREVON_NATS_URL/NATS_USER/NATS_PASSWORD above
+            # (application-nats, the plane-local broker). Deliberately NOT named
+            # NATS_SHARED_URL — config.go's NATSURL fallback chain already treats
+            # that literal name as an alternate plane-local broker URL.
+            CONVERSATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
+            CONVERSATION_GDPR_SHARED_NATS_USER: conversation-core-gdpr
+            CONVERSATION_GDPR_SHARED_NATS_PASSWORD: ${CONVERSATION_CORE_GDPR_NATS_PASSWORD:?CONVERSATION_CORE_GDPR_NATS_PASSWORD is required}
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            application-postgres:
+                condition: service_healthy
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${CONVERSATION_CORE_GO_HOST_PORT:-3160}:3160"
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3160/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  conversation-ingest-rs:
-    env_file:
-      - ./conversation-core/.env
-    <<: *service-hardening
-    build:
-      context: ./conversation-core/conversation-ingest-rs
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: conversation-ingest-rs
-    restart: unless-stopped
-    environment:
-      PORT: "3161"
-      CONVERSATION_CORE_URL: http://conversation-core-go:3160
-      # Dedicated caller credentials. The inbound token is shared only with the
-      # integration email worker; the outbound token maps to conversation-core's
-      # conversation-ingest principal.
-      CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN: ${CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN:?CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must be set for email-worker delegation}
-      CONVERSATION_CORE_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must match conversation-core}
-      RUST_LOG: ${RUST_LOG:-info}
-    depends_on:
-      conversation-core-go:
-        condition: service_healthy
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${CONVERSATION_INGEST_RS_HOST_PORT:-3161}:3161"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3161/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    conversation-ingest-rs:
+        env_file:
+            - ./conversation-core/.env
+        <<: *service-hardening
+        build:
+            context: ./conversation-core/conversation-ingest-rs
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: conversation-ingest-rs
+        restart: unless-stopped
+        environment:
+            PORT: "3161"
+            CONVERSATION_CORE_URL: http://conversation-core-go:3160
+            # Dedicated caller credentials. The inbound token is shared only with the
+            # integration email worker; the outbound token maps to conversation-core's
+            # conversation-ingest principal.
+            CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN: ${CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN:?CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN must be set for email-worker delegation}
+            CONVERSATION_CORE_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must match conversation-core}
+            RUST_LOG: ${RUST_LOG:-info}
+        depends_on:
+            conversation-core-go:
+                condition: service_healthy
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${CONVERSATION_INGEST_RS_HOST_PORT:-3161}:3161"
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3161/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  social-core:
-    env_file:
-      - ./social-core/.env
-    <<: *service-hardening
-    build:
-      context: ./social-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: social-core
-    restart: unless-stopped
-    environment:
-      PORT: "3162"
-      SERVICE_NAME: social-core
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-      VELION_NATS_URL: nats://application-nats:4222
-      NATS_USER: application-social
-      NATS_PASSWORD: ${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD must be set}
-      SOCIAL_PUBLISH_WORKER_ENABLED: ${SOCIAL_PUBLISH_WORKER_ENABLED:-true}
-      SOCIAL_PUBLISH_WORKER_POLL_INTERVAL: ${SOCIAL_PUBLISH_WORKER_POLL_INTERVAL:-5s}
-      SOCIAL_PUBLISH_WORKER_BATCH_SIZE: ${SOCIAL_PUBLISH_WORKER_BATCH_SIZE:-10}
-      LINKEDIN_API_BASE_URL: ${LINKEDIN_API_BASE_URL:-https://api.linkedin.com}
-      LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202606}
-      X_API_BASE_URL: ${X_API_BASE_URL:-https://api.x.com}
-      INSTAGRAM_GRAPH_API_BASE_URL: ${INSTAGRAM_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
-      FACEBOOK_GRAPH_API_BASE_URL: ${FACEBOOK_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
-      TIKTOK_API_BASE_URL: ${TIKTOK_API_BASE_URL:-https://open.tiktokapis.com}
-      SNAPCHAT_API_BASE_URL: ${SNAPCHAT_API_BASE_URL:-https://adsapi.snapchat.com/v1}
-    depends_on:
-      jetstream-provisioner:
-        condition: service_completed_successfully
-      nats:
-        condition: service_healthy
-      application-postgres:
-        condition: service_healthy
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${SOCIAL_CORE_HOST_PORT:-3162}:3162"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3162/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    social-core:
+        env_file:
+            - ./social-core/.env
+        <<: *service-hardening
+        build:
+            context: ./social-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: social-core
+        restart: unless-stopped
+        environment:
+            PORT: "3162"
+            SERVICE_NAME: social-core
+            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+            INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+            VEREVON_NATS_URL: nats://application-nats:4222
+            NATS_USER: application-social
+            NATS_PASSWORD: ${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD must be set}
+            SOCIAL_PUBLISH_WORKER_ENABLED: ${SOCIAL_PUBLISH_WORKER_ENABLED:-true}
+            SOCIAL_PUBLISH_WORKER_POLL_INTERVAL: ${SOCIAL_PUBLISH_WORKER_POLL_INTERVAL:-5s}
+            SOCIAL_PUBLISH_WORKER_BATCH_SIZE: ${SOCIAL_PUBLISH_WORKER_BATCH_SIZE:-10}
+            LINKEDIN_API_BASE_URL: ${LINKEDIN_API_BASE_URL:-https://api.linkedin.com}
+            LINKEDIN_API_VERSION: ${LINKEDIN_API_VERSION:-202606}
+            X_API_BASE_URL: ${X_API_BASE_URL:-https://api.x.com}
+            INSTAGRAM_GRAPH_API_BASE_URL: ${INSTAGRAM_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
+            FACEBOOK_GRAPH_API_BASE_URL: ${FACEBOOK_GRAPH_API_BASE_URL:-https://graph.facebook.com/v23.0}
+            TIKTOK_API_BASE_URL: ${TIKTOK_API_BASE_URL:-https://open.tiktokapis.com}
+            SNAPCHAT_API_BASE_URL: ${SNAPCHAT_API_BASE_URL:-https://adsapi.snapchat.com/v1}
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            application-postgres:
+                condition: service_healthy
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${SOCIAL_CORE_HOST_PORT:-3162}:3162"
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3162/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  insight-core:
-    env_file:
-      - ./insight-core/.env
-    <<: *service-hardening
-    build:
-      context: ./insight-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: insight-core
-    restart: unless-stopped
-    # W3 Market-Intelligence service. Durable metric store on application-postgres
-    # (DATABASE_URL) + a JetStream metric subscriber on the plane-local broker.
-    # The connector registry remains in-memory; do NOT scale this beyond one
-    # instance while that registry is process-local (container_name pins it).
-    environment:
-      PORT: "3163"
-      SERVICE_NAME: insight-core
-      # Must equal the gateway's forwarded x-internal-api-key (config.go hard-fails
-      # if empty). Resolves from the shared ${INTERNAL_API_KEY} like the other cores.
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-      # Explicit (config.go hard-fails on empty) — audience for connector token leases.
-      INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE: ${INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE:-insight-core}
-      # W3 (PR-3): durable metric store + real-event subscriber. Mirrors leads-core.
-      # Phase 4 PR-4: migration 002 creates a dedicated `insight_core` schema on
-      # this shared application-postgres (queries are schema-qualified), so the
-      # metric store never collides with the other cores sharing the database.
-      # NOTE (infra): the live application-postgres-data volume may have been
-      # initialized under the legacy NOTIFICATION_* creds; reconcile
-      # APPLICATION_PLANE_DB_USER/PASSWORD/NAME with the volume before this
-      # DATABASE_URL authenticates (Postgres honors POSTGRES_* only at first init).
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      # Subscribe to the SAME bus conversation-core publishes velion.application.> to
-      # (its config resolves VELION_NATS_URL first), so the metric subscriber binds
-      # the existing JetStream stream rather than a divergent one.
-      NATS_URL: nats://application-nats:4222
-      NATS_USER: application-insight
-      NATS_PASSWORD: ${APPLICATION_INSIGHT_NATS_PASSWORD:?APPLICATION_INSIGHT_NATS_PASSWORD must be set}
-      # Phase 7 B12 — the model-plane-agents producer leg. The Model Plane runs
-      # on its own isolated NATS cluster; the agent subscriber dual-connects via
-      # the inter-plane-bus alias and records run/tool/approval lifecycle events
-      # (mp.v1.run.*.event) as surface=agents metrics. Without this the agents
-      # surface stays empty even when agent runs are executing.
-      MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-nats:4222}
-      MODEL_PLANE_NATS_USER: application-insight-model
-      MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD must be set}
-      # Task #28: metrics.snapshotted carries only a summary count; the metric
-      # subscriber fetches the real per-metric values from social-core's
-      # GET /api/v1/social/metrics using this URL + the shared internal key.
-      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INSIGHT_CORE_HOST_PORT:-3163}:3163"
-    depends_on:
-      jetstream-provisioner:
-        condition: service_completed_successfully
-      nats:
-        condition: service_healthy
-      application-postgres:
-        condition: service_healthy
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 32M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3163/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    insight-core:
+        env_file:
+            - ./insight-core/.env
+        <<: *service-hardening
+        build:
+            context: ./insight-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: insight-core
+        restart: unless-stopped
+        # W3 Market-Intelligence service. Durable metric store on application-postgres
+        # (DATABASE_URL) + a JetStream metric subscriber on the plane-local broker.
+        # The connector registry remains in-memory; do NOT scale this beyond one
+        # instance while that registry is process-local (container_name pins it).
+        environment:
+            PORT: "3163"
+            SERVICE_NAME: insight-core
+            # Must equal the gateway's forwarded x-internal-api-key (config.go hard-fails
+            # if empty). Resolves from the shared ${INTERNAL_API_KEY} like the other cores.
+            INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+            INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+            # Explicit (config.go hard-fails on empty) — audience for connector token leases.
+            INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE: ${INSIGHT_CONNECTOR_TOKEN_LEASE_AUDIENCE:-insight-core}
+            # W3 (PR-3): durable metric store + real-event subscriber. Mirrors leads-core.
+            # Phase 4 PR-4: migration 002 creates a dedicated `insight_core` schema on
+            # this shared application-postgres (queries are schema-qualified), so the
+            # metric store never collides with the other cores sharing the database.
+            # NOTE (infra): the live application-postgres-data volume may have been
+            # initialized under the legacy NOTIFICATION_* creds; reconcile
+            # APPLICATION_PLANE_DB_USER/PASSWORD/NAME with the volume before this
+            # DATABASE_URL authenticates (Postgres honors POSTGRES_* only at first init).
+            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            # Subscribe to the SAME bus conversation-core publishes verevon.application.> to
+            # (its config resolves VEREVON_NATS_URL first), so the metric subscriber binds
+            # the existing JetStream stream rather than a divergent one.
+            NATS_URL: nats://application-nats:4222
+            NATS_USER: application-insight
+            NATS_PASSWORD: ${APPLICATION_INSIGHT_NATS_PASSWORD:?APPLICATION_INSIGHT_NATS_PASSWORD must be set}
+            # Phase 7 B12 — the model-plane-agents producer leg. The Model Plane runs
+            # on its own isolated NATS cluster; the agent subscriber dual-connects via
+            # the inter-plane-bus alias and records run/tool/approval lifecycle events
+            # (mp.v1.run.*.event) as surface=agents metrics. Without this the agents
+            # surface stays empty even when agent runs are executing.
+            MODEL_PLANE_NATS_URL: ${MODEL_PLANE_NATS_URL:-nats://model-nats:4222}
+            MODEL_PLANE_NATS_USER: application-insight-model
+            MODEL_PLANE_NATS_PASSWORD: ${APPLICATION_INSIGHT_MODEL_NATS_PASSWORD:?APPLICATION_INSIGHT_MODEL_NATS_PASSWORD must be set}
+            # Task #28: metrics.snapshotted carries only a summary count; the metric
+            # subscriber fetches the real per-metric values from social-core's
+            # GET /api/v1/social/metrics using this URL + the shared internal key.
+            SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INSIGHT_CORE_HOST_PORT:-3163}:3163"
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            application-postgres:
+                condition: service_healthy
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 32M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3163/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  leads-core:
-    env_file:
-      - ./leads-core/.env
-    <<: *service-hardening
-    build:
-      context: ./leads-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: leads-core
-    restart: unless-stopped
-    # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
-    # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
-    # event on the plane-local broker consumed by audit-core under the pinned
-    # `application` authority.
-    #
-    # Provider lead sync: LinkedIn Lead Gen form responses via integration-corev2's
-    # actions gateway (integration-api on the inter-plane bus, same route as
-    # social-core/insight-core). PERSON DATA is confined to the provider_leads
-    # table — see leads-core/README.md "PII posture" before extending.
-    environment:
-      PORT: "3164"
-      SERVICE_NAME: leads-core
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-      NATS_URL: nats://application-nats:4222
-      NATS_USER: application-leads
-      NATS_PASSWORD: ${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD must be set}
-      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
-      PROVIDER_LEAD_SYNC_ENABLED: ${PROVIDER_LEAD_SYNC_ENABLED:-true}
-      PROVIDER_LEAD_SYNC_INTERVAL: ${PROVIDER_LEAD_SYNC_INTERVAL:-1h}
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
-    depends_on:
-      jetstream-provisioner:
-        condition: service_completed_successfully
-      nats:
-        condition: service_healthy
-      application-postgres:
-        condition: service_healthy
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 32M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3164/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    leads-core:
+        env_file:
+            - ./leads-core/.env
+        <<: *service-hardening
+        build:
+            context: ./leads-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: leads-core
+        restart: unless-stopped
+        # W1 lead-builder: filtered Enhetsregisteret company search + saved org-scoped
+        # lists (Postgres) + metered CSV export. Emits a best-effort per-export audit
+        # event on the plane-local broker consumed by audit-core under the pinned
+        # `application` authority.
+        #
+        # Provider lead sync: LinkedIn Lead Gen form responses via integration-corev2's
+        # actions gateway (integration-api on the inter-plane bus, same route as
+        # social-core/insight-core). PERSON DATA is confined to the provider_leads
+        # table — see leads-core/README.md "PII posture" before extending.
+        environment:
+            PORT: "3164"
+            SERVICE_NAME: leads-core
+            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+            NATS_URL: nats://application-nats:4222
+            NATS_USER: application-leads
+            NATS_PASSWORD: ${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD must be set}
+            INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+            PROVIDER_LEAD_SYNC_ENABLED: ${PROVIDER_LEAD_SYNC_ENABLED:-true}
+            PROVIDER_LEAD_SYNC_INTERVAL: ${PROVIDER_LEAD_SYNC_INTERVAL:-1h}
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${LEADS_CORE_HOST_PORT:-3164}:3164"
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            application-postgres:
+                condition: service_healthy
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 32M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3164/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  information-core:
-    env_file:
-      - ./information-core/.env
-    <<: *service-hardening
-    build:
-      context: ./information-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: information-core
-    restart: unless-stopped
-    environment:
-      PORT: "3190"
-      SERVICE_NAME: information-core
-      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
-      INFORMATION_CORE_USER_AGENT: ${INFORMATION_CORE_USER_AGENT:-VelionInformationCore/1.0 (ops@velion.local)}
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INFORMATION_CORE_HOST_PORT:-3190}:3190"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3190/health >/dev/null || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    information-core:
+        env_file:
+            - ./information-core/.env
+        <<: *service-hardening
+        build:
+            context: ./information-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: information-core
+        restart: unless-stopped
+        environment:
+            PORT: "3190"
+            SERVICE_NAME: information-core
+            INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+            INFORMATION_CORE_USER_AGENT: ${INFORMATION_CORE_USER_AGENT:-VerevonInformationCore/1.0 (ops@verevon.local)}
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:${INFORMATION_CORE_HOST_PORT:-3190}:3190"
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://localhost:3190/health >/dev/null || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  notification-core:
-    <<: *service-hardening
-    build:
-      context: ./notification-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: notification-core
-    restart: unless-stopped
-    env_file:
-      - ./notification-core/.env
-    environment:
-      # Override the service-local env file so a persisted Application Plane
-      # database and every first-party service use the same runtime credential.
-      DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
-      NATS_URL: nats://nats:4222          # override env_file — local app-nats for own publisher
-      NATS_SHARED_URL: nats://nats:4222   # priority 2 in Go config chain
-      VELION_NATS_URL: nats://nats:4222   # priority 1 in Go config chain — must override env_file
-      NATS_USER: application-notification
-      NATS_PASSWORD: ${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD must be set}
-      NOTIFICATION_DELIVERY_MODE: ${NOTIFICATION_DELIVERY_MODE:-disabled}
-      NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
-      NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
-      # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
-      # identity (notification-core-gdpr) on the shared Control-Plane broker,
-      # kept distinct from NATS_URL/NATS_SHARED_URL/VELION_NATS_URL above,
-      # which this deployment deliberately points at the plane-local broker
-      # (see "priority 1/2 in Go config chain" comments) — reusing either of
-      # those names here would be neutralized by that existing wiring.
-      NOTIFICATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
-      NOTIFICATION_GDPR_SHARED_NATS_USER: notification-core-gdpr
-      NOTIFICATION_GDPR_SHARED_NATS_PASSWORD: ${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}
-    depends_on:
-      jetstream-provisioner:
-        condition: service_completed_successfully
-      nats:
-        condition: service_healthy
-      application-postgres:
-        condition: service_healthy
-      application-dragonfly:
-        condition: service_healthy
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3140:3140"
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 -O /dev/null http://localhost:3140/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+    notification-core:
+        <<: *service-hardening
+        build:
+            context: ./notification-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: notification-core
+        restart: unless-stopped
+        env_file:
+            - ./notification-core/.env
+        environment:
+            # Override the service-local env file so a persisted Application Plane
+            # database and every first-party service use the same runtime credential.
+            DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
+            NATS_URL: nats://nats:4222 # override env_file — local app-nats for own publisher
+            NATS_SHARED_URL: nats://nats:4222 # priority 2 in Go config chain
+            VEREVON_NATS_URL: nats://nats:4222 # priority 1 in Go config chain — must override env_file
+            NATS_USER: application-notification
+            NATS_PASSWORD: ${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD must be set}
+            NOTIFICATION_DELIVERY_MODE: ${NOTIFICATION_DELIVERY_MODE:-disabled}
+            NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
+            NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
+            # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
+            # identity (notification-core-gdpr) on the shared Control-Plane broker,
+            # kept distinct from NATS_URL/NATS_SHARED_URL/VEREVON_NATS_URL above,
+            # which this deployment deliberately points at the plane-local broker
+            # (see "priority 1/2 in Go config chain" comments) — reusing either of
+            # those names here would be neutralized by that existing wiring.
+            NOTIFICATION_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
+            NOTIFICATION_GDPR_SHARED_NATS_USER: notification-core-gdpr
+            NOTIFICATION_GDPR_SHARED_NATS_PASSWORD: ${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}
+        depends_on:
+            jetstream-provisioner:
+                condition: service_completed_successfully
+            nats:
+                condition: service_healthy
+            application-postgres:
+                condition: service_healthy
+            application-dragonfly:
+                condition: service_healthy
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3140:3140"
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "20m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget --no-verbose --tries=1 -O /dev/null http://localhost:3140/health || exit 1",
+                ]
+            interval: 30s
+            timeout: 10s
+            retries: 3
+            start_period: 20s
 
-  # (novu delivery adapter runs inline inside notification-core)
+    # (novu delivery adapter runs inline inside notification-core)
 
-  # ─────────────────────────────────────────────────────────────
-  # NATS — plane-level message bus (required)
-  # ─────────────────────────────────────────────────────────────
-  nats:
-    image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
-    container_name: app-nats
-    restart: unless-stopped
-    command: ["-c", "/etc/nats/nats.conf"]
-    environment:
-      APPLICATION_CONVERSATION_NATS_PASSWORD: "\"${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD is required}\""
-      APPLICATION_SOCIAL_NATS_PASSWORD: "\"${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD is required}\""
-      APPLICATION_INSIGHT_NATS_PASSWORD: "\"${APPLICATION_INSIGHT_NATS_PASSWORD:?APPLICATION_INSIGHT_NATS_PASSWORD is required}\""
-      APPLICATION_LEADS_NATS_PASSWORD: "\"${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD is required}\""
-      APPLICATION_NOTIFICATION_NATS_PASSWORD: "\"${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD is required}\""
-      AUDIT_APPLICATION_NATS_PASSWORD: "\"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}\""
-      APPLICATION_NATS_PROVISIONER_PASSWORD: "\"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}\""
-      APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD: "\"${APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD:?APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD is required}\""
-    networks:
-      app-net:
-      inter-plane-bus:
-        aliases:
-          - application-nats
-    volumes:
-      - app-nats-data:/data
-      - ./nats.conf:/etc/nats/nats.conf:ro
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-          cpus: "0.25"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
+    # ─────────────────────────────────────────────────────────────
+    # NATS — plane-level message bus (required)
+    # ─────────────────────────────────────────────────────────────
+    nats:
+        image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
+        container_name: app-nats
+        restart: unless-stopped
+        command: ["-c", "/etc/nats/nats.conf"]
+        environment:
+            APPLICATION_CONVERSATION_NATS_PASSWORD: '"${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD is required}"'
+            APPLICATION_SOCIAL_NATS_PASSWORD: '"${APPLICATION_SOCIAL_NATS_PASSWORD:?APPLICATION_SOCIAL_NATS_PASSWORD is required}"'
+            APPLICATION_INSIGHT_NATS_PASSWORD: '"${APPLICATION_INSIGHT_NATS_PASSWORD:?APPLICATION_INSIGHT_NATS_PASSWORD is required}"'
+            APPLICATION_LEADS_NATS_PASSWORD: '"${APPLICATION_LEADS_NATS_PASSWORD:?APPLICATION_LEADS_NATS_PASSWORD is required}"'
+            APPLICATION_NOTIFICATION_NATS_PASSWORD: '"${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD is required}"'
+            AUDIT_APPLICATION_NATS_PASSWORD: '"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"'
+            APPLICATION_NATS_PROVISIONER_PASSWORD: '"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}"'
+            APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD: '"${APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD:?APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD is required}"'
+        networks:
+            app-net:
+            inter-plane-bus:
+                aliases:
+                    - application-nats
+        volumes:
+            - app-nats-data:/data
+            - ./nats.conf:/etc/nats/nats.conf:ro
+        deploy:
+            resources:
+                limits:
+                    memory: 64M
+                    cpus: "0.25"
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD-SHELL",
+                    "wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1 || exit 1",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 5s
 
-  # ==============================================
-  # JetStream provisioner (one-shot). App cores use BindProvisioned = bind to
-  # pre-existing streams + durable push consumers; they never create them. This
-  # runs after app-nats is healthy on every `up`, idempotently creating the
-  # VELION_* streams + consumers. Consumer/publisher cores depend on it
-  # completing (service_completed_successfully) so a clean bring-up has the
-  # topology before they bind. Manual equivalent: scripts/provision-jetstream.sh.
-  # ==============================================
-  jetstream-provisioner:
-    image: natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
-    container_name: app-jetstream-provisioner
-    restart: "no"
-    depends_on:
-      nats:
-        condition: service_healthy
-    environment:
-      APPLICATION_NATS_PROVISIONER_PASSWORD: ${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}
-    entrypoint: ["sh", "/provision.sh"]
-    volumes:
-      - ./scripts/jetstream-provision-entrypoint.sh:/provision.sh:ro
-    networks:
-      - app-net
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+    # ==============================================
+    # JetStream provisioner (one-shot). App cores use BindProvisioned = bind to
+    # pre-existing streams + durable push consumers; they never create them. This
+    # runs after app-nats is healthy on every `up`, idempotently creating the
+    # VEREVON_* streams + consumers. Consumer/publisher cores depend on it
+    # completing (service_completed_successfully) so a clean bring-up has the
+    # topology before they bind. Manual equivalent: scripts/provision-jetstream.sh.
+    # ==============================================
+    jetstream-provisioner:
+        image: natsio/nats-box@sha256:ffce8bd103383f179f8c7f11cf645726acf5d17280706c530c3b342dbe16334c
+        container_name: app-jetstream-provisioner
+        restart: "no"
+        depends_on:
+            nats:
+                condition: service_healthy
+        environment:
+            APPLICATION_NATS_PROVISIONER_PASSWORD: ${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}
+        entrypoint: ["sh", "/provision.sh"]
+        volumes:
+            - ./scripts/jetstream-provision-entrypoint.sh:/provision.sh:ro
+        networks:
+            - app-net
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
 
-  # ==============================================
-  # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
-  # ==============================================
+    # ==============================================
+    # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
+    # ==============================================
 
-  application-prometheus:
-    image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
-    container_name: application-prometheus
-    restart: unless-stopped
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=15d
-      - --web.enable-lifecycle
-    volumes:
-      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - application-prometheus-data:/prometheus
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:19096:9090" # host 19096 avoids Model Plane letta-bridge on host 9096
-    networks:
-      - app-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    application-prometheus:
+        image: prom/prometheus:v2.54.1@sha256:f6639335d34a77d9d9db382b92eeb7fc00934be8eae81dbc03b31cfe90411a94
+        container_name: application-prometheus
+        restart: unless-stopped
+        command:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=15d
+            - --web.enable-lifecycle
+        volumes:
+            - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - application-prometheus-data:/prometheus
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:19096:9090" # host 19096 avoids Model Plane letta-bridge on host 9096
+        networks:
+            - app-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-q",
+                    "--spider",
+                    "http://127.0.0.1:9090/-/healthy",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
 
-  application-grafana:
-    image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
-    container_name: application-grafana
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
-      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
-      - application-grafana-data:/var/lib/grafana
-    ports:
-      - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3010:3000" # host 3010 for the Application-Plane Grafana UI
-    networks:
-      - app-net
-    depends_on:
-      - application-prometheus
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
+    application-grafana:
+        image: grafana/grafana:11.2.0@sha256:408afb9726de5122b00a2576763a8a57a3c86d5b0eff5305bc994ceb3eb96c3f
+        container_name: application-grafana
+        restart: unless-stopped
+        environment:
+            GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+            GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+            GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
+            GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+            GF_USERS_ALLOW_SIGN_UP: "false"
+        volumes:
+            - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+            - application-grafana-data:/var/lib/grafana
+        ports:
+            - "${APPLICATION_BIND_ADDRESS:-127.0.0.1}:3010:3000" # host 3010 for the Application-Plane Grafana UI
+        networks:
+            - app-net
+        depends_on:
+            - application-prometheus
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
 
 volumes:
-  convex-data:
-    driver: local
-  affine-uploads:
-    driver: local
-  affine-config:
-    driver: local
-  application-postgres-data:
-    driver: local
-  application-dragonfly-data:
-    driver: local
-  app-nats-data:
-    driver: local
-  application-prometheus-data:
-    driver: local
-  application-grafana-data:
-    driver: local
+    convex-data:
+        driver: local
+    affine-uploads:
+        driver: local
+    affine-config:
+        driver: local
+    application-postgres-data:
+        driver: local
+    application-dragonfly-data:
+        driver: local
+    app-nats-data:
+        driver: local
+    application-prometheus-data:
+        driver: local
+    application-grafana-data:
+        driver: local
 
 networks:
-  # Privat nettverk for Application plane
-  app-net:
-    name: app-net
-    driver: bridge
+    # Privat nettverk for Application plane
+    app-net:
+        name: app-net
+        driver: bridge
 
-  # Shared nettverk for cross-plane app-til-app kommunikasjon
-  inter-plane-bus:
-    external: true
-    name: inter-plane-bus
-    labels:
-      com.docker.compose.network: "inter-plane-bus"
-      com.docker.compose.project: "triodelab"
+    # Shared nettverk for cross-plane app-til-app kommunikasjon
+    inter-plane-bus:
+        external: true
+        name: inter-plane-bus
+        labels:
+            com.docker.compose.network: "inter-plane-bus"
+            com.docker.compose.project: "triodelab"

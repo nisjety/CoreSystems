@@ -2,8 +2,8 @@
 //
 // Legacy subjects (from Model Plane v2):
 //
-//	velion.agent.run.{run_id}.event       -> mp.v1.run.{run_id}.event
-//	velion.session.{id}.command           -> mp.v1.session.{id}.command
+//	verevon.agent.run.{run_id}.event       -> mp.v1.run.{run_id}.event
+//	verevon.session.{id}.command           -> mp.v1.session.{id}.command
 //	aqencia.reasoning.reasoning.started   -> mp.v1.run.{id}.event (RUN_STARTED)
 //	aqencia.reasoning.reasoning.completed -> mp.v1.run.{id}.event (RUN_COMPLETED)
 //	aqencia.reasoning.usage.recorded      -> mp.v1.ingress.usage
@@ -23,9 +23,9 @@ type LegacyMapping struct {
 // LegacyMappings is the complete mapping table from v2 to new subjects.
 var LegacyMappings = []LegacyMapping{
 	{
-		LegacyPattern: "velion.agent.run.*.event",
+		LegacyPattern: "verevon.agent.run.*.event",
 		NewSubjectFn: func(s string) string {
-			// velion.agent.run.<run_id>.event -> mp.v1.run.<run_id>.event
+			// verevon.agent.run.<run_id>.event -> mp.v1.run.<run_id>.event
 			parts := strings.Split(s, ".")
 			if len(parts) >= 5 {
 				return RunEventSubject(parts[3])
@@ -34,9 +34,9 @@ var LegacyMappings = []LegacyMapping{
 		},
 	},
 	{
-		LegacyPattern: "velion.session.*.command",
+		LegacyPattern: "verevon.session.*.command",
 		NewSubjectFn: func(s string) string {
-			// velion.session.<id>.command -> mp.v1.session.<id>.command
+			// verevon.session.<id>.command -> mp.v1.session.<id>.command
 			parts := strings.Split(s, ".")
 			if len(parts) >= 4 {
 				return SessionCommandSubject(parts[2])

@@ -15,7 +15,7 @@ import (
 type EventHandler struct {
 	userRepo        *users.Repository
 	publisher       *nats.Publisher
-	sharedPublisher *nats.SharedPublisher // cross-plane events on velion-nats
+	sharedPublisher *nats.SharedPublisher // cross-plane events on verevon-nats
 
 	// G41 (Slice D) — Microsoft Graph enrichment dependencies.
 	// Both nil-safe: when either is absent (e.g. local dev without an
@@ -91,7 +91,7 @@ func (h *EventHandler) HandleUserRegistered(ctx context.Context, event *nats.Use
 
 	log.Printf("✅ Created user in local DB via NATS: %s (id=%s)", event.Email, newUser.ID)
 
-	// Publish to shared cross-plane NATS (velion-nats) so other planes can react
+	// Publish to shared cross-plane NATS (verevon-nats) so other planes can react
 	if h.sharedPublisher != nil {
 		h.sharedPublisher.PublishUserRegistered(ctx, newUser.ID, event.Email, event.Name, event.Provider)
 	}
@@ -373,7 +373,7 @@ func (h *EventHandler) HandleSessionEnded(ctx context.Context, event *nats.Sessi
 func (h *EventHandler) HandleUserProviderLinked(ctx context.Context, event *nats.UserProviderLinkedEvent) error {
 	log.Printf("🔔 Handling provider linked: %s → %s", event.Email, event.Provider)
 
-	// G48 (velion-gap.md §8.33): GetByID fallback when GetByEmail fails.
+	// G48 (verevon-gap.md §8.33): GetByID fallback when GetByEmail fails.
 	// Mirrors the lookup pattern in HandleUserRegistered. Necessary because
 	// the legacy auto-provision flow can leave user_service.users rows under
 	// a placeholder email (e.g. `g3-smoke@example.com`) while auth-service
@@ -524,7 +524,7 @@ func (h *EventHandler) enrichFromMicrosoftGraph(ctx context.Context, user *users
 			updateParams.Avatar = &avatarCopy
 		}
 	}
-	// G46 (velion-gap.md §8.32): when Graph returns a more authoritative
+	// G46 (verevon-gap.md §8.32): when Graph returns a more authoritative
 	// email than what's currently stored (auto-provisioned placeholders
 	// like `g3-smoke@example.com` from a Wave-9-era fixture), refresh the
 	// `users.email` column so downstream lookups by email find the right

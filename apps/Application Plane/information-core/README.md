@@ -1,6 +1,6 @@
 # information-core
 
-Real-time contextual data aggregator for the Application Plane. Wraps bounded read-only external APIs, caches their responses, and exposes a single internal HTTP surface for Velion's workspace and AI model.
+Real-time contextual data aggregator for the Application Plane. Wraps bounded read-only external APIs, caches their responses, and exposes a single internal HTTP surface for Verevon's workspace and AI model.
 
 All routes are guarded by `x-internal-api-key` and are **not** reachable from the public internet.
 
@@ -36,7 +36,7 @@ Queries traffic registration points via the SVV GraphQL API. Returns volume and 
 Aggregates Norwegian and industry-specific RSS feeds into a normalised article list. Supports category filtering and age-based cutoffs.
 
 - Cache TTL: 1800 s (30 min)
-- Use case: Surface relevant news in the Velion home feed; the AI can reference recent developments when answering questions.
+- Use case: Surface relevant news in the Verevon home feed; the AI can reference recent developments when answering questions.
 
 ### Address — `Kartverket Address REST`
 
@@ -126,7 +126,7 @@ x-internal-api-key: <key>
 | `PORT` | `3190` | HTTP listen port |
 | `SERVICE_NAME` | `information-core` | Reported in health checks |
 | `INTERNAL_API_KEY` | *(required)* | Shared secret for internal callers |
-| `INFORMATION_CORE_USER_AGENT` | `VelionInformationCore/1.0 ...` | Sent to upstream APIs that require it (Yr, Nominatim) |
+| `INFORMATION_CORE_USER_AGENT` | `VerevonInformationCore/1.0 ...` | Sent to upstream APIs that require it (Yr, Nominatim) |
 | `ENTUR_CLIENT_NAME` | `coresystem-information-core` | Required provider identification header for Entur |
 | `LOVDATA_API_KEY` | *(optional; required for `/legal/search`)* | Lovdata API key, injected at runtime and never logged |
 | `DATEX_URL` | *(optional; required for `/datex/situation`)* | Registered DATEX II 3.1 pull endpoint |

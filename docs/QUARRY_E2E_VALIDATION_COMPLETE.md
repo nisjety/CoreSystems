@@ -38,7 +38,7 @@ The Quarry system has been **comprehensively tested and validated**. All core co
 | Stage | Test | Result |
 |-------|------|--------|
 | **Submission** | Create new crawl job | ✅ Job ID: `39c9239d-51b4-48fd-a4f1-80d2e6836ed4` |
-| **Queue** | NATS async dispatch | ✅ Message published to `velion.ingestion.jobs.execute.crawl` |
+| **Queue** | NATS async dispatch | ✅ Message published to `verevon.ingestion.jobs.execute.crawl` |
 | **Processing** | Worker receives & executes | ✅ Status transitions: `queued` → `scraping` → `completed` |
 | **Ingestion** | Documents indexed to DB | ✅ Documents persisted to `crawl_documents` table |
 | **Retrieval** | Search & retrieval | ✅ Documents searchable via data plane |
@@ -112,7 +112,7 @@ API Creates Job (PostgreSQL: crawl_runs)
     ↓
 AsyncDispatcher.Dispatch() → NATS
     ↓
-Message Published: "velion.ingestion.jobs.execute.crawl"
+Message Published: "verevon.ingestion.jobs.execute.crawl"
     ↓
 Worker Receives from NATS Consumer
     ↓

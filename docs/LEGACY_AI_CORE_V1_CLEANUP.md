@@ -67,7 +67,7 @@ reasoning-nats-data
 ### 2.5 Docker Network
 
 - **`model-plane-net`** — Private bridge network for all v1 services
-- **`velion-net`** — Shared external network for cross-plane communication
+- **`verevon-net`** — Shared external network for cross-plane communication
 
 ### 2.6 Codebase Inventory
 
@@ -154,7 +154,7 @@ MODEL_PLANE_V2_ROLLOUT_PCT: ${MODEL_PLANE_V2_ROLLOUT_PCT:-0}
 
 ### 5.2 Shared Network
 
-Both v1 and v2 join `velion-net` (external bridge network) for cross-plane communication. After v1 decommission, only v2 services will remain on `velion-net`.
+Both v1 and v2 join `verevon-net` (external bridge network) for cross-plane communication. After v1 decommission, only v2 services will remain on `verevon-net`.
 
 ---
 
@@ -262,7 +262,7 @@ The following ports become available after v1 removal:
 | Qdrant data not migrated to Data Plane | HIGH | Run verification query against Data Plane Qdrant before removing v1 volumes |
 | Neo4j graph data loss | HIGH | Export graph dump before volume removal |
 | v1 skills/ historical data | LOW | Archive to git branch; v2 has independent skills system |
-| Shared `velion-net` disruption | LOW | v2 already on `velion-net`; removing v1 only removes v1 connections |
+| Shared `verevon-net` disruption | LOW | v2 already on `verevon-net`; removing v1 only removes v1 connections |
 | Hardcoded credentials in v1 .env files | MEDIUM | Rotate all credentials listed in v1 compose after decommission |
 
 ---

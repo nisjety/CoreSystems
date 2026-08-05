@@ -387,7 +387,7 @@ Runtime-relevant findings:
 - **Updated 2026-07-10**: `services/retrieval-engine-rs/tests/pipeline_e2e.rs` re-verified; all three tests are implemented (not TODO stubs). Two are `#[ignore]`d pending a live docker-compose stack rather than unwritten.
 - `tests/e2e/README.md` describes more complete scenarios than the current `pipeline_e2e.rs` implementation actually provides.
 - `docs/gap-data.md` still describes `retrieval-eval-py` as a scaffold target, but the current tree does not show a populated Python runtime service under `services/retrieval-eval-py`.
-- `Makefile` still refers to creating `velion-net` as a local stub network name; current compose actually uses `inter-plane-bus`.
+- `Makefile` still refers to creating `verevon-net` as a local stub network name; current compose actually uses `inter-plane-bus`.
 
 Not treated as runtime problems:
 

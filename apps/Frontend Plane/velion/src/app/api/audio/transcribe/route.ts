@@ -1,14 +1,14 @@
 import { NextRequest } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
-// U2-10 (ui-ux-velion-gap.md §10 + Option A consolidation):
+// U2-10 (ui-ux-verevon-gap.md §10 + Option A consolidation):
 //
 // Voice-input transcription proxy now hits the Model Plane v1 Rust
 // gateway at `/v1/ai/transcribe` (Azure Speech via
 // speech_routes::transcribe_azure). Previously this hit ai-core (v2
 // Python).
 //
-// Velion's chat input still posts FormData with an `audio` blob — we
+// Verevon's chat input still posts FormData with an `audio` blob — we
 // convert it to base64 + JSON here to match the gateway's contract.
 
 const MODEL_GATEWAY_URL =

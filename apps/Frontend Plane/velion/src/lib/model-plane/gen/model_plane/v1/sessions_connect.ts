@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetRunModeRequest, SetRunModeResponse, StartRunRequest, StartRunResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -161,6 +161,23 @@ export const SessionCore = {
       kind: MethodKind.Unary,
     },
     /**
+     * SetAgentSkillEnabled — flip one skill's injection switch by id.
+     *
+     * UpsertAgentSkill cannot do this: it is keyed by (org_id, name) and upserts
+     * the WHOLE skill, so calling it with only `enabled` would blank the content,
+     * triggers and restrictions of the skill it was meant to pause. The quality
+     * policy needs to stop injecting a skill without destroying it, which is
+     * precisely what that would do.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.SetAgentSkillEnabled
+     */
+    setAgentSkillEnabled: {
+      name: "SetAgentSkillEnabled",
+      I: SetAgentSkillEnabledRequest,
+      O: SetAgentSkillEnabledResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * List a thread's conversation messages in order (the durable transcript
      * source for the G7 learning review). Distinct from the gateway's in-memory
      * ListThreadMessages cache — this reads the session-core system-of-record.
@@ -199,6 +216,55 @@ export const SessionCore = {
       name: "SetRunMode",
       I: SetRunModeRequest,
       O: SetRunModeResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * ManagedRunLifecycle owns the additive, durable terminalization protocol for
+ * runs whose producers can lose a terminal RPC response. It intentionally
+ * lives beside, rather than inside, SessionCore so legacy SessionCore clients
+ * and mocks remain source-compatible.
+ *
+ * @generated from service model_plane.v1.ManagedRunLifecycle
+ */
+export const ManagedRunLifecycle = {
+  typeName: "model_plane.v1.ManagedRunLifecycle",
+  methods: {
+    /**
+     * Start a run and its single terminalization obligation atomically.
+     *
+     * @generated from rpc model_plane.v1.ManagedRunLifecycle.StartManagedRun
+     */
+    startManagedRun: {
+      name: "StartManagedRun",
+      I: StartManagedRunRequest,
+      O: StartManagedRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Record one immutable, metadata-only terminal outcome from an authenticated
+     * workload identity. The response is a durable terminal receipt.
+     *
+     * @generated from rpc model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome
+     */
+    recordTerminalOutcome: {
+      name: "RecordTerminalOutcome",
+      I: RecordTerminalOutcomeRequest,
+      O: RecordTerminalOutcomeResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Renew the server-owned recovery deadline while an accepted producer is
+     * still working. This request cannot carry content or choose a deadline.
+     *
+     * @generated from rpc model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun
+     */
+    heartbeatManagedRun: {
+      name: "HeartbeatManagedRun",
+      I: HeartbeatManagedRunRequest,
+      O: HeartbeatManagedRunResponse,
       kind: MethodKind.Unary,
     },
   }

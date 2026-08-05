@@ -11,7 +11,7 @@ The service is functional for authenticated, tenant-scoped rate shopping, includ
 The 2026-07-10 local Docker verification established:
 
 - `shipping-core` was healthy on host port `3156` and its database readiness check passed.
-- Direct and Velion-gateway carrier/quote requests returned 200.
+- Direct and Verevon-gateway carrier/quote requests returned 200.
 - Bring production, DHL test, and UPS CIE returned rates.
 - FedEx sandbox was configured but returned an authorization error.
 - PostNord, DSV, Helthjem and Porterbuddy were explicit local mocks.
@@ -59,15 +59,15 @@ The working-tree source supports:
 
 Implemented does not mean safely exposed. The router currently has only request logging; no user/session authentication, tenant derivation, role check, rate limiting, or ZDR middleware is mounted.
 
-## Velion and Model Plane access
+## Verevon and Model Plane access
 
 There are currently three different access paths:
 
-1. Velion's Rust gateway proxies `/api/v1/shipping/*` to this service.
+1. Verevon's Rust gateway proxies `/api/v1/shipping/*` to this service.
 2. Model Plane execution-core has carrier, quote, tracking and booking tools.
 3. The frontend chat only advertises tools when Browse/actions/tools or Plan mode activates the relevant path.
 
-Normal chat does not automatically receive shipping tools. A healthy Shipping Core therefore does not mean a default Velion chat turn can use it. The target AI-first contract is one generated shipping action definition shared by the human UI, gateway, Model tool catalog, approval policy, audit and tests.
+Normal chat does not automatically receive shipping tools. A healthy Shipping Core therefore does not mean a default Verevon chat turn can use it. The target AI-first contract is one generated shipping action definition shared by the human UI, gateway, Model tool catalog, approval policy, audit and tests.
 
 Booking must remain a high-risk confirmed action. Quote and carrier listing are read-only; create/confirm/cancel/pickup/manifest operations are writes with external consequences.
 
@@ -138,14 +138,14 @@ curl -sS http://127.0.0.1:3156/api/quotes \
   -H 'Content-Type: application/json' \
   --data-binary '{
     "from": {
-      "name": "Velion Test",
+      "name": "Verevon Test",
       "postal_code": "0150",
       "city": "Oslo",
       "country": "NO",
       "is_business": true
     },
     "to": {
-      "name": "Velion Test",
+      "name": "Verevon Test",
       "postal_code": "7010",
       "city": "Trondheim",
       "country": "NO",
@@ -191,7 +191,7 @@ Implemented source fix:
 4. Reject or mark an option incomplete when price exists but promised-delivery data required by the user is unavailable.
 5. Add an E2E assertion that the Oslo-to-Trondheim response never emits year 1 or `transit_days=0` when Bring provided a promise.
 
-Until the rebuilt image passes the read-only live quote gate, Velion must still treat the running deployment's zero promise as stale/degraded rather than infer a delivery time.
+Until the rebuilt image passes the read-only live quote gate, Verevon must still treat the running deployment's zero promise as stale/degraded rather than infer a delivery time.
 
 ## Configuration
 
@@ -283,5 +283,5 @@ Never use as routine smoke:
 2. Deploy and live-verify the Bring delivery parsing regression fix.
 3. Return explicit live/sandbox/mock provenance.
 4. Rebuild revision-labelled shipping and gateway images and verify source/deployment parity.
-5. Expose quote/carrier actions through the single Velion action contract and effective-capability inventory.
+5. Expose quote/carrier actions through the single Verevon action contract and effective-capability inventory.
 6. Add read-only E2E coverage through frontend -> gateway -> Model execution -> shipping-core, then separately test write operations against vendor sandboxes only.

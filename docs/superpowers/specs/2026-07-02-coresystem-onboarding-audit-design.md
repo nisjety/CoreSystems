@@ -6,7 +6,7 @@ Date: 2026-07-02
 
 Refresh CoreSystem documentation and produce an audit backlog for the current main projects:
 
-- Frontend Plane: `apps/Frontend Plane/velionv3`
+- Frontend Plane: `apps/Frontend Plane/verevonv3`
 - Data Plane v2
 - Ingestion Plane
 - Model Plane
@@ -17,7 +17,7 @@ This pass is documentation and audit backlog only. It must not patch implementat
 
 ## Goals
 
-- Update the system overview to reflect `velionv3` as the focused frontend target while preserving `velionv2` as historical/reference context where needed.
+- Update the system overview to reflect `verevonv3` as the focused frontend target while preserving `verevonv2` as historical/reference context where needed.
 - Document the current service map, ownership boundaries, entry points, contracts, and common quality gates across the six requested planes.
 - Identify bugs, missing implementations, stale docs, incomplete wiring, boundary risks, and test gaps with file-level evidence.
 - Produce a prioritized backlog with confidence levels and recommended next actions.
@@ -49,6 +49,6 @@ Use an evidence-first workflow:
 
 ## Verification
 
-- Self-review docs for stale `velionv2` focus, contradictions, placeholders, and missing owner-plane links.
+- Self-review docs for stale `verevonv2` focus, contradictions, placeholders, and missing owner-plane links.
 - Record commands run, command failures, and skipped checks in the backlog.
 - Leave remediation planning for a follow-up pass after the user reviews the documentation and backlog.

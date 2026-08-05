@@ -1,12 +1,12 @@
 export const sidebarType = {
-  root: "font-sans velion-sidebar-type",
-  title: "velion-sidebar-title",
-  groupTitle: "velion-sidebar-group-title",
-  row: "velion-sidebar-row",
-  rowNormal: "velion-sidebar-row-normal",
-  rowStrong: "velion-sidebar-row-strong",
-  input: "velion-sidebar-input",
-  secondary: "velion-sidebar-secondary",
+  root: "font-sans verevon-sidebar-type",
+  title: "verevon-sidebar-title",
+  groupTitle: "verevon-sidebar-group-title",
+  row: "verevon-sidebar-row",
+  rowNormal: "verevon-sidebar-row-normal",
+  rowStrong: "verevon-sidebar-row-strong",
+  input: "verevon-sidebar-input",
+  secondary: "verevon-sidebar-secondary",
   icon: "size-[15px]",
 } as const;
 

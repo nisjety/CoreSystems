@@ -6,6 +6,7 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
+import "model_plane/v1/verified_outcome.proto";
 
 // OrchestrationCore — authoritative state for plans, approvals, todos,
 // and subagent lineage. Mirrors the Rust mp-orchestration crate records and
@@ -59,6 +60,23 @@ service OrchestrationCoreService {
   // is derived from its verified service credential, never from this request.
   rpc ClaimApprovalDeliveries(ClaimApprovalDeliveriesRequest)
       returns (ClaimApprovalDeliveriesResponse);
+
+  // Fetch the exact immutable action descriptor for an active delivery lease.
+  // This is service-only and lease-bound; normal approval readers never
+  // receive descriptor content.
+  rpc GetApprovalContinuation(GetApprovalContinuationRequest)
+      returns (GetApprovalContinuationResponse);
+
+  // Record the immutable receipt that a verified worker has begun the exact
+  // descriptor-backed continuation. The worker supplies only its active lease;
+  // Session Core derives fingerprint/version from retained descriptor data.
+  rpc RecordApprovalContinuationStarted(RecordApprovalContinuationStartedRequest)
+      returns (RecordApprovalContinuationStartedResponse);
+
+  // Append the terminal outcome for a started continuation. Completion requires
+  // an authoritative provider receipt; this alone does not settle the outbox.
+  rpc RecordApprovalContinuationOutcome(RecordApprovalContinuationOutcomeRequest)
+      returns (RecordApprovalContinuationOutcomeResponse);
 
   // Acknowledge a claimed delivery as retryable or terminal. There is no
   // delivered outcome until Execution Core can present a durable, authenticated
@@ -531,6 +549,15 @@ message CreateApprovalRequest {
   // request (e.g. the gateway re-asserting a pending gate) never creates a
   // duplicate durable approval. Empty = no idempotency guard (D-1).
   string idempotency_key = 10;
+
+  // Optional canonical JSON descriptor for the exact suspended action. It is
+  // validated, scope-bound, and written once with the approval record; it
+  // contains no bearer, refresh token, or provider credential. Empty means
+  // this approval is proposal-only and can never be resumed by a worker.
+  //
+  // ZDR callers must leave this empty: retained continuation descriptors are
+  // intentionally incompatible with zero-data-retention execution.
+  string continuation_descriptor_json = 11;
 }
 
 message CreateApprovalResponse {
@@ -661,6 +688,76 @@ message ClaimApprovalDeliveriesResponse {
   repeated ApprovalDelivery deliveries = 1;
 }
 
+// Service-only, lease-bound continuation lookup. The descriptor remains
+// unavailable when the active lease does not match, has expired, or was
+// created before descriptor-backed pausing existed.
+message GetApprovalContinuationRequest {
+  string org_id = 1;
+  string delivery_id = 2;
+  string approval_id = 3;
+  string lease_token = 4;
+}
+
+message GetApprovalContinuationResponse {
+  // False for a stale/mismatched lease and for a descriptor-free approval.
+  // These cases remain indistinguishable to avoid leaking durable state.
+  bool available = 1;
+
+  // Canonical descriptor JSON. Set only when available is true.
+  string continuation_descriptor_json = 2;
+}
+
+message RecordApprovalContinuationStartedRequest {
+  string org_id = 1;
+  string delivery_id = 2;
+  string approval_id = 3;
+  string lease_token = 4;
+}
+
+message RecordApprovalContinuationStartedResponse {
+  // Stable immutable receipt. A retry returns the original receipt ID.
+  string receipt_id = 1;
+
+  // True when an earlier worker already recorded this delivery's start. The
+  // caller must not execute the descriptor again.
+  bool already_started = 2;
+}
+
+enum ApprovalContinuationOutcome {
+  APPROVAL_CONTINUATION_OUTCOME_UNSPECIFIED = 0;
+  APPROVAL_CONTINUATION_OUTCOME_COMPLETED = 1;
+  APPROVAL_CONTINUATION_OUTCOME_FAILED = 2;
+  APPROVAL_CONTINUATION_OUTCOME_CANCELLED = 3;
+}
+
+message RecordApprovalContinuationOutcomeRequest {
+  string org_id = 1;
+  string delivery_id = 2;
+  string approval_id = 3;
+  string receipt_id = 4;
+  string lease_token = 5;
+  ApprovalContinuationOutcome outcome = 6;
+
+  // Required only for COMPLETED. This must be the bounded authoritative
+  // receipt returned by the provider/action boundary, never a model claim.
+  string provider_receipt_id = 7;
+
+  // Required only for FAILED or CANCELLED; validated against a finite
+  // allowlist and never stores raw provider diagnostics.
+  string failure_code = 8;
+
+  // Optional independent judgment on whether this outcome's claimed result
+  // actually happened (Verified Outcome Foundation, verevon-roadmap.md §3b).
+  // Absent from older callers; a missing field is stored as
+  // VERIFICATION_STATUS_UNSPECIFIED, never inferred from `outcome`.
+  VerificationResult verification = 9;
+}
+
+message RecordApprovalContinuationOutcomeResponse {
+  bool recorded = 1;
+  bool already_finalized = 2;
+}
+
 enum ApprovalDeliveryAcknowledgement {
   // Unknown acknowledgement; rejected.
   APPROVAL_DELIVERY_ACKNOWLEDGEMENT_UNSPECIFIED = 0;
@@ -672,6 +769,11 @@ enum ApprovalDeliveryAcknowledgement {
 
   // The delivery cannot proceed safely. This never emits a run-resumed event.
   APPROVAL_DELIVERY_ACKNOWLEDGEMENT_TERMINAL = 2;
+
+  // The exact descriptor-backed action completed and its immutable outcome
+  // carries an authoritative provider receipt. This settles the outbox only;
+  // it does not assert customer delivery.
+  APPROVAL_DELIVERY_ACKNOWLEDGEMENT_SETTLED = 3;
 }
 
 message AcknowledgeApprovalDeliveryRequest {
@@ -684,12 +786,15 @@ message AcknowledgeApprovalDeliveryRequest {
   // Exact opaque lease capability returned by ClaimApprovalDeliveries.
   string lease_token = 3;
 
-  // Retry or terminal. A successful execution acknowledgement is deliberately
-  // unavailable until a durable continuation receipt exists.
+  // Retry, terminal, or receipt-backed settled.
   ApprovalDeliveryAcknowledgement acknowledgement = 4;
 
   // A bounded allowlisted failure classification, not a free-form error.
   string failure_code = 5;
+
+  // Required only for SETTLED. Session Core verifies this exact immutable
+  // receipt has a completed outcome and authoritative provider receipt.
+  string continuation_receipt_id = 6;
 }
 
 message AcknowledgeApprovalDeliveryResponse {
@@ -707,6 +812,11 @@ message AcknowledgeApprovalDeliveryResponse {
 
   // Next eligible retry time. Empty for terminal entries or exact replays.
   google.protobuf.Timestamp next_attempt_at = 4;
+
+  // True only for a receipt-backed settled delivery. It means the worker
+  // finished its continuation protocol, not that a customer received a
+  // communication.
+  bool settled = 5;
 }
 
 // --- GetSubagentLineage ---
@@ -797,6 +907,14 @@ message OrchestrationEvent {
     BrowserRunResumed browser_run_resumed = 20;
     BrowserActionApprovalRequired browser_action_approval_required = 21;
     BrowserActionDecided browser_action_decided = 22;
+
+    // Verified Outcome Foundation (verevon-roadmap.md §3b, tag 23 — additive).
+    // Fired once a resumed continuation's independent VerificationResult is
+    // durably recorded, so the Agent Run Console can show it live without a
+    // separate fetch. Only emitted when the recording worker actually sent a
+    // verification result — an older worker's outcome (no `verification`
+    // field) never fires this event.
+    ApprovalContinuationVerified approval_continuation_verified = 23;
   }
 
   message PlanTransitioned {
@@ -947,6 +1065,18 @@ message OrchestrationEvent {
     string decision = 5;
     // Principal who decided, when known. Empty for a system timeout.
     string decided_by = 6;
+  }
+
+  // Verified Outcome Foundation (verevon-roadmap.md §3b): a resumed
+  // continuation's independently-judged outcome, live on the run's own event
+  // stream. `verification` is never absent on this event — the recording
+  // handler only fires it when one was actually produced.
+  message ApprovalContinuationVerified {
+    string run_id = 1;
+    string delivery_id = 2;
+    string approval_id = 3;
+    string receipt_id = 4;
+    VerificationResult verification = 5;
   }
 }
 

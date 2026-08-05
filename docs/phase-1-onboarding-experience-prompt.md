@@ -1,7 +1,7 @@
 # Phase 1 onboarding · experience prompt
 
 This document is a single self-contained prompt. Paste it into Claude /
-GPT-5 / Cursor / any coding agent to brief them on **how the Velion
+GPT-5 / Cursor / any coding agent to brief them on **how the Verevon
 onboarding wizard should work** — user journey, backend wiring, state
 machine, fallbacks, and success criteria. It is written in the second
 person ("you build…") so the agent can act on it directly.
@@ -24,7 +24,7 @@ person ("you build…") so the agent can act on it directly.
 
 ## Prompt (copy from here)
 
-> You are building Phase 1 of Velion's onboarding wizard. Velion is a
+> You are building Phase 1 of Verevon's onboarding wizard. Verevon is a
 > customer-support AI platform (Intercom × Chatbase). The wizard's
 > job is to take a freshly-signed-up user from "just verified my
 > email" to "looking at my own dashboard with my own knowledge
@@ -114,7 +114,7 @@ person ("you build…") so the agent can act on it directly.
 >         grey `#A09890`. Same shapes as AuthPage's submit buttons.
 >      8. **Footer slot** — AuthPage shows `<SupportLinks>` here. The
 >         wizard reuses the same slot for an inline help line
->         ("Stuck? support@velion.com") so the bottom of the card is
+>         ("Stuck? support@verevon.com") so the bottom of the card is
 >         never visually empty.
 >
 > 3. **Right pane layout — image frame the AuthPage establishes,
@@ -163,7 +163,7 @@ person ("you build…") so the agent can act on it directly.
 >    during the wizard's hydration window via the placeholder above.
 >
 > 6. **localStorage is the resume source-of-truth.** Persist every
->    transition to `velion.onboarding.v1`. Hydrate from
+>    transition to `verevon.onboarding.v1`. Hydrate from
 >    localStorage on first mount (in `useEffect`, never SSR). If
 >    missing or corrupted, start at `post-signin`. Server-side
 >    persistence is deferred — for now the only server writes are
@@ -184,7 +184,7 @@ person ("you build…") so the agent can act on it directly.
 > component lives at `components/auth/onboarding/steps/<Name>Step.tsx`
 > and is dispatched by `<OnboardingFrame>`.
 >
-> 1. **`post-signin`** — Left: greeting + spinner ("Setter opp Velion …").
+> 1. **`post-signin`** — Left: greeting + spinner ("Setter opp Verevon …").
 >    Right: 3–5 s product-reveal video (loops). Auto-advance after 3 s
 >    or `onEnded`. Marks `introPlayed=true` once.
 > 2. **`organization`** — Left: `<BrregSearch>` + "Skip verification"
@@ -228,7 +228,7 @@ person ("you build…") so the agent can act on it directly.
 >    deterministic floor server-side — 5+ connectors → enterprise,
 >    3+ → pro, 1+ OR (website + size ≥ medium) → standard. The floor
 >    only upgrades, never downgrades.
-> 7. **`assembly`** — Left: "Setter sammen Velion til deg" + 5-tick
+> 7. **`assembly`** — Left: "Setter sammen Verevon til deg" + 5-tick
 >    checklist filling at 700 ms intervals. Right: 6 s dashboard-
 >    assembly video. After the last tick + 400 ms: call
 >    `markOnboardingCompleteOnServer()` (fires `PUT
@@ -260,7 +260,7 @@ person ("you build…") so the agent can act on it directly.
 > ### File layout (target)
 >
 > ```
-> apps/Frontend Plane/velion/src/
+> apps/Frontend Plane/verevon/src/
 >   app/(auth)/login/page.tsx                       # renders <AuthOrOnboardingPage>
 >   app/(onboarding)/onboarding/<slug>/page.tsx     # each → <LegacyOnboardingRedirect slug>
 >   app/api/onboarding/recommend-plan/route.ts      # LLM + deterministic floor
@@ -302,7 +302,7 @@ person ("you build…") so the agent can act on it directly.
 > `tsc --noEmit` and the QA checklist in
 > `phase-1-onboarding-prompt-setup.md §5`. Do not introduce a viz
 > library for the graph — pure SVG + deterministic-radial layout is
-> enough and the velion bundle is already heavy. Do not introduce a
+> enough and the verevon bundle is already heavy. Do not introduce a
 > form library — controlled React state + native `<form>` is enough
 > at this surface area.
 >

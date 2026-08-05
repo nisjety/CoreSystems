@@ -62,8 +62,8 @@ func TestPublisher_DualWrite_WithMapping(t *testing.T) {
 	if f.calls[0].subject != "mp.v1.run.run-1.event" {
 		t.Errorf("first call should be v1, got %q", f.calls[0].subject)
 	}
-	if f.calls[1].subject != "velion.agent.run.run-1.event" {
-		t.Errorf("second call should be legacy velion, got %q", f.calls[1].subject)
+	if f.calls[1].subject != "verevon.agent.run.run-1.event" {
+		t.Errorf("second call should be legacy verevon, got %q", f.calls[1].subject)
 	}
 }
 
@@ -103,7 +103,7 @@ func TestPublisher_LegacyOnly_WithMapping(t *testing.T) {
 	if len(f.calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(f.calls))
 	}
-	if f.calls[0].subject != "velion.session.sess-9.command" {
+	if f.calls[0].subject != "verevon.session.sess-9.command" {
 		t.Errorf("expected legacy subject, got %q", f.calls[0].subject)
 	}
 }

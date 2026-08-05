@@ -50,14 +50,14 @@ test("v1-parity auth, onboarding, dashboard, and chat surfaces render", async ({
 
   await page.goto("/dashboard");
   await expect(page.getByRole("heading", { name: /god (morgen|ettermiddag|kveld), ima/i })).toBeVisible();
-  await expect(page.getByLabel(/message velion/i)).toBeVisible();
+  await expect(page.getByLabel(/message verevon/i)).toBeVisible();
   const sidebar = page.locator('aside[aria-label="Primary navigation"]');
   await expect(sidebar).toHaveCSS("width", "60px");
   await page.getByRole("button", { name: /expand sidebar/i }).click();
   await expect(sidebar).toHaveCSS("width", "320px");
   await expect(page.getByLabel(/filter sidebar section/i)).toBeVisible();
   await page.getByLabel(/filter sidebar section/i).fill("chat");
-  await expect(page.getByRole("link", { name: /velion chat/i })).toBeVisible();
+  await expect(page.getByRole("link", { name: /verevon chat/i })).toBeVisible();
   await page.getByLabel(/filter sidebar section/i).fill("");
   await sidebar.getByRole("button", { name: /^søk$/i }).click();
   await expect(page.getByRole("dialog", { name: /global search/i })).toBeVisible();
@@ -76,11 +76,11 @@ test("v1-parity auth, onboarding, dashboard, and chat surfaces render", async ({
   await expect(page.getByText(/connect novu/i)).toBeVisible();
   await page.getByRole("button", { name: /calendar/i }).click();
   await expect(page.getByText(/no events for this day/i)).toBeVisible();
-  const composer = page.locator(".velion-home-composer");
-  const composerCard = page.locator(".velion-dashboard-composer-card").first();
+  const composer = page.locator(".verevon-home-composer");
+  const composerCard = page.locator(".verevon-dashboard-composer-card").first();
   const modelButton = composer.getByRole("button", { name: /gpt-4o mini/i });
   await modelButton.click();
-  const modelPanel = composer.locator(".velion-popover").first();
+  const modelPanel = composer.locator(".verevon-popover").first();
   await expect(modelPanel).toBeVisible();
   const modelPanelBox = await modelPanel.boundingBox();
   const composerBox = await composer.boundingBox();
@@ -89,15 +89,15 @@ test("v1-parity auth, onboarding, dashboard, and chat surfaces render", async ({
   expect(modelPanelBox!.y + modelPanelBox!.height).toBeLessThanOrEqual(composerBox!.y);
   await page.getByRole("button", { name: /claude sonnet/i }).click();
   await expect(page.getByRole("button", { name: /claude sonnet/i })).toBeVisible();
-  await page.getByLabel(/message velion/i).fill("Monday");
+  await page.getByLabel(/message verevon/i).fill("Monday");
   await expect(page.getByText(/schedule/i)).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(page.getByLabel(/message velion/i)).toHaveValue(/Mon,/);
-  await page.getByLabel(/message velion/i).fill("");
+  await expect(page.getByLabel(/message verevon/i)).toHaveValue(/Mon,/);
+  await page.getByLabel(/message verevon/i).fill("");
   await page.getByRole("button", { name: /quick response/i }).click();
   await expect(page.locator("[data-mode-announcement='Quick response activated']")).toBeVisible();
   await page.getByRole("button", { name: /suggestions/i }).click();
-  const suggestionsPanel = composer.locator(".velion-popover").first();
+  const suggestionsPanel = composer.locator(".verevon-popover").first();
   await expect(suggestionsPanel).toBeVisible();
   const suggestionsPanelBox = await suggestionsPanel.boundingBox();
   const composerCardBox = await composerCard.boundingBox();
@@ -108,7 +108,7 @@ test("v1-parity auth, onboarding, dashboard, and chat surfaces render", async ({
   await page.getByRole("button", { name: /deep search/i }).click();
   await expect(page.getByRole("button", { name: /deep search/i })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: /send message/i }).click();
-  await expect(page.locator(".velion-fade-up").filter({ hasText: /kort svarutkast/i }).first()).toBeVisible();
+  await expect(page.locator(".verevon-fade-up").filter({ hasText: /kort svarutkast/i }).first()).toBeVisible();
   await page.getByRole("button", { name: /^voice mode$/i }).click();
   await expect(page.getByRole("dialog", { name: /voice mode/i })).toBeVisible();
   await page.getByRole("button", { name: /close voice mode/i }).click();
@@ -207,7 +207,7 @@ test("v1-parity auth, onboarding, dashboard, and chat surfaces render", async ({
 
   await page.goto("/chat");
   await expect(page.getByRole("heading", { name: /hva kan jeg hjelpe med/i, level: 1 })).toBeVisible();
-  await expect(page.getByLabel(/message velion/i)).toBeVisible();
+  await expect(page.getByLabel(/message verevon/i)).toBeVisible();
   await expect(page.getByRole("button", { name: /use quick prompt: create slides/i })).toBeVisible();
   await page.getByRole("button", { name: /show more quick prompts/i }).click();
   await expect(page.getByRole("menuitem", { name: /^code$/i })).toBeVisible();
@@ -219,7 +219,7 @@ test("v1-parity auth, onboarding, dashboard, and chat surfaces render", async ({
   await expect(chatSidebar).toHaveCSS("width", "320px");
   await expect(page.getByLabel(/search conversations/i)).toBeVisible();
   await expect(page.getByRole("navigation", { name: /chat conversations/i })).toBeVisible();
-  await page.getByLabel(/message velion/i).fill("Draft a response plan for today's inbox");
+  await page.getByLabel(/message verevon/i).fill("Draft a response plan for today's inbox");
   await page.getByRole("button", { name: /send message/i }).click();
   await expect(page.locator("article").filter({ hasText: /draft a response plan for today's inbox/i }).first()).toBeVisible();
   await expect(page.getByText(/prompt received/i)).toBeVisible();

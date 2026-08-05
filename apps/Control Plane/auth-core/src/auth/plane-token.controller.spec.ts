@@ -61,7 +61,7 @@ describe('PlaneTokenController service issuance audit', () => {
     const audit = {
       publishAuditDurable: jest
         .fn()
-        .mockResolvedValue({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 41 }),
+        .mockResolvedValue({ stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 41 }),
     };
     const controller = new PlaneTokenController(
       tokens as never,
@@ -81,7 +81,7 @@ describe('PlaneTokenController service issuance audit', () => {
       ),
     ).resolves.toEqual({ token: mintedToken });
     expect(audit.publishAuditDurable).toHaveBeenCalledWith(
-      'velion.audit.v2.control.auth-core.plane_service_token_issued',
+      'verevon.audit.v2.control.auth-core.plane_service_token_issued',
       expect.objectContaining({
         occurred_at: issuedAt,
         event_id: `plane-token:${createHash('sha256')
@@ -146,7 +146,7 @@ describe('PlaneTokenController service issuance audit', () => {
     await Promise.resolve();
     expect(returned).toBe(false);
 
-    acknowledge?.({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 42 });
+    acknowledge?.({ stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 42 });
     await expect(issuance).resolves.toEqual({ token: mintedToken });
   });
 
@@ -208,7 +208,7 @@ describe('PlaneTokenController service issuance audit', () => {
       tokens as never,
       {
         publishAuditDurable: jest.fn().mockResolvedValue({
-          stream: 'VELION_CONTROL_OBSERVABILITY',
+          stream: 'VEREVON_CONTROL_OBSERVABILITY',
           seq: 44,
         }),
       } as never,

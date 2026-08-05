@@ -7,7 +7,7 @@ Sequenced remediation plan: **auth → onboarding → dashboard → functionalit
 | Phase | Status | Verification |
 |---|---|---|
 | 0 — quality gates | ✅ Done | Quarry-v2 `cargo check --tests` green; orchestrator-core `go test` green; convex-core `pnpm typecheck`+`lint` green; gateway `cargo fmt --check` clean; Makefile no longer targets legacy Quarry. |
-| 1 — auth | ✅ Done | `sendOnSignUp:true`; seeded verified account (`e2e@velion.dev`) live-proven through gateway (`/api/v1/me` 200); gateway dev-bypass hardened with `APP_ENV=production` guard + unit test. |
+| 1 — auth | ✅ Done | `sendOnSignUp:true`; seeded verified account (`e2e@verevon.dev`) live-proven through gateway (`/api/v1/me` 200); gateway dev-bypass hardened with `APP_ENV=production` guard + unit test. |
 | 2 — onboarding edge migration | ✅ Code done, live-verify pending image rebuild | 3 direct `quarry_control_url` call sites → `quarry-edge` `/v1/crawl` + `/v1/jobs/{id}/events`, each carrying the `quarry` audience bearer; edge gained `after_seq`+`max_depth` passthrough; gateway 148 tests pass; `quarry_control_url` fully removed from config. |
 | 3 — dashboard honesty | ✅ Done (already honest) | social-workspace + insights + read-data all drive UI from explicit `state` markers (`live`/`empty`/`unavailable`/`planned`); no fabricated-as-live data found. |
 | 4 — functionality | ✅ Done (wired + live) | `/api/v1/models` returns real Azure OpenAI models (200); insights/agent-runs routes correctly wired; run-list requires `thread_id` by design. |
@@ -35,7 +35,7 @@ Sources: [audit backlog](../apps/CORESYSTEM_AUDIT_BACKLOG.md), [cross-plane map]
 | 0.1 | Quarry-v2 test compile: `DataPlaneIngestRequest` constructors missing `initiator_user_id`/`visibility` | E0063 at `Quarry-v2/crates/quarry-core/tests/contracts.rs:231` and `crates/quarry-runtime/src/ingest_client.rs:380` (cfg(test) helper). Production code (`pipeline.rs:621-641`) is already correct. Contract semantics locked in `quarry-core/src/contracts.rs:121-157`: `Some(initiator)` → forwarded as `x-user-id`, doc private-by-default; `None` = system ingest → org-visible. | Add `initiator_user_id: None, visibility: None` at both test sites; extend serde roundtrip test with a `Some(...)` case asserting `skip_serializing_if` omits `None` keys. | `cd "apps/Ingestion Plane/Quarry-v2" && cargo check --tests -p quarry-core -p quarry-runtime` |
 | 0.2 | orchestrator-core tests don't compile: `stubClient` missing `ListPendingApprovals` | `handlers_test.go:140,214` — generated gRPC client interface gained the method (HITL work); stub never extended. | Add `ListPendingApprovals` method to `stubClient` returning an empty response. Test-only. | `cd "apps/Model Plane/go/services/orchestrator-core" && go vet ./internal/orchestration/ && go test ./internal/orchestration/` |
 | 0.3 | convex-core pnpm scripts blocked: `ERR_PNPM_IGNORED_BUILDS` (`esbuild@0.27.0`) | pnpm 11 refuses scripts until the esbuild postinstall is approved. | Add `"pnpm": { "onlyBuiltDependencies": ["esbuild"] }` to `apps/Application Plane/convex-core/package.json` (versioned, CI-safe). | `cd "apps/Application Plane/convex-core" && pnpm typecheck && pnpm lint` |
-| 0.4 | velionv3 gateway rustfmt drift | 12 diff sites in `cost.rs`, `eval.rs`, `middleware.rs`, `rate_limit.rs` (committed code, not WIP). | `cargo fmt` in `apps/gateway`; formatting-only commit. | `cargo fmt --check` in the gateway |
+| 0.4 | verevonv3 gateway rustfmt drift | 12 diff sites in `cost.rs`, `eval.rs`, `middleware.rs`, `rate_limit.rs` (committed code, not WIP). | `cargo fmt` in `apps/gateway`; formatting-only commit. | `cargo fmt --check` in the gateway |
 | 0.5 | Ingestion Makefile targets legacy `Quarry` | `setup`/`dev-quarry`/`test-quarry`/`ci-test`/`docs`/`version` all cd into legacy Go `Quarry`. | Repoint to Quarry-v2 (`cargo test --workspace`, edge run target); keep legacy targets only if explicitly marked deprecated. | `make -n test-quarry \| grep -c "cd Quarry "` → 0 |
 
 ## Phase 1 — Auth (unblocks everything user-facing)
@@ -44,7 +44,7 @@ Sources: [audit backlog](../apps/CORESYSTEM_AUDIT_BACKLOG.md), [cross-plane map]
 
 | # | Task | Fix | Verify |
 |---|---|---|---|
-| 1.1 | Unblock verified sessions for local/E2E | Add a seed script that inserts (or updates) a **verified** test account in `auth_service` DB (`emailVerified=true`), alongside the existing dev user `local@velion.dev`. Wire it as a make target so the Playwright fixture (Phase 7) can depend on it. Do **not** silently flip `REQUIRE_EMAIL_VERIFICATION` off in docker env — that would mask the product bug. | signup→verify(seeded)→signin→`/api/v1/me` 200 through the gateway |
+| 1.1 | Unblock verified sessions for local/E2E | Add a seed script that inserts (or updates) a **verified** test account in `auth_service` DB (`emailVerified=true`), alongside the existing dev user `local@verevon.dev`. Wire it as a make target so the Playwright fixture (Phase 7) can depend on it. Do **not** silently flip `REQUIRE_EMAIL_VERIFICATION` off in docker env — that would mask the product bug. | signup→verify(seeded)→signin→`/api/v1/me` 200 through the gateway |
 | 1.2 | Fix the verification-email dead end for real users | Set `sendOnSignUp: true` (or send on blocked signin) so a verification email is actually dispatched when verification is required; confirm the SPA login surface offers "resend verification". Guard: if `RESEND_API_KEY` is absent, log loudly — never pretend the mail was sent. | throwaway signup produces a Resend send attempt (visible in auth-core logs) |
 | 1.3 | Harden gateway dev-bypass | `allow_dev_auth_bypass` is env-gated default-false (`gateway/src/config.rs:189`, `middleware.rs:172`) — good. Add a belt-and-braces guard: refuse to honor the flag when the deploy profile is production (e.g. panic/ignore when `APP_ENV=production`), plus a config test. | gateway cargo tests |
 | 1.4 | auth-core lint backlog (649 problems) + duplicate token controllers | Defer mechanical Prettier fixes to a formatting-only commit; file unsafe-`any`/floating-promise fixes as a follow-up batch. Not release-blocking. | `pnpm exec eslint ...` trend |
@@ -75,7 +75,7 @@ The SPA has a principled fallback framework (`shared/read-data`: `unavailable`/`
 |---|---|---|---|
 | 3.1 | Fallback register | Inventory every `source: 'fallback'` / `plannedResult` / `unavailableResult` consumer across social, studio, agents, shared read-data; classify: honest-empty vs planned-badge vs masking-missing-wiring. | register doc committed |
 | 3.2 | Badge or wire | For every "masking" case: either render the state marker (unavailable/not-connected) or wire the live owner-plane call. No fabricated data presented as live. | UI shows real state per surface |
-| 3.3 | Insights reality check | `/agents` insights use the RUN_* producer (live per Phase 7 work); conversation/social insight producers were blocked on a down `velion-nats`. Verify current bus health and either wire or badge those two. | insights panel shows real run metrics |
+| 3.3 | Insights reality check | `/agents` insights use the RUN_* producer (live per Phase 7 work); conversation/social insight producers were blocked on a down `verevon-nats`. Verify current bus health and either wire or badge those two. | insights panel shows real run metrics |
 
 ## Phase 4 — Functionality (chat/search/crawl/agent-runs)
 
@@ -112,7 +112,7 @@ The SPA has a principled fallback framework (`shared/read-data`: `unavailable`/`
 
 | # | Task | Fix | Verify |
 |---|---|---|---|
-| 7.1 | Playwright harness | Add Playwright dep + config to velionv3 (none exists today); seeded verified account from 1.1 as fixture. | `pnpm exec playwright test` runs |
+| 7.1 | Playwright harness | Add Playwright dep + config to verevonv3 (none exists today); seeded verified account from 1.1 as fixture. | `pnpm exec playwright test` runs |
 | 7.2 | Authenticated cross-plane journey | One spec: signin → onboarding-complete workspace → knowledge sources (Data) → crawl start (Ingestion via edge) → chat/run (Model) → inbox/notification (Application). This is the audit's missing L4. | spec green against the local stack |
 | 7.3 | L5 policy proof | Fold in Phase 6 tenant-denial + Phase 5 webhook smoke + Phase 2 edge-only guard as CI-runnable gates. | gates listed in cross-plane map updated |
 

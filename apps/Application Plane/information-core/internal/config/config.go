@@ -26,7 +26,7 @@ func Load() Config {
 		Port:            getInt("PORT", 3190),
 		ServiceName:     getString("SERVICE_NAME", "information-core"),
 		InternalAPIKey:  strings.TrimSpace(os.Getenv("INTERNAL_API_KEY")),
-		UserAgent:       getString("INFORMATION_CORE_USER_AGENT", "VelionInformationCore/1.0 (ops@velion.local)"),
+		UserAgent:       getString("INFORMATION_CORE_USER_AGENT", "VerevonInformationCore/1.0 (ops@verevon.local)"),
 		LovdataAPIKey:   strings.TrimSpace(os.Getenv("LOVDATA_API_KEY")),
 		EnturClientName: getString("ENTUR_CLIENT_NAME", "coresystem-information-core"),
 		DatexURL:        strings.TrimSpace(os.Getenv("DATEX_URL")),

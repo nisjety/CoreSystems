@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+// nonNilStringSlice keeps SQL array columns as empty arrays rather than NULL.
+// PostgreSQL defaults do not apply when an INSERT explicitly binds a nil Go
+// slice, which matters for providers such as Notion that have no OAuth scope
+// parameter in their authorization contract.
+func nonNilStringSlice(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return append([]string{}, values...)
+}
+
 var (
 	ErrNotFound = errors.New("not found")
 	ErrConflict = errors.New("conflict")
@@ -63,6 +74,12 @@ type ConnectionFilter struct {
 	ProviderKey    string
 	ConnectorType  string
 	UserID         string
+}
+
+// ConnectionSyncStatusUpdater is implemented by repositories that project
+// worker delivery health onto integration_connections.last_sync_status.
+type ConnectionSyncStatusUpdater interface {
+	UpdateConnectionSyncStatus(ctx context.Context, connectionID, status string) error
 }
 
 type ConnectionConsent struct {
@@ -245,6 +262,10 @@ type Repository interface {
 	ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error)
 	GetConnection(ctx context.Context, id string) (Connection, error)
 	FindActiveConnection(ctx context.Context, organizationID, connectorType string) (Connection, error)
+	// FindActiveConnectionByProviderAccount scopes reconnect identity to the
+	// provider-confirmed account. It prevents a second OAuth account in the
+	// same organization from overwriting the first connection.
+	FindActiveConnectionByProviderAccount(ctx context.Context, organizationID, connectorType, providerAccountID string) (Connection, error)
 	MarkConnectionDeleted(ctx context.Context, id string) (Connection, error)
 	UpdateConnectionCapabilities(ctx context.Context, id string, capabilities []string) (Connection, error)
 	UpsertConnectionConsent(ctx context.Context, consent ConnectionConsent) (ConnectionConsent, error)
@@ -258,7 +279,7 @@ type Repository interface {
 	ListSyncEvents(ctx context.Context, jobID string) ([]SyncEvent, error)
 	InsertWebhookEvent(ctx context.Context, event WebhookEvent) error
 	// GetWebhookEvent fetches a stored webhook by id, org-scoped. Downstream
-	// cores subscribe to the lightweight velion.ingestion.integration.
+	// cores subscribe to the lightweight verevon.ingestion.integration.
 	// webhook_received NATS event (metadata only: eventType, webhookEventId)
 	// and fetch the full payload on demand via this lookup rather than the
 	// event carrying a potentially-large body.

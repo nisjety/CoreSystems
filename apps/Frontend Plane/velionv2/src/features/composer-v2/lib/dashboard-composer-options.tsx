@@ -16,7 +16,7 @@ import type {
 } from "@/features/dashboard-v2/lib/dashboard-composer-model";
 import type { AutocompleteItem, HistoryPanelPosition, SettingsPanelPosition } from "@/features/composer-v2/lib/dashboard-composer-types";
 
-export const modelOptions = ["GPT-4o Mini", "GPT-4.1", "Claude Sonnet", "Velion Reasoner"] as const satisfies readonly DashboardComposerModel[];
+export const modelOptions = ["GPT-4o Mini", "GPT-4.1", "Claude Sonnet", "Verevon Reasoner"] as const satisfies readonly DashboardComposerModel[];
 export const responseModes: Array<{ id: ResponseMode; label: string; announcement: string; icon: ReactNode }> = [
   { id: "auto", label: "Auto", announcement: "Auto mode", icon: <WandSparkles className="size-4" /> },
   { id: "quick", label: "Quick response", announcement: "Quick response activated", icon: <Zap className="size-4" /> },

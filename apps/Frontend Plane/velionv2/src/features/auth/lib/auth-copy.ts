@@ -1,9 +1,9 @@
 export const authCopy = {
-  brand: "Velion",
+  brand: "Verevon",
   back: "← TILBAKE",
   supportNeedHelp: "Trenger du hjelp?",
   supportContact: "Kontakt Support",
-  supportEmail: "support@velion.com",
+  supportEmail: "support@verevon.com",
   termsPrefixSignin: "Ved å fortsette aksepterer du våre",
   termsAnd: "og",
   termsUser: "brukervilkår",

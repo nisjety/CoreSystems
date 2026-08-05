@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { VelionProductShell } from "@/features/shell-v2/components/VelionProductShell";
+import { VerevonProductShell } from "@/features/shell-v2/components/VerevonProductShell";
 import { SearchAnswerView } from "@/features/search-v2/components/SearchAnswerView";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
@@ -13,8 +13,8 @@ export async function generateMetadata({
   const { q } = await searchParams;
   const query = typeof q === "string" ? q : "";
   return {
-    title: query ? `${query} — Søk | Velion` : "Søk | Velion",
-    description: query ? `Søkeresultater for ${query}` : "Velion web search",
+    title: query ? `${query} — Søk | Verevon` : "Søk | Verevon",
+    description: query ? `Søkeresultater for ${query}` : "Verevon web search",
   };
 }
 
@@ -29,8 +29,8 @@ export default async function SearchPage({
   const initialQuery = typeof q === "string" ? q : "";
 
   return (
-    <VelionProductShell activeRoute="/search">
+    <VerevonProductShell activeRoute="/search">
       <SearchAnswerView initialQuery={initialQuery} />
-    </VelionProductShell>
+    </VerevonProductShell>
   );
 }

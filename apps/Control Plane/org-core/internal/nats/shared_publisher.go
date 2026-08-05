@@ -13,7 +13,7 @@ import (
 )
 
 // SharedPublisher publishes cross-plane domain events to the shared
-// velion-nats broker on the aqencia.controlplane.* subject namespace.
+// verevon-nats broker on the aqencia.controlplane.* subject namespace.
 //
 // Subject convention: aqencia.controlplane.<entity>.<verb>
 //
@@ -38,7 +38,7 @@ type SharedCredentials struct {
 // owns stream and consumer topology; this runtime principal can only publish.
 func NewSharedPublisher(sharedURL string, credentials SharedCredentials, clientName string) (*SharedPublisher, error) {
 	if sharedURL == "" {
-		log.Println("ℹ️  VELION_NATS_URL not set — cross-plane publishing disabled (org-core)")
+		log.Println("ℹ️  VEREVON_NATS_URL not set — cross-plane publishing disabled (org-core)")
 		return nil, nil
 	}
 
@@ -174,6 +174,21 @@ func (sp *SharedPublisher) PublishPlanChanged(ctx context.Context, orgID, orgNam
 
 func planChangeMessageID(orgID string, revision int64) string {
 	return fmt.Sprintf("organization-plan:%s:%d", orgID, revision)
+}
+
+// PublishInteractiveRetentionEnabled publishes the minimal, durable cleanup
+// signal emitted only when ZDR changes from false to true. The event contains
+// no actor identity, customer content, or retention payload: Conversation Core
+// needs only the organization identifier to remove personal draft recovery.
+func (sp *SharedPublisher) PublishInteractiveRetentionEnabled(ctx context.Context, orgID string, eventID int64) error {
+	return sp.Publish(ctx, "aqencia.controlplane.org.interactive_retention.enabled", map[string]any{
+		"org_id": orgID,
+		"zdr":    true,
+	}, jetstream.WithMsgID(interactiveRetentionMessageID(eventID)))
+}
+
+func interactiveRetentionMessageID(eventID int64) string {
+	return fmt.Sprintf("interactive-retention:%d", eventID)
 }
 
 // PublishMemberAdded publishes aqencia.controlplane.org.member_added.

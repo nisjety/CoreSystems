@@ -25,7 +25,7 @@ function credentials(): string {
   return JSON.stringify([
     {
       credentialId: 'gateway-2026-07',
-      principal: 'velion-gateway',
+      principal: 'verevon-gateway',
       audience: 'auth-core',
       token: TOKEN,
       scopes: [
@@ -42,7 +42,7 @@ function credentials(): string {
 function metadata(valid = true): Metadata {
   const value = new Metadata();
   value.set('x-service-credential-id', 'gateway-2026-07');
-  value.set('x-service-principal', 'velion-gateway');
+  value.set('x-service-principal', 'verevon-gateway');
   value.set('x-service-auth', valid ? TOKEN : 'wrong-token');
   return value;
 }
@@ -131,7 +131,7 @@ describe('AuthGrpcController scoped service authentication', () => {
     process.env.AUTH_GRPC_SERVICE_CREDENTIALS = JSON.stringify([
       {
         credentialId: 'gateway-readonly',
-        principal: 'velion-gateway',
+        principal: 'verevon-gateway',
         audience: 'auth-core',
         token: TOKEN,
         scopes: ['auth:user:read'],
@@ -139,7 +139,7 @@ describe('AuthGrpcController scoped service authentication', () => {
     ]);
     const requestMetadata = new Metadata();
     requestMetadata.set('x-service-credential-id', 'gateway-readonly');
-    requestMetadata.set('x-service-principal', 'velion-gateway');
+    requestMetadata.set('x-service-principal', 'verevon-gateway');
     requestMetadata.set('x-service-auth', TOKEN);
     const controller = new AuthGrpcController();
 

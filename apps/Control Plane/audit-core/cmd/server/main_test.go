@@ -23,11 +23,11 @@ import (
 	"github.com/triodelab/controlplane/audit-core/internal/subscriber"
 )
 
-const serverTestCredentials = `[{"principal":"velion-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"abcdef0123456789abcdef0123456789","scopes":["audit:write"],"planes":["ingestion"]}]`
+const serverTestCredentials = `[{"principal":"verevon-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"abcdef0123456789abcdef0123456789","scopes":["audit:write"],"planes":["ingestion"]}]`
 
 func TestLoadConfigRejectsIncompleteServiceCredentialAuthority(t *testing.T) {
 	setMinimumConfig(t)
-	t.Setenv("AUDIT_CORE_SERVICE_CREDENTIALS", `[{"principal":"velion-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]}]`)
+	t.Setenv("AUDIT_CORE_SERVICE_CREDENTIALS", `[{"principal":"verevon-gateway","audience":"audit-core","token":"0123456789abcdef0123456789abcdef","scopes":["audit:read:self"]}]`)
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("incomplete service credential authority was accepted at startup")
 	}
@@ -188,15 +188,15 @@ func TestPlaneRuntimePrincipalsCannotReachJetStreamAdminOrAuditConsumerSubjects(
 		delivery       string
 		ack            string
 	}{
-		{name: "model", path: filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"), runtimeUser: "model-gateway-runtime", inbox: "_INBOX.MODEL_GATEWAY_RUNTIME", allowedSubject: "mp.v1.run.fixture.event", delivery: "_VELION.AUDIT.DELIVER.model.audit-v2", ack: "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.1.1.1.1.1"},
-		{name: "application", path: filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"), runtimeUser: "application-social", inbox: "_INBOX.APPLICATION_SOCIAL", allowedSubject: "velion.application.social.fixture", delivery: "_VELION.AUDIT.DELIVER.application.audit-v2", ack: "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-application-v3-audit.1.1.1.1.1"},
+		{name: "model", path: filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"), runtimeUser: "model-gateway-runtime", inbox: "_INBOX.MODEL_GATEWAY_RUNTIME", allowedSubject: "mp.v1.run.fixture.event", delivery: "_VEREVON.AUDIT.DELIVER.model.audit-v2", ack: "$JS.ACK.VEREVON_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.1.1.1.1.1"},
+		{name: "application", path: filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"), runtimeUser: "application-social", inbox: "_INBOX.APPLICATION_SOCIAL", allowedSubject: "verevon.application.social.fixture", delivery: "_VEREVON.AUDIT.DELIVER.application.audit-v2", ack: "$JS.ACK.VEREVON_CONTROL_OBSERVABILITY.audit-core-application-v3-audit.1.1.1.1.1"},
 	}
 	for _, envName := range []string{
 		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
 		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
+		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
 		"APPLICATION_LEADS_NATS_PASSWORD", "APPLICATION_NOTIFICATION_NATS_PASSWORD",
 		"AUDIT_APPLICATION_NATS_PASSWORD", "APPLICATION_NATS_PROVISIONER_PASSWORD",
 	} {
@@ -405,7 +405,7 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 		},
 		{
 			service: "session-core", user: "session-core-runtime", password: "MODEL_SESSION_CORE_NATS_PASSWORD",
-			inbox: "_INBOX.SESSION_CORE_RUNTIME.>", auditSubject: "velion.audit.v2.model.session-core.>",
+			inbox: "_INBOX.SESSION_CORE_RUNTIME.>", auditSubject: "verevon.audit.v2.model.session-core.>",
 			source: filepath.Join(modelRoot, "rust", "services", "session-core", "src", "nats_connection.rs"),
 		},
 		{
@@ -469,7 +469,7 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gatewayBlock, "velion.audit.v2.model.") || strings.Contains(gatewayBlock, "session-core-tools") {
+	if strings.Contains(gatewayBlock, "verevon.audit.v2.model.") || strings.Contains(gatewayBlock, "session-core-tools") {
 		t.Fatal("model-gateway principal can cross the session audit or durable-consumer boundary")
 	}
 	for _, forbidden := range []string{"agents.>", "org.>", "notify.>"} {
@@ -494,7 +494,7 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 			t.Fatalf("session-core principal missing fixed-consumer capability %q", required)
 		}
 	}
-	if strings.Contains(sessionBlock, "velion.audit.v2.model.model-gateway.>") {
+	if strings.Contains(sessionBlock, "verevon.audit.v2.model.model-gateway.>") {
 		t.Fatal("session-core principal can publish model-gateway audit events")
 	}
 	if strings.Contains(broker, `user: "model-runtime"`) || strings.Contains(compose, "NATS_USER: model-runtime") {
@@ -509,7 +509,7 @@ func TestModelAuditProducersUseDistinctServicePrincipals(t *testing.T) {
 			t.Fatalf("tool-completion producer missing scoped capability %q", required)
 		}
 	}
-	for _, forbidden := range []string{"mp.v1.", "velion.audit.v2.model.", "session-core-tools", "session-core-orchestration"} {
+	for _, forbidden := range []string{"mp.v1.", "verevon.audit.v2.model.", "session-core-tools", "session-core-orchestration"} {
 		if strings.Contains(toolCompletionBlock, forbidden) {
 			t.Fatalf("tool-completion producer retains unrelated capability %q", forbidden)
 		}
@@ -588,14 +588,14 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 	if jsErr != nil {
 		t.Fatal(jsErr)
 	}
-	if _, publishErr := sessionPublishJS.Publish("velion.audit.v2.model.session-core.fixture", []byte(`{"event_id":"fixture"}`)); publishErr != nil {
+	if _, publishErr := sessionPublishJS.Publish("verevon.audit.v2.model.session-core.fixture", []byte(`{"event_id":"fixture"}`)); publishErr != nil {
 		t.Fatalf("session-core audit namespace did not receive a JetStream PubAck: %v", publishErr)
 	}
 	assertMainPermissionDenied(t, gateway, gatewayErrors, "gateway cross-producer audit publish", func() error {
-		return gateway.Publish("velion.audit.v2.model.session-core.forged", nil)
+		return gateway.Publish("verevon.audit.v2.model.session-core.forged", nil)
 	})
 	assertMainPermissionDenied(t, gateway, gatewayErrors, "gateway legacy self-producer audit publish", func() error {
-		return gateway.Publish("velion.audit.v2.model.model-gateway.forged", nil)
+		return gateway.Publish("verevon.audit.v2.model.model-gateway.forged", nil)
 	})
 	for _, subject := range []string{
 		"agents.forged",
@@ -610,11 +610,11 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 		t.Fatalf("gateway canonical mp.v1 run publish denied: %v", err)
 	}
 	assertMainPermissionDenied(t, session, sessionErrors, "session cross-producer audit publish", func() error {
-		return session.Publish("velion.audit.v2.model.model-gateway.forged", nil)
+		return session.Publish("verevon.audit.v2.model.model-gateway.forged", nil)
 	})
 	for _, subject := range []string{
-		"velion.audit.v2.model.model-gateway.forged",
-		"velion.audit.v2.model.session-core.forged",
+		"verevon.audit.v2.model.model-gateway.forged",
+		"verevon.audit.v2.model.session-core.forged",
 	} {
 		assertMainPermissionDenied(t, toolCompletion, toolCompletionErrors, "tool-completion audit publish", func() error {
 			return toolCompletion.Publish(subject, nil)
@@ -630,7 +630,7 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 		t.Fatalf("orchestrator-core exact run publish denied: %v", err)
 	}
 	assertMainPermissionDenied(t, orchestrator, orchestratorErrors, "orchestrator legacy subscribe", func() error {
-		_, subscribeErr := orchestrator.Subscribe("velion.agent.run.*.event", func(*nats.Msg) {})
+		_, subscribeErr := orchestrator.Subscribe("verevon.agent.run.*.event", func(*nats.Msg) {})
 		return subscribeErr
 	})
 
@@ -745,7 +745,7 @@ func TestApplicationLocalBrokerUsesPerServicePrincipals(t *testing.T) {
 			!strings.Contains(block, "NATS_PASSWORD: ${"+principal.password+":?") {
 			t.Fatalf("%s is not wired to scoped local principal %s", principal.service, principal.user)
 		}
-		for _, forbidden := range []string{"\n      NATS_TOKEN:", "\n      VELION_NATS_TOKEN:", "APPLICATION_NATS_RUNTIME_PASSWORD"} {
+		for _, forbidden := range []string{"\n      NATS_TOKEN:", "\n      VEREVON_NATS_TOKEN:", "APPLICATION_NATS_RUNTIME_PASSWORD"} {
 			if strings.Contains(block, forbidden) {
 				t.Fatalf("%s still receives shared local broker credential %q", principal.service, forbidden)
 			}
@@ -803,7 +803,7 @@ func TestConvexControlProjectionUsesScopedPreprovisionedConsumer(t *testing.T) {
 				t.Fatalf("Convex scoped Control wiring missing %q", required)
 			}
 		}
-		for _, forbidden := range []string{"NATS_TOKEN", "VELION_NATS_TOKEN"} {
+		for _, forbidden := range []string{"NATS_TOKEN", "VEREVON_NATS_TOKEN"} {
 			if strings.Contains(block, forbidden) {
 				t.Fatalf("Convex still receives token credential %q", forbidden)
 			}
@@ -811,7 +811,7 @@ func TestConvexControlProjectionUsesScopedPreprovisionedConsumer(t *testing.T) {
 	}
 
 	subscriber := string(subscriberBytes)
-	for _, forbidden := range []string{"NATS_TOKEN", "VELION_NATS_TOKEN", "jetstreamManager", "streams.add"} {
+	for _, forbidden := range []string{"NATS_TOKEN", "VEREVON_NATS_TOKEN", "jetstreamManager", "streams.add"} {
 		if strings.Contains(subscriber, forbidden) {
 			t.Fatalf("Convex runtime retains token/admin path %q", forbidden)
 		}
@@ -833,7 +833,7 @@ func TestConvexControlProjectionUsesScopedPreprovisionedConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(notificationBlock, "SHARED_NATS_TOKEN") || strings.Contains(notificationBlock, "VELION_NATS_TOKEN") {
+	if strings.Contains(notificationBlock, "SHARED_NATS_TOKEN") || strings.Contains(notificationBlock, "VEREVON_NATS_TOKEN") {
 		t.Fatal("disabled Notification shared-bus consumer still receives a token")
 	}
 }
@@ -848,7 +848,7 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 		"CONTROL_SHARED_BRIDGE_PASSWORD", "CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
 		"SESSION_CORE_GDPR_NATS_PASSWORD", "CONVERSATION_CORE_GDPR_NATS_PASSWORD",
 		"QUARRY_CONTROL_GDPR_NATS_PASSWORD", "NOTIFICATION_CORE_GDPR_NATS_PASSWORD",
-		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
+		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "EMBEDDING_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
 		"WIKI_STORE_GDPR_NATS_PASSWORD", "RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD",
 		"DATA_QUALITY_GDPR_NATS_PASSWORD", "DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD",
 		"QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD", "COST_CORE_GDPR_NATS_PASSWORD",
@@ -1076,8 +1076,37 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 	case <-time.After(2 * time.Second):
 		t.Fatal("scoped conversation-core org-erasure consumer did not receive the durable erasure event")
 	}
+	conversationRetentionReceived := make(chan struct{}, 1)
+	conversationRetentionSubscription, err := conversationJS.QueueSubscribe(
+		provisioner.InteractiveRetentionEnabledSubject,
+		provisioner.ConversationInteractiveRetentionConsumerName,
+		func(message *nats.Msg) {
+			_ = message.Ack()
+			conversationRetentionReceived <- struct{}{}
+		},
+		nats.Bind(provisioner.ControlSharedStreamName, provisioner.ConversationInteractiveRetentionConsumerName),
+		nats.ManualAck(),
+	)
+	if err != nil {
+		t.Fatalf("bind scoped conversation-core interactive-retention consumer: %v", err)
+	}
+	t.Cleanup(func() { _ = conversationRetentionSubscription.Unsubscribe() })
+	if err := orgProducer.Publish(provisioner.InteractiveRetentionEnabledSubject, []byte(`{"org_id":"org-1","zdr":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := orgProducer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-conversationRetentionReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scoped conversation-core interactive-retention consumer did not receive the durable Control event")
+	}
 	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation GDPR request forgery", func() error {
 		return conversationGDPR.Publish(provisioner.GDPRErasureRequestedSubject, []byte(`{"forged":true}`))
+	})
+	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation retention request forgery", func() error {
+		return conversationGDPR.Publish(provisioner.InteractiveRetentionEnabledSubject, []byte(`{"forged":true}`))
 	})
 	assertMainPermissionDenied(t, conversationGDPR, conversationPermissionErrors, "conversation JetStream administration", func() error {
 		return conversationGDPR.Publish("$JS.API.STREAM.CREATE.FORGED", []byte(`{"name":"FORGED"}`))
@@ -1087,7 +1116,7 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 	const password = "0123456789abcdef0123456789abcdef"
 	for _, envName := range []string{
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD",
+		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD",
 		"APPLICATION_INSIGHT_NATS_PASSWORD", "APPLICATION_LEADS_NATS_PASSWORD",
 		"APPLICATION_NOTIFICATION_NATS_PASSWORD", "AUDIT_APPLICATION_NATS_PASSWORD",
 		"APPLICATION_NATS_PROVISIONER_PASSWORD",
@@ -1159,7 +1188,7 @@ func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 	insightJS, _ := insight.JetStream(nats.MaxWait(2 * time.Second))
 	reviewed := make(chan struct{}, 1)
 	reviewedSub, err := conversationJS.QueueSubscribe(
-		"velion.application.conversation.ai_action.reviewed", provisioner.ConversationAIActionConsumerName,
+		"verevon.application.conversation.ai_action.reviewed", provisioner.ConversationAIActionConsumerName,
 		func(message *nats.Msg) { _ = message.Ack(); reviewed <- struct{}{} },
 		nats.Bind(provisioner.ApplicationEventsStreamName, provisioner.ConversationAIActionConsumerName),
 	)
@@ -1169,7 +1198,7 @@ func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 	t.Cleanup(func() { _ = reviewedSub.Unsubscribe() })
 	metrics := make(chan struct{}, 1)
 	metricSub, err := insightJS.QueueSubscribe(
-		"velion.application.>", provisioner.InsightMetricConsumerName,
+		"verevon.application.>", provisioner.InsightMetricConsumerName,
 		func(message *nats.Msg) { _ = message.Ack(); metrics <- struct{}{} },
 		nats.Bind(provisioner.ApplicationEventsStreamName, provisioner.InsightMetricConsumerName),
 	)
@@ -1177,7 +1206,7 @@ func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 		t.Fatalf("bind scoped Insight consumer: %v", err)
 	}
 	t.Cleanup(func() { _ = metricSub.Unsubscribe() })
-	if _, err := conversationJS.Publish("velion.application.conversation.ai_action.reviewed", []byte(`{"fixture":true}`)); err != nil {
+	if _, err := conversationJS.Publish("verevon.application.conversation.ai_action.reviewed", []byte(`{"fixture":true}`)); err != nil {
 		t.Fatalf("conversation publish: %v", err)
 	}
 	for name, delivered := range map[string]<-chan struct{}{"conversation": reviewed, "insight": metrics} {
@@ -1191,16 +1220,16 @@ func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 		connection *nats.Conn
 		subject    string
 	}{
-		{social, "velion.application.social.fixture"},
-		{leads, "velion.audit.v2.application.leads-core.fixture"},
-		{notification, "velion.application.notification.fixture"},
+		{social, "verevon.application.social.fixture"},
+		{leads, "verevon.audit.v2.application.leads-core.fixture"},
+		{notification, "verevon.application.notification.fixture"},
 	} {
 		if err := publish.connection.Publish(publish.subject, []byte(`{"fixture":true}`)); err != nil {
 			t.Fatalf("scoped publish %s: %v", publish.subject, err)
 		}
 	}
 	assertMainPermissionDenied(t, social, socialPermissionErrors, "cross-service publish", func() error {
-		return social.Publish("velion.application.notification.forged", nil)
+		return social.Publish("verevon.application.notification.forged", nil)
 	})
 	if _, err := conversationJS.AddStream(&nats.StreamConfig{Name: "FORGED", Subjects: []string{"forged.>"}}); err == nil {
 		t.Fatal("Application runtime principal administered an unrelated stream")
@@ -1216,7 +1245,7 @@ func TestScopedBrokerConfigsParse(t *testing.T) {
 		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
+		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
 		"APPLICATION_LEADS_NATS_PASSWORD", "APPLICATION_NOTIFICATION_NATS_PASSWORD",
 		"AUDIT_APPLICATION_NATS_PASSWORD", "APPLICATION_NATS_PROVISIONER_PASSWORD",
 	} {
@@ -1258,7 +1287,7 @@ func TestScopedBrokerMonitoringBindsLoopback(t *testing.T) {
 		"CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
 		"SESSION_CORE_GDPR_NATS_PASSWORD", "CONVERSATION_CORE_GDPR_NATS_PASSWORD",
 		"QUARRY_CONTROL_GDPR_NATS_PASSWORD", "NOTIFICATION_CORE_GDPR_NATS_PASSWORD",
-		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
+		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "EMBEDDING_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
 		"WIKI_STORE_GDPR_NATS_PASSWORD", "RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD",
 		"DATA_QUALITY_GDPR_NATS_PASSWORD", "DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD",
 		"QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD", "COST_CORE_GDPR_NATS_PASSWORD",
@@ -1266,7 +1295,7 @@ func TestScopedBrokerMonitoringBindsLoopback(t *testing.T) {
 		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
 		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
 		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
+		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
 		"APPLICATION_LEADS_NATS_PASSWORD", "APPLICATION_NOTIFICATION_NATS_PASSWORD",
 		"AUDIT_APPLICATION_NATS_PASSWORD", "APPLICATION_NATS_PROVISIONER_PASSWORD",
 	} {
@@ -1368,7 +1397,7 @@ func TestControlReleaseUsesDistinctServicePrincipals(t *testing.T) {
 	for _, required := range []string{
 		"$JS.API.CONSUMER.INFO.CONTROL_PLANE_EVENTS.billing-core-organization-plan-changed",
 		"$JS.ACK.CONTROL_PLANE_EVENTS.billing-core-organization-plan-changed.>",
-		"_VELION.CONTROL.DELIVER.billing.organization-plan-changed billing-core-organization-plan-changed",
+		"_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed billing-core-organization-plan-changed",
 	} {
 		if !strings.Contains(billingBlock, required) {
 			t.Fatalf("billing principal missing fixed consumer capability %q", required)
@@ -1597,13 +1626,13 @@ func TestScopedBrokerConfigsPinPlaneDeliverySubjects(t *testing.T) {
 		}
 		text := string(contents)
 		for _, kind := range []string{"audit", "usage"} {
-			want := fmt.Sprintf("_VELION.AUDIT.DELIVER.%s.%s-v2 audit-core-%s-v3-%s", plane, kind, plane, kind)
+			want := fmt.Sprintf("_VEREVON.AUDIT.DELIVER.%s.%s-v2 audit-core-%s-v3-%s", plane, kind, plane, kind)
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s broker ACL missing %q", plane, want)
 			}
 		}
 		for other := range configs {
-			if other != plane && strings.Contains(text, "_VELION.AUDIT.DELIVER."+other+".") {
+			if other != plane && strings.Contains(text, "_VEREVON.AUDIT.DELIVER."+other+".") {
 				t.Fatalf("%s broker ACL admits %s delivery subject", plane, other)
 			}
 		}
@@ -1979,7 +2008,7 @@ func publishAuditEvent(t *testing.T, nc *nats.Conn, eventName string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.Publish("velion.audit.v2.model.model-gateway."+eventName, payload); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.model.model-gateway."+eventName, payload); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1990,10 +2019,10 @@ func provisionMainTestObservability(t *testing.T, nc *nats.Conn, bus, plane stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := js.StreamInfo("VELION_CONTROL_OBSERVABILITY"); errors.Is(err, nats.ErrStreamNotFound) {
+	if _, err := js.StreamInfo("VEREVON_CONTROL_OBSERVABILITY"); errors.Is(err, nats.ErrStreamNotFound) {
 		if _, err := js.AddStream(&nats.StreamConfig{
-			Name:       "VELION_CONTROL_OBSERVABILITY",
-			Subjects:   []string{"velion.audit.v2." + plane + ".>", "velion.usage.v2." + plane + ".>", "velion.dlq.audit-core.>"},
+			Name:       "VEREVON_CONTROL_OBSERVABILITY",
+			Subjects:   []string{"verevon.audit.v2." + plane + ".>", "verevon.usage.v2." + plane + ".>", "verevon.dlq.audit-core.>"},
 			Retention:  nats.LimitsPolicy,
 			Storage:    nats.FileStorage,
 			Discard:    nats.DiscardOld,
@@ -2007,16 +2036,16 @@ func provisionMainTestObservability(t *testing.T, nc *nats.Conn, bus, plane stri
 	}
 	for _, kind := range []string{"audit", "usage"} {
 		consumer := fmt.Sprintf("audit-core-%s-v3-%s", bus, kind)
-		if _, err := js.ConsumerInfo("VELION_CONTROL_OBSERVABILITY", consumer); err == nil {
+		if _, err := js.ConsumerInfo("VEREVON_CONTROL_OBSERVABILITY", consumer); err == nil {
 			continue
 		} else if !errors.Is(err, nats.ErrConsumerNotFound) {
 			t.Fatal(err)
 		}
-		if _, err := js.AddConsumer("VELION_CONTROL_OBSERVABILITY", &nats.ConsumerConfig{
+		if _, err := js.AddConsumer("VEREVON_CONTROL_OBSERVABILITY", &nats.ConsumerConfig{
 			Durable:        consumer,
-			DeliverSubject: fmt.Sprintf("_VELION.AUDIT.DELIVER.%s.%s-v2", plane, kind),
+			DeliverSubject: fmt.Sprintf("_VEREVON.AUDIT.DELIVER.%s.%s-v2", plane, kind),
 			DeliverGroup:   consumer,
-			FilterSubject:  fmt.Sprintf("velion.%s.v2.%s.>", kind, plane),
+			FilterSubject:  fmt.Sprintf("verevon.%s.v2.%s.>", kind, plane),
 			DeliverPolicy:  nats.DeliverAllPolicy,
 			AckPolicy:      nats.AckExplicitPolicy,
 			AckWait:        30 * time.Second,

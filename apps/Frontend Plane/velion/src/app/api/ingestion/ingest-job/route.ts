@@ -120,7 +120,7 @@ async function fetchPageBody(url: string): Promise<ScrapedPage> {
   if (!ref?.artifact_id) {
     throw new Error('no markdown artifact in scrape response')
   }
-  // (b) GET /v1/artifacts/:id/bytes — see §8.28 in velion-gap.md.
+  // (b) GET /v1/artifacts/:id/bytes — see §8.28 in verevon-gap.md.
   const bytesRes = await fetch(
     `${QUARRY_EDGE_URL}/v1/artifacts/${encodeURIComponent(ref.artifact_id)}/bytes`,
   )

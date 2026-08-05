@@ -14,11 +14,11 @@ Image: `ingestion-plane-support-worker`, created 2026-07-07, container started 2
 
 ## Bottom Line
 
-`support-worker` is a **real, complete Temporal worker** (not a scaffold) that pairs a Temporal worker with a NATS→Temporal bridge for Zammad support-ticket automation. The code is clean — no mocks, stubs, TODOs, or placeholders anywhere in `src/`. The process is alive and its two live infra dependencies (Temporal, velion-nats) are reachable.
+`support-worker` is a **real, complete Temporal worker** (not a scaffold) that pairs a Temporal worker with a NATS→Temporal bridge for Zammad support-ticket automation. The code is clean — no mocks, stubs, TODOs, or placeholders anywhere in `src/`. The process is alive and its two live infra dependencies (Temporal, verevon-nats) are reachable.
 
 **But it is functionally dead-ended in this deployment.** Every one of its business dependencies is either absent or mis-routed, and nothing feeds it input:
 
-1. **No input producer.** Nothing in the monorepo publishes to `velion.support.*` (grep across `apps/` = 0 hits), and there is **no Zammad container** (`zammad-railsserver` is not in the compose file or the runtime). The NATS bridge connects, creates the `VELION_SUPPORT` stream + `support-worker` durable consumer, and then waits forever for messages that never arrive.
+1. **No input producer.** Nothing in the monorepo publishes to `verevon.support.*` (grep across `apps/` = 0 hits), and there is **no Zammad container** (`zammad-railsserver` is not in the compose file or the runtime). The NATS bridge connects, creates the `VEREVON_SUPPORT` stream + `support-worker` durable consumer, and then waits forever for messages that never arrive.
 2. **`ai-core` does not exist.** `classifyActivity` calls `http://ai-core:8001/api/v1/reason`. No container is named or aliased `ai-core` anywhere (compose has no such service; runtime lookup count = 0). The triage workflow would DNS-fail at step 1.
 3. **Zammad is unreachable AND unauthenticated.** `patchZammadActivity` targets `http://zammad-railsserver:3000` (host absent) and `ZAMMAD_API_TOKEN` is empty, so it throws `ZAMMAD_API_TOKEN is required` before it even makes a request.
 4. **notification-core route mismatch.** `notify-agent`/`send-csat` POST to `notification-core:3140/v1/notifications`. notification-core is up (`/health` = 200) but that route (and `/api/v1/notifications`, `/notifications`, `/v1/notify`) returns Go's default `404 page not found` even with the internal key — so even the one reachable downstream fails at the HTTP layer.
@@ -35,8 +35,8 @@ Entrypoint `src/index.ts`:
 - Starts the NATS bridge, then blocks on `worker.run()`. Handles SIGTERM/SIGINT graceful shutdown (drain NATS, shutdown worker, close connections).
 
 `src/nats-bridge.ts`:
-- Connects to `VELION_NATS_URL` with token auth and **bounded exponential backoff** (2s→30s, infinite retries) so a cold-boot `ENOTFOUND velion-nats` does not crash-loop the worker. (Added in commit `25445bb7`.)
-- `ensureStream` creates JetStream stream `VELION_SUPPORT` (subjects `velion.support.>`) if missing; `ensureConsumer` creates durable pull consumer `support-worker` (filter `velion.support.>`, explicit ack, deliver-new). Both idempotent.
+- Connects to `VEREVON_NATS_URL` with token auth and **bounded exponential backoff** (2s→30s, infinite retries) so a cold-boot `ENOTFOUND verevon-nats` does not crash-loop the worker. (Added in commit `25445bb7`.)
+- `ensureStream` creates JetStream stream `VEREVON_SUPPORT` (subjects `verevon.support.>`) if missing; `ensureConsumer` creates durable pull consumer `support-worker` (filter `verevon.support.>`, explicit ack, deliver-new). Both idempotent.
 - Consumes messages, JSON-parses each as a `ZammadTicketEvent`, routes by subject, `ack()` on success / `nak()` on throw.
 
 `src/workflows/*`:
@@ -53,10 +53,10 @@ Entrypoint `src/index.ts`:
 ## Subject Routing (source-only)
 
 Bridge `handleMessage` handles:
-- `velion.support.ticket.created` → start `triage-{id}` workflow, and `sla-{id}` if `sla_deadline` present.
-- `velion.support.article.added` → external replies reset SLA (terminate old `sla-{id}`, start `sla-{id}-{ts}`).
-- `velion.support.ticket.assigned` → direct `notifyAgentActivity` (no workflow).
-- `velion.support.ticket.updated` / `velion.support.sla.breach` → comment says "handled downstream"; there is **no handler**, so they fall through and are `ack()`'d and dropped.
+- `verevon.support.ticket.created` → start `triage-{id}` workflow, and `sla-{id}` if `sla_deadline` present.
+- `verevon.support.article.added` → external replies reset SLA (terminate old `sla-{id}`, start `sla-{id}-{ts}`).
+- `verevon.support.ticket.assigned` → direct `notifyAgentActivity` (no workflow).
+- `verevon.support.ticket.updated` / `verevon.support.sla.breach` → comment says "handled downstream"; there is **no handler**, so they fall through and are `ack()`'d and dropped.
 - **No `ticket.closed` handler** → `csatSurvey` is never triggered. CSAT is dead from the bridge's perspective.
 
 ## Live Verification (this pass)
@@ -64,16 +64,16 @@ Bridge `handleMessage` handles:
 - **[live-curl]** notification-core `http://127.0.0.1:3140/health` = **200** (host is up). `POST /v1/notifications`, `/api/v1/notifications`, `/notifications`, `/v1/notify` (with the internal key) all = **404 `page not found`** (Go default). support-worker's notify target route does not exist as coded → notify/CSAT activities would throw. (notification-core's true route surface is Application Plane and out of scope to fully map, but the coded path is wrong.)
 - **[source-only]** `docker ps -a` + `docker network inspect`: **no `ai-core`** container/alias (lookup count 0); **no `zammad`** container/alias; compose defines neither service.
 - **[source-only]** Temporal reachable: `ingestion-temporal` carries alias `temporal` on `ingestion-net`; support-worker is on `ingestion-net` → `temporal:7233` resolves. (ingestion-temporal shows `(unhealthy)` only because its exec-based healthcheck fails under the containerd corruption; the process serves traffic.)
-- **[source-only]** velion-nats reachable: alias `velion-nats`/`nats` on `inter-plane-bus`; support-worker on `inter-plane-bus`; `VELION_NATS_TOKEN` set → bridge connects and provisions stream/consumer.
+- **[source-only]** verevon-nats reachable: alias `verevon-nats`/`nats` on `inter-plane-bus`; support-worker on `inter-plane-bus`; `VEREVON_NATS_TOKEN` set → bridge connects and provisions stream/consumer.
 - **[source-only]** notification-core reachable at network level (alias on `inter-plane-bus`), but see route 404 above.
-- **[source-only]** No producer of `velion.support.*` anywhere in `apps/` (grep = 0), and no Zammad→NATS publisher exists.
+- **[source-only]** No producer of `verevon.support.*` anywhere in `apps/` (grep = 0), and no Zammad→NATS publisher exists.
 - **[logs]** UNAVAILABLE — `docker logs support-worker` returns `input/output error` (log blob corrupted). Could not observe actual worker/bridge log lines.
 
 ## Config / Env (source-only)
 
 `src/config.ts` validates env via Zod (all URLs + `INTERNAL_API_KEY` min 1). Running container env (from `docker inspect`) matches compose:
 - `TEMPORAL_ADDRESS=temporal:7233`, `TEMPORAL_NAMESPACE=default`
-- `VELION_NATS_URL=nats://velion-nats:4222` (+ token set)
+- `VEREVON_NATS_URL=nats://verevon-nats:4222` (+ token set)
 - `ZAMMAD_API_URL=http://zammad-railsserver:3000`, **`ZAMMAD_API_TOKEN=` (empty)**
 - `AI_CORE_URL=http://ai-core:8001` (**phantom host**)
 - Notification URL is configured; the legacy runtime has a credential present. Its value is intentionally not reproduced and must be rotated if exposure is suspected. Changed source uses a dedicated support notification token and rejects legacy shared-key auth.
@@ -87,7 +87,7 @@ All env is valid *format*, so config parses and the process does **not** crash a
 ## Bugs / Warnings / Cleanup
 
 - **[source-only] CRITICAL – broken business wiring:** `ai-core` and `zammad-railsserver` do not exist in this deployment; `ZAMMAD_API_TOKEN` is empty; notify route 404s. No end-to-end path can succeed even if a `ticket.created` event were injected.
-- **[source-only] HIGH – no input producer:** nothing publishes `velion.support.*` and no Zammad instance exists, so the bridge is a consumer with no producer. The whole service is inert.
+- **[source-only] HIGH – no input producer:** nothing publishes `verevon.support.*` and no Zammad instance exists, so the bridge is a consumer with no producer. The whole service is inert.
 - **[source-only] MEDIUM – `csatSurvey` never invoked:** exported/registered but no bridge route starts it (no `ticket.closed` handling). Dead workflow path.
 - **[live-curl] MEDIUM – notify path route mismatch:** `/v1/notifications` is not served by notification-core (404 with key). If a notify ever fired, it would throw.
 - **[source-only] LOW – weak AI-response validation:** `classifyActivity` casts `parsed as ClassifyResult` after checking key *presence* only, not enum validity. An out-of-set `team` yields `resolveGroupName(...) === undefined` → `patchZammad group: undefined`.

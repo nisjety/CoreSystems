@@ -91,8 +91,8 @@ Legacy (compatibility adapter active in dev):
 
 | Legacy Subject | New Subject |
 |---------------|-------------|
-| `velion.agent.run.{run_id}.event` | `mp.v1.run.{run_id}.event` |
-| `velion.session.{id}.command` | `mp.v1.session.{id}.command` |
+| `verevon.agent.run.{run_id}.event` | `mp.v1.run.{run_id}.event` |
+| `verevon.session.{id}.command` | `mp.v1.session.{id}.command` |
 | `aqencia.reasoning.reasoning.started` | `mp.v1.ingress.run_started_compat` |
 | `aqencia.reasoning.reasoning.completed` | `mp.v1.ingress.run_completed_compat` |
 | `aqencia.reasoning.usage.recorded` | `mp.v1.ingress.usage` |

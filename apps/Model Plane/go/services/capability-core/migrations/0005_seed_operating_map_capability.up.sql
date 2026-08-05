@@ -1,6 +1,6 @@
 -- 0005_seed_operating_map_capability.up.sql
 --
--- Registers the Model Plane synthesis capability used by Velion Knowledge's
+-- Registers the Model Plane synthesis capability used by Verevon Knowledge's
 -- AI Operating Map. Data Plane remains the durable owner of map versions,
 -- proposals, wiki publication, retrieval, graph, and source traces.
 

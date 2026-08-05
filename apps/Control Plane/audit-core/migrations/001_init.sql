@@ -2,7 +2,7 @@
 --
 -- Two append-only tables, one for security/audit events and one for
 -- usage counters. Both partition by ingestion month so the read path
--- (the velion /settings/audit-log + /settings/usage views) can hit
+-- (the verevon /settings/audit-log + /settings/usage views) can hit
 -- a small slice of rows.
 --
 -- Both tables key on (org_id, ingested_at) so the typical query

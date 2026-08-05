@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { PersistedAgent } from '../types';
 
 /**
- * Wave 7 (velion ui-ux-velion-gap.md §17): per-agent fine-tuning jobs.
+ * Wave 7 (verevon ui-ux-verevon-gap.md §17): per-agent fine-tuning jobs.
  *
  * Drives the `FinetuneTab` in `AgentWorkspaceView`. The Convex side is
  * NOT subscribed (jobs live in capability-core's Postgres, not Convex);

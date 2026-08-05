@@ -42,7 +42,7 @@ vi.mock("@/features/composer-v2/components/DashboardComposer", () => ({
 	DashboardComposer: () => <div>Dashboard composer</div>,
 }));
 
-vi.mock("@/features/dashboard-v2/components/VelionInformationCards", () => ({
+vi.mock("@/features/dashboard-v2/components/VerevonInformationCards", () => ({
 	NewsDashboardCard: ({
 		card,
 		onPrompt,
@@ -86,7 +86,7 @@ vi.mock("@/features/shell-v2/lib/control-plane-provider", () => ({
 	}),
 }));
 
-import { VelionHome } from "@/features/dashboard-v2/components/VelionHome";
+import { VerevonHome } from "@/features/dashboard-v2/components/VerevonHome";
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
 	return new Response(JSON.stringify(body), {
@@ -95,7 +95,7 @@ function jsonResponse(body: unknown, init: ResponseInit = {}) {
 	});
 }
 
-describe("VelionHome search expansion", () => {
+describe("VerevonHome search expansion", () => {
 	beforeEach(() => {
 		navigationMocks.prefetch.mockReset();
 		navigationMocks.push.mockReset();
@@ -126,7 +126,7 @@ describe("VelionHome search expansion", () => {
 			if (url === "/api/v1/search/web") {
 				return jsonResponse({
 					data: {
-						answer: "Velion fant 2 relevante treff for \"7 uker embryo\".",
+						answer: "Verevon fant 2 relevante treff for \"7 uker embryo\".",
 						citations: [],
 						mode: "search",
 						results: [
@@ -157,7 +157,7 @@ describe("VelionHome search expansion", () => {
 
 	it("keeps previews compact while typing and expands only after Enter", async () => {
 		const user = userEvent.setup();
-		render(<VelionHome />);
+		render(<VerevonHome />);
 
 		await user.click(screen.getByRole("button", { name: "Søk" }));
 		await user.type(

@@ -13,7 +13,7 @@ import type { NextRequest } from "next/server"
  * bounce a genuinely authenticated user on a cookie-name mismatch.
  */
 
-const SESSION_COOKIE_HINT = /sess|sid|auth|idknuten|velion/i
+const SESSION_COOKIE_HINT = /sess|sid|auth|idknuten|verevon/i
 
 function extraCookieNames(): string[] {
   const rawCookieNames = process.env.AUTH_SESSION_COOKIE_NAMES || ""

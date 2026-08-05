@@ -5,17 +5,17 @@ import { useAgentSelection, useWorkflowBuilderTool } from "@/features/agents-v2/
 import {
   inspectorByTool,
   toolToCanvasNode,
-} from "@/features/agents-v2/lib/velion-workflow-builder-data";
+} from "@/features/agents-v2/lib/verevon-workflow-builder-data";
 import {
   WorkflowCanvas,
   WorkflowGenerationStatus,
   WorkflowPromptComposer,
   WorkflowTopBar,
-} from "@/features/agents-v2/components/VelionWorkflowCanvas";
-import { WorkflowInspector } from "@/features/agents-v2/components/VelionWorkflowInspector";
-import { WorkflowToolsPanel } from "@/features/agents-v2/components/VelionWorkflowToolsPanel";
+} from "@/features/agents-v2/components/VerevonWorkflowCanvas";
+import { WorkflowInspector } from "@/features/agents-v2/components/VerevonWorkflowInspector";
+import { WorkflowToolsPanel } from "@/features/agents-v2/components/VerevonWorkflowToolsPanel";
 
-export function VelionWorkflowBuilder() {
+export function VerevonWorkflowBuilder() {
   const [agentSelection, setAgentSelection] = useAgentSelection();
   const [selectedTool, setSelectedTool] = useWorkflowBuilderTool();
   const selectedNodeId = toolToCanvasNode[selectedTool];

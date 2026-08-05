@@ -188,7 +188,7 @@ pub async fn register_client(
         ));
     }
     let body = RegistrationRequest {
-        client_name: "Velion",
+        client_name: "Verevon",
         redirect_uris: vec![redirect_uri],
         grant_types: vec!["authorization_code", "refresh_token"],
         response_types: vec!["code"],
@@ -698,7 +698,7 @@ mod tests {
         let url = build_authorization_url(
             "https://auth.example.test/authorize",
             "client-123",
-            "https://velion.example.test/callback",
+            "https://verevon.example.test/callback",
             "state-abc",
             "challenge-xyz",
             &["read".to_owned(), "write".to_owned()],
@@ -715,7 +715,7 @@ mod tests {
         let url = build_authorization_url(
             "https://auth.example.test/authorize",
             "client-123",
-            "https://velion.example.test/callback",
+            "https://verevon.example.test/callback",
             "state-abc",
             "challenge-xyz",
             &[],

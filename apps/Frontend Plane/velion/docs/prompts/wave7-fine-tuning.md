@@ -6,7 +6,7 @@ Self-contained brief for a future Claude session (or human engineer) to land per
 
 ## Context (read before starting)
 
-CoreSystem already has a fully wired Agent platform combining Chatbase-style UX with Intercom-style operations. The agent workspace at `/agents/{id}/{viewId}` is 5 tabs deep with everything **except fine-tuning** working against real backends. The gap doc tracks closure progress at `apps/Frontend Plane/velion/docs/ui-ux-velion-gap.md`.
+CoreSystem already has a fully wired Agent platform combining Chatbase-style UX with Intercom-style operations. The agent workspace at `/agents/{id}/{viewId}` is 5 tabs deep with everything **except fine-tuning** working against real backends. The gap doc tracks closure progress at `apps/Frontend Plane/verevon/docs/ui-ux-verevon-gap.md`.
 
 **The relevant section to read first**: §16 ("Agent ⇆ Data Plane wiring") at the bottom of that doc. It contains the architecture sketch for fine-tuning + the explicit statement that this is "Wave 7" work.
 
@@ -15,13 +15,13 @@ CoreSystem already has a fully wired Agent platform combining Chatbase-style UX 
 | Capability | Where it lives | Why it matters for fine-tuning |
 |---|---|---|
 | Agent record with `tools`, `knowledgeSources`, model, systemPrompt | `apps/Application Plane/convex-core/convex/agents.ts` + `convex/schema.ts` | The fine-tuned model id needs to land in the agent's `model` field. The schema needs one new optional field — `finetuneJobId` — to track in-flight jobs. |
-| Velion → Model Plane JWT auth | `apps/Frontend Plane/velion/src/lib/model-plane/auth-token.ts` | Reuse `getModelPlaneTokenFromSession(request)` so the new `/api/agents/{id}/finetune` proxy authenticates the same way the existing agent proxies do. |
+| Verevon → Model Plane JWT auth | `apps/Frontend Plane/verevon/src/lib/model-plane/auth-token.ts` | Reuse `getModelPlaneTokenFromSession(request)` so the new `/api/agents/{id}/finetune` proxy authenticates the same way the existing agent proxies do. |
 | Gateway JWT validation | `apps/Model Plane/rust/services/model-gateway/src/auth.rs` | Already validates incoming bearers via JWKS from auth-core. New `/v1/finetune/*` routes go behind the existing `require_auth` middleware. |
 | Azure OpenAI integration | `apps/Model Plane/rust/services/inference-core/src/provider/azure.rs` | The fine-tuning calls use the *same* Azure key + endpoint as inference. No new credentials needed. |
-| Model registry surfaces | `apps/Model Plane/go/services/capability-core/internal/api/capabilities.go` + Convex `agents` table | When a fine-tune job completes and produces a deployment, register it in capability-core's `models` registry so the existing `useModels` hook (`velion/src/components/chat/hooks/useModels.ts`) surfaces it in the agent's model picker. |
+| Model registry surfaces | `apps/Model Plane/go/services/capability-core/internal/api/capabilities.go` + Convex `agents` table | When a fine-tune job completes and produces a deployment, register it in capability-core's `models` registry so the existing `useModels` hook (`verevon/src/components/chat/hooks/useModels.ts`) surfaces it in the agent's model picker. |
 | Cron / scheduled-job pattern | `apps/Model Plane/rust/services/model-gateway/src/http_routes.rs` cron proxies + capability-core cron table | Fine-tuning jobs are long-running (minutes to hours). The job polling can either piggyback on the cron table (a "system" cron entry that polls Azure on a 60s interval) or live in a new `finetune_jobs` table. Either works; pick the lighter one. |
-| Agent workspace UI shell | `apps/Frontend Plane/velion/src/components/agents/AgentWorkspaceView.tsx` | The 5 tabs (playground / sources / tools / analytics / schedules) all live in this file. Add a 6th tab. |
-| Per-tab hook pattern | `apps/Frontend Plane/velion/src/components/agents/hooks/{useAgentStats,useAgentPlayground,useAgentTools,useAgentKnowledge,useAgentCron}.ts` | New `useAgentFinetune` follows the same shape. |
+| Agent workspace UI shell | `apps/Frontend Plane/verevon/src/components/agents/AgentWorkspaceView.tsx` | The 5 tabs (playground / sources / tools / analytics / schedules) all live in this file. Add a 6th tab. |
+| Per-tab hook pattern | `apps/Frontend Plane/verevon/src/components/agents/hooks/{useAgentStats,useAgentPlayground,useAgentTools,useAgentKnowledge,useAgentCron}.ts` | New `useAgentFinetune` follows the same shape. |
 
 ### What is NOT in place (the work)
 
@@ -51,13 +51,13 @@ Add a 6th tab beside the existing 5 (`playground`, `knowledge`, `actions`, `anal
 
 Pattern to follow: `useAgentCron` + `SchedulesTab` in `AgentWorkspaceView.tsx`. Same shape — list + form + per-row actions.
 
-### 2. Velion API proxies
+### 2. Verevon API proxies
 
 - `POST /api/agents/{id}/finetune` — multipart/form-data upload. Body: `file` (JSONL), `baseModel`, `hyperparameters?`. Forwards to gateway `POST /v1/finetune/jobs`. Auth via `getModelPlaneTokenFromSession`.
 - `GET /api/agents/{id}/finetune` — lists past jobs for the agent. Forwards to gateway `GET /v1/finetune/jobs?agent_id={id}`.
 - `DELETE /api/agents/{id}/finetune/{jobId}` — cancels. Forwards to gateway `DELETE /v1/finetune/jobs/{jobId}`.
 
-Follow the pattern in `apps/Frontend Plane/velion/src/app/api/cron/route.ts` + `cron/[id]/route.ts` — same auth flow, same passthrough shape.
+Follow the pattern in `apps/Frontend Plane/verevon/src/app/api/cron/route.ts` + `cron/[id]/route.ts` — same auth flow, same passthrough shape.
 
 ### 3. Gateway routes — new file `model-gateway/src/finetune_routes.rs`
 
@@ -69,7 +69,7 @@ Routes (all behind `require_auth`):
   3. Upload the JSONL to Azure OpenAI Files API: `POST {AZURE_OPENAI_ENDPOINT}/openai/files?api-version={version}&purpose=fine-tune` with `multipart/form-data`. Capture the `file_id`.
   4. Kick off the job: `POST {AZURE_OPENAI_ENDPOINT}/openai/fine_tuning/jobs?api-version=2024-08-01-preview` with `{model, training_file, hyperparameters?, suffix}`. Capture `job_id` + initial status.
   5. Persist `{job_id, org_id, agent_id, base_model, azure_file_id, status: 'queued', created_at}` into a new `finetune_jobs` Postgres table (add migration: `apps/Model Plane/rust/services/session-core/migrations/000X_finetune_jobs.up.sql` OR `apps/Model Plane/go/services/capability-core/migrations/...` — capability-core is the better home since it already owns models + cron tables).
-  6. Return `{job_id, status}` to velion.
+  6. Return `{job_id, status}` to verevon.
 
 - `GET /v1/finetune/jobs?agent_id=...` — list jobs for the agent (Postgres SELECT scoped by `org_id` from claims).
 
@@ -86,7 +86,7 @@ Add a background tokio task that:
 - For each, calls `GET {AZURE_OPENAI_ENDPOINT}/openai/fine_tuning/jobs/{job_id}?api-version=...`.
 - Updates the row: `status`, `completed_at`, `fine_tuned_model` (Azure returns this on success — it's the **model name**, not the deployment).
 - On `succeeded`: also creates the Azure **deployment** (a separate API call to `PUT {AZURE_OPENAI_ENDPOINT}/openai/deployments/{name}?api-version=...` with the fine-tuned model name + a deployment id like `{agent_id}-ft-{shortJobId}`). Then INSERTs into capability-core's `models` table so the model picker surfaces it.
-- Emit a NATS event `mp.v1.finetune.{job_id}.event` so velion's chat / agent UI can react (Convex subscriber already pulls from model-plane-nats per W4-2).
+- Emit a NATS event `mp.v1.finetune.{job_id}.event` so verevon's chat / agent UI can react (Convex subscriber already pulls from model-plane-nats per W4-2).
 
 Pattern: there's an existing polling-loop precedent in `apps/Model Plane/rust/services/session-core/src/compaction.rs` (the 60s tick loop). Copy that structure.
 
@@ -122,7 +122,7 @@ Before declaring done:
 
 ### 8. Documentation
 
-Close the open Wave 7 item in `apps/Frontend Plane/velion/docs/ui-ux-velion-gap.md`:
+Close the open Wave 7 item in `apps/Frontend Plane/verevon/docs/ui-ux-verevon-gap.md`:
 
 - Add a §17 section titled "Agent fine-tuning — closed".
 - Update the tally at the bottom of §16 to remove "1 explicit open".
@@ -141,7 +141,7 @@ Close the open Wave 7 item in `apps/Frontend Plane/velion/docs/ui-ux-velion-gap.
 ## Estimated scope
 
 - UI tab: 4-6 hours.
-- Velion proxies: 2 hours.
+- Verevon proxies: 2 hours.
 - Gateway routes + Files upload: 4-6 hours.
 - Polling worker: 3-4 hours.
 - Admin-scope plumbing through auth-core: 2 hours.

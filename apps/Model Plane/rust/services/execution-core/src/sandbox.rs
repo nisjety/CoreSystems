@@ -392,14 +392,14 @@ mod tests {
     /// must keep inheriting.
     #[test]
     fn an_env_allowlist_clears_first_and_inheritance_stays_opt_in() {
-        let ws = PathBuf::from("/tmp/velion-code-x");
+        let ws = PathBuf::from("/tmp/verevon-code-x");
         let p = MpSandboxPolicy::WorkspaceWrite {
             writable_roots: vec![ws.clone()],
             network: MpNetworkPolicy::Disabled,
         };
         let allowlist = vec![
             ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
-            ("HOME".to_owned(), "/tmp/velion-code-x".to_owned()),
+            ("HOME".to_owned(), "/tmp/verevon-code-x".to_owned()),
         ];
         let argv = build_bwrap_argv_with(
             &p,
@@ -418,7 +418,7 @@ mod tests {
         let first_setenv = argv.iter().position(|a| a == "--setenv").expect("--setenv");
         assert!(clear_at < first_setenv, "clear must precede the allowlist");
         assert!(windowed(&argv, &["--setenv", "PATH", "/usr/bin:/bin"]));
-        assert!(windowed(&argv, &["--setenv", "HOME", "/tmp/velion-code-x"]));
+        assert!(windowed(&argv, &["--setenv", "HOME", "/tmp/verevon-code-x"]));
         assert_eq!(
             argv.iter().filter(|a| *a == "--setenv").count(),
             allowlist.len(),
@@ -438,7 +438,7 @@ mod tests {
         // The code-execution path depends on this: the program is spawned with
         // the workspace as its cwd so a relative `open("out.xlsx","wb")` writes
         // into the one writable root instead of the read-only rootfs.
-        let ws = PathBuf::from("/tmp/velion-code-run-step-0-1");
+        let ws = PathBuf::from("/tmp/verevon-code-run-step-0-1");
         let p = MpSandboxPolicy::WorkspaceWrite {
             writable_roots: vec![ws.clone()],
             network: MpNetworkPolicy::Disabled,
@@ -453,13 +453,13 @@ mod tests {
             &argv,
             &[
                 "--bind",
-                "/tmp/velion-code-run-step-0-1",
-                "/tmp/velion-code-run-step-0-1"
+                "/tmp/verevon-code-run-step-0-1",
+                "/tmp/verevon-code-run-step-0-1"
             ]
         ));
         assert!(windowed(
             &argv,
-            &["--chdir", "/tmp/velion-code-run-step-0-1"]
+            &["--chdir", "/tmp/verevon-code-run-step-0-1"]
         ));
         assert!(argv.iter().any(|a| a == "--unshare-net"));
         // --chdir must precede the `--` terminator, i.e. be a bwrap option and

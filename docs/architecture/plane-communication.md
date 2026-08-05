@@ -9,7 +9,7 @@ constants, and pub/sub call sites. Scope: **Model Plane v1** (canonical; v2 depr
 | Transport | Used for |
 |---|---|
 | **gRPC** | Sync service-to-service. Intra-Model-Plane (model-gateway → session-core:9091, inference-core:9092, execution-core:9093, capability-core:9097, orchestrator-core:8084, sandbox-manager, browser-broker, letta-bridge:9096). Model→Data via `DATAPLANE_RETRIEVAL_ADDR`, `DATAPLANE_GRAPH_ADDR`. |
-| **NATS (core + JetStream)** | Async events on the shared `nats:4222`. `velion-nats:4222` is a **separate** bus for Velion/Frontend integration + usage/audit (`velion.usage.v1.*`). |
+| **NATS (core + JetStream)** | Async events on the shared `nats:4222`. `verevon-nats:4222` is a **separate** bus for Verevon/Frontend integration + usage/audit (`verevon.usage.v1.*`). |
 | **HTTP/REST** | Cross-plane edges: Quarry-edge → Model (`ai-core:8001`) + Data (`dpv2-documents-api:8010`, `dpv2-retrieval-engine:8004`); Model gateway → Quarry-edge (`QUARRY_EDGE_URL`); finspo/integration → `dpv2-documents-api`. |
 | **Temporal** (`temporal:7233`) | Workflow orchestration: orchestrator-core, quarry-control/orchestrator. |
 | **Postgres / Redis** | Per-service DBs (session_core, quarry_v2, finspo, imports, integration). Redis: Quarry job store + (new) Model-Plane LangCache/Agent Memory. Vectors = **Qdrant**; FTS = **Quickwit**. |
@@ -20,7 +20,7 @@ constants, and pub/sub call sites. Scope: **Model Plane v1** (canonical; v2 depr
 2. **Data v2 indexing pipeline (NATS)** — `documents.created` → **index-engine-rs** (chunk) → `knowledge.units.created` → **embedding-engine-rs** (embed → Qdrant) → `documents.indexed` → **quickwit-adapter-rs** (FTS). `documents.deleted` fans out to all. Wiki: `wiki.version.published` → embedding wiki_consumer.
 3. **Model v1 → Data v2** — agent → gRPC `RetrievalService.Retrieve` / `DocumentService` / `KnowledgeService.CheckPermissions`.
 4. **Model v1 → Ingestion** — model-gateway → HTTP Quarry-edge (live Fetch/ExtractStructured). **Quarry → Model** — quarry-edge → `ai-core` (LLM extraction).
-5. **Events** — `mp.v1.*` run/feedback, `velion.usage.v1.<plane>.<op>` usage, `dataplane.cost.ledger` (data-orchestrator consumes).
+5. **Events** — `mp.v1.*` run/feedback, `verevon.usage.v1.<plane>.<op>` usage, `dataplane.cost.ledger` (data-orchestrator consumes).
 
 ## Document lifecycle subjects (verified)
 
@@ -55,10 +55,10 @@ All on shared `nats:4222`; keeps Qdrant + Quickwit + graph; adds no new system.
 
 **Deploy note:** the JetStream durable consumers `index-engine` (added `documents.updated`) and `embedding-engine` (added `knowledge.units.deleted`) changed their `filter_subjects`, and the `DATAPLANE_DOCUMENTS` / `DATAPLANE_KNOWLEDGE` streams gained subjects. `get_or_create_consumer` won't mutate an existing durable consumer's filter — on an existing deployment, delete + recreate those two consumers (and update the stream subject lists) so the new subjects are delivered. graph-index uses core NATS for `knowledge.units.deleted` (no consumer change needed).
 
-**Follow-ups:** GC for now-unreferenced graph entities/relationships/claims; fold cache-hit + cost events into one ledger; NATS bus unification (`nats` vs `velion-nats`).
+**Follow-ups:** GC for now-unreferenced graph entities/relationships/claims; fold cache-hit + cost events into one ledger; NATS bus unification (`nats` vs `verevon-nats`).
 
 ## Related
 
-- NATS bus fragmentation (`nats` vs `velion-nats` vs shared/local) — separate "bus unification" track; not required for RDI above.
-- Cost-ledger unification (`dataplane.cost.ledger` + `velion.usage.v1.*` + LangCache cache-hit events) — fold into one schema/consumer.
+- NATS bus fragmentation (`nats` vs `verevon-nats` vs shared/local) — separate "bus unification" track; not required for RDI above.
+- Cost-ledger unification (`dataplane.cost.ledger` + `verevon.usage.v1.*` + LangCache cache-hit events) — fold into one schema/consumer.
 - LangCache (Rust model-gateway) + Agent Memory (Go letta-bridge) + retrieval router (retrieval-engine-rs) already landed.

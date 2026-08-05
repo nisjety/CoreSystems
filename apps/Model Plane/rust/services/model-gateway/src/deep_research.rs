@@ -137,7 +137,7 @@ const MAX_REPORT_TOKENS: i32 = 16_384;
 /// A report shorter than this cannot carry findings plus an unverified section.
 const MIN_REPORT_TOKENS: i32 = 512;
 
-/// Model tier for the planning inference: the Velion intent layer's cheapest
+/// Model tier for the planning inference: the Verevon intent layer's cheapest
 /// mode. Splitting a question into sub-queries is a rewrite task, not a
 /// reasoning task, and it never reaches the user.
 ///
@@ -146,7 +146,7 @@ const MIN_REPORT_TOKENS: i32 = 512;
 /// keeps the tier because the budget below is sized for a reasoning model's
 /// chain of thought either way, so whichever model the tier resolves to has
 /// room to answer.
-const PLAN_MODEL: &str = "velion-budget";
+const PLAN_MODEL: &str = "verevon-budget";
 /// Hard ceiling on the planning inference. It gates every later phase, so a
 /// slow planner must degrade to "search the question as asked" rather than eat
 /// the wall clock the searches need.
@@ -158,7 +158,7 @@ const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
 /// Output budget for 3-6 short sub-queries, one per line.
 ///
 /// Sized for *reasoning* tokens, not just the ~30 tokens of visible output.
-/// `velion-budget` resolves to gpt-5-nano, which bills its chain of thought
+/// `verevon-budget` resolves to gpt-5-nano, which bills its chain of thought
 /// against this same ceiling: measured live, `max_completion_tokens: 320`
 /// returned `finish_reason: "length"` with **320 reasoning tokens and zero
 /// content** — an HTTP 200 carrying nothing, which is exactly how deep
@@ -3031,12 +3031,12 @@ mod tests {
         // turn's model is answering fine in the same request.
         assert!(should_retry_plan_on_turn_model(
             "",
-            "velion-budget",
+            "verevon-budget",
             "gpt-4.1"
         ));
         assert!(should_retry_plan_on_turn_model(
             "   \n ",
-            "velion-budget",
+            "verevon-budget",
             "gpt-4.1"
         ));
     }
@@ -3045,7 +3045,7 @@ mod tests {
     fn a_usable_plan_is_never_retried() {
         assert!(!should_retry_plan_on_turn_model(
             "befolkning oslo 2025",
-            "velion-budget",
+            "verevon-budget",
             "gpt-4.1"
         ));
     }
@@ -3055,12 +3055,12 @@ mod tests {
         // Same id: retrying spends the wall clock twice for one answer.
         assert!(!should_retry_plan_on_turn_model(
             "",
-            "velion-budget",
-            "velion-budget"
+            "verevon-budget",
+            "verevon-budget"
         ));
         // No turn model to fall back to.
-        assert!(!should_retry_plan_on_turn_model("", "velion-budget", ""));
-        assert!(!should_retry_plan_on_turn_model("", "velion-budget", "  "));
+        assert!(!should_retry_plan_on_turn_model("", "verevon-budget", ""));
+        assert!(!should_retry_plan_on_turn_model("", "verevon-budget", "  "));
     }
 
     // --- the relevance gate ----------------------------------------------

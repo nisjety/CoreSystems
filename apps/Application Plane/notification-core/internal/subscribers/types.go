@@ -4,13 +4,13 @@
 // round-trip user-core on every Novu trigger — the upstream NATS event
 // stream syncs them when auth-core / user-core publish updates.
 //
-// U5-2 (velion ui-ux-velion-gap.md §10).
+// U5-2 (verevon ui-ux-verevon-gap.md §10).
 package subscribers
 
 import "time"
 
 // Subscriber mirrors a row in `notification_subscribers`. JSON tags are
-// snake_case to match velion's existing wire vocabulary.
+// snake_case to match verevon's existing wire vocabulary.
 type Subscriber struct {
 	UserID           string     `json:"user_id"`
 	NovuSubscriberID string     `json:"novu_subscriber_id"`

@@ -174,7 +174,7 @@ All cross-plane service references MUST follow:
 
 ## 5. TypeScript Source Code Fixes
 
-### Frontend Plane — `velion`
+### Frontend Plane — `verevon`
 
 | File | Line | Current | Fix |
 |------|------|---------|-----|

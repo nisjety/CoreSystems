@@ -37,13 +37,13 @@ So this is a **close-the-gaps** effort, not greenfield.
 
 ## 1. The two harness profiles
 
-Velion has two AI surfaces with different reliability shapes. They share one
+Verevon has two AI surfaces with different reliability shapes. They share one
 runtime; only the *profile* (config swapped at runtime) differs — the
 orchestrator never changes.
 
 | Concern        | `chat` profile (ChatGPT/Claude/Manus-style)        | `deployed_agent` profile (Intercom/Chatbase/Zendesk-style) |
 |----------------|----------------------------------------------------|------------------------------------------------------------|
-| Audience       | One user ↔ their own AI                             | Bot serves the *customer's customer*; Velion user = operator |
+| Audience       | One user ↔ their own AI                             | Bot serves the *customer's customer*; Verevon user = operator |
 | Task graph     | **Invisible.** Harness stays hidden                | Operator-facing inbox + plan/approval surfaces             |
 | HITL           | Optional inline approval for risky tools           | Mid-conversation human takeover (handoff)                  |
 | Resumability   | Resume the answer stream on reload                 | Resume the operator's live event feed on reload            |
@@ -56,7 +56,7 @@ lifecycle hooks and operator events fire. The clean chat UI is never touched by
 operator concerns.
 
 **Status** ✅ persisted + resolved (Phase 2): the field lives on the Convex
-`agents` table (schema + `create`/`update` mutations) and the velion
+`agents` table (schema + `create`/`update` mutations) and the verevon
 `PersistedAgent` type. `resolveAgentProfile(agent)` in
 `components/agents/types.ts` applies the migration default — `deployed_agent`
 when `publicEnabled`, else `chat`. `useAgentPlayground` exposes the resolved
@@ -71,9 +71,9 @@ gateway/execution-core hook branching on profile.
 | Two harness profiles | none | add `profile` to agent def; branch hooks/events on it | 2 |
 | Full SSE resumability (resume on reload, lost final-chunk) | `invoke_stream_sse`, `run_events_sse` | no `id:` field, no `Last-Event-Id`, deltas not persisted | 1+2 |
 | HITL primitive | `Approval` + `RunPaused/ResumedForApproval` + `DecideApproval` | verify execution-core creates Approval + emits pause event + blocks on resume | 2 |
-| Auth/retry/telemetry not reinvented per route | `auth-token.ts` mints tokens | velion `harness-client.ts` wrapper (token + retry + correlation-id + telemetry) | 1 |
+| Auth/retry/telemetry not reinvented per route | `auth-token.ts` mints tokens | verevon `harness-client.ts` wrapper (token + retry + correlation-id + telemetry) | 1 |
 | Plan structure server-side + authoritative task graph | `Plan`/`PlanStep` + `OrchestrationCoreService` | already authoritative; surface via hook | 2 |
-| Common task-graph feed (no per-hook polling) | `StreamRunEvents` + `run_events_sse` | velion `useRunEvents` hook + proxy route | 2 |
+| Common task-graph feed (no per-hook polling) | `StreamRunEvents` + `run_events_sse` | verevon `useRunEvents` hook + proxy route | 2 |
 | "plus more" reliability | events, idempotency, OTEL | correlation-id end-to-end; recovery events; golden parity tests | 2+ |
 
 ## 3. SSE resumability protocol
@@ -96,11 +96,11 @@ sourcing:
    subscribes first (no gap), replays buffered events with `id > after_event_id`,
    then tails live (deduping the overlap by id).
 5. **Snapshot fallback**: if the cursor predates the buffer (eviction / restart),
-   the client reconciles via `ListPlans`/`ListTodos`/`ListApprovals`. The velion
+   the client reconciles via `ListPlans`/`ListTodos`/`ListApprovals`. The verevon
    `useRunEvents` hook owns this; the buffer is a best-effort fast path, the
    snapshot is the correctness backstop.
 
-Wire path: browser `EventSource` → velion proxy `/api/agents/runs/{id}/events`
+Wire path: browser `EventSource` → verevon proxy `/api/agents/runs/{id}/events`
 (`harnessFetch`, forwards `Last-Event-Id`) → gateway `run_events_sse` → gRPC
 `StreamRunEvents(after_event_id)` → session-core replay+tail.
 
@@ -138,13 +138,13 @@ operator/user DecideApproval(granted|denied)   OR   handoff reply
 `chat` profile uses it for inline risky-tool confirmation; `deployed_agent`
 profile uses it for Intercom-style mid-conversation human takeover.
 
-## 5. velion harness client (Phase 1, this change)
+## 5. verevon harness client (Phase 1, this change)
 
 `src/lib/model-plane/harness-client.ts` centralizes what every route reinvents:
 
 - Bearer token minting (cookie → internalClaims → env), deduping the block
   currently copy-pasted in `reasoning.ts` (twice).
-- `x-correlation-id` generation + propagation (ties velion → gateway → NATS).
+- `x-correlation-id` generation + propagation (ties verevon → gateway → NATS).
 - Retry with exponential backoff + jitter on retryable failures (429/502/503/
   504/network), honoring `Retry-After`. POST is retried only when explicitly
   marked idempotent.
@@ -157,14 +157,14 @@ profile uses it for Intercom-style mid-conversation human takeover.
 - **Phase 1** ✅: this doc · `harness-client.ts` · SSE `id:` field on both
   gateway streams.
 - **Phase 2** ✅: proto `event_id` + `after_event_id`; session-core bounded
-  replay buffer; gateway `Last-Event-Id` wiring; velion proxy + `useRunEvents`
+  replay buffer; gateway `Last-Event-Id` wiring; verevon proxy + `useRunEvents`
   hook (with snapshot fallback); agent `profile` field end-to-end (Convex
-  schema + mutations + velion types + create/edit form selector); operator
+  schema + mutations + verevon types + create/edit form selector); operator
   run-event panel in `AgentWorkspaceView` (deployed_agent only); chat
   resume-on-reload (in-memory delta buffer + `/v1/invoke/resume/{request_id}`
-  + velion `/api/chat/resume/{requestId}` proxy); profile → approval-posture
+  + verevon `/api/chat/resume/{requestId}` proxy); profile → approval-posture
   policy (`gateway/src/profile.rs`) stamped on the STREAM_OPENED envelope and
-  fed by velion's chat-stream route.
+  fed by verevon's chat-stream route.
 - **Phase 3** ✅ (this round): HITL enforcement in execution-core's step loop
   (risky tool + `ask` posture → `CreateApproval` on session-core → row +
   `RUN_PAUSED_FOR_APPROVAL` broadcast → operator panel/snapshot show the pause;
@@ -174,13 +174,13 @@ profile uses it for Intercom-style mid-conversation human takeover.
 - **Phase 4** (in progress):
   - ✅ **Operator inbox UI** — `AgentInbox` (run list + detail), shown as a
     `deployed_agent`-only workspace tab; wires `useRunEvents` + HITL
-    approve/reject. Backed by velion proxies `GET /api/agents/runs` (lists
+    approve/reject. Backed by verevon proxies `GET /api/agents/runs` (lists
     `agentRuns:listForOrg`) and `POST /api/agents/approvals/{id}/decide`.
   - ✅ **Correlation-id golden parity tests** — `sse.rs` tests lock that every
     emitted envelope derives `correlation_id` from the request id, identically
     across HTTP/SSE and gRPC.
   - ✅ **Feedback → skill-promotion loop** (full Temporal workflow). End to end:
-    velion rate route → gateway `POST /v1/feedback` publishes `mp.v1.feedback.rated`
+    verevon rate route → gateway `POST /v1/feedback` publishes `mp.v1.feedback.rated`
     → orchestrator-core subscriber folds it into a `FeedbackStore` →
     `FeedbackPromotionWorkflow` (nightly) runs `AggregateFeedbackActivity`
     (skills above sample + good-ratio threshold) → launches a child
@@ -207,7 +207,7 @@ execution-core execute_step
 session-core create_approval
   → store::request_approval (durable row, state=requested)
   → broadcast ApprovalStateChanged(REQUESTED) + RunPausedForApproval
-  → StreamRunEvents → gateway SSE → velion useRunEvents → operator panel
+  → StreamRunEvents → gateway SSE → verevon useRunEvents → operator panel
 operator decides
   → DecideApproval(granted|denied) → ApprovalStateChanged → run resumes
 ```
@@ -227,7 +227,7 @@ replays it; the marker clears on normal completion.
 ## 7. Verification gates
 
 - `cargo check --workspace` + `cargo test --workspace` green after each Rust change.
-- `pnpm typecheck` green after velion changes.
+- `pnpm typecheck` green after verevon changes.
 - SSE: kill the browser tab mid-stream, reload → stream resumes from
   `Last-Event-Id` with no duplicated or dropped deltas.
 - HITL: a destructive tool call pauses the run, surfaces an approval, and only

@@ -1,7 +1,7 @@
 /**
  * Shared NATS Service
  *
- * Connects to the cross-plane NATS broker (velion-nats) and publishes
+ * Connects to the cross-plane NATS broker (verevon-nats) and publishes
  * domain events on the `aqencia.controlplane.*` subject namespace so that
  * all other planes (Ingestion, Data, Reasoning) can subscribe to them.
  *
@@ -42,11 +42,11 @@ export class SharedNatsService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     const url =
-      this.config.get<string>('VELION_NATS_URL') ||
+      this.config.get<string>('VEREVON_NATS_URL') ||
       this.config.get<string>('NATS_SHARED_URL');
     if (!url) {
       this.logger.warn(
-        'VELION_NATS_URL not set — cross-plane event publishing disabled',
+        'VEREVON_NATS_URL not set — cross-plane event publishing disabled',
       );
       return;
     }

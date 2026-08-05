@@ -4,8 +4,8 @@ import { redirect } from "next/navigation";
 import { getAuthGateState } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Velion v2",
-  description: "Velion v2 workspace entry.",
+  title: "Verevon v2",
+  description: "Verevon v2 workspace entry.",
 };
 
 export const dynamic = "force-dynamic";

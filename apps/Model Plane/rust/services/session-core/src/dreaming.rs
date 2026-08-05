@@ -44,7 +44,7 @@ pub(crate) struct DreamMemoryCandidate {
     ///
     /// Carried into `source_links` as [`LLM_SOURCE_LINK`] so the row's
     /// provenance survives into the memory-management surface: a user looking
-    /// at "what do you remember about me" can tell what they asked Velion to
+    /// at "what do you remember about me" can tell what they asked Verevon to
     /// remember from what it decided to remember, and delete the latter.
     pub inferred: bool,
 }
@@ -798,15 +798,17 @@ pub(crate) async fn list_user_memory(
 
     Ok(rows
         .into_iter()
-        .map(|(id, kind, content, confidence, updated_at, source_links)| MemorySearchRow {
-            id,
-            thread_id: String::new(),
-            provenance: MemoryProvenance::classify(&source_links),
-            topic: memory_topic("user", &kind).to_owned(),
-            content,
-            score: memory_score(confidence, 0.0),
-            updated_at,
-        })
+        .map(
+            |(id, kind, content, confidence, updated_at, source_links)| MemorySearchRow {
+                id,
+                thread_id: String::new(),
+                provenance: MemoryProvenance::classify(&source_links),
+                topic: memory_topic("user", &kind).to_owned(),
+                content,
+                score: memory_score(confidence, 0.0),
+                updated_at,
+            },
+        )
         .collect())
 }
 
@@ -881,7 +883,7 @@ fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
             session_id: None,
             key,
             content: format!(
-                "User asked Velion to remember: {}.",
+                "User asked Verevon to remember: {}.",
                 trim_sentence_end(&fact)
             ),
             kind: "fact",

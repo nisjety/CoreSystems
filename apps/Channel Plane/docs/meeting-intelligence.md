@@ -9,7 +9,7 @@
 
 ## Purpose
 
-Let an organization bring **meetings** (audio + video) into Velion so they can
+Let an organization bring **meetings** (audio + video) into Verevon so they can
 be transcribed, documented, searched, and reasoned over — **without the meeting
 content ever leaving the company**. Meetings are among the most sensitive data an
 org holds, so on-prem / open-source processing is a hard requirement, not a

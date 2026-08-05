@@ -75,7 +75,7 @@ export default async function RootLayout({
                   <GlobalLanguageProvider>
                     <MotionProvider>
                       {children}
-                      {/* G44 (velion-gap.md §8.30): sonner Toaster mount.
+                      {/* G44 (verevon-gap.md §8.30): sonner Toaster mount.
                           Required for the entitlement toast feed
                           (`useEntitlementToast`) and AuthCallbackClient's
                           existing post-OAuth notices to actually render. */}

@@ -35,7 +35,7 @@ message WikiPageVersion {
   google.protobuf.Timestamp published_at = 11;
   google.protobuf.Struct metadata = 12;
   // Server-scrubbed HTML render (bluemonday UGC policy). Trusted-render
-  // surfaces (Velion) should display `safe_html`; treat `content` as raw
+  // surfaces (Verevon) should display `safe_html`; treat `content` as raw
   // markdown. Set only when the scrub passed — see `safe_html_ok`.
   optional string safe_html = 13;
   // True iff the bluemonday scrub passed without flagging suspicious markup.

@@ -5,22 +5,22 @@ import {
 } from './invitation-email';
 
 describe('invitation email contract', () => {
-  it('builds a browser-facing Velion link and encodes the opaque invitation id', () => {
+  it('builds a browser-facing Verevon link and encodes the opaque invitation id', () => {
     expect(
-      buildInvitationLink('https://velion.example', 'invite/with space'),
-    ).toBe('https://velion.example/accept-invitation/invite%2Fwith%20space');
+      buildInvitationLink('https://verevon.example', 'invite/with space'),
+    ).toBe('https://verevon.example/accept-invitation/invite%2Fwith%20space');
   });
 
   it('requires a canonical HTTPS origin in production', () => {
-    expect(canonicalPublicOrigin('https://velion.example/', true)).toBe(
-      'https://velion.example',
+    expect(canonicalPublicOrigin('https://verevon.example/', true)).toBe(
+      'https://verevon.example',
     );
     for (const value of [
-      'http://velion.example',
-      'https://user:pass@velion.example',
-      'https://velion.example/base',
-      'https://velion.example?tenant=acme',
-      'https://velion.example/#fragment',
+      'http://verevon.example',
+      'https://user:pass@verevon.example',
+      'https://verevon.example/base',
+      'https://verevon.example?tenant=acme',
+      'https://verevon.example/#fragment',
     ]) {
       expect(() => canonicalPublicOrigin(value, true)).toThrow(
         'canonical HTTPS origin',
@@ -35,7 +35,7 @@ describe('invitation email contract', () => {
     expect(canonicalPublicOrigin('http://127.0.0.1:5173', false)).toBe(
       'http://127.0.0.1:5173',
     );
-    expect(() => canonicalPublicOrigin('http://velion.example', false)).toThrow(
+    expect(() => canonicalPublicOrigin('http://verevon.example', false)).toThrow(
       'canonical HTTPS origin',
     );
     expect(() => canonicalPublicOrigin('http://localhost:5173', true)).toThrow(

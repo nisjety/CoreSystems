@@ -2,7 +2,7 @@
 
 import { ChevronDown, type LucideIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
-import { VelionInput, VelionTextarea } from "@/components/ui/velion-ui";
+import { VerevonInput, VerevonTextarea } from "@/components/ui/verevon-ui";
 import { cn } from "@/lib/utils";
 import type { SupportIntegrationStatus } from "@/features/agents-v2/lib/use-chatbot-support-status";
 
@@ -84,7 +84,7 @@ export function SettingInput({
   return (
     <label className={cn("mt-4 block", compact ? "max-w-[124px]" : "")}>
       <span className="block text-[14px] font-medium text-[#202126] dark:text-white">{label}</span>
-      <VelionInput
+      <VerevonInput
         defaultValue={value}
         variant="compact"
         className="mt-2"
@@ -97,7 +97,7 @@ export function SettingTextarea({ label, value }: { label: string; value: string
   return (
     <label className="mt-4 block">
       <span className="block text-[14px] font-medium text-[#202126] dark:text-white">{label}</span>
-      <VelionTextarea
+      <VerevonTextarea
         defaultValue={value}
         variant="compact"
         className="mt-2"
@@ -166,7 +166,7 @@ export function EmptyStateInline({
 
 export function MetricCard({ Icon, label, value }: { Icon: LucideIcon; label: string; value: string }) {
   return (
-    <div className="velion-panel p-5">
+    <div className="verevon-panel p-5">
       <div className="flex items-center gap-2 text-[14px] font-semibold text-[#555B65] dark:text-[#D7DCE4]">
         <Icon className="size-5" />
         {label}

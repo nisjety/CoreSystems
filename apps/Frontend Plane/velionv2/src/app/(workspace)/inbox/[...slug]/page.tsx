@@ -1,12 +1,12 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { VelionInboxPage } from "@/features/inbox-v2/components/VelionInboxPage";
-import { VelionProductShell } from "@/features/shell-v2/components/VelionProductShell";
+import { VerevonInboxPage } from "@/features/inbox-v2/components/VerevonInboxPage";
+import { VerevonProductShell } from "@/features/shell-v2/components/VerevonProductShell";
 import { requireCompletedOnboarding } from "@/lib/auth/onboarding-access";
 
 export const metadata: Metadata = {
-  title: "Inbox | Velion v2",
-  description: "Velion omnichannel inbox.",
+  title: "Inbox | Verevon v2",
+  description: "Verevon omnichannel inbox.",
 };
 
 export default async function InboxSectionPage({
@@ -20,9 +20,9 @@ export default async function InboxSectionPage({
 
   return (
     <Suspense fallback={<InboxPageFallback />}>
-      <VelionProductShell activeRoute="/inbox" defaultSidebarExpanded expandedSidebarWidth={356}>
-        <VelionInboxPage routeSlug={slug} />
-      </VelionProductShell>
+      <VerevonProductShell activeRoute="/inbox" defaultSidebarExpanded expandedSidebarWidth={356}>
+        <VerevonInboxPage routeSlug={slug} />
+      </VerevonProductShell>
     </Suspense>
   );
 }

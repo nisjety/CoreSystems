@@ -337,7 +337,7 @@ fn format_weather_summary(payload: &WeatherPayload) -> String {
 /// weather data is public, non-personal information, not a caller-specific
 /// query whose text could itself be sensitive. This is the exact same
 /// judgment the frontend gateway already makes for this same upstream (see
-/// `apps/Frontend Plane/velionv3/apps/gateway/src/domains/information.rs:14`:
+/// `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/information.rs:14`:
 /// "Information feeds: weather, traffic, news ... public data ... No session
 /// guard") — carried over here deliberately, not an oversight.
 ///

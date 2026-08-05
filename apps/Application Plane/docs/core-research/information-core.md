@@ -1,6 +1,6 @@
 # information-core
 
-> **2026-07-13 superseding update.** Changed source no longer generates traffic volume or speed. Traffic measurements are nullable provenance-bearing observations with measured/estimated/synthetic/unavailable type, provider/source, timestamps, units, confidence/quality, freshness, and unavailable reason; Atlas station-only results are explicitly `metadata_only`. Derived road/county metadata is labeled estimated/low-quality or unavailable. Upstream HTTP/GraphQL errors are honest and not cached; coordinate/radius/search inputs are bounded. Go race tests pass; traffic coverage is 92.0% and `Latest` 86.7%. Velion v3 and the Model formatter preserve/label provenance. None of these changed runtimes is deployed, and legacy Velion v2 still expects numeric fields. The July 11 synthetic-fact text below is historical evidence of the defect, not current source behavior.
+> **2026-07-13 superseding update.** Changed source no longer generates traffic volume or speed. Traffic measurements are nullable provenance-bearing observations with measured/estimated/synthetic/unavailable type, provider/source, timestamps, units, confidence/quality, freshness, and unavailable reason; Atlas station-only results are explicitly `metadata_only`. Derived road/county metadata is labeled estimated/low-quality or unavailable. Upstream HTTP/GraphQL errors are honest and not cached; coordinate/radius/search inputs are bounded. Go race tests pass; traffic coverage is 92.0% and `Latest` 86.7%. Verevon v3 and the Model formatter preserve/label provenance. None of these changed runtimes is deployed, and legacy Verevon v2 still expects numeric fields. The July 11 synthetic-fact text below is historical evidence of the defect, not current source behavior.
 
 > **2026-07-21 source correction.** This historical audit predates the Norway-source expansion and the ownership repair. `information-core` no longer contains a Bring client or `/api/v1/shipping/track`; carrier tracking is owned by Ingestion Plane `shipping-core`, and Model Plane's `track_shipment` path now uses its tenant-scoped `/api/tracking/{trackingNo}` route. For the current route/source inventory, see [`information-core/docs/norway-data-sources-implementation.md`](../../information-core/docs/norway-data-sources-implementation.md).
 
@@ -70,7 +70,7 @@ Auth gate is genuine and correct `[live-curl] + [source-only]`:
   `deploy/docker-compose.yml` (execution-core) sets `INFORMATION_CORE_URL_EXEC` default
   `http://host.docker.internal:3190` and `INFORMATION_CORE_INTERNAL_KEY` → `INTERNAL_API_KEY`.
   This puts information-core on the chat tool path.
-- Historical caller `velionv2` (`src/app/api/v1/information/_lib/upstream.ts`) — deprecated
+- Historical caller `verevonv2` (`src/app/api/v1/information/_lib/upstream.ts`) — deprecated
   plane per 2026-07-10; treat v2 as inactive. Current product traffic should be verified via
   the v3 gateway, not asserted from here.
 - No inbound dependency on any Application-Plane peer; it is a leaf utility service.

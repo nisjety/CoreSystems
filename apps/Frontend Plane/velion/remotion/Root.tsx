@@ -1,7 +1,7 @@
 import { Composition } from 'remotion'
 
 import { ProductReveal } from './ProductReveal'
-import { VelionSignalDroneShort } from './VelionSignalDroneShort'
+import { VerevonSignalDroneShort } from './VerevonSignalDroneShort'
 
 export function RemotionRoot() {
   return (
@@ -15,8 +15,8 @@ export function RemotionRoot() {
         height={1080}
       />
       <Composition
-        id="VelionSignalDroneShort"
-        component={VelionSignalDroneShort}
+        id="VerevonSignalDroneShort"
+        component={VerevonSignalDroneShort}
         durationInFrames={351}
         fps={25}
         width={1920}

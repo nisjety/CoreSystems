@@ -1,7 +1,7 @@
-//! Velion intent layer — the model-selection step of the API layer.
+//! Verevon intent layer — the model-selection step of the API layer.
 //!
-//! "Velion" is exposed in the model picker as three auto modes — **Budget**,
-//! **Balance**, **Genius** — instead of a single opaque "Velion Auto". This
+//! "Verevon" is exposed in the model picker as three auto modes — **Budget**,
+//! **Balance**, **Genius** — instead of a single opaque "Verevon Auto". This
 //! module turns one of those modes into a concrete model id by combining:
 //!
 //! 1. **task complexity**, estimated heuristically from the request (message
@@ -14,7 +14,7 @@
 //!
 //! It runs once at the top of [`crate::provider::fallback::FallbackChain`],
 //! before any provider is tried. A pinned model id (e.g. `gpt-4o-mini`,
-//! `claude-opus-4-8`) is not a Velion mode, so it bypasses this layer entirely.
+//! `claude-opus-4-8`) is not a Verevon mode, so it bypasses this layer entirely.
 
 use std::time::Duration;
 
@@ -24,9 +24,9 @@ use tracing::warn;
 use super::routing_policy::RoutingPolicy;
 use super::{ChatMessage, ToolDefinition};
 
-/// The three Velion auto modes the model picker exposes.
+/// The three Verevon auto modes the model picker exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VelionMode {
+pub enum VerevonMode {
     /// Cost-first: the cheapest capable model.
     Budget,
     /// Balanced cost/quality — the recommended default.
@@ -35,36 +35,36 @@ pub enum VelionMode {
     Genius,
 }
 
-impl VelionMode {
+impl VerevonMode {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            VelionMode::Budget => "budget",
-            VelionMode::Balance => "balance",
-            VelionMode::Genius => "genius",
+            VerevonMode::Budget => "budget",
+            VerevonMode::Balance => "balance",
+            VerevonMode::Genius => "genius",
         }
     }
 
     /// One tier cheaper — used to tighten routing when the budget is
     /// `Constrained`. `Budget` is already the floor.
-    fn downgrade(self) -> VelionMode {
+    fn downgrade(self) -> VerevonMode {
         match self {
-            VelionMode::Genius => VelionMode::Balance,
-            VelionMode::Balance | VelionMode::Budget => VelionMode::Budget,
+            VerevonMode::Genius => VerevonMode::Balance,
+            VerevonMode::Balance | VerevonMode::Budget => VerevonMode::Budget,
         }
     }
 }
 
-/// Parse a model id into a Velion intent mode, or `None` for a pinned model id
+/// Parse a model id into a Verevon intent mode, or `None` for a pinned model id
 /// (which bypasses the intent layer). The literal empty string and `"default"`
-/// are intentionally **not** Velion modes — they keep the legacy per-provider
+/// are intentionally **not** Verevon modes — they keep the legacy per-provider
 /// default behaviour for direct, non-UI callers.
 #[must_use]
-pub fn parse_mode(model: &str) -> Option<VelionMode> {
+pub fn parse_mode(model: &str) -> Option<VerevonMode> {
     match model.trim().to_ascii_lowercase().as_str() {
-        "velion-budget" => Some(VelionMode::Budget),
-        "velion-balance" | "velion" | "velion-auto" | "auto" => Some(VelionMode::Balance),
-        "velion-genius" => Some(VelionMode::Genius),
+        "verevon-budget" => Some(VerevonMode::Budget),
+        "verevon-balance" | "verevon" | "verevon-auto" | "auto" => Some(VerevonMode::Balance),
+        "verevon-genius" => Some(VerevonMode::Genius),
         _ => None,
     }
 }
@@ -200,7 +200,7 @@ pub const CHEAP_FALLBACK: &str = "gpt-4o-mini";
 #[must_use]
 pub fn choose(
     policy: &RoutingPolicy,
-    mode: VelionMode,
+    mode: VerevonMode,
     complexity: Complexity,
     posture: BudgetPosture,
 ) -> &str {
@@ -217,18 +217,18 @@ pub fn choose(
     policy.cell(effective, complexity)
 }
 
-/// The outcome of resolving a Velion request — the concrete model plus the
+/// The outcome of resolving a Verevon request — the concrete model plus the
 /// signals that produced it, for structured logging.
 #[derive(Debug, Clone)]
 pub struct Decision {
     pub model: String,
-    pub mode: VelionMode,
+    pub mode: VerevonMode,
     pub complexity: Complexity,
     pub posture: BudgetPosture,
 }
 
-/// Resolve a Velion request to a concrete [`Decision`], or `None` when the
-/// model id is a pinned model (not a Velion mode). `budget` is best-effort:
+/// Resolve a Verevon request to a concrete [`Decision`], or `None` when the
+/// model id is a pinned model (not a Verevon mode). `budget` is best-effort:
 /// when absent, posture is `Unknown` and routing uses the `Healthy` ladder.
 /// `caller_bearer` is the caller's own verified token, forwarded to cost-core
 /// so the budget check authenticates as the caller; empty skips the check.
@@ -442,13 +442,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_mode_maps_velion_ids_only() {
-        assert_eq!(parse_mode("velion-budget"), Some(VelionMode::Budget));
-        assert_eq!(parse_mode("velion-balance"), Some(VelionMode::Balance));
-        assert_eq!(parse_mode("VELION-GENIUS"), Some(VelionMode::Genius));
-        // "Velion Auto" synonyms route to the balanced mode.
-        for m in ["velion", "velion-auto", "auto"] {
-            assert_eq!(parse_mode(m), Some(VelionMode::Balance), "{m:?}");
+    fn parse_mode_maps_verevon_ids_only() {
+        assert_eq!(parse_mode("verevon-budget"), Some(VerevonMode::Budget));
+        assert_eq!(parse_mode("verevon-balance"), Some(VerevonMode::Balance));
+        assert_eq!(parse_mode("VEREVON-GENIUS"), Some(VerevonMode::Genius));
+        // "Verevon Auto" synonyms route to the balanced mode.
+        for m in ["verevon", "verevon-auto", "auto"] {
+            assert_eq!(parse_mode(m), Some(VerevonMode::Balance), "{m:?}");
         }
         // Pinned models and the legacy sentinels bypass the intent layer.
         for m in [
@@ -635,7 +635,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Budget,
+                VerevonMode::Budget,
                 Complexity::Simple,
                 BudgetPosture::Healthy
             ),
@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Budget,
+                VerevonMode::Budget,
                 Complexity::Complex,
                 BudgetPosture::Healthy
             ),
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Balance,
+                VerevonMode::Balance,
                 Complexity::Simple,
                 BudgetPosture::Healthy
             ),
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Balance,
+                VerevonMode::Balance,
                 Complexity::Moderate,
                 BudgetPosture::Healthy
             ),
@@ -676,7 +676,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Balance,
+                VerevonMode::Balance,
                 Complexity::Complex,
                 BudgetPosture::Healthy
             ),
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Complex,
                 BudgetPosture::Healthy
             ),
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Moderate,
                 BudgetPosture::Healthy
             ),
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn exhausted_budget_forces_cheap_fallback() {
         let p = policy();
-        for mode in [VelionMode::Budget, VelionMode::Balance, VelionMode::Genius] {
+        for mode in [VerevonMode::Budget, VerevonMode::Balance, VerevonMode::Genius] {
             for cx in [
                 Complexity::Simple,
                 Complexity::Moderate,
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Complex,
                 BudgetPosture::Constrained
             ),
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Balance,
+                VerevonMode::Balance,
                 Complexity::Complex,
                 BudgetPosture::Constrained
             ),
@@ -755,13 +755,13 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Complex,
                 BudgetPosture::Unknown
             ),
             choose(
                 &p,
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Complex,
                 BudgetPosture::Healthy
             )
@@ -776,7 +776,7 @@ mod tests {
         assert_eq!(
             choose(
                 &p,
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Complex,
                 BudgetPosture::Healthy
             ),
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(
             choose(
                 &policy(),
-                VelionMode::Genius,
+                VerevonMode::Genius,
                 Complexity::Complex,
                 BudgetPosture::Healthy
             ),
@@ -839,10 +839,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_velion_balance_without_budget_is_unknown_posture() {
+    async fn resolve_verevon_balance_without_budget_is_unknown_posture() {
         let d = resolve(
             &policy(),
-            "velion-balance",
+            "verevon-balance",
             &[user("hi")],
             &[],
             "auto",
@@ -852,8 +852,8 @@ mod tests {
             None,
         )
         .await
-        .expect("velion mode resolves");
-        assert_eq!(d.mode, VelionMode::Balance);
+        .expect("verevon mode resolves");
+        assert_eq!(d.mode, VerevonMode::Balance);
         assert_eq!(d.complexity, Complexity::Simple);
         assert_eq!(d.posture, BudgetPosture::Unknown);
         assert_eq!(d.model, "gpt-4o-mini");

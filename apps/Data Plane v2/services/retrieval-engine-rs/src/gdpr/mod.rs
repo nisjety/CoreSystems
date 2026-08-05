@@ -4,7 +4,7 @@
 //! full rationale, including the `retrieval_candidates` cascade and the
 //! audit-log retention check).
 //!
-//! `event` decodes and gates the shared `velion.gdpr.erasure.requested` fan-out
+//! `event` decodes and gates the shared `verevon.gdpr.erasure.requested` fan-out
 //! (organization-scoped erasure only — see its module docs for the per-user
 //! safety contract); `purge` performs the actual hard-delete; `consumer` is
 //! the NATS JetStream transport that wires the two together.

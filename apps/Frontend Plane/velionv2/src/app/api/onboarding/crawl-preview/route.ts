@@ -389,7 +389,7 @@ async function fetchJobEvents(
 function crawlIdempotencyKey(url: string, maxPages: number): string {
   const day = new Date().toISOString().slice(0, 10);
   const digest = createHash("sha256").update(`${url}:${maxPages}:${day}`).digest("hex").slice(0, 40);
-  return `velion-crawl-${digest}`;
+  return `verevon-crawl-${digest}`;
 }
 
 /* ----------------------------------------------------------- snippet mapping */
@@ -582,7 +582,7 @@ async function fetchPublicText(
       cache: "no-store",
       headers: {
         Accept: options.accept,
-        "User-Agent": "Velion-Onboarding/1.0 (+https://velion.com)",
+        "User-Agent": "Verevon-Onboarding/1.0 (+https://verevon.com)",
       },
       redirect: "manual",
       signal: AbortSignal.timeout(options.timeoutMs),

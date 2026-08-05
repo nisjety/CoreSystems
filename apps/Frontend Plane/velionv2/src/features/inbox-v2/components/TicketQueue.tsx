@@ -39,7 +39,7 @@ const inboxTabs: Array<{ id: InboxTab; label: string }> = [
 const filterMenuItems = [
   { label: "Your inbox", href: "/inbox?view=mine", description: "Conversations assigned to you, kept inside the active inbox workspace." },
   { label: "All conversations", href: "/inbox?view=all", description: "A full team queue view for monitoring every active conversation." },
-  { label: "Unassigned", href: "/inbox?view=unassigned", description: "Tickets that Velion or a human operator should route to an owner." },
+  { label: "Unassigned", href: "/inbox?view=unassigned", description: "Tickets that Verevon or a human operator should route to an owner." },
   { label: "Mentions", href: "/inbox?view=mentions", description: "Conversation threads where an operator or AI workflow was mentioned." },
   { label: "Messenger", href: "/inbox?view=view-messenger", description: "Messenger-channel conversations without leaving the inbox surface." },
   { label: "Email", href: "/inbox?view=view-email", description: "Email-channel conversations without opening a separate page." },
@@ -499,7 +499,7 @@ function FiltersMenu({
   searchQuery: string;
 }) {
   return (
-    <div className="velion-popover absolute right-0 top-9 z-30 w-[238px] py-2">
+    <div className="verevon-popover absolute right-0 top-9 z-30 w-[238px] py-2">
       <div className="px-3 pb-1 text-[12px] font-semibold text-[#626260]">Status</div>
       <div className="px-1.5">
         {inboxTabs.map((tab) => (
@@ -563,7 +563,7 @@ function FiltersMenu({
 
 function SortMenu({ activeSort, onSelect }: { activeSort: SortKey; onSelect: (sort: SortKey) => void }) {
   return (
-    <div className="velion-popover absolute right-0 top-9 z-30 w-[258px] py-2">
+    <div className="verevon-popover absolute right-0 top-9 z-30 w-[258px] py-2">
       {sortOptions.map((option) => {
         const Icon = option.icon;
         return (

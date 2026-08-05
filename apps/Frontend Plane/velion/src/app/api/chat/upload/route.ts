@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 
 import { resolveChatActor } from '../_lib/session-store'
 
-// U2-13 (ui-ux-velion-gap.md §10): chat attachments are now real documents.
+// U2-13 (ui-ux-verevon-gap.md §10): chat attachments are now real documents.
 //
 // Previous behaviour persisted files as base64 data-URLs embedded in the
 // chat message — the file "appeared" attached but was never indexed,

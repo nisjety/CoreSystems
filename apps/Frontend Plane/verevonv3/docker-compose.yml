@@ -1,0 +1,244 @@
+name: frontend-plane-verevonv3
+
+# Frontend Plane: verevon v3.
+# This stack now owns the v3 SPA, its Rust gateway, and the shared Verevon NATS
+# bus used across planes. The browser talks to the same origin and nginx
+# reverse-proxies `/api` to `verevon-gateway-rs` over the shared inter-plane
+# network.
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
+  BUILD_DATE: ${BUILD_DATE:-unknown}
+
+services:
+  nats:
+    image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
+    container_name: verevon-nats
+    restart: unless-stopped
+    # Prefer the canonical VEREVON_NATS_TOKEN. The legacy fallback keeps an
+    # existing local-only stack restartable during the product rename without
+    # copying its secret into source control.
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        token="$${VEREVON_NATS_TOKEN:-$${VELION_NATS_TOKEN:-}}"
+        test -n "$$token" || { echo "VEREVON_NATS_TOKEN is required" >&2; exit 78; }
+        exec nats-server -js -m 8222 -sd /data --auth "$$token"
+    environment:
+      VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:-}
+      # Local migration compatibility only; new environments use the key above.
+      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+    networks:
+      - inter-plane-bus
+    volumes:
+      - verevon-nats-data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  gateway:
+    build:
+      context: ./apps/gateway
+      dockerfile: Dockerfile
+      args: *build-metadata
+    container_name: verevon-gateway-rs
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    environment:
+      PORT: 3185
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY must be set (no change-me default)}
+      # Ownership honesty gate (PR-6): the SAME value retrieval-engine reads. The
+      # gateway reports gate_open = (this == strict) && identity_live at
+      # /api/v1/ownership/status; the SPA renders no privacy affordance otherwise.
+      CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-strict}
+      AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
+      USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      ORG_CORE_SERVICE_TOKEN: ${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:3017}
+      SESSION_CORE_SERVICE_TOKEN: ${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      USER_CORE_SERVICE_TOKEN: ${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN must match Control Plane configuration}
+      BILLING_CORE_URL: ${BILLING_CORE_URL:-http://billing-core:3014}
+      BILLING_CORE_SERVICE_TOKEN: ${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+      NOTIFICATION_CORE_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must match Application Plane notification-core configuration}
+      CONVERSATION_CORE_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must match Application Plane conversation-core configuration}
+      INFORMATION_CORE_URL: ${INFORMATION_CORE_URL:-http://information-core:3190}
+      CONVERSATION_CORE_URL: ${CONVERSATION_CORE_URL:-http://conversation-core-go:3160}
+      SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # audit-core (Control Plane) is dual-homed on inter-plane-bus and binds
+      # HTTP_PORT 8187; insight-core (Application Plane, registry-only — no DB/NATS)
+      # binds 3163. Both were omitted here, so the gateway silently fell back to
+      # its config.rs default (audit) / left insight unwired. Pin them explicitly.
+      AUDIT_CORE_URL: ${AUDIT_CORE_URL:-http://audit-core:8187}
+      AUDIT_CORE_SERVICE_TOKEN: ${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
+      GRAPH_INDEX_URL: ${GRAPH_INDEX_URL:-http://dpv2-graph-index:9203}
+      DOCUMENTS_API_URL: ${DOCUMENTS_API_URL:-http://dpv2-documents-api:8010}
+      WIKI_STORE_URL: ${WIKI_STORE_URL:-http://dpv2-wiki-store:8011}
+      RETRIEVAL_ENGINE_URL: ${RETRIEVAL_ENGINE_URL:-http://dpv2-retrieval-engine:8004}
+      # Knowledge diagnostics use Data Plane service contracts only. Qdrant,
+      # Quickwit, MinIO, and Dragonfly remain private to dpv2-net.
+      EMBEDDING_ENGINE_URL: ${EMBEDDING_ENGINE_URL:-http://dpv2-embedding-engine:9202}
+      QUICKWIT_ADAPTER_URL: ${QUICKWIT_ADAPTER_URL:-http://dpv2-quickwit-adapter:9204}
+      FINSPO_CORE_URL: ${FINSPO_CORE_URL:-http://finspo-api:3130}
+      QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-http://quarry-edge:8082}
+      QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
+      # Result caching/rate limiting degrades safely to in-process storage when
+      # no frontend-owned cache contract is configured.
+      # imports service is reachable as "imports-api" on inter-plane-bus (the
+      # gateway default "imports-core" has no alias here → connection refused).
+      IMPORTS_API_URL: ${IMPORTS_API_URL:-http://imports-api:3025}
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-http://model-gateway:8080}
+      MODEL_GATEWAY_DEV_BEARER: ${MODEL_GATEWAY_DEV_BEARER:-}
+      MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
+      # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
+      # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+      AUTOCOMPLETE_CORE_URL: ${AUTOCOMPLETE_CORE_URL:-http://autocomplete-core:3219}
+      AUTOCOMPLETE_INTERNAL_TOKEN: ${AUTOCOMPLETE_INTERNAL_TOKEN:-}
+      # Stealth/proxy escalation for bot-walled sites (e.g. elkjop.no → 429). When a
+      # basic render is blocked, scrape-preview retries through a managed scraping API
+      # with residential proxies + anti-bot bypass. Unset ⇒ disabled (clear error).
+      # FREE/default: SCRAPE_ENHANCED_PROVIDER=scrapfly + a Scrapfly key (1000 free credits).
+      # BEST: SCRAPE_ENHANCED_PROVIDER=brightdata + Bright Data API token + SCRAPE_ENHANCED_ZONE.
+      SCRAPE_ENHANCED_PROVIDER: ${SCRAPE_ENHANCED_PROVIDER:-}
+      SCRAPE_ENHANCED_API_KEY: ${SCRAPE_ENHANCED_API_KEY:-}
+      SCRAPE_ENHANCED_ZONE: ${SCRAPE_ENHANCED_ZONE:-}
+      SCRAPE_ENHANCED_COUNTRY: ${SCRAPE_ENHANCED_COUNTRY:-no}
+      ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
+      RUST_LOG: ${RUST_LOG:-info}
+      VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
+      VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+    ports:
+      - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
+    networks:
+      - inter-plane-bus
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.75"
+    healthcheck:
+      # /health is served on :3185 (src/main.rs). curl is installed in the
+      # runtime stage of apps/gateway/Dockerfile for exactly this check.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3185/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      args: *build-metadata
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    ports:
+      - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:${VEREVONV3_HOST_PORT:-5173}:5173"
+    networks:
+      - inter-plane-bus
+    depends_on:
+      gateway:
+        condition: service_healthy
+    volumes:
+      # Mount entire app directory for hot reload
+      - .:/app
+      # Exclude node_modules from bind mount to avoid permission issues
+      - /app/node_modules
+      # Exclude .next cache
+      - /app/.next
+      # Exclude dist build output
+      - /app/dist
+    environment:
+      # Node otherwise derives a ~256 MiB heap from the container cgroup and
+      # Vite enters a GC/OOM loop while transforming this large workspace.
+      #
+      # 512 was enough until the chat surface grew (artifact panel, code
+      # highlighter, live run panel, run-watch). Vite then died mid-transform
+      # with "Ineffective mark-compacts near heap limit" at ~500 MiB, and the
+      # symptom was NOT an error page: index.html served 200, #root stayed
+      # empty, and the console was silent, because the crash happens in the
+      # dev server rather than the browser. Raised with headroom so the next
+      # module does not reproduce a blank page that looks like a UI bug.
+      #
+      # Keep this BELOW the container's memory limit below (2 GiB) — the heap is
+      # only part of Node's footprint, and a cap above the cgroup just moves the
+      # kill from V8 to the OOM killer.
+      NODE_OPTIONS: ${VEREVON_NODE_OPTIONS:---max-old-space-size=1536}
+      # Enable Vite HMR (Hot Module Replacement)
+      VITE_HMR_HOST: localhost
+      VITE_HMR_PORT: 5173
+      VITE_HMR_PROTOCOL: ws
+      # Server-only proxy target for Vite's /api + /health forwarding. Must be the
+      # gateway's compose service name in-container (127.0.0.1 only works for
+      # host-run `pnpm dev`). NOT VITE_-prefixed, so it stays out of the client
+      # bundle — the browser keeps calling same-origin /api (first-party cookie).
+      # This is Docker-internal service discovery, not a user-configurable
+      # browser endpoint. Pin the Compose service name so a legacy local .env
+      # value cannot point Vite at the retired velion-gateway-rs container.
+      GATEWAY_PROXY_TARGET: http://gateway:3185
+      VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
+      VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "curl --max-time 5 -sf http://127.0.0.1:5173 >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          # Vite's dev server + TS transform over this codebase steadily reaches
+          # ~760M, so a 768M ceiling put it in a restart loop (17 restarts in
+          # one session) that blanked the page mid-answer. Headroom measured
+          # against Docker's 7.7G VM, where the next-largest container is
+          # ~274M. Dev only — the built image is served by nginx and needs a
+          # fraction of this.
+          memory: 2G
+          cpus: "2.0"
+
+volumes:
+  verevon-nats-data:
+    name: verevon-nats-data
+    driver: local
+
+networks:
+  inter-plane-bus:
+    external: true
+    name: inter-plane-bus

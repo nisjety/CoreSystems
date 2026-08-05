@@ -19,7 +19,7 @@ import (
 const DurableConsumerName = "quarry-control-org-erasure"
 
 // controlSharedStream is the shared cross-plane control-plane JetStream
-// stream that carries velion.gdpr.erasure.requested (and other
+// stream that carries verevon.gdpr.erasure.requested (and other
 // Control-Plane-originated lifecycle events). Mirrors the
 // controlSharedStream constant documents-api-go's and conversation-core-go's
 // org-purge consumers bind against.

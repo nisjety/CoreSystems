@@ -1,1018 +1,1099 @@
 name: control-plane
 
 x-build-metadata: &build-metadata
-  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
-  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
+    SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION build arg required for image provenance}
+    BUILD_DATE: ${BUILD_DATE:?BUILD_DATE build arg required for image provenance}
 
 x-core-security: &core-security
-  read_only: true
-  tmpfs:
-    - /tmp:rw,noexec,nosuid,size=64m
-  security_opt:
-    - no-new-privileges:true
-  cap_drop:
-    - ALL
+    read_only: true
+    tmpfs:
+        - /tmp:rw,noexec,nosuid,size=64m
+    security_opt:
+        - no-new-privileges:true
+    cap_drop:
+        - ALL
 
 services:
-  # ==============================================
-  # INFRASTRUCTURE (KUN controlplane-net)
-  # ==============================================
+    # ==============================================
+    # INFRASTRUCTURE (KUN controlplane-net)
+    # ==============================================
 
-  controlplane-postgres:
-    image: postgres:15.18-alpine3.24@sha256:3d0f7584ed7d04e27fa050d6683a74746608faf21f202be78460d679cc56461f
-    container_name: controlplane-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
-      POSTGRES_DB: ${DB_NAME:-controlplane}
-      POSTGRES_INITDB_ARGS: --encoding=UTF8
-    ports:
-      - "127.0.0.1:${CONTROL_POSTGRES_HOST_PORT:-5433}:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    networks:
-      - controlplane-net
-    shm_size: "128mb"
-    command:
-      - "postgres"
-      - "-c"
-      - "shared_buffers=128MB"
-      - "-c"
-      - "work_mem=4MB"
-      - "-c"
-      - "effective_cache_size=256MB"
-      - "-c"
-      - "maintenance_work_mem=64MB"
-      - "-c"
-      - "max_connections=100"
-      - "-c"
-      - "random_page_cost=1.1"
-      - "-c"
-      - "log_min_messages=warning"
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "1.0"
-        reservations:
-          memory: 256M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      # Viktig: pg_isready uten -d kan default-e til db=bruker. Her er det OK, men vi kan være eksplisitte.
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:?DB_USER must be set in Control Plane .env} -d ${DB_NAME:-controlplane}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    controlplane-postgres:
+        image: postgres:15.18-alpine3.24@sha256:3d0f7584ed7d04e27fa050d6683a74746608faf21f202be78460d679cc56461f
+        container_name: controlplane-postgres
+        restart: unless-stopped
+        environment:
+            POSTGRES_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
+            POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
+            POSTGRES_DB: ${DB_NAME:-controlplane}
+            POSTGRES_INITDB_ARGS: --encoding=UTF8
+        ports:
+            - "127.0.0.1:${CONTROL_POSTGRES_HOST_PORT:-5433}:5432"
+        volumes:
+            - postgres-data:/var/lib/postgresql/data
+        networks:
+            - controlplane-net
+        shm_size: "128mb"
+        command:
+            - "postgres"
+            - "-c"
+            - "shared_buffers=128MB"
+            - "-c"
+            - "work_mem=4MB"
+            - "-c"
+            - "effective_cache_size=256MB"
+            - "-c"
+            - "maintenance_work_mem=64MB"
+            - "-c"
+            - "max_connections=100"
+            - "-c"
+            - "random_page_cost=1.1"
+            - "-c"
+            - "log_min_messages=warning"
+        deploy:
+            resources:
+                limits:
+                    memory: 512M
+                    cpus: "1.0"
+                reservations:
+                    memory: 256M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            # Viktig: pg_isready uten -d kan default-e til db=bruker. Her er det OK, men vi kan være eksplisitte.
+            test:
+                [
+                    "CMD-SHELL",
+                    "pg_isready -U ${DB_USER:?DB_USER must be set in Control Plane .env} -d ${DB_NAME:-controlplane}",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  controlplane-dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
-    container_name: controlplane-dragonfly
-    restart: unless-stopped
-    command: >
-      --requirepass=${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}
-      --cache_mode=true
-      --maxmemory=256mb
-      --proactor_threads=1
-      --dir=/data
-    ports:
-      - "127.0.0.1:${CONTROL_DRAGONFLY_HOST_PORT:-6380}:6379"
-    volumes:
-      - dragonfly-data:/data
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-          cpus: "0.5"
-        reservations:
-          memory: 128M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    controlplane-dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+        container_name: controlplane-dragonfly
+        restart: unless-stopped
+        command: >
+            --requirepass=${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}
+            --cache_mode=true
+            --maxmemory=256mb
+            --proactor_threads=1
+            --dir=/data
+        ports:
+            - "127.0.0.1:${CONTROL_DRAGONFLY_HOST_PORT:-6380}:6379"
+        volumes:
+            - dragonfly-data:/data
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.5"
+                reservations:
+                    memory: 128M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "redis-cli",
+                    "-a",
+                    "${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}",
+                    "ping",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  controlplane-nats:
-    image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
-    container_name: controlplane-nats
-    restart: unless-stopped
-    command: ["-c", "/etc/nats/nats.conf"]
-    environment:
-      AUTH_NATS_PASSWORD: "\"${AUTH_NATS_PASSWORD:?AUTH_NATS_PASSWORD is required}\""
-      USER_NATS_PASSWORD: "\"${USER_NATS_PASSWORD:?USER_NATS_PASSWORD is required}\""
-      ORG_NATS_PASSWORD: "\"${ORG_NATS_PASSWORD:?ORG_NATS_PASSWORD is required}\""
-      BILLING_NATS_PASSWORD: "\"${BILLING_NATS_PASSWORD:?BILLING_NATS_PASSWORD is required}\""
-      SESSION_NATS_PASSWORD: "\"${SESSION_NATS_PASSWORD:?SESSION_NATS_PASSWORD is required}\""
-      AUDIT_CONTROL_NATS_PASSWORD: "\"${AUDIT_CONTROL_NATS_PASSWORD:?AUDIT_CONTROL_NATS_PASSWORD is required}\""
-      CONTROL_NATS_PROVISIONER_PASSWORD: "\"${CONTROL_NATS_PROVISIONER_PASSWORD:?CONTROL_NATS_PROVISIONER_PASSWORD is required}\""
-    ports:
-      - "127.0.0.1:${CONTROL_NATS_HOST_PORT:-4223}:4222"
-      - "127.0.0.1:${CONTROL_NATS_MONITOR_HOST_PORT:-8223}:8222"
-    volumes:
-      - nats-data:/data
-      - ./nats.conf:/etc/nats/nats.conf:ro
-    networks:
-      - controlplane-net
-      - inter-plane-bus  # exposed so shared cross-plane services can reach it by container name
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.5"
-        reservations:
-          memory: 32M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    controlplane-nats:
+        image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+        container_name: controlplane-nats
+        restart: unless-stopped
+        command: ["-c", "/etc/nats/nats.conf"]
+        environment:
+            AUTH_NATS_PASSWORD: '"${AUTH_NATS_PASSWORD:?AUTH_NATS_PASSWORD is required}"'
+            USER_NATS_PASSWORD: '"${USER_NATS_PASSWORD:?USER_NATS_PASSWORD is required}"'
+            ORG_NATS_PASSWORD: '"${ORG_NATS_PASSWORD:?ORG_NATS_PASSWORD is required}"'
+            BILLING_NATS_PASSWORD: '"${BILLING_NATS_PASSWORD:?BILLING_NATS_PASSWORD is required}"'
+            SESSION_NATS_PASSWORD: '"${SESSION_NATS_PASSWORD:?SESSION_NATS_PASSWORD is required}"'
+            AUDIT_CONTROL_NATS_PASSWORD: '"${AUDIT_CONTROL_NATS_PASSWORD:?AUDIT_CONTROL_NATS_PASSWORD is required}"'
+            CONTROL_NATS_PROVISIONER_PASSWORD: '"${CONTROL_NATS_PROVISIONER_PASSWORD:?CONTROL_NATS_PROVISIONER_PASSWORD is required}"'
+        ports:
+            - "127.0.0.1:${CONTROL_NATS_HOST_PORT:-4223}:4222"
+            - "127.0.0.1:${CONTROL_NATS_MONITOR_HOST_PORT:-8223}:8222"
+        volumes:
+            - nats-data:/data
+            - ./nats.conf:/etc/nats/nats.conf:ro
+        networks:
+            - controlplane-net
+            - inter-plane-bus # exposed so shared cross-plane services can reach it by container name
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.5"
+                reservations:
+                    memory: 32M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-q",
+                    "--spider",
+                    "http://127.0.0.1:8222/healthz",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
 
-  control-shared-nats:
-    image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
-    container_name: control-shared-nats
-    restart: unless-stopped
-    command: ["-c", "/etc/nats/nats.conf"]
-    environment:
-      AUTH_SHARED_NATS_PASSWORD: "\"${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}\""
-      USER_SHARED_NATS_PASSWORD: "\"${USER_SHARED_NATS_PASSWORD:?USER_SHARED_NATS_PASSWORD is required}\""
-      ORG_SHARED_NATS_PASSWORD: "\"${ORG_SHARED_NATS_PASSWORD:?ORG_SHARED_NATS_PASSWORD is required}\""
-      BILLING_SHARED_NATS_PASSWORD: "\"${BILLING_SHARED_NATS_PASSWORD:?BILLING_SHARED_NATS_PASSWORD is required}\""
-      SESSION_SHARED_NATS_PASSWORD: "\"${SESSION_SHARED_NATS_PASSWORD:?SESSION_SHARED_NATS_PASSWORD is required}\""
-      APPLICATION_CONVEX_CONTROL_NATS_PASSWORD: "\"${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:?APPLICATION_CONVEX_CONTROL_NATS_PASSWORD is required}\""
-      DOCUMENTS_GDPR_NATS_PASSWORD: "\"${DOCUMENTS_GDPR_NATS_PASSWORD:?DOCUMENTS_GDPR_NATS_PASSWORD is required}\""
-      CONTROL_SHARED_BRIDGE_PASSWORD: "\"${CONTROL_SHARED_BRIDGE_PASSWORD:?CONTROL_SHARED_BRIDGE_PASSWORD is required}\""
-      CONTROL_SHARED_NATS_PROVISIONER_PASSWORD: "\"${CONTROL_SHARED_NATS_PROVISIONER_PASSWORD:?CONTROL_SHARED_NATS_PROVISIONER_PASSWORD is required}\""
-      SESSION_CORE_GDPR_NATS_PASSWORD: "\"${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}\""
-      CONVERSATION_CORE_GDPR_NATS_PASSWORD: "\"${CONVERSATION_CORE_GDPR_NATS_PASSWORD:?CONVERSATION_CORE_GDPR_NATS_PASSWORD is required}\""
-      QUARRY_CONTROL_GDPR_NATS_PASSWORD: "\"${QUARRY_CONTROL_GDPR_NATS_PASSWORD:?QUARRY_CONTROL_GDPR_NATS_PASSWORD is required}\""
-      NOTIFICATION_CORE_GDPR_NATS_PASSWORD: "\"${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}\""
-      INDEX_ENGINE_GDPR_NATS_PASSWORD: "\"${INDEX_ENGINE_GDPR_NATS_PASSWORD:?INDEX_ENGINE_GDPR_NATS_PASSWORD is required}\""
-      GRAPH_INDEX_GDPR_NATS_PASSWORD: "\"${GRAPH_INDEX_GDPR_NATS_PASSWORD:?GRAPH_INDEX_GDPR_NATS_PASSWORD is required}\""
-      WIKI_STORE_GDPR_NATS_PASSWORD: "\"${WIKI_STORE_GDPR_NATS_PASSWORD:?WIKI_STORE_GDPR_NATS_PASSWORD is required}\""
-      RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD: "\"${RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD:?RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD is required}\""
-      DATA_QUALITY_GDPR_NATS_PASSWORD: "\"${DATA_QUALITY_GDPR_NATS_PASSWORD:?DATA_QUALITY_GDPR_NATS_PASSWORD is required}\""
-      DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD: "\"${DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD:?DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD is required}\""
-      QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD: "\"${QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD:?QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD is required}\""
-      COST_CORE_GDPR_NATS_PASSWORD: "\"${COST_CORE_GDPR_NATS_PASSWORD:?COST_CORE_GDPR_NATS_PASSWORD is required}\""
-      EMBEDDING_ENGINE_GDPR_NATS_PASSWORD: "\"${EMBEDDING_ENGINE_GDPR_NATS_PASSWORD:?EMBEDDING_ENGINE_GDPR_NATS_PASSWORD is required}\""
-    ports:
-      - "127.0.0.1:${CONTROL_SHARED_NATS_HOST_PORT:-4224}:4222"
-      - "127.0.0.1:${CONTROL_SHARED_NATS_MONITOR_HOST_PORT:-8224}:8222"
-    volumes:
-      - control-shared-nats-data:/data
-      - ./control-shared-nats.conf:/etc/nats/nats.conf:ro
-    networks:
-      controlplane-net:
-      inter-plane-bus:
-        aliases:
-          - control-shared-nats
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8222/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+    control-shared-nats:
+        image: nats:2.10.29-alpine3.22@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+        container_name: control-shared-nats
+        restart: unless-stopped
+        command: ["-c", "/etc/nats/nats.conf"]
+        environment:
+            AUTH_SHARED_NATS_PASSWORD: '"${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}"'
+            USER_SHARED_NATS_PASSWORD: '"${USER_SHARED_NATS_PASSWORD:?USER_SHARED_NATS_PASSWORD is required}"'
+            ORG_SHARED_NATS_PASSWORD: '"${ORG_SHARED_NATS_PASSWORD:?ORG_SHARED_NATS_PASSWORD is required}"'
+            BILLING_SHARED_NATS_PASSWORD: '"${BILLING_SHARED_NATS_PASSWORD:?BILLING_SHARED_NATS_PASSWORD is required}"'
+            SESSION_SHARED_NATS_PASSWORD: '"${SESSION_SHARED_NATS_PASSWORD:?SESSION_SHARED_NATS_PASSWORD is required}"'
+            APPLICATION_CONVEX_CONTROL_NATS_PASSWORD: '"${APPLICATION_CONVEX_CONTROL_NATS_PASSWORD:?APPLICATION_CONVEX_CONTROL_NATS_PASSWORD is required}"'
+            DOCUMENTS_GDPR_NATS_PASSWORD: '"${DOCUMENTS_GDPR_NATS_PASSWORD:?DOCUMENTS_GDPR_NATS_PASSWORD is required}"'
+            CONTROL_SHARED_BRIDGE_PASSWORD: '"${CONTROL_SHARED_BRIDGE_PASSWORD:?CONTROL_SHARED_BRIDGE_PASSWORD is required}"'
+            CONTROL_SHARED_NATS_PROVISIONER_PASSWORD: '"${CONTROL_SHARED_NATS_PROVISIONER_PASSWORD:?CONTROL_SHARED_NATS_PROVISIONER_PASSWORD is required}"'
+            SESSION_CORE_GDPR_NATS_PASSWORD: '"${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}"'
+            CONVERSATION_CORE_GDPR_NATS_PASSWORD: '"${CONVERSATION_CORE_GDPR_NATS_PASSWORD:?CONVERSATION_CORE_GDPR_NATS_PASSWORD is required}"'
+            QUARRY_CONTROL_GDPR_NATS_PASSWORD: '"${QUARRY_CONTROL_GDPR_NATS_PASSWORD:?QUARRY_CONTROL_GDPR_NATS_PASSWORD is required}"'
+            NOTIFICATION_CORE_GDPR_NATS_PASSWORD: '"${NOTIFICATION_CORE_GDPR_NATS_PASSWORD:?NOTIFICATION_CORE_GDPR_NATS_PASSWORD is required}"'
+            INDEX_ENGINE_GDPR_NATS_PASSWORD: '"${INDEX_ENGINE_GDPR_NATS_PASSWORD:?INDEX_ENGINE_GDPR_NATS_PASSWORD is required}"'
+            GRAPH_INDEX_GDPR_NATS_PASSWORD: '"${GRAPH_INDEX_GDPR_NATS_PASSWORD:?GRAPH_INDEX_GDPR_NATS_PASSWORD is required}"'
+            WIKI_STORE_GDPR_NATS_PASSWORD: '"${WIKI_STORE_GDPR_NATS_PASSWORD:?WIKI_STORE_GDPR_NATS_PASSWORD is required}"'
+            RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD: '"${RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD:?RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD is required}"'
+            DATA_QUALITY_GDPR_NATS_PASSWORD: '"${DATA_QUALITY_GDPR_NATS_PASSWORD:?DATA_QUALITY_GDPR_NATS_PASSWORD is required}"'
+            DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD: '"${DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD:?DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD is required}"'
+            QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD: '"${QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD:?QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD is required}"'
+            COST_CORE_GDPR_NATS_PASSWORD: '"${COST_CORE_GDPR_NATS_PASSWORD:?COST_CORE_GDPR_NATS_PASSWORD is required}"'
+            EMBEDDING_ENGINE_GDPR_NATS_PASSWORD: '"${EMBEDDING_ENGINE_GDPR_NATS_PASSWORD:?EMBEDDING_ENGINE_GDPR_NATS_PASSWORD is required}"'
+        ports:
+            - "127.0.0.1:${CONTROL_SHARED_NATS_HOST_PORT:-4224}:4222"
+            - "127.0.0.1:${CONTROL_SHARED_NATS_MONITOR_HOST_PORT:-8224}:8222"
+        volumes:
+            - control-shared-nats-data:/data
+            - ./control-shared-nats.conf:/etc/nats/nats.conf:ro
+        networks:
+            controlplane-net:
+            inter-plane-bus:
+                aliases:
+                    - control-shared-nats
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-q",
+                    "--spider",
+                    "http://127.0.0.1:8222/healthz",
+                ]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 10s
 
-  # ==============================================
-  # CONTROL PLANE APPS (controlplane-net + inter-plane-bus)
-  # ==============================================
+    # ==============================================
+    # CONTROL PLANE APPS (controlplane-net + inter-plane-bus)
+    # ==============================================
 
-  auth-core:
-    <<: *core-security
-    build:
-      context: ./auth-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: auth-service
-    init: true
-    restart: unless-stopped
-    env_file:
-      - ./auth-core/.env
-      - ./auth-core/.env.docker
-    environment:
-      # Base Compose is the loopback development stack. Production override
-      # switches this to production and requires a file-backed principal registry.
-      NODE_ENV: development
-      VELION_NATS_URL: nats://control-shared-nats:4222
-      NATS_SHARED_USER: auth-core-shared
-      NATS_SHARED_PASSWORD: ${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}
-      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
-      NATS_URL: nats://controlplane-nats:4222
-      NATS_USER: auth-core-control
-      NATS_PASSWORD: ${AUTH_NATS_PASSWORD:?AUTH_NATS_PASSWORD is required}
-      ORG_CORE_URL: http://org-core:8080
-      BILLING_CORE_URL: http://billing-core:3014
-      ORG_CORE_SERVICE_TOKEN: ${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}
-      BILLING_CORE_SERVICE_TOKEN: ${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}
-      AUTH_GRPC_SERVICE_CREDENTIALS: >-
-        [{"credentialId":"velion-gateway-primary","principal":"velion-gateway","audience":"auth-core","token":"${GATEWAY_AUTH_GRPC_SERVICE_TOKEN:?GATEWAY_AUTH_GRPC_SERVICE_TOKEN is required}","scopes":["auth:token:validate","auth:user:read"]},{"credentialId":"retrieval-engine-primary","principal":"retrieval-engine","audience":"auth-core","token":"${RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN:?RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN is required}","scopes":["auth:token:validate"]}]
-      # Method-scoped Auth -> User gRPC identity. Production replaces this
-      # inline development tuple with a deployment-owned secret file.
-      USER_CORE_GRPC_CLIENT_CREDENTIAL: >-
-        {"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}"}
-      # Internal Auth contracts are independently scoped. The two principals
-      # cannot cross OAuth/admin and agent-provision boundaries.
-      AUTH_INTERNAL_SERVICE_CREDENTIALS: >-
-        [{"credentialId":"user-core-primary","principal":"user-core","audience":"auth-core-internal","token":"${USER_AUTH_INTERNAL_SERVICE_TOKEN:?USER_AUTH_INTERNAL_SERVICE_TOKEN is required}","scopes":["oauth:token:read","oauth:token:refresh","nats:authenticate","auth:admin"]},{"credentialId":"quarry-control-primary","principal":"quarry-control","audience":"auth-core-internal","token":"${QUARRY_AUTH_INTERNAL_SERVICE_TOKEN:?QUARRY_AUTH_INTERNAL_SERVICE_TOKEN is required}","scopes":["agent:provision"]}]
-      DATA_PLANE_POLICY_AUTH_AUDIENCE: ${DATA_PLANE_POLICY_AUTH_AUDIENCE:-control-policy}
-      DATA_PLANE_POLICY_CALLER_SERVICE_ID: ${DATA_PLANE_POLICY_CALLER_SERVICE_ID:-retrieval-engine}
-      PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS: ${PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS:-300}
-      # One canonical issuer must sign both interactive Model tokens and
-      # service-to-service plane tokens. Deriving either issuer from the public
-      # Better Auth callback origin makes otherwise-valid cross-plane JWTs fail
-      # verification whenever the frontend and Auth Core origins differ.
-      MODEL_PLANE_AUTH_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
-      PLANE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
-      PLANE_SERVICE_PRINCIPALS_JSON: ${PLANE_SERVICE_PRINCIPALS_JSON:?PLANE_SERVICE_PRINCIPALS_JSON is required}
-      USER_CORE_SERVICE_TOKEN: ${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}
-      # Dedicated read-only credential for user-core's exact Better Auth
-      # membership decision. It must not be reused as a general internal key.
-      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
-      # Read-only Auth-canonical membership list used only by the explicit
-      # Application operator reconciliation workflow.
-      APPLICATION_RECONCILER_AUTH_TOKEN: ${APPLICATION_RECONCILER_AUTH_TOKEN:?APPLICATION_RECONCILER_AUTH_TOKEN is required}
-      # Better Auth must advertise the public same-origin BFF, never its private
-      # container/loopback address. OAuth/OIDC/SAML callbacks and invitation
-      # links all return through Velion, which forwards only the bounded auth
-      # callback contract to this service.
-      BETTER_AUTH_URL: ${VELION_PUBLIC_ORIGIN:-http://localhost:5173}
-      FRONTEND_URL: ${VELION_PUBLIC_ORIGIN:-http://localhost:5173}
-      # Better Auth CSRF/origin trust for velionv3 via the Rust gateway (:3185)
-      # plus SPA dev/Docker origins. auth.ts unions this with the built-in list
-      # (incl velionv2 :3000) — additive, does not displace existing trust.
-      BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:-http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199}
-      DISPOSABLE_EMAIL_BLOCKLIST_ENABLED: ${DISPOSABLE_EMAIL_BLOCKLIST_ENABLED:-true}
-      DISPOSABLE_EMAIL_DOMAINS_FILE: ${DISPOSABLE_EMAIL_DOMAINS_FILE:-/app/config/security/disposable-email-domains.txt}
-      # Stable RS256 signing key for the data-plane / Convex / plane JWTs +
-      # JWKS at /api/convex-auth/jwks. Mounted from ./auth-core/keys (gitignored;
-      # generate with `openssl genpkey -algorithm RSA ...`). Without this the
-      # service falls back to an EPHEMERAL key that rotates on every restart —
-      # breaking any verifier that pins the public key (e.g. retrieval-engine's
-      # JWT_PUBLIC_KEY_FILE). Paths only — no private-key material in compose.
-      CONVEX_AUTH_PRIVATE_KEY_FILE: ${CONVEX_AUTH_PRIVATE_KEY_FILE:-/app/keys/convex-auth.key}
-      CONVEX_AUTH_PUBLIC_KEY_FILE: ${CONVEX_AUTH_PUBLIC_KEY_FILE:-/app/keys/convex-auth.pub}
-    volumes:
-      - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
-      - ./auth-core/keys:/app/keys:ro
-    ports:
-      - "127.0.0.1:${AUTH_CORE_HTTP_HOST_PORT:-3011}:3011"
-      - "127.0.0.1:${AUTH_CORE_GRPC_HOST_PORT:-50011}:50011"
-    networks:
-      - controlplane-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
-        reservations:
-          memory: 128M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      controlplane-postgres:
-        condition: service_healthy
-      controlplane-dragonfly:
-        condition: service_healthy
-      controlplane-nats:
-        condition: service_healthy
-      audit-nats-provisioner:
-        condition: service_completed_successfully
-    stop_signal: SIGTERM
-    stop_grace_period: 15s
-    healthcheck:
-      # Probe an intentionally public 200 route. Better Auth correctly returns
-      # 401 for an anonymous get-session request, which made healthy instances
-      # permanently fail this container healthcheck.
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3011/users/public"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 45s
+    auth-core:
+        <<: *core-security
+        build:
+            context: ./auth-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: auth-service
+        init: true
+        restart: unless-stopped
+        env_file:
+            - ./auth-core/.env
+            - ./auth-core/.env.docker
+        environment:
+            # Base Compose is the loopback development stack. Production override
+            # switches this to production and requires a file-backed principal registry.
+            NODE_ENV: development
+            VEREVON_NATS_URL: nats://control-shared-nats:4222
+            NATS_SHARED_USER: auth-core-shared
+            NATS_SHARED_PASSWORD: ${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}
+            NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+            NATS_URL: nats://controlplane-nats:4222
+            NATS_USER: auth-core-control
+            NATS_PASSWORD: ${AUTH_NATS_PASSWORD:?AUTH_NATS_PASSWORD is required}
+            ORG_CORE_URL: http://org-core:8080
+            BILLING_CORE_URL: http://billing-core:3014
+            ORG_CORE_SERVICE_TOKEN: ${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}
+            BILLING_CORE_SERVICE_TOKEN: ${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}
+            AUTH_GRPC_SERVICE_CREDENTIALS: >-
+                [{"credentialId":"verevon-gateway-primary","principal":"verevon-gateway","audience":"auth-core","token":"${GATEWAY_AUTH_GRPC_SERVICE_TOKEN:?GATEWAY_AUTH_GRPC_SERVICE_TOKEN is required}","scopes":["auth:token:validate","auth:user:read"]},{"credentialId":"retrieval-engine-primary","principal":"retrieval-engine","audience":"auth-core","token":"${RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN:?RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN is required}","scopes":["auth:token:validate"]}]
+            # Method-scoped Auth -> User gRPC identity. Production replaces this
+            # inline development tuple with a deployment-owned secret file.
+            USER_CORE_GRPC_CLIENT_CREDENTIAL: >-
+                {"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}"}
+            # Internal Auth contracts are independently scoped. The two principals
+            # cannot cross OAuth/admin and agent-provision boundaries.
+            AUTH_INTERNAL_SERVICE_CREDENTIALS: >-
+                [{"credentialId":"user-core-primary","principal":"user-core","audience":"auth-core-internal","token":"${USER_AUTH_INTERNAL_SERVICE_TOKEN:?USER_AUTH_INTERNAL_SERVICE_TOKEN is required}","scopes":["oauth:token:read","oauth:token:refresh","nats:authenticate","auth:admin"]},{"credentialId":"quarry-control-primary","principal":"quarry-control","audience":"auth-core-internal","token":"${QUARRY_AUTH_INTERNAL_SERVICE_TOKEN:?QUARRY_AUTH_INTERNAL_SERVICE_TOKEN is required}","scopes":["agent:provision"]}]
+            DATA_PLANE_POLICY_AUTH_AUDIENCE: ${DATA_PLANE_POLICY_AUTH_AUDIENCE:-control-policy}
+            DATA_PLANE_POLICY_CALLER_SERVICE_ID: ${DATA_PLANE_POLICY_CALLER_SERVICE_ID:-retrieval-engine}
+            PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS: ${PLANE_TOKEN_TTL_CONTROL_POLICY_SECONDS:-300}
+            # One canonical issuer must sign both interactive Model tokens and
+            # service-to-service plane tokens. Deriving either issuer from the public
+            # Better Auth callback origin makes otherwise-valid cross-plane JWTs fail
+            # verification whenever the frontend and Auth Core origins differ.
+            MODEL_PLANE_AUTH_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+            PLANE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
+            PLANE_SERVICE_PRINCIPALS_JSON: ${PLANE_SERVICE_PRINCIPALS_JSON:?PLANE_SERVICE_PRINCIPALS_JSON is required}
+            USER_CORE_SERVICE_TOKEN: ${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}
+            # Dedicated read-only credential for user-core's exact Better Auth
+            # membership decision. It must not be reused as a general internal key.
+            USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
+            # Read-only Auth-canonical membership list used only by the explicit
+            # Application operator reconciliation workflow.
+            APPLICATION_RECONCILER_AUTH_TOKEN: ${APPLICATION_RECONCILER_AUTH_TOKEN:?APPLICATION_RECONCILER_AUTH_TOKEN is required}
+            # Better Auth must advertise the public same-origin BFF, never its private
+            # container/loopback address. OAuth/OIDC/SAML callbacks and invitation
+            # links all return through Verevon, which forwards only the bounded auth
+            # callback contract to this service.
+            BETTER_AUTH_URL: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+            FRONTEND_URL: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
+            # Better Auth CSRF/origin trust for verevonv3 via the Rust gateway (:3185)
+            # plus SPA dev/Docker origins. auth.ts unions this with the built-in list
+            # (incl verevonv2 :3000) — additive, does not displace existing trust.
+            BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:-http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199}
+            DISPOSABLE_EMAIL_BLOCKLIST_ENABLED: ${DISPOSABLE_EMAIL_BLOCKLIST_ENABLED:-true}
+            DISPOSABLE_EMAIL_DOMAINS_FILE: ${DISPOSABLE_EMAIL_DOMAINS_FILE:-/app/config/security/disposable-email-domains.txt}
+            # Stable RS256 signing key for the data-plane / Convex / plane JWTs +
+            # JWKS at /api/convex-auth/jwks. Mounted from ./auth-core/keys (gitignored;
+            # generate with `openssl genpkey -algorithm RSA ...`). Without this the
+            # service falls back to an EPHEMERAL key that rotates on every restart —
+            # breaking any verifier that pins the public key (e.g. retrieval-engine's
+            # JWT_PUBLIC_KEY_FILE). Paths only — no private-key material in compose.
+            CONVEX_AUTH_PRIVATE_KEY_FILE: ${CONVEX_AUTH_PRIVATE_KEY_FILE:-/app/keys/convex-auth.key}
+            CONVEX_AUTH_PUBLIC_KEY_FILE: ${CONVEX_AUTH_PUBLIC_KEY_FILE:-/app/keys/convex-auth.pub}
+        volumes:
+            - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
+            - ./auth-core/keys:/app/keys:ro
+        ports:
+            - "127.0.0.1:${AUTH_CORE_HTTP_HOST_PORT:-3011}:3011"
+            - "127.0.0.1:${AUTH_CORE_GRPC_HOST_PORT:-50011}:50011"
+        networks:
+            - controlplane-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+                reservations:
+                    memory: 128M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+            controlplane-dragonfly:
+                condition: service_healthy
+            controlplane-nats:
+                condition: service_healthy
+            audit-nats-provisioner:
+                condition: service_completed_successfully
+        stop_signal: SIGTERM
+        stop_grace_period: 15s
+        healthcheck:
+            # Probe an intentionally public 200 route. Better Auth correctly returns
+            # 401 for an anonymous get-session request, which made healthy instances
+            # permanently fail this container healthcheck.
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://127.0.0.1:3011/users/public",
+                ]
+            interval: 60s
+            timeout: 10s
+            retries: 3
+            start_period: 45s
 
-  user-core:
-    <<: *core-security
-    build:
-      context: ./user-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: user-service
-    init: true
-    restart: unless-stopped 
-    env_file:
-      - ./user-core/.env
-      - ./user-core/.env.docker
-    environment:
-      GOMAXPROCS: "1"
-      PPROF_ENABLED: "false"
-      VELION_NATS_URL: nats://control-shared-nats:4222
-      NATS_SHARED_USER: user-core-shared
-      NATS_SHARED_PASSWORD: ${USER_SHARED_NATS_PASSWORD:?USER_SHARED_NATS_PASSWORD is required}
-      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
-      NATS_URL: nats://controlplane-nats:4222
-      NATS_USER: user-core-control
-      NATS_PASSWORD: ${USER_NATS_PASSWORD:?USER_NATS_PASSWORD is required}
-      DRAGONFLY_ENABLED: "true"
-      DRAGONFLY_HOST: controlplane-dragonfly
-      DRAGONFLY_PORT: "6379"
-      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
-      # G26: silence gin's debug-mode banner + enable release-mode perf paths.
-      GIN_MODE: release
-      # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
-      # user-core needs both its own DB and a secondary auth_service connection.
-      DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
-      AUTH_DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/auth_service?sslmode=disable
-      # Self-scoped gateway/session calls carry an HMAC signature over caller,
-      # audience, timestamp, method, URI, verified subject/profile claims, and
-      # request-body digest. Plain X-User-* headers remain unauthorized.
-      # Data Plane authz visibility/grant stays disabled until its org/resource
-      # delegation contract is equivalently bound.
-      USER_CORE_SERVICE_CREDENTIALS: >-
-        [{"principal":"velion-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read"]}]
-      USER_CORE_GRPC_SERVICE_CREDENTIALS: >-
-        [{"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}","methods":["/user.v1.UserService/CreateUser","/user.v1.UserService/UpdateUser","/user.v1.UserService/GetUserByEmail","/user.v1.UserService/CreateSession","/user.v1.UserService/GetUser","/user.v1.UserService/DeleteUser","/user.v1.UserService/HealthCheck"]}]
-      USER_AUTH_INTERNAL_CLIENT_CREDENTIAL: >-
-        {"credentialId":"user-core-primary","principal":"user-core","audience":"auth-core-internal","token":"${USER_AUTH_INTERNAL_SERVICE_TOKEN:?USER_AUTH_INTERNAL_SERVICE_TOKEN is required}"}
-      AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
-      DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
-      AUTH_SERVICE_URL: http://auth-core:3011
-      USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
-    volumes:
-      - ./auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
-    expose:
-      - "3012"
-      - "50012"
-    networks:
-      - controlplane-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      controlplane-postgres:
-        condition: service_healthy
-      controlplane-dragonfly:
-        condition: service_healthy
-      controlplane-nats:
-        condition: service_healthy
-      audit-nats-provisioner:
-        condition: service_completed_successfully
-      auth-core:
-        condition: service_healthy
-    stop_signal: SIGTERM
-    stop_grace_period: 10s
-    healthcheck:
-      # Deep check: /health round-trips the DB (returns 503 on auth/conn failure)
-      # so a stale DB password makes this container unhealthy instead of a bare
-      # port-open check (was `nc -z 50012`) that misses DB-auth drift.
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3012/health"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    user-core:
+        <<: *core-security
+        build:
+            context: ./user-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: user-service
+        init: true
+        restart: unless-stopped
+        env_file:
+            - ./user-core/.env
+            - ./user-core/.env.docker
+        environment:
+            GOMAXPROCS: "1"
+            PPROF_ENABLED: "false"
+            VEREVON_NATS_URL: nats://control-shared-nats:4222
+            NATS_SHARED_USER: user-core-shared
+            NATS_SHARED_PASSWORD: ${USER_SHARED_NATS_PASSWORD:?USER_SHARED_NATS_PASSWORD is required}
+            NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+            NATS_URL: nats://controlplane-nats:4222
+            NATS_USER: user-core-control
+            NATS_PASSWORD: ${USER_NATS_PASSWORD:?USER_NATS_PASSWORD is required}
+            DRAGONFLY_ENABLED: "true"
+            DRAGONFLY_HOST: controlplane-dragonfly
+            DRAGONFLY_PORT: "6379"
+            DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
+            # G26: silence gin's debug-mode banner + enable release-mode perf paths.
+            GIN_MODE: release
+            # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
+            # user-core needs both its own DB and a secondary auth_service connection.
+            DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
+            AUTH_DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/auth_service?sslmode=disable
+            # Self-scoped gateway/session calls carry an HMAC signature over caller,
+            # audience, timestamp, method, URI, verified subject/profile claims, and
+            # request-body digest. Plain X-User-* headers remain unauthorized.
+            # Data Plane authz visibility/grant stays disabled until its org/resource
+            # delegation contract is equivalently bound.
+            USER_CORE_SERVICE_CREDENTIALS: >-
+                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read"]}]
+            USER_CORE_GRPC_SERVICE_CREDENTIALS: >-
+                [{"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}","methods":["/user.v1.UserService/CreateUser","/user.v1.UserService/UpdateUser","/user.v1.UserService/GetUserByEmail","/user.v1.UserService/CreateSession","/user.v1.UserService/GetUser","/user.v1.UserService/DeleteUser","/user.v1.UserService/HealthCheck"]},{"credentialId":"execution-core-primary","principal":"execution-core","audience":"user-core-grpc","token":"${EXECUTION_CORE_USER_CORE_GRPC_TOKEN:?EXECUTION_CORE_USER_CORE_GRPC_TOKEN is required}","methods":["/user.v1.UserService/GetUser","/user.v1.UserService/GetUserProfile"]}]
+            USER_AUTH_INTERNAL_CLIENT_CREDENTIAL: >-
+                {"credentialId":"user-core-primary","principal":"user-core","audience":"auth-core-internal","token":"${USER_AUTH_INTERNAL_SERVICE_TOKEN:?USER_AUTH_INTERNAL_SERVICE_TOKEN is required}"}
+            AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
+            AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+            DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
+            AUTH_SERVICE_URL: http://auth-core:3011
+            USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
+        volumes:
+            - ./auth-core/keys/convex-auth.pub:/app/keys/convex-auth.pub:ro
+        expose:
+            - "3012"
+            - "50012"
+        networks:
+            - controlplane-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+            controlplane-dragonfly:
+                condition: service_healthy
+            controlplane-nats:
+                condition: service_healthy
+            audit-nats-provisioner:
+                condition: service_completed_successfully
+            auth-core:
+                condition: service_healthy
+        stop_signal: SIGTERM
+        stop_grace_period: 10s
+        healthcheck:
+            # Deep check: /health round-trips the DB (returns 503 on auth/conn failure)
+            # so a stale DB password makes this container unhealthy instead of a bare
+            # port-open check (was `nc -z 50012`) that misses DB-auth drift.
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://127.0.0.1:3012/health",
+                ]
+            interval: 60s
+            timeout: 10s
+            retries: 3
+            start_period: 30s
 
-  org-core:
-    <<: *core-security
-    build:
-      context: ./org-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: org-core-service
-    init: true
-    restart: unless-stopped
-    env_file:
-      - ./org-core/.env
-      - ./org-core/.env.docker
-    environment:
-      GOMAXPROCS: "1"
-      PPROF_ENABLED: "false"
-      VELION_NATS_URL: nats://control-shared-nats:4222
-      NATS_SHARED_USER: org-core-shared
-      NATS_SHARED_PASSWORD: ${ORG_SHARED_NATS_PASSWORD:?ORG_SHARED_NATS_PASSWORD is required}
-      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
-      NATS_URL: nats://controlplane-nats:4222
-      NATS_USER: org-core-control
-      NATS_PASSWORD: ${ORG_NATS_PASSWORD:?ORG_NATS_PASSWORD is required}
-      DRAGONFLY_ENABLED: "true"
-      DRAGONFLY_HOST: controlplane-dragonfly
-      DRAGONFLY_PORT: "6379"
-      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
-      # G26: silence gin's debug-mode banner + enable release-mode perf paths.
-      GIN_MODE: release
-      # Single-source the DB password: assembled here from ${DB_PASSWORD} in .env
-      # (compose `environment:` overrides env_file), so the credential lives in
-      # exactly ONE place. No per-service .env.docker copy to drift out of sync.
-      DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
-      USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
-      ORG_CORE_SERVICE_CREDENTIALS: >-
-        [{"principal":"velion-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]}]
-    ports:
-      - "127.0.0.1:${ORG_CORE_HTTP_HOST_PORT:-18080}:8080"
-      - "127.0.0.1:${ORG_CORE_GRPC_HOST_PORT:-19090}:9090"
-      - "127.0.0.1:${ORG_CORE_METRICS_HOST_PORT:-19091}:9091"
-    networks:
-      - controlplane-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      controlplane-postgres:
-        condition: service_healthy
-      controlplane-dragonfly:
-        condition: service_healthy
-      controlplane-nats:
-        condition: service_healthy
-      audit-nats-provisioner:
-        condition: service_completed_successfully
-      auth-core:
-        condition: service_healthy
-      user-core:
-        condition: service_healthy
-    stop_signal: SIGTERM
-    stop_grace_period: 10s
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    org-core:
+        <<: *core-security
+        build:
+            context: ./org-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: org-core-service
+        init: true
+        restart: unless-stopped
+        env_file:
+            - ./org-core/.env
+            - ./org-core/.env.docker
+        environment:
+            GOMAXPROCS: "1"
+            PPROF_ENABLED: "false"
+            VEREVON_NATS_URL: nats://control-shared-nats:4222
+            NATS_SHARED_USER: org-core-shared
+            NATS_SHARED_PASSWORD: ${ORG_SHARED_NATS_PASSWORD:?ORG_SHARED_NATS_PASSWORD is required}
+            NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+            NATS_URL: nats://controlplane-nats:4222
+            NATS_USER: org-core-control
+            NATS_PASSWORD: ${ORG_NATS_PASSWORD:?ORG_NATS_PASSWORD is required}
+            DRAGONFLY_ENABLED: "true"
+            DRAGONFLY_HOST: controlplane-dragonfly
+            DRAGONFLY_PORT: "6379"
+            DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
+            # G26: silence gin's debug-mode banner + enable release-mode perf paths.
+            GIN_MODE: release
+            # Single-source the DB password: assembled here from ${DB_PASSWORD} in .env
+            # (compose `environment:` overrides env_file), so the credential lives in
+            # exactly ONE place. No per-service .env.docker copy to drift out of sync.
+            DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
+            USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
+            ORG_CORE_SERVICE_CREDENTIALS: >-
+                [{"principal":"verevon-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"execution-core","audience":"org-core","token":"${EXECUTION_ORG_CORE_SERVICE_TOKEN:?EXECUTION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]}]
+        ports:
+            - "127.0.0.1:${ORG_CORE_HTTP_HOST_PORT:-18080}:8080"
+            - "127.0.0.1:${ORG_CORE_GRPC_HOST_PORT:-19090}:9090"
+            - "127.0.0.1:${ORG_CORE_METRICS_HOST_PORT:-19091}:9091"
+        networks:
+            - controlplane-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+            controlplane-dragonfly:
+                condition: service_healthy
+            controlplane-nats:
+                condition: service_healthy
+            audit-nats-provisioner:
+                condition: service_completed_successfully
+            auth-core:
+                condition: service_healthy
+            user-core:
+                condition: service_healthy
+        stop_signal: SIGTERM
+        stop_grace_period: 10s
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://127.0.0.1:8080/health",
+                ]
+            interval: 60s
+            timeout: 10s
+            retries: 3
+            start_period: 30s
 
-  billing-core:
-    <<: *core-security
-    build:
-      context: ./billing-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: billing-core-service
-    init: true
-    restart: unless-stopped
-    env_file:
-      - ./billing-core/.env
-      - ./billing-core/.env.docker
-    environment:
-      GOMAXPROCS: "1"
-      PPROF_ENABLED: "false"
-      VELION_NATS_URL: nats://control-shared-nats:4222
-      NATS_SHARED_USER: billing-core-shared
-      NATS_SHARED_PASSWORD: ${BILLING_SHARED_NATS_PASSWORD:?BILLING_SHARED_NATS_PASSWORD is required}
-      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
-      NATS_URL: nats://controlplane-nats:4222
-      NATS_USER: billing-core-control
-      NATS_PASSWORD: ${BILLING_NATS_PASSWORD:?BILLING_NATS_PASSWORD is required}
-      DRAGONFLY_ENABLED: "true"
-      DRAGONFLY_HOST: controlplane-dragonfly
-      DRAGONFLY_PORT: "6379"
-      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
-      # G26: silence gin's debug-mode banner + enable release-mode perf paths.
-      GIN_MODE: release
-      # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
-      DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
-      ORG_CORE_SERVICE_TOKEN: ${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}
-      BILLING_CORE_SERVICE_CREDENTIALS: >-
-        [{"principal":"velion-gateway","audience":"billing-core","token":"${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:organization:deactivate:any"]},{"principal":"session-core","audience":"billing-core","token":"${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:any"]},{"principal":"integration-corev2","audience":"billing-core","token":"${INTEGRATION_BILLING_CORE_SERVICE_TOKEN:?INTEGRATION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]}]
-    ports:
-      - "127.0.0.1:${BILLING_CORE_HTTP_HOST_PORT:-3014}:3014"
-      - "127.0.0.1:${BILLING_CORE_GRPC_HOST_PORT:-50013}:50013"
-    networks:
-      - controlplane-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      controlplane-postgres:
-        condition: service_healthy
-      controlplane-dragonfly:
-        condition: service_healthy
-      controlplane-nats:
-        condition: service_healthy
-      audit-nats-provisioner:
-        condition: service_completed_successfully
-    stop_signal: SIGTERM
-    stop_grace_period: 10s
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3014/health"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    billing-core:
+        <<: *core-security
+        build:
+            context: ./billing-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: billing-core-service
+        init: true
+        restart: unless-stopped
+        env_file:
+            - ./billing-core/.env
+            - ./billing-core/.env.docker
+        environment:
+            GOMAXPROCS: "1"
+            PPROF_ENABLED: "false"
+            VEREVON_NATS_URL: nats://control-shared-nats:4222
+            NATS_SHARED_USER: billing-core-shared
+            NATS_SHARED_PASSWORD: ${BILLING_SHARED_NATS_PASSWORD:?BILLING_SHARED_NATS_PASSWORD is required}
+            NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+            NATS_URL: nats://controlplane-nats:4222
+            NATS_USER: billing-core-control
+            NATS_PASSWORD: ${BILLING_NATS_PASSWORD:?BILLING_NATS_PASSWORD is required}
+            DRAGONFLY_ENABLED: "true"
+            DRAGONFLY_HOST: controlplane-dragonfly
+            DRAGONFLY_PORT: "6379"
+            DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
+            # G26: silence gin's debug-mode banner + enable release-mode perf paths.
+            GIN_MODE: release
+            # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
+            DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
+            ORG_CORE_SERVICE_TOKEN: ${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}
+            BILLING_CORE_SERVICE_CREDENTIALS: >-
+                [{"principal":"verevon-gateway","audience":"billing-core","token":"${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:organization:deactivate:any"]},{"principal":"session-core","audience":"billing-core","token":"${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:any"]},{"principal":"integration-corev2","audience":"billing-core","token":"${INTEGRATION_BILLING_CORE_SERVICE_TOKEN:?INTEGRATION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]}]
+        ports:
+            - "127.0.0.1:${BILLING_CORE_HTTP_HOST_PORT:-3014}:3014"
+            - "127.0.0.1:${BILLING_CORE_GRPC_HOST_PORT:-50013}:50013"
+        networks:
+            - controlplane-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+            controlplane-dragonfly:
+                condition: service_healthy
+            controlplane-nats:
+                condition: service_healthy
+            audit-nats-provisioner:
+                condition: service_completed_successfully
+        stop_signal: SIGTERM
+        stop_grace_period: 10s
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://127.0.0.1:3014/health",
+                ]
+            interval: 60s
+            timeout: 10s
+            retries: 3
+            start_period: 30s
 
-  # ==============================================
-  # SESSION-CORE (session harness for Model Plane v1/v2)
-  # ==============================================
+    # ==============================================
+    # SESSION-CORE (session harness for Model Plane v1/v2)
+    # ==============================================
 
-  session-core:
-    <<: *core-security
-    build:
-      context: ./session-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: session-core-service
-    init: true
-    restart: unless-stopped
-    env_file:
-      - ./session-core/.env
-      - ./session-core/.env.docker
-    environment:
-      GOMAXPROCS: "1"
-      VELION_NATS_URL: nats://control-shared-nats:4222
-      DB_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
-      PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
-      DATABASE_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
-      DATABASE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
-      NATS_USER: session-core-control
-      NATS_PASSWORD: ${SESSION_NATS_PASSWORD:?SESSION_NATS_PASSWORD is required}
-      NATS_LOCAL_URL: nats://controlplane-nats:4222
-      NATS_SHARED_URL: nats://control-shared-nats:4222
-      NATS_SHARED_USER: session-core-shared
-      NATS_SHARED_PASSWORD: ${SESSION_SHARED_NATS_PASSWORD:?SESSION_SHARED_NATS_PASSWORD is required}
-      NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
-      DRAGONFLY_ADDR: controlplane-dragonfly:6379
-      DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
-      SESSION_CORE_SERVICE_CREDENTIALS: >-
-        [{"principal":"velion-gateway","audience":"session-core","token":"${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN is required}","scopes":["sessions:read","sessions:write"]}]
-      USER_CORE_SERVICE_TOKEN: ${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}
-      ORG_CORE_SERVICE_TOKEN: ${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}
-      BILLING_CORE_SERVICE_TOKEN: ${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}
-      # Canary ramp: set to 0-100 to route that % of tenants to Model Plane v2
-      MODEL_PLANE_V2_ROLLOUT_PCT: ${MODEL_PLANE_V2_ROLLOUT_PCT:-0}
-      # Convex sync: mirrors session/message state into convex-core (Application Plane)
-      # for reactive frontend subscriptions. Leave CONVEX_URL empty to disable.
-      CONVEX_URL: ${CONVEX_URL:-http://convex-backend:3211}
-      CONVEX_SERVICE_KEY: ${CONVEX_SERVICE_KEY:-}
-      ORG_CORE_URL: http://org-core:8080
-    ports:
-      - "127.0.0.1:${SESSION_CORE_HTTP_HOST_PORT:-3017}:3017"
-      - "127.0.0.1:${SESSION_CORE_GRPC_HOST_PORT:-50017}:50017"
-    networks:
-      - controlplane-net
-      - inter-plane-bus
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 64M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    depends_on:
-      controlplane-postgres:
-        condition: service_healthy
-      controlplane-dragonfly:
-        condition: service_healthy
-      controlplane-nats:
-        condition: service_healthy
-      audit-nats-provisioner:
-        condition: service_completed_successfully
-    stop_signal: SIGTERM
-    stop_grace_period: 10s
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3017/health"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    session-core:
+        <<: *core-security
+        build:
+            context: ./session-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: session-core-service
+        init: true
+        restart: unless-stopped
+        env_file:
+            - ./session-core/.env
+            - ./session-core/.env.docker
+        environment:
+            GOMAXPROCS: "1"
+            VEREVON_NATS_URL: nats://control-shared-nats:4222
+            DB_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
+            PGPASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
+            DATABASE_USER: ${DB_USER:?DB_USER must be set in Control Plane .env}
+            DATABASE_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}
+            NATS_USER: session-core-control
+            NATS_PASSWORD: ${SESSION_NATS_PASSWORD:?SESSION_NATS_PASSWORD is required}
+            NATS_LOCAL_URL: nats://controlplane-nats:4222
+            NATS_SHARED_URL: nats://control-shared-nats:4222
+            NATS_SHARED_USER: session-core-shared
+            NATS_SHARED_PASSWORD: ${SESSION_SHARED_NATS_PASSWORD:?SESSION_SHARED_NATS_PASSWORD is required}
+            NATS_SHARED_ALLOW_TOKEN_FALLBACK: "0"
+            DRAGONFLY_ADDR: controlplane-dragonfly:6379
+            DRAGONFLY_PASSWORD: ${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set in Control Plane .env}
+            SESSION_CORE_SERVICE_CREDENTIALS: >-
+                [{"principal":"verevon-gateway","audience":"session-core","token":"${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN is required}","scopes":["sessions:read","sessions:write"]}]
+            USER_CORE_SERVICE_TOKEN: ${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}
+            ORG_CORE_SERVICE_TOKEN: ${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}
+            BILLING_CORE_SERVICE_TOKEN: ${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}
+            # Canary ramp: set to 0-100 to route that % of tenants to Model Plane v2
+            MODEL_PLANE_V2_ROLLOUT_PCT: ${MODEL_PLANE_V2_ROLLOUT_PCT:-0}
+            # Convex sync: mirrors session/message state into convex-core (Application Plane)
+            # for reactive frontend subscriptions. Leave CONVEX_URL empty to disable.
+            CONVEX_URL: ${CONVEX_URL:-http://convex-backend:3211}
+            CONVEX_SERVICE_KEY: ${CONVEX_SERVICE_KEY:-}
+            ORG_CORE_URL: http://org-core:8080
+        ports:
+            - "127.0.0.1:${SESSION_CORE_HTTP_HOST_PORT:-3017}:3017"
+            - "127.0.0.1:${SESSION_CORE_GRPC_HOST_PORT:-50017}:50017"
+        networks:
+            - controlplane-net
+            - inter-plane-bus
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 64M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+            controlplane-dragonfly:
+                condition: service_healthy
+            controlplane-nats:
+                condition: service_healthy
+            audit-nats-provisioner:
+                condition: service_completed_successfully
+        stop_signal: SIGTERM
+        stop_grace_period: 10s
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://127.0.0.1:3017/health",
+                ]
+            interval: 60s
+            timeout: 10s
+            retries: 3
+            start_period: 30s
 
-  # ==============================================
-  # AUDIT-CORE (Phase A · A1.6 — append-only audit + usage log)
-  # ==============================================
-  # Subscribes to producer-scoped `velion.audit.v2.>` and `velion.usage.v2.>` on the
-  # shared bus and persists to controlplane-postgres. Reads via
-  # /v1/{audit,usage,usage/summary} are org-scoped by query param;
-  # internal-api-key required (replaced by auth-core JWT once Wave 3
-  # enforce mode lands).
-  # Required deployment-only JetStream authority for local Control brokers.
-  # Control services fail closed until these exact streams/durables converge.
-  # Extra-plane topology is deliberately handled by the retrying optional
-  # provisioner below so Model/Application outages cannot block this stack.
-  audit-nats-provisioner:
-    <<: *core-security
-    build:
-      context: ./audit-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: audit-nats-provisioner
-    restart: "no"
-    entrypoint: ["/usr/local/bin/nats-provisioner"]
-    environment:
-      AUDIT_NATS_PROVISION_BUSES: >-
-        [{"name":"control","plane":"control","url":"nats://controlplane-nats:4222","user":"observability-provisioner-control","password":"${CONTROL_NATS_PROVISIONER_PASSWORD:?CONTROL_NATS_PROVISIONER_PASSWORD is required}"},{"name":"shared-control","plane":"shared","url":"nats://control-shared-nats:4222","user":"control-shared-provisioner","password":"${CONTROL_SHARED_NATS_PROVISIONER_PASSWORD:?CONTROL_SHARED_NATS_PROVISIONER_PASSWORD is required}"}]
-    networks:
-      - controlplane-net
-    depends_on:
-      controlplane-nats:
-        condition: service_healthy
-      control-shared-nats:
-        condition: service_healthy
+    # ==============================================
+    # AUDIT-CORE (Phase A · A1.6 — append-only audit + usage log)
+    # ==============================================
+    # Subscribes to producer-scoped `verevon.audit.v2.>` and `verevon.usage.v2.>` on the
+    # shared bus and persists to controlplane-postgres. Reads via
+    # /v1/{audit,usage,usage/summary} are org-scoped by query param;
+    # internal-api-key required (replaced by auth-core JWT once Wave 3
+    # enforce mode lands).
+    # Required deployment-only JetStream authority for local Control brokers.
+    # Control services fail closed until these exact streams/durables converge.
+    # Extra-plane topology is deliberately handled by the retrying optional
+    # provisioner below so Model/Application outages cannot block this stack.
+    audit-nats-provisioner:
+        <<: *core-security
+        build:
+            context: ./audit-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: audit-nats-provisioner
+        restart: "no"
+        entrypoint: ["/usr/local/bin/nats-provisioner"]
+        environment:
+            AUDIT_NATS_PROVISION_BUSES: >-
+                [{"name":"control","plane":"control","url":"nats://controlplane-nats:4222","user":"observability-provisioner-control","password":"${CONTROL_NATS_PROVISIONER_PASSWORD:?CONTROL_NATS_PROVISIONER_PASSWORD is required}"},{"name":"shared-control","plane":"shared","url":"nats://control-shared-nats:4222","user":"control-shared-provisioner","password":"${CONTROL_SHARED_NATS_PROVISIONER_PASSWORD:?CONTROL_SHARED_NATS_PROVISIONER_PASSWORD is required}"}]
+        networks:
+            - controlplane-net
+        depends_on:
+            controlplane-nats:
+                condition: service_healthy
+            control-shared-nats:
+                condition: service_healthy
 
-  # Optional extra-plane topology owner. It exits after successful idempotent
-  # convergence and Compose retries failures without gating Control startup.
-  # Audit Core connects independently and reports each unavailable plane as
-  # degraded until this process succeeds and its fixed consumers can bind.
-  audit-extra-nats-provisioner:
-    <<: *core-security
-    build:
-      context: ./audit-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: audit-extra-nats-provisioner
-    restart: on-failure
-    entrypoint: ["/usr/local/bin/nats-provisioner"]
-    environment:
-      AUDIT_NATS_PROVISION_BUSES: >-
-        [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}","optional":true}]
-    networks:
-      - inter-plane-bus
+    # Optional extra-plane topology owner. It exits after successful idempotent
+    # convergence and Compose retries failures without gating Control startup.
+    # Audit Core connects independently and reports each unavailable plane as
+    # degraded until this process succeeds and its fixed consumers can bind.
+    audit-extra-nats-provisioner:
+        <<: *core-security
+        build:
+            context: ./audit-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: audit-extra-nats-provisioner
+        restart: on-failure
+        entrypoint: ["/usr/local/bin/nats-provisioner"]
+        environment:
+            AUDIT_NATS_PROVISION_BUSES: >-
+                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-model","password":"${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}","optional":true},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"observability-provisioner-application","password":"${APPLICATION_NATS_PROVISIONER_PASSWORD:?APPLICATION_NATS_PROVISIONER_PASSWORD is required}","optional":true}]
+        networks:
+            - inter-plane-bus
 
-  audit-core:
-    <<: *core-security
-    build:
-      context: ./audit-core
-      dockerfile: Dockerfile
-      args: *build-metadata
-    container_name: audit-core-service
-    init: true
-    restart: unless-stopped
-    env_file:
-      - ./audit-core/.env
-    environment:
-      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
-      # Scoped runtime identity: bind/consume/ACK/DLQ only. It cannot administer
-      # streams or consumers and is distinct from every producer credential.
-      NATS_URL: nats://controlplane-nats:4222
-      NATS_USER: audit-core-control
-      NATS_PASSWORD: ${AUDIT_CONTROL_NATS_PASSWORD:?AUDIT_CONTROL_NATS_PASSWORD is required}
-      # Named, independently credentialed cross-plane buses. The supervisor
-      # retries unavailable planes while /readyz reports each bus and lag.
-      AUDIT_EXTRA_NATS_BUSES: >-
-        [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"audit-core-model","password":"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"audit-core-application","password":"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"}]
-      HTTP_PORT: "8187"
-      AUDIT_CORE_SERVICE_CREDENTIALS: >-
-        [{"principal":"velion-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
-    ports:
-      # Native HTTP port 8187 (host and container). Kept clear of Model
-      # Plane's browser-broker so the two never collide on the host.
-      - "127.0.0.1:${AUDIT_CORE_HTTP_HOST_PORT:-8187}:8187"
-    networks:
-      - controlplane-net
-      - inter-plane-bus
-    depends_on:
-      controlplane-postgres:
-        condition: service_healthy
-      controlplane-nats:
-        condition: service_healthy
-      audit-nats-provisioner:
-        condition: service_completed_successfully
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
-        reservations:
-          memory: 32M
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      # Docker health tracks local Control-plane availability only. `/readyz`
-      # remains the full cross-plane gate and reports Model/Application lag or
-      # absence without preventing this service from starting independently.
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8187/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    audit-core:
+        <<: *core-security
+        build:
+            context: ./audit-core
+            dockerfile: Dockerfile
+            args: *build-metadata
+        container_name: audit-core-service
+        init: true
+        restart: unless-stopped
+        env_file:
+            - ./audit-core/.env
+        environment:
+            DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/${DB_NAME:-controlplane}?sslmode=disable
+            # Scoped runtime identity: bind/consume/ACK/DLQ only. It cannot administer
+            # streams or consumers and is distinct from every producer credential.
+            NATS_URL: nats://controlplane-nats:4222
+            NATS_USER: audit-core-control
+            NATS_PASSWORD: ${AUDIT_CONTROL_NATS_PASSWORD:?AUDIT_CONTROL_NATS_PASSWORD is required}
+            # Named, independently credentialed cross-plane buses. The supervisor
+            # retries unavailable planes while /readyz reports each bus and lag.
+            AUDIT_EXTRA_NATS_BUSES: >-
+                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"audit-core-model","password":"${AUDIT_MODEL_NATS_PASSWORD:?AUDIT_MODEL_NATS_PASSWORD is required}"},{"name":"application","plane":"application","url":"nats://application-nats:4222","user":"audit-core-application","password":"${AUDIT_APPLICATION_NATS_PASSWORD:?AUDIT_APPLICATION_NATS_PASSWORD is required}"}]
+            HTTP_PORT: "8187"
+            AUDIT_CORE_SERVICE_CREDENTIALS: >-
+                [{"principal":"verevon-gateway","audience":"audit-core","token":"${GATEWAY_AUDIT_CORE_SERVICE_TOKEN:?GATEWAY_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:read:self"]},{"principal":"integration-corev2","audience":"audit-core","token":"${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}","scopes":["audit:write"],"planes":["ingestion"]}]
+        ports:
+            # Native HTTP port 8187 (host and container). Kept clear of Model
+            # Plane's browser-broker so the two never collide on the host.
+            - "127.0.0.1:${AUDIT_CORE_HTTP_HOST_PORT:-8187}:8187"
+        networks:
+            - controlplane-net
+            - inter-plane-bus
+        depends_on:
+            controlplane-postgres:
+                condition: service_healthy
+            controlplane-nats:
+                condition: service_healthy
+            audit-nats-provisioner:
+                condition: service_completed_successfully
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
+                reservations:
+                    memory: 32M
+        logging:
+            driver: json-file
+            options:
+                max-size: "10m"
+                max-file: "3"
+        healthcheck:
+            # Docker health tracks local Control-plane availability only. `/readyz`
+            # remains the full cross-plane gate and reports Model/Application lag or
+            # absence without preventing this service from starting independently.
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "--quiet",
+                    "--tries=1",
+                    "--spider",
+                    "http://127.0.0.1:8187/healthz",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
 
-  # ==============================================
-  # LAGO (Holdes i CP plane: KUN controlplane-net)
-  # ==============================================
+    # ==============================================
+    # LAGO (Holdes i CP plane: KUN controlplane-net)
+    # ==============================================
 
-  lago-db:
-    image: getlago/postgres-partman:15.0-alpine
-    container_name: lago-db
-    restart: unless-stopped
-    env_file:
-      - ./lago.env
-    volumes:
-      - lago_postgres_data:/data/postgres
-    ports:
-      - "127.0.0.1:${LAGO_POSTGRES_HOST_PORT:-5434}:5432"
-    networks:
-      - controlplane-net
-    shm_size: "64mb"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
-        reservations:
-          memory: 128M
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lago -d lago"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    lago-db:
+        image: getlago/postgres-partman:15.0-alpine
+        container_name: lago-db
+        restart: unless-stopped
+        env_file:
+            - ./lago.env
+        volumes:
+            - lago_postgres_data:/data/postgres
+        ports:
+            - "127.0.0.1:${LAGO_POSTGRES_HOST_PORT:-5434}:5432"
+        networks:
+            - controlplane-net
+        shm_size: "64mb"
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+                reservations:
+                    memory: 128M
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U lago -d lago"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  lago-dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
-    container_name: lago-dragonfly
-    restart: unless-stopped
-    command: >
-      --cache_mode=true
-      --maxmemory=256mb
-      --proactor_threads=1
-      --dir=/data
-    volumes:
-      - lago_dragonfly_data:/data
-    ports:
-      - "127.0.0.1:${LAGO_DRAGONFLY_HOST_PORT:-6381}:6379"
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-          cpus: "0.25"
-        reservations:
-          memory: 128M
-    healthcheck:
-      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    lago-dragonfly:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.37.0
+        container_name: lago-dragonfly
+        restart: unless-stopped
+        command: >
+            --cache_mode=true
+            --maxmemory=256mb
+            --proactor_threads=1
+            --dir=/data
+        volumes:
+            - lago_dragonfly_data:/data
+        ports:
+            - "127.0.0.1:${LAGO_DRAGONFLY_HOST_PORT:-6381}:6379"
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.25"
+                reservations:
+                    memory: 128M
+        healthcheck:
+            test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
 
-  lago-pdf:
-    image: getlago/lago-gotenberg:7.8.2
-    platform: linux/amd64
-    container_name: lago-pdf
-    restart: unless-stopped
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 128M
-          cpus: "0.25"
+    lago-pdf:
+        image: getlago/lago-gotenberg:7.8.2
+        platform: linux/amd64
+        container_name: lago-pdf
+        restart: unless-stopped
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 128M
+                    cpus: "0.25"
 
-  lago-migrate:
-    image: getlago/api:v1.42.0
-    container_name: lago-migrate
-    restart: "no"
-    env_file:
-      - ./lago.env
-    command: ["./scripts/migrate.sh"]
-    depends_on:
-      lago-db:
-        condition: service_healthy
-    networks:
-      - controlplane-net
+    lago-migrate:
+        image: getlago/api:v1.42.0
+        container_name: lago-migrate
+        restart: "no"
+        env_file:
+            - ./lago.env
+        command: ["./scripts/migrate.sh"]
+        depends_on:
+            lago-db:
+                condition: service_healthy
+        networks:
+            - controlplane-net
 
-  lago-api:
-    image: getlago/api:v1.42.0
-    container_name: lago-api
-    restart: unless-stopped
-    env_file:
-      - ./lago.env
-    command: ["./scripts/start.api.sh"]
-    ports:
-      - "127.0.0.1:${LAGO_API_HOST_PORT:-3016}:3000"
-    volumes:
-      - lago_storage_data:/app/storage
-    depends_on:
-      lago-migrate:
-        condition: service_completed_successfully
-      lago-db:
-        condition: service_healthy
-      lago-dragonfly:
-        condition: service_healthy
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-          cpus: "0.5"
-        reservations:
-          memory: 192M
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://127.0.0.1:3000/health || exit 1"]
-      interval: 30s
-      start_period: 45s
-      timeout: 15s
-      retries: 5
+    lago-api:
+        image: getlago/api:v1.42.0
+        container_name: lago-api
+        restart: unless-stopped
+        env_file:
+            - ./lago.env
+        command: ["./scripts/start.api.sh"]
+        ports:
+            - "127.0.0.1:${LAGO_API_HOST_PORT:-3016}:3000"
+        volumes:
+            - lago_storage_data:/app/storage
+        depends_on:
+            lago-migrate:
+                condition: service_completed_successfully
+            lago-db:
+                condition: service_healthy
+            lago-dragonfly:
+                condition: service_healthy
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.5"
+                reservations:
+                    memory: 192M
+        healthcheck:
+            test:
+                ["CMD-SHELL", "curl -f http://127.0.0.1:3000/health || exit 1"]
+            interval: 30s
+            start_period: 45s
+            timeout: 15s
+            retries: 5
 
-  lago-worker:
-    image: getlago/api:v1.42.0
-    container_name: lago-worker
-    restart: unless-stopped
-    env_file:
-      - ./lago.env
-    command: ["./scripts/start.worker.sh"]
-    volumes:
-      - lago_storage_data:/app/storage
-    depends_on:
-      lago-migrate:
-        condition: service_completed_successfully
-      lago-db:
-        condition: service_healthy
-      lago-dragonfly:
-        condition: service_healthy
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-          cpus: "0.5"
-        reservations:
-          memory: 192M
+    lago-worker:
+        image: getlago/api:v1.42.0
+        container_name: lago-worker
+        restart: unless-stopped
+        env_file:
+            - ./lago.env
+        command: ["./scripts/start.worker.sh"]
+        volumes:
+            - lago_storage_data:/app/storage
+        depends_on:
+            lago-migrate:
+                condition: service_completed_successfully
+            lago-db:
+                condition: service_healthy
+            lago-dragonfly:
+                condition: service_healthy
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.5"
+                reservations:
+                    memory: 192M
 
-  lago-clock:
-    image: getlago/api:v1.42.0
-    container_name: lago-clock
-    restart: unless-stopped
-    env_file:
-      - ./lago.env
-    command: ["./scripts/start.clock.sh"]
-    depends_on:
-      lago-migrate:
-        condition: service_completed_successfully
-      lago-db:
-        condition: service_healthy
-      lago-dragonfly:
-        condition: service_healthy
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 384M
-          cpus: "0.25"
-        reservations:
-          memory: 128M
+    lago-clock:
+        image: getlago/api:v1.42.0
+        container_name: lago-clock
+        restart: unless-stopped
+        env_file:
+            - ./lago.env
+        command: ["./scripts/start.clock.sh"]
+        depends_on:
+            lago-migrate:
+                condition: service_completed_successfully
+            lago-db:
+                condition: service_healthy
+            lago-dragonfly:
+                condition: service_healthy
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 384M
+                    cpus: "0.25"
+                reservations:
+                    memory: 128M
 
-  lago-front:
-    image: getlago/front:v1.42.0
-    container_name: lago-front
-    restart: unless-stopped
-    env_file:
-      - ./lago.env
-    ports:
-      - "127.0.0.1:${LAGO_FRONT_HOST_PORT:-3015}:80"
-    depends_on:
-      lago-api:
-        condition: service_healthy
-    networks:
-      - controlplane-net
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-          cpus: "0.25"
+    lago-front:
+        image: getlago/front:v1.42.0
+        container_name: lago-front
+        restart: unless-stopped
+        env_file:
+            - ./lago.env
+        ports:
+            - "127.0.0.1:${LAGO_FRONT_HOST_PORT:-3015}:80"
+        depends_on:
+            lago-api:
+                condition: service_healthy
+        networks:
+            - controlplane-net
+        deploy:
+            resources:
+                limits:
+                    memory: 64M
+                    cpus: "0.25"
 
-  # ==============================================
-  # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
-  # ==============================================
+    # ==============================================
+    # OBSERVABILITY (Phase 6 B13) — Prometheus + Grafana
+    # ==============================================
 
-  controlplane-prometheus:
-    image: prom/prometheus:v2.54.1
-    container_name: controlplane-prometheus
-    restart: unless-stopped
-    command:
-      - --config.file=/etc/prometheus/prometheus.yml
-      - --storage.tsdb.retention.time=15d
-    volumes:
-      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    ports:
-      - "127.0.0.1:${CONTROL_PROMETHEUS_HOST_PORT:-19095}:9090"
-    networks:
-      - controlplane-net  # reach the cores by container name
-      - inter-plane-bus   # reach the Frontend-Plane gateway
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/-/healthy"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    controlplane-prometheus:
+        image: prom/prometheus:v2.54.1
+        container_name: controlplane-prometheus
+        restart: unless-stopped
+        command:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=15d
+        volumes:
+            - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - prometheus-data:/prometheus
+        ports:
+            - "127.0.0.1:${CONTROL_PROMETHEUS_HOST_PORT:-19095}:9090"
+        networks:
+            - controlplane-net # reach the cores by container name
+            - inter-plane-bus # reach the Frontend-Plane gateway
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
+        healthcheck:
+            test:
+                [
+                    "CMD",
+                    "wget",
+                    "-q",
+                    "--spider",
+                    "http://127.0.0.1:9090/-/healthy",
+                ]
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
 
-  controlplane-grafana:
-    image: grafana/grafana:11.2.0
-    container_name: controlplane-grafana
-    restart: unless-stopped
-    environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in Control Plane .env}
-      GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_USERS_ALLOW_SIGN_UP: "false"
-    volumes:
-      - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
-      - grafana-data:/var/lib/grafana
-    ports:
-      - "127.0.0.1:${CONTROL_GRAFANA_HOST_PORT:-3009}:3000"
-    networks:
-      - controlplane-net
-    depends_on:
-      controlplane-prometheus:
-        condition: service_healthy
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-          cpus: "0.5"
+    controlplane-grafana:
+        image: grafana/grafana:11.2.0
+        container_name: controlplane-grafana
+        restart: unless-stopped
+        environment:
+            GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+            GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in Control Plane .env}
+            GF_AUTH_ANONYMOUS_ENABLED: ${GRAFANA_ANONYMOUS_ENABLED:-false}
+            GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+            GF_USERS_ALLOW_SIGN_UP: "false"
+        volumes:
+            - ./observability/grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+            - grafana-data:/var/lib/grafana
+        ports:
+            - "127.0.0.1:${CONTROL_GRAFANA_HOST_PORT:-3009}:3000"
+        networks:
+            - controlplane-net
+        depends_on:
+            controlplane-prometheus:
+                condition: service_healthy
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+                    cpus: "0.5"
 
 networks:
-  # Privat nettverk kun for Control Plane
-  controlplane-net:
-    name: controlplane-net
-    driver: bridge
+    # Privat nettverk kun for Control Plane
+    controlplane-net:
+        name: controlplane-net
+        driver: bridge
 
-  # Felles prosjekt-nettverk (må eksistere)
-  inter-plane-bus:
-    external: true
-    name: inter-plane-bus
-    labels:
-      com.docker.compose.network: "inter-plane-bus"
-      com.docker.compose.project: "triodelab"
+    # Felles prosjekt-nettverk (må eksistere)
+    inter-plane-bus:
+        external: true
+        name: inter-plane-bus
+        labels:
+            com.docker.compose.network: "inter-plane-bus"
+            com.docker.compose.project: "triodelab"
 
 volumes:
-  postgres-data:
-    driver: local
-  dragonfly-data:
-    driver: local
-  nats-data:
-    driver: local
-  control-shared-nats-data:
-    driver: local
-  prometheus-data:
-    driver: local
-  grafana-data:
-    driver: local
+    postgres-data:
+        driver: local
+    dragonfly-data:
+        driver: local
+    nats-data:
+        driver: local
+    control-shared-nats-data:
+        driver: local
+    prometheus-data:
+        driver: local
+    grafana-data:
+        driver: local
 
-  lago_postgres_data:
-    driver: local
-  lago_dragonfly_data:
-    driver: local
-  lago_storage_data:
-    driver: local
+    lago_postgres_data:
+        driver: local
+    lago_dragonfly_data:
+        driver: local
+    lago_storage_data:
+        driver: local

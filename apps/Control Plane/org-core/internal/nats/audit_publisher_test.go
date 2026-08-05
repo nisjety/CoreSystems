@@ -41,7 +41,7 @@ func TestPublishAuditMessageRequiresPubAckAndPinsStableMessageID(t *testing.T) {
 		{name: "transport failure", err: errors.New("broker unavailable"), wantErr: "broker unavailable"},
 		{name: "missing acknowledgement", wantErr: "invalid JetStream PubAck"},
 		{name: "empty acknowledgement", ack: &jetstream.PubAck{}, wantErr: "invalid JetStream PubAck"},
-		{name: "acknowledged", ack: &jetstream.PubAck{Stream: "VELION_CONTROL_OBSERVABILITY", Sequence: 42}},
+		{name: "acknowledged", ack: &jetstream.PubAck{Stream: "VEREVON_CONTROL_OBSERVABILITY", Sequence: 42}},
 	}
 
 	for _, tt := range tests {
@@ -50,7 +50,7 @@ func TestPublishAuditMessageRequiresPubAckAndPinsStableMessageID(t *testing.T) {
 			err := publishAuditMessage(
 				context.Background(),
 				publisher,
-				"velion.audit.v2.control.org-core.erasure",
+				"verevon.audit.v2.control.org-core.erasure",
 				"gdpr:org-core:stable-event",
 				[]byte(`{"event_id":"gdpr:org-core:stable-event"}`),
 			)
@@ -69,7 +69,7 @@ func TestPublishAuditMessageRequiresPubAckAndPinsStableMessageID(t *testing.T) {
 			if got := publisher.msg.Header.Get(gonats.MsgIdHdr); got != "gdpr:org-core:stable-event" {
 				t.Fatalf("Nats-Msg-Id=%q; want stable event identity", got)
 			}
-			if got := publisher.msg.Subject; got != "velion.audit.v2.control.org-core.erasure" {
+			if got := publisher.msg.Subject; got != "verevon.audit.v2.control.org-core.erasure" {
 				t.Fatalf("subject=%q", got)
 			}
 		})
@@ -78,11 +78,11 @@ func TestPublishAuditMessageRequiresPubAckAndPinsStableMessageID(t *testing.T) {
 
 func TestClientPublishAuditEncodesPayloadAndUsesAckPublisher(t *testing.T) {
 	publisher := &auditAckPublisherStub{
-		ack: &jetstream.PubAck{Stream: "VELION_CONTROL_OBSERVABILITY", Sequence: 9},
+		ack: &jetstream.PubAck{Stream: "VEREVON_CONTROL_OBSERVABILITY", Sequence: 9},
 	}
 	client := &Client{js: publisher}
 	if err := client.PublishAudit(
-		context.Background(), "velion.audit.v2.control.org-core.erasure",
+		context.Background(), "verevon.audit.v2.control.org-core.erasure",
 		"gdpr:org-core:client", map[string]any{"event_id": "gdpr:org-core:client"},
 	); err != nil {
 		t.Fatalf("publish client audit: %v", err)
@@ -91,7 +91,7 @@ func TestClientPublishAuditEncodesPayloadAndUsesAckPublisher(t *testing.T) {
 		t.Fatalf("published message=%v", publisher.msg)
 	}
 	if err := client.PublishAudit(
-		context.Background(), "velion.audit.v2.control.org-core.erasure",
+		context.Background(), "verevon.audit.v2.control.org-core.erasure",
 		"gdpr:org-core:bad", map[string]any{"bad": func() {}},
 	); err == nil || !strings.Contains(err.Error(), "marshal") {
 		t.Fatalf("unencodable audit payload error=%v", err)

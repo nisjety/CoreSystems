@@ -8,7 +8,7 @@
 -- priced (never silently zero).
 --
 -- Prices are USD per 1,000,000 tokens (the conventional unit on vendor price
--- sheets). They are public list prices for the model families Velion routes to
+-- sheets). They are public list prices for the model families Verevon routes to
 -- via the intent layer (gpt-4o-mini / model-router / claude-sonnet / claude-opus
 -- — see routing_policy.rs) plus the Azure speech + embedding helpers.
 --

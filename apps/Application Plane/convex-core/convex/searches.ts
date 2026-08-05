@@ -1,11 +1,11 @@
 /**
- * Search history — velionv2 search-v2 persistence.
+ * Search history — verevonv2 search-v2 persistence.
  *
  * Mirrors the split used across convex-core (see `controlSessions.ts` /
  * `conversations.ts`):
  *
  *   - WRITES (`createThread`, `appendTurn`) are service-key gated mutations.
- *     velionv2's BFF calls them after a search answer completes, so search
+ *     verevonv2's BFF calls them after a search answer completes, so search
  *     authority stays server-side — a browser cannot forge history.
  *   - READS (`listThreads`, `getThread`) are public, arg-scoped queries for
  *     the browser's `useQuery` reactive subscription. They are scoped by the
@@ -188,7 +188,7 @@ export const getThread = query({
 
 /**
  * deleteThread — remove a thread and all its turns. Service-key gated (called
- * from the velionv2 BFF "delete from history" action). Hard delete so the
+ * from the verevonv2 BFF "delete from history" action). Hard delete so the
  * user's search history is genuinely gone, not just hidden. Optionally asserts
  * ownership via externalUserId before deleting.
  */

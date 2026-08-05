@@ -148,7 +148,7 @@ Every shim below requires an **explicit owner**, **migration target**, and **rem
 
 **Scope:** convex-backend env vars in `apps/Application Plane/docker-compose.yml`  
 **Risk:** Medium — incorrect hostname breaks cross-plane calls  
-**Pre-check:** Verify target services are reachable on shared `velion-net`
+**Pre-check:** Verify target services are reachable on shared `verevon-net`
 
 1. `AUTH_SERVER_URL=http://auth-service:3011` → `AUTH_CORE_URL=http://auth-core:3011`
 2. `ORG_CORE_URL=http://org-core-service:8080` → `ORG_CORE_URL=http://org-core:8080`
@@ -166,7 +166,7 @@ Every shim below requires an **explicit owner**, **migration target**, and **rem
 2. **Stage 3b — Canary (25%):** Ramp to 25%. Compare v1 and v2 outputs for consistency. Monitor for 1 week.
 3. **Stage 3c — Majority (75%):** Ramp to 75%. v1 serves only fallback traffic. Monitor for 1 week.
 4. **Stage 3d — Full cutover (100%):** Set to 100%. v1 receives zero traffic.
-5. **Stage 3e — AI_CORE_URL migration:** Update convex-backend `AI_CORE_URL` from `http://ai-core:8000` to `http://ai-core-v2:8001` (or whatever v2 canonical hostname resolves to on `velion-net`).
+5. **Stage 3e — AI_CORE_URL migration:** Update convex-backend `AI_CORE_URL` from `http://ai-core:8000` to `http://ai-core-v2:8001` (or whatever v2 canonical hostname resolves to on `verevon-net`).
 6. **Bake period:** Run at 100% v2 for **2 weeks minimum** before proceeding to Phase 4.
 
 ### Phase 4: Retire Root docker-compose.yml (MEDIUM RISK)
@@ -213,7 +213,7 @@ Every shim below requires an **explicit owner**, **migration target**, and **rem
    - Currently `reasoning-net` = `ingestion-net` (external: true) — Model Plane v2 shares Ingestion Plane's network.
    - If this coupling is intentional and stable, document it as a permanent architectural decision.
    - If separation is desired, create a dedicated `reasoning-net` and update v2 compose + Temporal connectivity.
-4. Verify remaining networks: `controlplane-net`, `data-net`, `ingestion-net`, `app-net`, `velion-net` — all should have active containers.
+4. Verify remaining networks: `controlplane-net`, `data-net`, `ingestion-net`, `app-net`, `verevon-net` — all should have active containers.
 
 ---
 
@@ -223,7 +223,7 @@ Three separate NATS instances exist:
 
 | Instance | Plane | Host Ports | Network | Decommission? |
 |----------|-------|------------|---------|--------------|
-| controlplane-nats | L1 Control | 4223/8223 | controlplane-net + velion-net | ❌ Retain |
+| controlplane-nats | L1 Control | 4223/8223 | controlplane-net + verevon-net | ❌ Retain |
 | reasoning-nats (v1) | L4 v1 | 4225/8225 | model-plane-net | ✅ Remove with Phase 5 |
 | reasoning-v2-nats | L4 v2 | 4227/8227 | reasoning-net (= ingestion-net) | ❌ Retain |
 

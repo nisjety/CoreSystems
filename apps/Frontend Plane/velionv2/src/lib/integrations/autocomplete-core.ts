@@ -38,7 +38,7 @@ function getAutocompleteToken() {
 }
 
 function resolveOrgId(actor: RequestActor) {
-  return process.env.VELION_ORG_ID ?? process.env.DEFAULT_ORG_ID ?? actor.userId;
+  return process.env.VEREVON_ORG_ID ?? process.env.DEFAULT_ORG_ID ?? actor.userId;
 }
 
 export async function fetchAutocompleteSuggestions(

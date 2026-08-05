@@ -27,18 +27,18 @@ import {
   NavbarActionButton,
   NavDivider,
   SearchTrigger,
-} from "@/features/shell-v2/components/VelionNavbarControls";
+} from "@/features/shell-v2/components/VerevonNavbarControls";
 import {
   CalendarDropdown,
   MessagesDropdown,
   NotificationsDropdown,
   ProfileDropdown,
-} from "@/features/shell-v2/components/VelionNavbarPanels";
-import { VelionSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from "@/features/shell-v2/components/VelionSidebar";
+} from "@/features/shell-v2/components/VerevonNavbarPanels";
+import { VerevonSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from "@/features/shell-v2/components/VerevonSidebar";
 import {
   fallbackWorkspaceIdentity,
   formatPlanLabel,
-  type VelionRoute,
+  type VerevonRoute,
   type WorkspaceIdentity,
 } from "@/features/shell-v2/lib/shell-data";
 import { useControlPlaneContext } from "@/features/shell-v2/lib/control-plane-provider";
@@ -54,19 +54,19 @@ import { useTheme } from "@/lib/theme/theme-provider";
 type OpenPanel = "assistant" | "messages" | "notifications" | "calendar" | "profile" | "support" | "workspace" | null;
 
 const LazyGlobalSearchDialog = dynamic(
-  () => import("@/features/shell-v2/components/VelionNavbarOverlays").then((module) => module.GlobalSearchDialog),
+  () => import("@/features/shell-v2/components/VerevonNavbarOverlays").then((module) => module.GlobalSearchDialog),
   { ssr: false },
 );
 const LazyAssistantModal = dynamic(
-  () => import("@/features/shell-v2/components/VelionNavbarOverlays").then((module) => module.AssistantModal),
+  () => import("@/features/shell-v2/components/VerevonNavbarOverlays").then((module) => module.AssistantModal),
   { ssr: false },
 );
 const LazySupportModal = dynamic(
-  () => import("@/features/shell-v2/components/VelionNavbarOverlays").then((module) => module.SupportModal),
+  () => import("@/features/shell-v2/components/VerevonNavbarOverlays").then((module) => module.SupportModal),
   { ssr: false },
 );
 
-function getNavbarLabels(activeRoute: VelionRoute) {
+function getNavbarLabels(activeRoute: VerevonRoute) {
   switch (activeRoute) {
     case "/chat":
       return { moduleLabel: "Chat", tabLabel: "Oppgaver" };
@@ -194,14 +194,14 @@ function resolveWorkspaceIdentity(
   };
 }
 
-export function VelionProductShell({
+export function VerevonProductShell({
   activeRoute,
   children,
   defaultSidebarExpanded = false,
   expandedSidebarWidth = SIDEBAR_EXPANDED_WIDTH,
   lockSidebarCollapsed = false,
 }: {
-  activeRoute: VelionRoute;
+  activeRoute: VerevonRoute;
   children: React.ReactNode;
   defaultSidebarExpanded?: boolean;
   expandedSidebarWidth?: number;
@@ -243,7 +243,7 @@ export function VelionProductShell({
       style={{
         ["--dashboard-navbar-height" as string]: "56px",
         ["--dashboard-rail-width" as string]: `${sidebarWidth}px`,
-        ["--velion-sidebar-accent" as string]: sidebarAccentColor,
+        ["--verevon-sidebar-accent" as string]: sidebarAccentColor,
       }}
     >
       <TopNavbar
@@ -254,7 +254,7 @@ export function VelionProductShell({
         onProfileChange={setProfile}
         onSearchOpenChange={setSearchOpen}
       />
-      <VelionSidebar
+      <VerevonSidebar
         activeRoute={activeRoute}
         expandedWidth={expandedSidebarWidth}
         expanded={effectiveSidebarExpanded}
@@ -263,7 +263,7 @@ export function VelionProductShell({
         onOpenSearch={() => setSearchOpen(true)}
       />
       <main className="relative h-full overflow-hidden pt-14 md:pl-[var(--dashboard-rail-width)]">
-        <div className="velion-workspace-panel dashboard-main-panel relative h-full overflow-hidden bg-[#FCFCFD] text-[#1A1A1A] transition-colors dark:bg-[#1C1E24] dark:text-[#ECEEF2]">
+        <div className="verevon-workspace-panel dashboard-main-panel relative h-full overflow-hidden bg-[#FCFCFD] text-[#1A1A1A] transition-colors dark:bg-[#1C1E24] dark:text-[#ECEEF2]">
           {children}
         </div>
       </main>
@@ -279,7 +279,7 @@ function TopNavbar({
   onProfileChange,
   onSearchOpenChange,
 }: {
-  activeRoute: VelionRoute;
+  activeRoute: VerevonRoute;
   profile: NavbarProfile | null;
   searchOpen: boolean;
   workspace: WorkspaceIdentity;
@@ -381,7 +381,7 @@ function TopNavbar({
 
   return (
     <>
-      <header ref={headerRef} className="dashboard-navbar-bg fixed inset-x-0 top-0 z-[var(--velion-z-navbar)] backdrop-blur transition-colors">
+      <header ref={headerRef} className="dashboard-navbar-bg fixed inset-x-0 top-0 z-[var(--verevon-z-navbar)] backdrop-blur transition-colors">
         <div className="flex h-14 items-center justify-between gap-4 pl-3 pr-5">
           <div className="flex min-w-0 items-center gap-3">
             <TopLayerTooltip label="Home">
@@ -563,7 +563,7 @@ function WorkspaceSwitcher({
   const [active, setActive] = useState<ActiveWorkspace>("org");
 
   return (
-    <div className="fixed left-[132px] top-12 z-[var(--velion-z-popover)] w-[286px] overflow-hidden rounded-[14px] border border-black/[0.08] bg-white/96 p-1.5 shadow-[0_18px_52px_rgba(15,16,20,0.16)] backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#232630]/96">
+    <div className="fixed left-[132px] top-12 z-[var(--verevon-z-popover)] w-[286px] overflow-hidden rounded-[14px] border border-black/[0.08] bg-white/96 p-1.5 shadow-[0_18px_52px_rgba(15,16,20,0.16)] backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#232630]/96">
       {/* Organization workspace */}
       <button
         type="button"

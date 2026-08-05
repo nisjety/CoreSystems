@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 const HEX_COLOR = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
 
 const brandThemeSchema = z.object({
-  mode: z.enum(["velion", "brand"]),
+  mode: z.enum(["verevon", "brand"]),
   primaryColor: z.string().regex(HEX_COLOR),
 });
 

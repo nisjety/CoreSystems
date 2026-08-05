@@ -15,7 +15,7 @@ class APIClient {
   ): Promise<T> {
     const url = `${this.baseURL}${endpoint}`
     // Endpoints frequently probed during the OAuth-callback retry window
-    // (see velion-gap.md G30). Per-attempt errors are expected until the
+    // (see verevon-gap.md G30). Per-attempt errors are expected until the
     // Better Auth cookie lands; downgrade their console output from `error`
     // to a single `warn` so dev traces don't look like fires.
     const suppressOnboardingProbeLogs =

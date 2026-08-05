@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useQuery } from "convex/react";
 import { makeFunctionReference } from "convex/server";
 
-// Decoupled reference to convex-core's `searches.listThreads` query — velionv2
+// Decoupled reference to convex-core's `searches.listThreads` query — verevonv2
 // doesn't carry convex-core's generated `api`, so we name the function by path.
 // Args/return are untyped here; we narrow the row shape locally.
 const listThreadsRef = makeFunctionReference<"query">("searches:listThreads");
@@ -70,7 +70,7 @@ export function RecentSearches({
   return (
     <section
       aria-label="Nylige søk"
-      className="velion-glass-soft rounded-3xl px-4 py-3.5"
+      className="verevon-glass-soft rounded-3xl px-4 py-3.5"
     >
       <h3 className="text-[11px] font-semibold uppercase tracking-wide text-[#9A9188] dark:text-[#9A9EA8]">
         Nylige søk

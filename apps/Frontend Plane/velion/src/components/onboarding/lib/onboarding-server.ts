@@ -30,7 +30,7 @@ async function hasAnySessionCookie(): Promise<boolean> {
  * G30 v2: server-side resolution of the post-OAuth-callback routing decision.
  *
  * The client component (`AuthCallbackClient.tsx`) previously made 3 round
- * trips to velion API proxies as soon as the OAuth redirect landed. Better
+ * trips to verevon API proxies as soon as the OAuth redirect landed. Better
  * Auth's secondary-storage write (Postgres + Redis) races those calls and
  * frequently produces transient 401s during the first 1-2 s after redirect.
  *

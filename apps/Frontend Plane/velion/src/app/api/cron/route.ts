@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
 /**
- * U3-12 (ui-ux-velion-gap.md §14): velion proxy for the gateway's
+ * U3-12 (ui-ux-verevon-gap.md §14): verevon proxy for the gateway's
  * `/v1/cron` surface (capability-core via model-gateway). Lists or
  * creates org-scoped cron entries; the gateway injects the caller's
  * org_id from the JWT before forwarding to capability-core.

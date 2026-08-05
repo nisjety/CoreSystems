@@ -20,7 +20,7 @@ type fakeRepository struct {
 func TestResolveUserDoesNotTreatGatewaySessionScopeAsMembershipAuthority(t *testing.T) {
 	service := NewService(&fakeRepository{}, nil)
 	ctx := delegation.WithPrincipal(context.Background(), delegation.Principal{
-		ServiceID:      "velion-gateway",
+		ServiceID:      "verevon-gateway",
 		UserID:         "user-1",
 		OrganizationID: "org-a",
 		Role:           "member",

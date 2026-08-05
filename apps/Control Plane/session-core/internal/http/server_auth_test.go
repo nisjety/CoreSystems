@@ -58,17 +58,19 @@ func requestProtected(t *testing.T, router http.Handler, headers map[string]stri
 	return recorder
 }
 
-func signSessionRequest(request *http.Request, token, principal, userID string, timestamp time.Time) {
+func signSessionRequest(request *http.Request, token, principal, userID, nonce string, timestamp time.Time) {
 	timestampValue := timestamp.UTC().Format(time.RFC3339)
 	bodyDigest := sessionDelegationBodyDigest(nil)
 	claims := sessionDelegationClaims{
 		Principal: principal, Audience: serviceCredentialAudience,
 		Timestamp: timestampValue, Method: request.Method, URI: request.URL.RequestURI(),
-		UserID: userID, BodySHA256: bodyDigest,
+		UserID: userID, Nonce: nonce, BodySHA256: bodyDigest,
 	}
 	request.Header.Set("X-Service-Token", token)
 	request.Header.Set("X-User-Id", userID)
+	request.Header.Set("X-Delegation-Version", "v2")
 	request.Header.Set("X-Delegation-Timestamp", timestampValue)
+	request.Header.Set("X-Delegation-Nonce", nonce)
 	request.Header.Set("X-Delegation-Body-SHA256", bodyDigest)
 	request.Header.Set("X-Delegation-Signature", sessionDelegationSignature(token, claims))
 }
@@ -157,14 +159,14 @@ func TestAuthContextRejectsFleetSharedKeyAsUserDelegation(t *testing.T) {
 }
 
 func TestAuthContextAcceptsAudienceAndScopeBoundServiceCredential(t *testing.T) {
-	t.Setenv("SESSION_CORE_SERVICE_CREDENTIALS", `[{"principal":"velion-gateway","audience":"session-core","token":"0123456789abcdef0123456789abcdef","scopes":["sessions:read"]}]`)
+	t.Setenv("SESSION_CORE_SERVICE_CREDENTIALS", `[{"principal":"verevon-gateway","audience":"session-core","token":"0123456789abcdef0123456789abcdef","scopes":["sessions:read"]}]`)
 	router := newAuthProbeRouter(t, func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("auth-core must not be called for an internal service credential")
 	})
 
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/current", nil)
-	signSessionRequest(request, "0123456789abcdef0123456789abcdef", "velion-gateway", "verified-at-gateway", time.Now())
+	signSessionRequest(request, "0123456789abcdef0123456789abcdef", "verevon-gateway", "verified-at-gateway", "nonce-service-delegation-0001", time.Now())
 	router.ServeHTTP(response, request)
 
 	require.Equal(t, http.StatusOK, response.Code)
@@ -172,11 +174,11 @@ func TestAuthContextAcceptsAudienceAndScopeBoundServiceCredential(t *testing.T) 
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 	assert.Equal(t, "verified-at-gateway", body["user_id"])
 	assert.Equal(t, "service_principal", body["auth_method"])
-	assert.Equal(t, "velion-gateway", body["service_principal"])
+	assert.Equal(t, "verevon-gateway", body["service_principal"])
 }
 
 func TestAuthContextRejectsUnsignedServiceDelegation(t *testing.T) {
-	t.Setenv("SESSION_CORE_SERVICE_CREDENTIALS", `[{"principal":"velion-gateway","audience":"session-core","token":"0123456789abcdef0123456789abcdef","scopes":["sessions:read"]}]`)
+	t.Setenv("SESSION_CORE_SERVICE_CREDENTIALS", `[{"principal":"verevon-gateway","audience":"session-core","token":"0123456789abcdef0123456789abcdef","scopes":["sessions:read"]}]`)
 	router := newAuthProbeRouter(t, func(w http.ResponseWriter, _ *http.Request) {
 		t.Fatal("auth-core must not be called for an internal service credential")
 	})
@@ -190,9 +192,30 @@ func TestAuthContextRejectsUnsignedServiceDelegation(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, response.Code)
 }
 
+func TestAuthContextRejectsReplayedServiceDelegation(t *testing.T) {
+	t.Setenv("SESSION_CORE_SERVICE_CREDENTIALS", `[{"principal":"verevon-gateway","audience":"session-core","token":"0123456789abcdef0123456789abcdef","scopes":["sessions:read"]}]`)
+	router := newAuthProbeRouter(t, func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("auth-core must not be called for an internal service credential")
+	})
+
+	now := time.Now()
+	for attempt := range 2 {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/current", nil)
+		signSessionRequest(request, "0123456789abcdef0123456789abcdef", "verevon-gateway", "verified-at-gateway", "nonce-replay-service-delegation", now)
+		router.ServeHTTP(response, request)
+
+		if attempt == 0 {
+			assert.Equal(t, http.StatusOK, response.Code)
+			continue
+		}
+		assert.Equal(t, http.StatusForbidden, response.Code)
+	}
+}
+
 func TestSessionDelegationMatchesGatewayFixedVector(t *testing.T) {
 	credential := serviceCredential{
-		Principal: "velion-gateway",
+		Principal: "verevon-gateway",
 		Audience:  "session-core",
 		Token:     "0123456789abcdef0123456789abcdef",
 	}
@@ -200,12 +223,14 @@ func TestSessionDelegationMatchesGatewayFixedVector(t *testing.T) {
 	request.Header.Set("X-User-Id", "verified-user")
 	request.Header.Set("X-User-Email", "verified@example.com")
 	request.Header.Set("X-User-Name", "Verified User")
+	request.Header.Set("X-Delegation-Version", "v2")
 	request.Header.Set("X-Delegation-Timestamp", "2026-07-11T02:00:00+00:00")
+	request.Header.Set("X-Delegation-Nonce", "nonce-fixed-vector-000000001")
 	request.Header.Set("X-Delegation-Body-SHA256", "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU")
-	request.Header.Set("X-Delegation-Signature", "4dgUVZ5Z-eyZrNkVl-GrS5j7MfOHTDna2V8_vSRBbcA")
+	request.Header.Set("X-Delegation-Signature", "sG_AhFjLnFXYkEfnku8KLV_PqkbYFC2XTOHUdxx0BF0")
 	now := time.Date(2026, 7, 11, 2, 0, 1, 0, time.UTC)
 
-	claims, ok := verifySessionServiceDelegation(request, credential, now)
+	claims, ok := verifySessionServiceDelegation(request, credential, newSessionDelegationNonceCache(10), now)
 	require.True(t, ok)
 	assert.Equal(t, "verified-user", claims.UserID)
 	assert.Equal(t, "verified@example.com", claims.Email)

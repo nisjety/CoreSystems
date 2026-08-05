@@ -121,7 +121,7 @@ pub struct InferRequest {
     pub tools: Vec<ToolDefinition>,
     /// Tool selection policy: "auto" | "none" | "required" | a tool name.
     pub tool_choice: String,
-    /// Tenant scope for the Velion intent layer's budget check (from gRPC
+    /// Tenant scope for the Verevon intent layer's budget check (from gRPC
     /// metadata `x-org-id`; empty when the caller doesn't forward it).
     pub org_id: String,
     /// Acting user for the budget check (from gRPC metadata `x-user-id`).
@@ -592,7 +592,7 @@ mod tests {
         ));
         // Region-less Azure OpenAI hosts must NOT be falsely flagged non-EU.
         assert!(!endpoint_region_is_non_eu(
-            "https://velion.openai.azure.com"
+            "https://verevon.openai.azure.com"
         ));
         assert!(!endpoint_region_is_non_eu(
             "https://my-swedencentral-res.openai.azure.com"

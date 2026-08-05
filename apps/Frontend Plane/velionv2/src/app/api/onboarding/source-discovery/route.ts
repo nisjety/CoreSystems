@@ -242,7 +242,7 @@ async function seedDataPlaneSourceIntro(input: {
 }): Promise<{ status: "pending" | "ready" | "failed"; documentId?: string }> {
   try {
     const content = [
-      `${input.connector.label} is connected to Velion for onboarding.`,
+      `${input.connector.label} is connected to Verevon for onboarding.`,
       "This onboarding source map contains safe metadata only, not private message or document contents.",
       input.metadata.workspaceName ? `Workspace: ${input.metadata.workspaceName}.` : null,
       input.metadata.entityCounts

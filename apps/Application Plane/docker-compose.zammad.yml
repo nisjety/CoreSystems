@@ -155,7 +155,7 @@ services:
         condition: service_healthy
     networks:
       - zammad-net
-      - velion-net
+      - verevon-net
 
   zammad-postgresql:
     image: postgres:${POSTGRES_VERSION:-17.9-alpine}
@@ -189,7 +189,7 @@ services:
         condition: service_completed_successfully
     networks:
       - zammad-net
-      - velion-net
+      - verevon-net
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:3000/api/v1/getting_started || exit 1"]
       interval: 15s
@@ -230,7 +230,7 @@ services:
         condition: service_completed_successfully
     networks:
       - zammad-net
-      - velion-net
+      - verevon-net
 
   zammad-websocket:
     <<: *zammad-service
@@ -240,7 +240,7 @@ services:
         condition: service_completed_successfully
     networks:
       - zammad-net
-      - velion-net
+      - verevon-net
 
 volumes:
   elasticsearch-data:
@@ -258,6 +258,6 @@ networks:
   zammad-net:
     name: zammad-net
     driver: bridge
-  velion-net:
+  verevon-net:
     external: true
     name: inter-plane-bus

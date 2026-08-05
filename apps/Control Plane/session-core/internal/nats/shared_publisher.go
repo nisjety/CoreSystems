@@ -9,7 +9,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// SharedPublisher handles cross-plane event publishing to velion-nats.
+// SharedPublisher handles cross-plane event publishing to verevon-nats.
 type SharedPublisher struct {
 	client *Client
 	js     jetstream.JetStream
@@ -39,7 +39,7 @@ func (sp *SharedPublisher) PublishSessionCommand(ctx context.Context, sessionID,
 	switch version {
 	case "v2":
 		// Route to new canonical subjects for Model Plane v2
-		subject := fmt.Sprintf("velion.session.%s.command", sessionID)
+		subject := fmt.Sprintf("verevon.session.%s.command", sessionID)
 		msg := map[string]any{
 			"type":       commandType,
 			"session_id": sessionID,
@@ -87,7 +87,7 @@ func (sp *SharedPublisher) PublishSessionEvent(
 		return fmt.Errorf("shared publisher not initialized")
 	}
 
-	subject := fmt.Sprintf("velion.session.%s.event", sessionID)
+	subject := fmt.Sprintf("verevon.session.%s.event", sessionID)
 	msg := map[string]any{
 		"session_id": sessionID,
 		"sequence":   sequence,
@@ -103,7 +103,7 @@ func (sp *SharedPublisher) SubscribeSessionEvents(sessionID string, handler nats
 	if sp == nil || sp.client == nil {
 		return nil, fmt.Errorf("shared publisher not initialized")
 	}
-	subject := fmt.Sprintf("velion.session.%s.event", sessionID)
+	subject := fmt.Sprintf("verevon.session.%s.event", sessionID)
 	return sp.client.Subscribe(subject, handler)
 }
 

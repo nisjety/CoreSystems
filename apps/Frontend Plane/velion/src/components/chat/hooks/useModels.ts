@@ -1,6 +1,6 @@
 'use client'
 
-// U2-2 / U3-2 (ui-ux-velion-gap.md §10): live-catalog hook for the model
+// U2-2 / U3-2 (ui-ux-verevon-gap.md §10): live-catalog hook for the model
 // picker. Fetches `/api/models` (proxy to capability-core's
 // `/api/v1/capabilities?kind=model`) and falls back to the static
 // `SUPPORTED_MODELS` map in `app/api/chat/_lib/models.ts` so the picker

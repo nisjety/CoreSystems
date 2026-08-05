@@ -15,7 +15,7 @@ import {
 import {
   SidebarPanelTitle,
   SidebarSearchField,
-} from "@/features/shell-v2/components/VelionSidebarPrimitives";
+} from "@/features/shell-v2/components/VerevonSidebarPrimitives";
 import { sidebarType } from "@/features/shell-v2/lib/sidebar-style";
 import { cn } from "@/lib/utils";
 
@@ -363,7 +363,7 @@ function isInboxItemActive(item: InboxNavItem, activeView: string, activeChannel
 }
 
 function isInboxSubItemActive(item: InboxNavSubItem, activeView: string, activeChannel: string | null) {
-  const href = new URL(item.href, "https://velion.local");
+  const href = new URL(item.href, "https://verevon.local");
   const itemView = href.searchParams.get("view") ?? "mine";
   const itemChannel = href.searchParams.get("channel");
   return activeView === itemView && (activeChannel ?? null) === (itemChannel ?? null);

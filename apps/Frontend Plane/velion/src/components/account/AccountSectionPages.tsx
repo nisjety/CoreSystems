@@ -49,7 +49,7 @@ export function AccountSecurityPage() {
   return (
     <AccountSurface
       title="Security"
-      description="Manage your password, strengthen sign-in protection, and keep your Velion identity under control."
+      description="Manage your password, strengthen sign-in protection, and keep your Verevon identity under control."
     >
       <SecuritySection />
     </AccountSurface>
@@ -60,7 +60,7 @@ export function AccountLinkedAccountsPage() {
   return (
     <AccountSurface
       title="Sign-in methods"
-      description="Review the providers attached to your Velion identity and keep workspace integrations separate from authentication."
+      description="Review the providers attached to your Verevon identity and keep workspace integrations separate from authentication."
     >
       <LinkedAccountsSection />
     </AccountSurface>

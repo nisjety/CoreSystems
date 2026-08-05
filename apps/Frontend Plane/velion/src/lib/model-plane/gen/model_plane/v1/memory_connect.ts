@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { IndexMemoryRequest, IndexMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, SearchMemoryRequest, SearchMemoryResponse } from "./memory_pbjs";
+import { DeleteMemoryRequest, DeleteMemoryResponse, IndexMemoryRequest, IndexMemoryResponse, ListMemoryRequest, ListMemoryResponse, MemoryHealthRequest, MemoryHealthResponse, SearchMemoryRequest, SearchMemoryResponse } from "./memory_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -36,6 +36,32 @@ export const MemoryService = {
       name: "IndexMemory",
       I: IndexMemoryRequest,
       O: IndexMemoryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List durable memory entries owned by a user, across every thread. Unlike
+     * SearchMemory this is not thread-scoped: it backs a "what do you remember
+     * about me" surface, so the caller supplies a user rather than a thread.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.ListMemory
+     */
+    listMemory: {
+      name: "ListMemory",
+      I: ListMemoryRequest,
+      O: ListMemoryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Delete a single memory entry by id, scoped to the owning user. Removes
+     * both the durable index record and, best-effort, the underlying semantic
+     * memory record.
+     *
+     * @generated from rpc model_plane.v1.MemoryService.DeleteMemory
+     */
+    deleteMemory: {
+      name: "DeleteMemory",
+      I: DeleteMemoryRequest,
+      O: DeleteMemoryResponse,
       kind: MethodKind.Unary,
     },
     /**

@@ -34,7 +34,7 @@ export const sidebarSections: Record<SidebarSectionKey, SidebarSectionDefinition
   agents: {
     eyebrow: 'Agents',
     title: 'Agent Workspace',
-    description: 'Configure Velion agents, knowledge sources, actions, tone, and handoff behavior.',
+    description: 'Configure Verevon agents, knowledge sources, actions, tone, and handoff behavior.',
     views: [
       { id: 'agents', label: 'Agents', description: 'High-level agent administration and orchestration entry point.', href: '/agents' },
       { id: 'settings', label: 'Agent settings', description: 'Prompting, memory, tone, and policy configuration.', href: '/agents/settings' },
@@ -47,14 +47,14 @@ export const sidebarSections: Record<SidebarSectionKey, SidebarSectionDefinition
     description: 'The operator inbox for queue triage, live conversations, and shared customer context.',
     views: [
       { id: 'inbox', label: 'Inbox', description: 'Landing view for queue health and inbox workflows.', href: '/inbox' },
-      { id: 'messages', label: 'Velion Chat', description: 'Direct AI chat for drafting, exploration, and non-queue work.', href: '/chat' },
+      { id: 'messages', label: 'Verevon Chat', description: 'Direct AI chat for drafting, exploration, and non-queue work.', href: '/chat' },
       { id: 'chat-logs', label: 'Chat logs', description: 'Archived transcripts and historical conversations.', href: '/inbox/chat-logs' },
     ],
   },
   knowledge: {
     eyebrow: 'Knowledge',
     title: 'Knowledge Layer',
-    description: 'The source-of-truth layer Velion uses to retrieve, answer, train, and validate.',
+    description: 'The source-of-truth layer Verevon uses to retrieve, answer, train, and validate.',
     views: [
       { id: 'documents', label: 'Documents', description: 'Files, folders, and indexed knowledge objects stored for the organization.', href: '/knowledge/documents' },
       { id: 'sources', label: 'Sources', description: 'Connected websites, repositories, and external inputs.', href: '/knowledge/sources' },

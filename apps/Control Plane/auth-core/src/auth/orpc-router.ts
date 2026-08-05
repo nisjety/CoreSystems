@@ -21,7 +21,7 @@ function hashBearerToken(token: string): string {
 }
 
 function generateBearerToken(): string {
-  return `velion_bt_${randomBytes(32).toString('base64url')}`;
+  return `verevon_bt_${randomBytes(32).toString('base64url')}`;
 }
 
 // Context helpers and types
@@ -268,18 +268,18 @@ function redirectUrisFrom(value: unknown): string[] {
   return stringListValue(value) ?? [];
 }
 
-function oidcVelionMetadata(
+function oidcVerevonMetadata(
   metadata: Record<string, unknown>,
 ): Record<string, unknown> {
-  return isRecord(metadata.velion) ? metadata.velion : {};
+  return isRecord(metadata.verevon) ? metadata.verevon : {};
 }
 
 function oidcMetadataString(
   metadata: Record<string, unknown>,
   key: string,
 ): string | undefined {
-  const velion = oidcVelionMetadata(metadata);
-  return stringValue(velion[key]) ?? stringValue(metadata[key]);
+  const verevon = oidcVerevonMetadata(metadata);
+  return stringValue(verevon[key]) ?? stringValue(metadata[key]);
 }
 
 function oidcMetadataStringList(
@@ -287,9 +287,9 @@ function oidcMetadataStringList(
   key: string,
   fallback: string[],
 ): string[] {
-  const velion = oidcVelionMetadata(metadata);
+  const verevon = oidcVerevonMetadata(metadata);
   return (
-    stringListValue(velion[key]) ?? stringListValue(metadata[key]) ?? fallback
+    stringListValue(verevon[key]) ?? stringListValue(metadata[key]) ?? fallback
   );
 }
 
@@ -297,11 +297,11 @@ function buildOIDCClientMetadata(
   input: z.infer<typeof CreateOIDCClientSchema>,
 ): Record<string, unknown> {
   const metadata = input.metadata ?? {};
-  const existingVelion = isRecord(metadata.velion) ? metadata.velion : {};
+  const existingVerevon = isRecord(metadata.verevon) ? metadata.verevon : {};
   return {
     ...metadata,
-    velion: {
-      ...existingVelion,
+    verevon: {
+      ...existingVerevon,
       organizationId: input.organizationId,
       scopes: input.scopes,
       grantTypes: input.grantTypes,
@@ -381,7 +381,7 @@ const DEFAULT_CONSENT: z.infer<typeof ConsentSchema> = {
   necessary: true,
 };
 
-const CONSENT_SUBJECT_COOKIE = 'velion_consent_subject';
+const CONSENT_SUBJECT_COOKIE = 'verevon_consent_subject';
 
 type ConsentSubject = {
   userId?: string;
@@ -530,7 +530,7 @@ async function isPasswordCompromised(password: string): Promise<boolean> {
     {
       headers: {
         'Add-Padding': 'true',
-        'User-Agent': 'Velion Auth Password Checker',
+        'User-Agent': 'Verevon Auth Password Checker',
       },
     },
   );

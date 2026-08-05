@@ -16,6 +16,7 @@ use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind, ApprovalState, ChatMessage, ContextSegment,
     GetContextAssemblyRequest, InferRequest, OrchestrationEvent, PlanState, RunAgentRequest,
     RunAgentResponse, StreamRunEventsRequest, SubagentRole, TodoState, ToolDefinition,
+    VerificationStatus,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -1108,7 +1109,7 @@ pub async fn invoke_stream_sse(
         let sink =
             crate::sse_events::RichEventSink::new(tx.clone(), features.clone(), req_id.clone());
 
-        // Starts as the requested id (possibly a `velion-*` mode); the tool phase
+        // Starts as the requested id (possibly a `verevon-*` mode); the tool phase
         // replaces it with the concrete model it resolved.
         let mut answer_model = model_clone.clone();
         // A successful tool call this turn (Visma, web_search, …) is real
@@ -1973,7 +1974,7 @@ const MAX_CONTEXT_ASSEMBLY_TOKENS: u32 = 32_768;
 /// Output ceiling for a user-facing answer.
 ///
 /// Was a hardcoded 1024 on every answer this service has ever streamed, which
-/// silently truncates exactly the answers Velion exists to give — a supplier
+/// silently truncates exactly the answers Verevon exists to give — a supplier
 /// breakdown, a stock table, a multi-invoice summary all run past ~4k characters
 /// and simply stopped mid-sentence. 1024 is a sane cap for a *tool-call* round
 /// (see `tool_loop::max_tool_round_tokens`), never for prose the user reads.
@@ -2207,7 +2208,7 @@ fn build_context_assembly_block(
     // failure this preamble exists to prevent. Listing the real section names also
     // makes the labels below self-describing instead of unexplained.
     let mut block = String::from(
-        "Velion context assembly. Use this as durable conversation and Data Plane context.",
+        "Verevon context assembly. Use this as durable conversation and Data Plane context.",
     );
     if grounded {
         block.push_str(
@@ -3017,10 +3018,10 @@ fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
         .filter(|value| !value.is_empty());
     let content = match user_name {
         Some(user_name) => format!(
-            "You are Velion, the AI assistant currently helping {org_name}. The signed-in user is {user_name}. When they say \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Velion itself. When they say \"I\", \"me\", or \"my\", they mean themselves, {user_name}. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
+            "You are Verevon, the AI assistant currently helping {org_name}. The signed-in user is {user_name}. When they say \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Verevon itself. When they say \"I\", \"me\", or \"my\", they mean themselves, {user_name}. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
         ),
         None => format!(
-            "You are Velion, the AI assistant currently helping {org_name}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Velion itself. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
+            "You are Verevon, the AI assistant currently helping {org_name}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org_name} — not Verevon itself. For broad questions like \"who are we\" or \"what do we offer\", treat it as a question about {org_name} and use the knowledge_search tool to ground your answer in {org_name}'s own information rather than answering from general knowledge."
         ),
     };
     Some(ChatMessage {
@@ -3845,10 +3846,10 @@ async fn direct_infer(
 }
 
 /// Model for the thread-title summarization: a **pinned** cheap non-reasoning
-/// model, deliberately *not* the `velion-budget` tier it used to name.
+/// model, deliberately *not* the `verevon-budget` tier it used to name.
 ///
 /// A tier is the wrong dependency for a micro-call with a fixed token budget.
-/// `velion-budget` is resolved by inference-core's intent layer, which re-routes
+/// `verevon-budget` is resolved by inference-core's intent layer, which re-routes
 /// by prompt size — and one of the models it lands on, `gpt-5-nano`, is a
 /// *reasoning* model that bills its chain of thought against `max_tokens`.
 /// Measured live on this deployment, same code path, same 24-token budget:
@@ -3861,7 +3862,7 @@ async fn direct_infer(
 /// So the sidebar label quietly worked on long answers and vanished on short
 /// ones — the common case — which is exactly how this survived unnoticed.
 /// A pinned id bypasses the intent layer entirely (`intent::parse_mode` treats
-/// only the `velion-*` names as modes), so the budget below is honest and the
+/// only the `verevon-*` names as modes), so the budget below is honest and the
 /// behaviour no longer depends on how much the user happened to type.
 ///
 /// `gpt-4o-mini` specifically: inference-core's designated cheap fallback
@@ -5014,6 +5015,9 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
             "browser_action_approval_required"
         }
         orchestration_event::Event::BrowserActionDecided(_) => "browser_action_decided",
+        orchestration_event::Event::ApprovalContinuationVerified(_) => {
+            "approval_continuation_verified"
+        }
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
@@ -5158,6 +5162,29 @@ fn orchestration_event_to_step_update(
                 "denied".to_owned()
             },
         ),
+        Event::ApprovalContinuationVerified(p) => {
+            let verification = p.verification.as_ref();
+            let status_enum = verification.and_then(|v| VerificationStatus::try_from(v.status).ok());
+            let status = match status_enum {
+                Some(VerificationStatus::VerifiedSuccess) => "done",
+                Some(VerificationStatus::VerifiedFailure) => "failed",
+                Some(VerificationStatus::PartiallyVerified) => "partial",
+                Some(VerificationStatus::Unknown | VerificationStatus::Unspecified) | None => {
+                    "unknown"
+                }
+            };
+            let reason = verification.map_or("", |v| v.reason.as_str());
+            (
+                format!("verify-{}", p.receipt_id),
+                "Verified".to_owned(),
+                if reason.is_empty() {
+                    enum_name(status_enum.as_ref()).to_owned()
+                } else {
+                    reason.to_owned()
+                },
+                status.to_owned(),
+            )
+        }
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -5290,6 +5317,20 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             object.insert("decision".to_owned(), json!(payload.decision));
             object.insert("decided_by".to_owned(), json!(payload.decided_by));
         }
+        orchestration_event::Event::ApprovalContinuationVerified(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("delivery_id".to_owned(), json!(payload.delivery_id));
+            object.insert("approval_id".to_owned(), json!(payload.approval_id));
+            object.insert("receipt_id".to_owned(), json!(payload.receipt_id));
+            if let Some(v) = payload.verification.as_ref() {
+                object.insert(
+                    "verification_status".to_owned(),
+                    json!(enum_name(VerificationStatus::try_from(v.status).ok().as_ref())),
+                );
+                object.insert("verification_method".to_owned(), json!(v.method));
+                object.insert("verification_reason".to_owned(), json!(v.reason));
+            }
+        }
     }
 
     Some(Value::Object(object))
@@ -5325,6 +5366,12 @@ impl EnumName for ApprovalKind {
 }
 
 impl EnumName for ApprovalState {
+    fn as_str_name(&self) -> &'static str {
+        self.as_str_name()
+    }
+}
+
+impl EnumName for VerificationStatus {
     fn as_str_name(&self) -> &'static str {
         self.as_str_name()
     }
@@ -5877,7 +5924,7 @@ mod tests {
             "x-internal-key",
             "x-user-id",
             "x-org-id",
-            "x-velion-org-id",
+            "x-verevon-org-id",
         ] {
             assert!(
                 request.metadata().get(forbidden).is_none(),

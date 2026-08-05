@@ -85,7 +85,7 @@ message MemoryEntry {
   string user_id = 7;
 
   // How this memory came to exist, so a person reading "what do you remember
-  // about me" can tell what they ASKED Velion to remember from what Velion
+  // about me" can tell what they ASKED Verevon to remember from what Verevon
   // decided to remember on its own.
   //
   // Three-valued rather than a bool: "stated" covers both an explicit

@@ -1,9 +1,9 @@
 'use client'
 
-// U6-3 (ui-ux-velion-gap.md §10): permissions editor.
+// U6-3 (ui-ux-verevon-gap.md §10): permissions editor.
 //
 // Renders the role list + per-role capability checklist + create/delete
-// affordances. Backed by org-core via velion's /api/org/orgs/:id/roles
+// affordances. Backed by org-core via verevon's /api/org/orgs/:id/roles
 // catch-all proxy.
 
 import { useCallback, useEffect, useMemo, useState } from 'react'

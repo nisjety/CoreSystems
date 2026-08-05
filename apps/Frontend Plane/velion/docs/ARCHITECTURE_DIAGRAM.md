@@ -28,7 +28,7 @@ Data, Ingestion, or Model Plane services directly.
 │                  FRONTEND PLANE  (Layer 6)               │
 │                                                          │
 │  ┌────────────────────┐  ┌──────────────────────────┐    │
-│  │  velion (Next.js)  │  │  triodelab-web (static)  │    │
+│  │  verevon (Next.js)  │  │  triodelab-web (static)  │    │
 │  │  :3000             │  │                          │    │
 │  └─────────┬──────────┘  └────────────┬─────────────┘    │
 │            │                          │                  │
@@ -39,7 +39,7 @@ Data, Ingestion, or Model Plane services directly.
 
 ## 📦 Service Responsibilities
 
-### 1. **velion** (Port 3000)
+### 1. **verevon** (Port 3000)
 
 **Domain**: Primary web application  
 **Technology**: Next.js (TypeScript)  
@@ -75,7 +75,7 @@ Data, Ingestion, or Model Plane services directly.
 ## Cross-Plane Contract Rules
 
 > Amended per [ADR 0003 — L5 boundary policy](./adr/0003-l5-boundary-policy.md)
-> (accepted 2026-05-09). Rules 5–7 ratify the existing velion-as-L5-ingress
+> (accepted 2026-05-09). Rules 5–7 ratify the existing verevon-as-L5-ingress
 > pattern; the previous "L5 is the ceiling" wording overstated the constraint
 > and was contradicted by every running route.
 
@@ -84,10 +84,10 @@ Data, Ingestion, or Model Plane services directly.
 2. **No direct DB access** — Frontend has zero database connections.
 3. **Auth cookie only** — Authentication flows through HTTP-only cookies
    issued by auth-core. The frontend never stores raw OAuth tokens (refresh
-   tokens live exclusively in auth-core; see ADR 0002 and velion-gap.md §2.1).
+   tokens live exclusively in auth-core; see ADR 0002 and verevon-gap.md §2.1).
 4. **Environment-driven URLs** — Backend URLs come from environment variables.
    No hard-coded service hosts.
-5. **Velion proxy as L5 ingress** — velion's `src/app/api/*` route handlers
+5. **Verevon proxy as L5 ingress** — verevon's `src/app/api/*` route handlers
    are the canonical L5 ingress for the Frontend Plane. They validate sessions
    (`control-plane-auth.ts`), mint internal auth headers, propagate correlation
    IDs, and forward to L1–L4 cores over the shared Docker network. New proxy
@@ -103,7 +103,7 @@ Data, Ingestion, or Model Plane services directly.
 ## Network Topology
 
 > Per [ADR 0004 — Docker network topology](./adr/0004-network-topology.md)
-> (proposed 2026-05-11). Renamed from `velion-net` on cutover.
+> (proposed 2026-05-11). Renamed from `verevon-net` on cutover.
 
 Docker networks split into two roles:
 
@@ -114,12 +114,12 @@ Docker networks split into two roles:
   network even if `inter-plane-bus` is also attached.
 
 - **`inter-plane-bus`** — the cross-cutting bus where cross-plane edges
-  live. Velion (L5 ingress per ADR 0003) reaches every plane's public
+  live. Verevon (L5 ingress per ADR 0003) reaches every plane's public
   surface over this bus. notification-core's subscriber to
   `app.session.*` events (G14) flows here. Auth-core JWKS reads from
   model-plane services flow here. **Not** for intra-plane traffic.
 
-Renamed from `velion-net` per ADR 0004 — the old name conflated "velion's
+Renamed from `verevon-net` per ADR 0004 — the old name conflated "verevon's
 network" with "the shared bus." A future ADR may shrink the bus to only
 the cross-plane edges; see ADR 0004 § "Forcing function for Option B."
 

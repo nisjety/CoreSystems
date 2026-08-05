@@ -2,11 +2,11 @@
  * Phase A · A1.4 — generic plane-token minter.
  *
  * Generalises the existing `lib/model-plane/auth-token.ts` machinery so
- * every cross-plane fetch in velion mints an audience-scoped JWT from
+ * every cross-plane fetch in verevon mints an audience-scoped JWT from
  * auth-core instead of forwarding the raw browser cookie or trusting an
  * `X-Org-ID` header. Backstops the Wave 3 multi-tenant trust contract:
  *
- *   1. Velion server-side route handler calls `mintPlaneToken({ audience,
+ *   1. Verevon server-side route handler calls `mintPlaneToken({ audience,
  *      request })` (session path) or `mintPlaneTokenInternal({ audience,
  *      ... })` (worker path).
  *   2. auth-core verifies the Better Auth session (or `INTERNAL_API_KEY`)
@@ -19,7 +19,7 @@
  * Tokens are TTL-cached in-process with a SHA-256 hashed key
  * (cookie ⊕ audience for session-path, claims tuple ⊕ audience for the
  * internal path). The cache is bounded at {@link MAX_CACHE_ENTRIES} with
- * LRU-on-touch eviction so a long-running velion process can't grow the
+ * LRU-on-touch eviction so a long-running verevon process can't grow the
  * map unbounded.
  *
  * Dev escape hatch: when {@link DEV_BYPASS_OPT_IN} is true AND auth-core
@@ -84,7 +84,7 @@ const DEV_BYPASS_TOKEN = 'dev-bypass'
 
 /**
  * Refresh-safety window: we treat a cached token as expired this far
- * before its real expiry, so clock-skew between velion and the plane
+ * before its real expiry, so clock-skew between verevon and the plane
  * gateway can't cause a 401 right at the boundary.
  */
 const REFRESH_SAFETY_MS = 30_000

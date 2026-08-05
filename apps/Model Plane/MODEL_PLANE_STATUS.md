@@ -36,7 +36,7 @@ graph, and wiki to `inter-plane-bus`, and started the stack without deleting
 volumes or rebuilding Control/Data services. Those Model NATS credentials and
 the Control Auth principal registry are not yet durable managed release
 configuration. Quarry remains absent. Never replace scoped credentials with a
-shared token or copy operator connector credentials into Velion.
+shared token or copy operator connector credentials into Verevon.
 
 Source hardening has advanced materially, but it is not deployment evidence:
 
@@ -403,7 +403,7 @@ must never be introduced as an MVP shortcut.
    state through authenticated search, `/readyz`, metrics, and Frontend UX.
    Keep Letta tool ranking classified separately.
 9. Complete MCP execution DNS/auth/HITL proof and expose Visma as
-   `not_configured`; no real Velion Visma server exists today.
+   `not_configured`; no real Verevon Visma server exists today.
 10. Resolve or stage the legacy Buf quality debt and establish a real protocol
    breaking baseline.
 11. Start only immutable candidates in safe dependency order and collect live
@@ -436,7 +436,7 @@ must never be introduced as an MVP shortcut.
   Frontend degraded behavior are not verified.
 - Agentic hybrid retrieval supports bounded reformulation/backtracking in
   source. Structured/tabular, graph, and MCP retrieval are not configured.
-- No real Velion Visma MCP server is configured. The status is
+- No real Verevon Visma MCP server is configured. The status is
   `not_configured`, never the operator's separate Codex/Claude connector.
 - No provider or test double is reported as production. Ordinary external
   inference remains unavailable under the current all-ZDR/no-verified-provider

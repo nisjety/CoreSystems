@@ -13,7 +13,7 @@
 #
 # Prerequisites:
 #   - All services running and healthy
-#   - Shared NATS (velion-nats) accessible
+#   - Shared NATS (verevon-nats) accessible
 #   - PostgreSQL (Data Plane) accessible for quota checks
 #
 # Usage:
@@ -127,8 +127,8 @@ test_phase_2() {
     log_info "Simulating org.plan_changed event via NATS..."
     
     # Check if we can connect to NATS
-    if docker exec velion-nats test -f /etc/nats/nats-shared.conf 2>/dev/null; then
-        log_success "Shared NATS (velion-nats) is accessible"
+    if docker exec verevon-nats test -f /etc/nats/nats-shared.conf 2>/dev/null; then
+        log_success "Shared NATS (verevon-nats) is accessible"
     else
         log_error "Cannot access shared NATS broker"
         return 1

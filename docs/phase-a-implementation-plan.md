@@ -47,7 +47,7 @@ auth-core, with claims:
   "exp": <60s-300s>
 }
 ```
-- Velion mints the JWT via auth-core on every server-side fetch
+- Verevon mints the JWT via auth-core on every server-side fetch
   (cache for the duration of the request; never re-use across requests).
 - Each plane validates the JWT against the JWKS at
   `http://auth-core:3011/api/convex-auth/jwks` (cached 15 min).
@@ -55,14 +55,14 @@ auth-core, with claims:
 - A shared `AuthContext` middleware is published as:
   - Go: `pkg/authctx` (control-plane workspace) + reused via go workspace
   - Rust: `mp-authctx` crate (model-plane workspace)
-  - TS: `@coresystem/auth-context` (velion local package or auth-core
+  - TS: `@coresystem/auth-context` (verevon local package or auth-core
     library export)
 
 ### Concrete deliverables
 **A1.1 — Auth contracts**
 - [ ] `auth-core`: publish JWKS URL + JWT issuance docs in `auth-plan.md`.
 - [ ] `auth-core`: add `/api/auth/internal/mint-plane-token?audience=...`
-  endpoint that velion server-side calls on every cross-plane fetch (60s exp).
+  endpoint that verevon server-side calls on every cross-plane fetch (60s exp).
 - [ ] Define `AuthClaims` shape as a shared protobuf message under
   `apps/Model Plane/proto/control/v1/auth.proto` (re-use across planes).
 
@@ -86,18 +86,18 @@ auth-core, with claims:
 
 **A1.4 — TS helper (`@coresystem/auth-context`)**
 - [ ] `mintPlaneToken(audience: "model" | "data" | "quarry" | ...)`:
-  Promise<string> — server-side helper called from velion route handlers.
+  Promise<string> — server-side helper called from verevon route handlers.
 - [ ] Auto-attaches to `fetch` via a wrapper.
-- [ ] Wire into every velion `app/api/**/route.ts` that does a server-side
+- [ ] Wire into every verevon `app/api/**/route.ts` that does a server-side
   cross-plane fetch.
 
 **A1.5 — Cost-core integration**
 - [ ] Each plane's middleware logs `(user_id, org_id, plane, op, tokens,
-  bytes, cost_cents)` to NATS subject `velion.usage.v1.<plane>.<op>`.
+  bytes, cost_cents)` to NATS subject `verevon.usage.v1.<plane>.<op>`.
 - [ ] `cost-core` aggregates by org_id and exposes `GET /v1/usage?org_id=...`.
 
 **A1.6 — Audit log**
-- [ ] Same NATS subject pattern → `velion.audit.v1.<plane>.<event>`.
+- [ ] Same NATS subject pattern → `verevon.audit.v1.<plane>.<event>`.
 - [ ] New `audit-core` (Go, port 8187) tiny service that subscribes,
   persists to Postgres, exposes `GET /v1/audit?org_id=...&since=...`.
   (Lives in Control Plane.)
@@ -214,14 +214,14 @@ Pages already exist:
 
 ### Current state (verified)
 - `(dashboard)/inbox/[[...slug]]/page.tsx` exists
-- `grep -i zammad` across `velion/src/` returns **zero hits** — Zammad
-  integration in velion is not wired
+- `grep -i zammad` across `verevon/src/` returns **zero hits** — Zammad
+  integration in verevon is not wired
 - Backend: `support-worker` already runs Temporal workflows
   (triage, sla, csat) consuming Zammad webhook events via NATS
 - Zammad container exists at `zammad-foundation/` in Application Plane
 
 ### What needs to land
-**A4.1 — Velion proxy for Zammad REST**
+**A4.1 — Verevon proxy for Zammad REST**
 - [ ] New `app/api/tickets/route.ts` (and `[id]/route.ts`,
   `[id]/articles/route.ts`) that proxy to Zammad's REST with
   `ZAMMAD_API_TOKEN`.
@@ -242,14 +242,14 @@ Pages already exist:
 **A4.3 — Convex mirror**
 - [ ] Add a `tickets` table in convex-core with subset of Zammad fields.
 - [ ] `convex-subscriber` already listens on
-  `velion.support.ticket.{created,updated,assigned}` and
-  `velion.support.article.added` — extend it to upsert into the new table.
+  `verevon.support.ticket.{created,updated,assigned}` and
+  `verevon.support.article.added` — extend it to upsert into the new table.
 - [ ] Add ID mapping `(zammad_ticket_id ↔ convex_ticket_id ↔ org_id)`.
 
 **A4.4 — Reply path**
-- [ ] Velion `POST /api/tickets/:id/reply` → proxies to Zammad
+- [ ] Verevon `POST /api/tickets/:id/reply` → proxies to Zammad
   `POST /api/v1/ticket_articles` → emits NATS
-  `velion.support.article.added` → support-worker sees it → SLA timer
+  `verevon.support.article.added` → support-worker sees it → SLA timer
   resets if external.
 
 ### Estimate: 1.5 weeks
@@ -279,7 +279,7 @@ Total elapsed: **4–5 weeks** of focused work.
 - Two tenants concurrently: every cross-plane call carries an auth-core
   JWT; querying `?org_id=<other>` returns 403; cost-core attributes spend
   correctly; audit log shows the cross-tenant attempt as `DENIED`.
-- Billing checkout returns the user to velion with the new plan reflected
+- Billing checkout returns the user to verevon with the new plan reflected
   in `/settings/billing` within 5 seconds.
 - All UIs render with the existing design system (no new dependencies).
 

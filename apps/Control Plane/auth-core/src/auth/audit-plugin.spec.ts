@@ -1,5 +1,5 @@
 import {
-  publishVelionAuditDurable,
+  publishVerevonAuditDurable,
   setAuditNatsPublisher,
 } from './audit-plugin';
 
@@ -13,10 +13,10 @@ describe('Better Auth audit durability', () => {
   it('awaits the durable publisher for security audit events', async () => {
     const publishAuditDurable = jest
       .fn()
-      .mockResolvedValue({ stream: 'VELION_CONTROL_OBSERVABILITY', seq: 9 });
+      .mockResolvedValue({ stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 9 });
     setAuditNatsPublisher({ publishAuditDurable });
 
-    await publishVelionAuditDurable({
+    await publishVerevonAuditDurable({
       occurred_at: '2026-07-15T00:00:00.000Z',
       event_id: 'session:session-1:sign_in',
       org_id: 'org-1',
@@ -27,7 +27,7 @@ describe('Better Auth audit durability', () => {
     });
 
     expect(publishAuditDurable).toHaveBeenCalledWith(
-      'velion.audit.v2.control.auth-core.sign_in',
+      'verevon.audit.v2.control.auth-core.sign_in',
       expect.objectContaining({
         event_id: 'session:session-1:sign_in',
         org_id: 'org-1',
@@ -43,7 +43,7 @@ describe('Better Auth audit durability', () => {
     });
 
     await expect(
-      publishVelionAuditDurable({
+      publishVerevonAuditDurable({
         occurred_at: '2026-07-15T00:00:00.000Z',
         event_id: 'twofa:mutation-1:enable',
         org_id: 'org-1',
@@ -56,7 +56,7 @@ describe('Better Auth audit durability', () => {
 
   it('fails closed when the durable publisher is unavailable', async () => {
     await expect(
-      publishVelionAuditDurable({
+      publishVerevonAuditDurable({
         occurred_at: '2026-07-15T00:00:00.000Z',
         event_id: 'session:session-1:sign_in',
         org_id: 'org-1',

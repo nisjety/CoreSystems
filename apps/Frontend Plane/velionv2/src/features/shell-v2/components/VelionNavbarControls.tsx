@@ -5,7 +5,7 @@ import type { Route } from "next";
 import { ChevronLeft, ChevronRight, Search, Slash } from "lucide-react";
 import type { ReactNode } from "react";
 import { TopLayerTooltip } from "@/features/shell-v2/components/TopLayerTooltip";
-import type { VelionRoute, WorkspaceIdentity } from "@/features/shell-v2/lib/shell-data";
+import type { VerevonRoute, WorkspaceIdentity } from "@/features/shell-v2/lib/shell-data";
 import { cn } from "@/lib/utils";
 
 export function SearchTrigger({ onOpen }: { onOpen: () => void }) {
@@ -14,15 +14,15 @@ export function SearchTrigger({ onOpen }: { onOpen: () => void }) {
       type="button"
       onClick={onOpen}
       title="Open knowledge search"
-      className="velion-navbar-search-trigger"
+      className="verevon-navbar-search-trigger"
       aria-label="Open knowledge search"
     >
-      <Search className="velion-navbar-search-icon" strokeWidth={1.8} />
-      <span className="velion-navbar-search-label">Search knowledge base</span>
-      <span className="velion-navbar-shortcut-key velion-navbar-shortcut-key-min">
+      <Search className="verevon-navbar-search-icon" strokeWidth={1.8} />
+      <span className="verevon-navbar-search-label">Search knowledge base</span>
+      <span className="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-min">
         /
       </span>
-      <span className="velion-navbar-shortcut-key velion-navbar-shortcut-key-wide">
+      <span className="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-wide">
         CMD+K
       </span>
     </button>
@@ -39,10 +39,10 @@ export function Breadcrumb({
   workspaceActive = false,
 }: {
   moduleLabel: string;
-  moduleHref: VelionRoute;
+  moduleHref: VerevonRoute;
   onWorkspaceClick?: () => void;
   tabLabel: string;
-  tabHref: VelionRoute;
+  tabHref: VerevonRoute;
   workspace: WorkspaceIdentity;
   workspaceActive?: boolean;
 }) {
@@ -117,7 +117,7 @@ export function NavbarActionButton({
       title={tooltip ?? label}
       data-active={active ? "true" : undefined}
       className={cn(
-        "velion-navbar-action-button",
+        "verevon-navbar-action-button",
         className,
       )}
     >

@@ -5,7 +5,7 @@
  *
  * Left: grouped source picker (Chat / Docs / Tools). Clicking a row creates a
  * connect session via the BFF (org + user resolved server-side from the
- * session), starts Velion direct OAuth from the Velion-styled row, and records
+ * session), starts Verevon direct OAuth from the Verevon-styled row, and records
  * the pick only after auth succeeds.
  *
  * Right: deterministic-radial node-link graph driven by graph-index-rs, polled
@@ -398,7 +398,7 @@ function runDirectOauthWindow({
       const payload = event.data;
       if (!payload || typeof payload !== "object") return;
       const record = payload as Record<string, unknown>;
-      if (record.type !== "velion.integration.connected") return;
+      if (record.type !== "verevon.integration.connected") return;
       if (sessionToken && record.sessionToken !== sessionToken) return;
       if (record.status === "success") {
         settle(() => resolve());
@@ -477,8 +477,8 @@ function connectAuthError(
   if (error instanceof ProviderAuthFlowError) {
     if (error.type === "blocked_by_browser") {
       return locale === "nb"
-        ? `Nettleseren blokkerte innloggingen for ${label}. Tillat popups for Velion og prøv igjen.`
-        : `Pop-up was blocked while connecting ${label}. Allow pop-ups for Velion and try again.`;
+        ? `Nettleseren blokkerte innloggingen for ${label}. Tillat popups for Verevon og prøv igjen.`
+        : `Pop-up was blocked while connecting ${label}. Allow pop-ups for Verevon and try again.`;
     }
     if (error.type === "window_closed") {
       return locale === "nb"

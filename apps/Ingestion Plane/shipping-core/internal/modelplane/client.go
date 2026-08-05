@@ -108,7 +108,7 @@ func (c *Client) token(ctx context.Context, orgID, userID string) (string, error
 	c.mu.Unlock()
 
 	body, err := json.Marshal(internalTokenRequest{
-		OrgID: orgID, UserID: userID, Email: userID + "@shipping-core.internal.velion",
+		OrgID: orgID, UserID: userID, Email: userID + "@shipping-core.internal.verevon",
 	})
 	if err != nil {
 		return "", fmt.Errorf("modelplane: encode token request: %w", err)

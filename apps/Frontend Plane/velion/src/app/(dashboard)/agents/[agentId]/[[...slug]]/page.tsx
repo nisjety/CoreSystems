@@ -52,7 +52,7 @@ export default async function AgentWorkspacePage({
     return <AgentWorkspaceView agent={persistedAgent} viewId={viewId} />
   }
 
-  // Wave 8 (ui-ux-velion-gap.md §18): only fall back to MOCK_AGENTS
+  // Wave 8 (ui-ux-verevon-gap.md §18): only fall back to MOCK_AGENTS
   // when the URL points at a *known demo id* (used by the seed flow
   // and design previews). Any other unknown id is a real 404 — we no
   // longer silently render fixtures to mask a broken lookup.

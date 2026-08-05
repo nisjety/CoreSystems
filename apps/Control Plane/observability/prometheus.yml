@@ -40,8 +40,8 @@ scrape_configs:
       - targets: ['audit-core-service:9091']
         labels: { service: audit-core }
 
-  - job_name: velion-gateway
+  - job_name: verevon-gateway
     metrics_path: /metrics
     static_configs:
-      - targets: ['velion-gateway-rs:3185']
+      - targets: ['verevon-gateway-rs:3185']
         labels: { service: gateway, plane: frontend }

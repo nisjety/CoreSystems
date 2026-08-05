@@ -85,7 +85,7 @@ for relative in \
   'apps/Ingestion Plane/.env' \
   'apps/Model Plane/deploy/.env' \
   'apps/Application Plane/.env' \
-  'apps/Frontend Plane/velionv3/.env'; do
+  'apps/Frontend Plane/verevonv3/.env'; do
   mkdir -p "$FIXTURE/$(dirname "$relative")"
   printf '# fixture\n' > "$FIXTURE/$relative"
 done
@@ -106,7 +106,7 @@ data="$FIXTURE/apps/Data Plane v2/.env"
 ingestion="$FIXTURE/apps/Ingestion Plane/.env"
 model="$FIXTURE/apps/Model Plane/deploy/.env"
 application="$FIXTURE/apps/Application Plane/.env"
-frontend="$FIXTURE/apps/Frontend Plane/velionv3/.env"
+frontend="$FIXTURE/apps/Frontend Plane/verevonv3/.env"
 
 assert_equal "fleet internal key is synchronized to Data" "$(value_of "$control" INTERNAL_API_KEY)" "$(value_of "$data" INTERNAL_API_KEY)"
 assert_equal "fleet internal key is synchronized to Frontend" "$(value_of "$control" INTERNAL_API_KEY)" "$(value_of "$frontend" INTERNAL_API_KEY)"
@@ -126,7 +126,7 @@ assert_compose_required_vars "Control Compose required variables are bootstrappe
 assert_compose_required_vars "Ingestion Compose required variables are bootstrapped" "$REPO_ROOT/apps/Ingestion Plane/docker-compose.yml" "$ingestion"
 assert_compose_required_vars "Model Compose required variables are bootstrapped" "$REPO_ROOT/apps/Model Plane/deploy/docker-compose.yml" "$model"
 assert_compose_required_vars "Application Compose required variables are bootstrapped" "$REPO_ROOT/apps/Application Plane/docker-compose.yml" "$application"
-assert_compose_required_vars "Frontend Compose required variables are bootstrapped" "$REPO_ROOT/apps/Frontend Plane/velionv3/docker-compose.yml" "$frontend"
+assert_compose_required_vars "Frontend Compose required variables are bootstrapped" "$REPO_ROOT/apps/Frontend Plane/verevonv3/docker-compose.yml" "$frontend"
 
 data_dockerignore="$REPO_ROOT/apps/Data Plane v2/.dockerignore"
 if grep -Fxq '.secrets/' "$data_dockerignore" &&

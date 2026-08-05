@@ -15,7 +15,7 @@
 // the host directly.
 //
 // Note: not every RPC in `ModelGatewayService` is re-exported here —
-// only the Wave 9/10 surfaces velion actually touches. Add re-exports
+// only the Wave 9/10 surfaces verevon actually touches. Add re-exports
 // as needed; the typed client supports them all out of the box.
 
 import { createClient, type Client } from "@connectrpc/connect";
@@ -46,7 +46,7 @@ export function gatewayClient(): Client<typeof ModelGateway> {
     baseUrl: DEFAULT_BASE_URL,
     // grpc-web works against tonic without extra config; the gateway
     // serves it on the same port as native gRPC. If we ever need
-    // streaming RPCs from velion we may need to switch this to the
+    // streaming RPCs from verevon we may need to switch this to the
     // `useHttpGet`/`useBinaryFormat` knobs — for unary it's irrelevant.
     useBinaryFormat: true,
   });

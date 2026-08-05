@@ -11,7 +11,7 @@
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
 
@@ -19,7 +19,7 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Default Claude model used when a request leaves the model unspecified
-/// ("Velion Auto"). The fallback chain substitutes this when Anthropic is the
+/// ("Verevon Auto"). The fallback chain substitutes this when Anthropic is the
 /// provider serving an unpinned request, so chat works against an
 /// Anthropic-only deployment with no client- or operator-chosen model.
 pub(crate) const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-20250514";
@@ -130,6 +130,211 @@ fn is_cheap_claude(model: &str) -> bool {
     model.to_ascii_lowercase().contains("haiku")
 }
 
+/// Anthropic's hard limit on `cache_control` breakpoints in a single request. A
+/// fifth breakpoint is a `400`, which would fail a user's whole turn — whereas a
+/// breakpoint we decline to place merely costs a few tokens. The planner below
+/// places at most three (tools, system, last message) and still checks against
+/// this ceiling, so the invariant is enforced in code and not only by
+/// construction; the spare slot is headroom for an account-side automatic cache
+/// breakpoint, which consumes one of the same four slots.
+const MAX_CACHE_BREAKPOINTS: usize = 4;
+
+/// The `cache_control` marker for Anthropic's default 5-minute ephemeral prompt
+/// cache.
+///
+/// **No `anthropic-beta` header is required.** Prompt caching is generally
+/// available on `anthropic-version: 2023-06-01` — the header this provider
+/// already sends — and the `prompt-caching-2024-07-31` beta header was only
+/// needed during the 2024 beta. Only the *1-hour* extended TTL
+/// (`{"type":"ephemeral","ttl":"1h"}`) and the cache-diagnostics beta need an
+/// extra header, and this provider uses neither: it sends the plain 5-minute
+/// `ephemeral` type, which is also what the Azure AI Foundry Claude deployments
+/// accept (Foundry lists prompt caching as a supported Claude capability and
+/// meters "tokens after the last cache breakpoint" for its rate limits).
+fn ephemeral_cache_control() -> serde_json::Value {
+    serde_json::json!({ "type": "ephemeral" })
+}
+
+/// Minimum cacheable prompt length, in tokens, for `model`.
+///
+/// Anthropic refuses to cache a prefix shorter than this even when it *is*
+/// marked — the breakpoint is silently ignored rather than rejected — so an
+/// over-high estimate costs a missed cache while an over-low one wastes a
+/// breakpoint slot. The published minimums differ per model family and apply
+/// identically on the first-party Claude API and on Microsoft Foundry. Unknown
+/// or future deployment names fall back to the Sonnet-class 1024.
+fn min_cacheable_tokens(model: &str) -> usize {
+    let model = model.to_ascii_lowercase();
+    if model.contains("haiku") {
+        // Haiku-class: the economy tier carries the highest floor, so the same
+        // prompt that caches on Sonnet may be too small to cache here.
+        2_048
+    } else if model.contains("opus-4-5")
+        || model.contains("opus-4.5")
+        || model.contains("opus-4-6")
+        || model.contains("opus-4.6")
+    {
+        4_096
+    } else if model.contains("opus-4-7")
+        || model.contains("opus-4.7")
+        || model.contains("mythos-preview")
+    {
+        2_048
+    } else {
+        // Sonnet-class (and Opus 4.8 / Opus 5, whose real floors are lower —
+        // treating them as 1024 is the conservative direction).
+        1_024
+    }
+}
+
+/// Conservative token estimate for `bytes` of prompt text.
+///
+/// inference-core has no real tokenizer yet (quality plan §2.2), so this reuses
+/// the plane's `bytes / 4` heuristic. The error direction is deliberate: real
+/// tokenizers emit *more* tokens than `bytes / 4` for both JSON tool schemas
+/// (punctuation-dense) and Norwegian prose (`æ/ø/å` split aggressively), so a
+/// prefix this function judges long enough is long enough in practice. When it
+/// is wrong it under-counts, which makes us decline a breakpoint rather than
+/// place a useless one.
+const fn estimated_tokens(bytes: usize) -> usize {
+    bytes / 4
+}
+
+/// Mark the stable prefix of an Anthropic request with prompt-cache
+/// breakpoints.
+///
+/// # Why this exists
+///
+/// model-gateway's inline chat loop runs up to 12 tool rounds per turn, and
+/// every round re-sends the *entire* system prompt, all tool definitions, and
+/// the whole accumulated history at full input-token price. Anthropic caches
+/// everything **up to and including** a block marked `cache_control`, over the
+/// hierarchy `tools` → `system` → `messages` (in that order), so *where* a
+/// breakpoint sits — not how many there are — decides how much of each round is
+/// billed at the ~10% cache-read rate instead of 100%.
+///
+/// # Placement
+///
+/// * **Last tool definition.** The tool block is byte-identical across every
+///   round of a turn and sits first in the hierarchy, making it the single most
+///   reusable prefix.
+/// * **The system prompt.** Also byte-identical across rounds, and its prefix
+///   subsumes `tools`, so this one breakpoint caches the tool block too.
+/// * **The last message.** The rolling breakpoint that makes the *loop* cheap:
+///   round N writes an entry at its final message, and round N+1's breakpoint
+///   walks backwards to find it (the lookback spans 20 blocks and a round
+///   appends only ~2), so round N+1 pays the cache-write rate on the delta
+///   alone.
+///
+/// Anthropic's minimum applies to the whole cacheable *prefix*, not to the
+/// marked block on its own, so the byte counter below accumulates in hierarchy
+/// order. A block that is skipped for being too small still contributes its
+/// bytes to the next candidate — and is still cached by it, since a later
+/// breakpoint's prefix contains it.
+///
+/// # ⚠ ZERO DATA RETENTION
+///
+/// Prompt caching means the **provider retains the prompt prefix server-side**
+/// for minutes. That is data retention, so it is disabled outright whenever
+/// `req.zdr` is set — the same discipline [`crate::cache`] applies when it
+/// bypasses the local prompt cache on both read *and* write. Under ZDR this
+/// returns with the body untouched, so no `cache_control` reaches the wire from
+/// any path: `infer` and `infer_stream` both build their body here, and this is
+/// the only place in the provider that emits the marker.
+fn apply_prompt_caching(body: &mut serde_json::Value, req: &InferRequest) {
+    // ⚠ COMPLIANCE GATE — see the "ZERO DATA RETENTION" note above. This must
+    // stay the first statement in this function.
+    if req.zdr {
+        return;
+    }
+
+    let min_tokens = min_cacheable_tokens(&req.model);
+    let mut breakpoints = 0_usize;
+    // Bytes of prompt content at or before the block under consideration.
+    let mut prefix_bytes = 0_usize;
+
+    // 1. Tool definitions — first in the cache hierarchy, byte-identical across
+    //    every round of a tool loop. `cache_control` hangs off the LAST tool,
+    //    which marks the whole `tools` block.
+    prefix_bytes += req
+        .tools
+        .iter()
+        .map(|t| t.name.len() + t.description.len() + t.parameters_json.len())
+        .sum::<usize>();
+    if breakpoints < MAX_CACHE_BREAKPOINTS && estimated_tokens(prefix_bytes) >= min_tokens {
+        if let Some(last_tool) = body
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|tools| tools.last_mut())
+        {
+            last_tool["cache_control"] = ephemeral_cache_control();
+            breakpoints += 1;
+        }
+    }
+
+    // 2. System prompt — byte-identical across rounds; its prefix subsumes the
+    //    tool block. A marked system prompt must use the structured block form,
+    //    since the plain-string form has nowhere to hang `cache_control`.
+    if let Some(system) = body
+        .get("system")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    {
+        prefix_bytes += system.len();
+        if !system.is_empty()
+            && breakpoints < MAX_CACHE_BREAKPOINTS
+            && estimated_tokens(prefix_bytes) >= min_tokens
+        {
+            body["system"] = serde_json::json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": ephemeral_cache_control(),
+            }]);
+            breakpoints += 1;
+        }
+    }
+
+    // 3. The last message — the rolling breakpoint that makes a multi-round tool
+    //    loop cheap (see the doc comment).
+    prefix_bytes += req
+        .messages
+        .iter()
+        .filter(|m| !m.role.eq_ignore_ascii_case("system"))
+        .map(|m| m.role.len() + m.content.len())
+        .sum::<usize>();
+    if breakpoints < MAX_CACHE_BREAKPOINTS && estimated_tokens(prefix_bytes) >= min_tokens {
+        if let Some(last_message) = body
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|messages| messages.last_mut())
+        {
+            let text = last_message
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            // Empty text blocks cannot be cached; marking one burns a slot.
+            if !text.is_empty() {
+                last_message["content"] = serde_json::json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": ephemeral_cache_control(),
+                }]);
+                breakpoints += 1;
+            }
+        }
+    }
+
+    if breakpoints > 0 {
+        debug!(
+            model = %req.model,
+            breakpoints,
+            min_cacheable_tokens = min_tokens,
+            "anthropic prompt-cache breakpoints applied"
+        );
+    }
+}
+
 /// Build the Anthropic messages API request body.
 fn build_request_body(req: &InferRequest) -> serde_json::Value {
     // The Anthropic Messages API takes the system prompt as a TOP-LEVEL `system`
@@ -211,6 +416,11 @@ fn build_request_body(req: &InferRequest) -> serde_json::Value {
         };
     }
 
+    // Mark the stable prefix for Anthropic's prompt cache. Must run last: it
+    // rewrites `tools` / `system` / `messages` in place, so every field it marks
+    // has to already be present. Bypassed entirely for ZDR requests.
+    apply_prompt_caching(&mut body, req);
+
     body
 }
 
@@ -242,6 +452,34 @@ fn to_i32_or_max(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// Tokens served from Anthropic's prompt cache for this request (0 when
+/// absent). `usage` is the Anthropic `usage` object itself (found at
+/// `response.usage` for non-streaming replies, `message_start.message.usage`
+/// for streaming).
+fn cache_read_input_tokens(usage: &serde_json::Value) -> i32 {
+    to_i32_or_max(usage["cache_read_input_tokens"].as_i64().unwrap_or(0))
+}
+
+/// Tokens newly written to Anthropic's prompt cache by this request (0 when
+/// absent). See [`cache_read_input_tokens`] for the `usage` shape.
+fn cache_creation_input_tokens(usage: &serde_json::Value) -> i32 {
+    to_i32_or_max(usage["cache_creation_input_tokens"].as_i64().unwrap_or(0))
+}
+
+/// With prompt caching on, Anthropic's `input_tokens` counts ONLY the tokens
+/// *after* the last cache breakpoint — the cached prefix is reported
+/// separately as `cache_read_input_tokens` (served from cache) and
+/// `cache_creation_input_tokens` (newly written). Downstream cost accounting
+/// reads this as the request's total input, so the cache legs are folded back
+/// in: without this, enabling caching would silently drop most of every
+/// round's input from usage and under-report cost. Both cache fields are
+/// absent (→ 0) when nothing was cached, so uncached requests are unchanged.
+fn total_input_tokens(usage: &serde_json::Value) -> i32 {
+    to_i32_or_max(usage["input_tokens"].as_i64().unwrap_or(0))
+        .saturating_add(cache_read_input_tokens(usage))
+        .saturating_add(cache_creation_input_tokens(usage))
+}
+
 fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
     // Concatenate all text blocks (a response may interleave text + tool_use).
     let content = json["content"]
@@ -259,7 +497,7 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         .as_str()
         .unwrap_or("end_turn")
         .to_owned();
-    let input_tokens = to_i32_or_max(json["usage"]["input_tokens"].as_i64().unwrap_or(0));
+    let input_tokens = total_input_tokens(&json["usage"]);
     let output_tokens = to_i32_or_max(json["usage"]["output_tokens"].as_i64().unwrap_or(0));
     let tool_calls = parse_tool_calls(json);
 
@@ -371,7 +609,17 @@ impl ProviderRouter for AnthropicProvider {
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-        info!(model = %req.model, provider = self.provider_name(), "infer completed");
+        // The cache legs are logged so a real multi-round turn can be verified:
+        // round 1 shows a non-zero `cache_creation_input_tokens`, round 2+ a
+        // non-zero `cache_read_input_tokens`. Both stay 0 for ZDR requests,
+        // which never carry a breakpoint.
+        info!(
+            model = %req.model,
+            provider = self.provider_name(),
+            cache_read_input_tokens = cache_read_input_tokens(&json["usage"]),
+            cache_creation_input_tokens = cache_creation_input_tokens(&json["usage"]),
+            "infer completed"
+        );
         Ok(parse_response(&req.request_id, &json))
     }
 
@@ -426,6 +674,16 @@ impl ProviderRouter for AnthropicProvider {
             let mut bytes_stream = response.bytes_stream();
             let mut buffer = String::new();
 
+            // Anthropic's streaming `message_stop` event carries NO `usage`
+            // field — usage is split across two earlier events instead:
+            // `message_start.message.usage` has `input_tokens` (plus the cache
+            // legs), and `message_delta.usage` has the final cumulative
+            // `output_tokens`. Capture both here and use them once the stream
+            // ends; reading `usage` off `message_stop` itself (the previous
+            // bug) always resolved to 0.
+            let mut input_tokens: i32 = 0;
+            let mut output_tokens: i32 = 0;
+
             while let Some(chunk_result) = bytes_stream.next().await {
                 let bytes = match chunk_result {
                     Ok(b) => b,
@@ -449,8 +707,8 @@ impl ProviderRouter for AnthropicProvider {
                                 delta: String::new(),
                                 done: true,
                                 model_used: model.clone(),
-                                input_tokens: 0,
-                                output_tokens: 0,
+                                input_tokens,
+                                output_tokens,
                             };
                             let _ = tx.send(final_chunk).await;
                             return;
@@ -459,7 +717,13 @@ impl ProviderRouter for AnthropicProvider {
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                             let event_type = json["type"].as_str().unwrap_or("");
 
-                            if event_type == "content_block_delta" {
+                            if event_type == "message_start" {
+                                input_tokens = total_input_tokens(&json["message"]["usage"]);
+                            } else if event_type == "message_delta" {
+                                if let Some(v) = json["usage"]["output_tokens"].as_i64() {
+                                    output_tokens = to_i32_or_max(v);
+                                }
+                            } else if event_type == "content_block_delta" {
                                 let delta = json["delta"]["text"].as_str().unwrap_or("").to_owned();
                                 let chunk = InferChunk {
                                     request_id: request_id.clone(),
@@ -478,12 +742,8 @@ impl ProviderRouter for AnthropicProvider {
                                     delta: String::new(),
                                     done: true,
                                     model_used: model.clone(),
-                                    input_tokens: json["usage"]["input_tokens"]
-                                        .as_i64()
-                                        .map_or(0, to_i32_or_max),
-                                    output_tokens: json["usage"]["output_tokens"]
-                                        .as_i64()
-                                        .map_or(0, to_i32_or_max),
+                                    input_tokens,
+                                    output_tokens,
                                 };
                                 let _ = tx.send(final_chunk).await;
                                 return;
@@ -499,8 +759,8 @@ impl ProviderRouter for AnthropicProvider {
                 delta: String::new(),
                 done: true,
                 model_used: model,
-                input_tokens: 0,
-                output_tokens: 0,
+                input_tokens,
+                output_tokens,
             };
             let _ = tx.send(final_chunk).await;
         });
@@ -561,7 +821,7 @@ mod tool_tests {
             messages: vec![
                 ChatMessage {
                     role: "system".to_owned(),
-                    content: "You are Velion.".to_owned(),
+                    content: "You are Verevon.".to_owned(),
                     name: String::new(),
                 },
                 ChatMessage {
@@ -574,11 +834,311 @@ mod tool_tests {
         };
         let body = build_request_body(&req);
         // System prompt hoisted to the top-level parameter, removed from messages.
-        assert_eq!(body["system"], "You are Velion.");
+        assert_eq!(body["system"], "You are Verevon.");
         assert_eq!(body["messages"].as_array().expect("messages").len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
         // temperature is never forwarded to Anthropic.
         assert!(body.get("temperature").is_none());
+    }
+}
+
+#[cfg(test)]
+mod prompt_cache_tests {
+    use super::{
+        build_request_body, min_cacheable_tokens, parse_response, total_input_tokens,
+        MAX_CACHE_BREAKPOINTS,
+    };
+    use crate::provider::{ChatMessage, InferRequest, ToolDefinition};
+
+    /// Recursively count `cache_control` keys anywhere in the body.
+    fn count_cache_control(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::Object(map) => map
+                .iter()
+                .map(|(key, nested)| {
+                    usize::from(key == "cache_control") + count_cache_control(nested)
+                })
+                .sum(),
+            serde_json::Value::Array(items) => items.iter().map(count_cache_control).sum(),
+            _ => 0,
+        }
+    }
+
+    /// A tool definition whose schema is `schema_bytes` long, so a test can sit
+    /// deliberately above or below a model's minimum cacheable length.
+    fn padded_tool(schema_bytes: usize) -> ToolDefinition {
+        let padding = "d".repeat(schema_bytes);
+        ToolDefinition {
+            name: "search_erp".to_owned(),
+            description: "Search the ERP".to_owned(),
+            parameters_json: format!(
+                r#"{{"type":"object","properties":{{"q":{{"type":"string","description":"{padding}"}}}}}}"#
+            ),
+        }
+    }
+
+    /// A request big enough to clear the Sonnet-class 1024-token minimum on all
+    /// three prefixes (tools, system, messages) — roughly 4 KiB each.
+    fn large_request(model: &str) -> InferRequest {
+        InferRequest {
+            model: model.to_owned(),
+            max_tokens: 1024,
+            tools: vec![padded_tool(5_000)],
+            tool_choice: "auto".to_owned(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: format!("You are Verevon. {}", "s".repeat(5_000)),
+                    name: String::new(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: format!("Hva er på lager? {}", "u".repeat(5_000)),
+                    name: String::new(),
+                },
+            ],
+            zdr: false,
+            ..Default::default()
+        }
+    }
+
+    /// ⚠ COMPLIANCE: Zero Data Retention forbids prompt caching outright.
+    ///
+    /// Anthropic's prompt cache holds the marked prefix server-side for minutes.
+    /// That is retention, so a ZDR request must carry NO `cache_control`
+    /// anywhere in its body — not on the tools, not on the system prompt, not on
+    /// any message — no matter how large and cacheable the prompt is. This
+    /// mirrors `cache.rs`, which bypasses the local prompt cache on both read and
+    /// write under ZDR. If this test fails, Verevon is leaking customer prompt
+    /// content into a provider-side cache in violation of its ZDR contract; do
+    /// not "fix" it by relaxing the assertion.
+    #[test]
+    fn zdr_request_must_not_send_cache_control_anywhere_in_the_body() {
+        let mut req = large_request("claude-sonnet-4-6");
+        req.zdr = true;
+
+        let body = build_request_body(&req);
+        let serialized = serde_json::to_string(&body).expect("serialize body");
+
+        assert!(
+            !serialized.contains("cache_control"),
+            "ZDR VIOLATION: prompt-cache breakpoint sent to the provider: {serialized}"
+        );
+        assert_eq!(
+            count_cache_control(&body),
+            0,
+            "ZDR VIOLATION: cache_control present in the request body"
+        );
+        // The unmarked shapes must also be the plain forms — a structured block
+        // rewrite would signal that marking ran and was merely stripped.
+        assert!(body["system"].is_string(), "ZDR body kept the plain system");
+        assert!(
+            body["messages"][0]["content"].is_string(),
+            "ZDR body kept plain message content"
+        );
+
+        // Same prompt without the ZDR bit MUST cache — otherwise this test would
+        // pass on a build where caching is broken for everyone.
+        let mut non_zdr = req.clone();
+        non_zdr.zdr = false;
+        let non_zdr_body = build_request_body(&non_zdr);
+        assert!(
+            count_cache_control(&non_zdr_body) > 0,
+            "control arm: a non-ZDR request of the same prompt must be cached"
+        );
+    }
+
+    #[test]
+    fn large_non_zdr_request_marks_tools_system_and_the_last_message() {
+        let body = build_request_body(&large_request("claude-sonnet-4-6"));
+
+        // Tool block: the marker hangs off the LAST tool definition, which caches
+        // the whole `tools` array (first in Anthropic's cache hierarchy).
+        assert_eq!(
+            body["tools"][0]["cache_control"]["type"], "ephemeral",
+            "tool definitions are byte-identical every round — must be cached"
+        );
+        // System prompt: rewritten to the structured block form so the marker has
+        // somewhere to live.
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["system"][0]["text"]
+            .as_str()
+            .expect("system text")
+            .starts_with("You are Verevon."));
+        // Last message: the rolling breakpoint that makes round N+1 cheap.
+        assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+        assert_eq!(
+            body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(count_cache_control(&body), 3);
+    }
+
+    #[test]
+    fn breakpoint_count_never_exceeds_anthropics_limit_of_four() {
+        // A fifth `cache_control` is a hard 400 that fails the user's whole turn.
+        // Pile on tools and history and assert the ceiling holds.
+        let mut req = large_request("claude-sonnet-4-6");
+        req.tools = (0..12).map(|_| padded_tool(4_000)).collect();
+        for i in 0..24 {
+            req.messages.push(ChatMessage {
+                role: if i % 2 == 0 { "assistant" } else { "user" }.to_owned(),
+                content: format!("round {i} {}", "h".repeat(2_000)),
+                name: String::new(),
+            });
+        }
+
+        let body = build_request_body(&req);
+        let placed = count_cache_control(&body);
+        assert!(
+            placed <= MAX_CACHE_BREAKPOINTS,
+            "placed {placed} breakpoints, over Anthropic's limit of {MAX_CACHE_BREAKPOINTS}"
+        );
+        assert!(placed > 0, "a large tool loop must still be cached");
+    }
+
+    #[test]
+    fn prompt_below_the_minimum_cacheable_length_is_not_marked() {
+        // Marking a prefix Anthropic is too small to cache buys nothing: it is
+        // silently ignored, so the breakpoint slot is simply wasted.
+        let req = InferRequest {
+            model: "claude-sonnet-4-6".to_owned(),
+            max_tokens: 256,
+            tools: vec![padded_tool(8)],
+            tool_choice: "auto".to_owned(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: "You are Verevon.".to_owned(),
+                    name: String::new(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "Hei".to_owned(),
+                    name: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let body = build_request_body(&req);
+        assert_eq!(
+            count_cache_control(&body),
+            0,
+            "a tiny prompt must not be marked: {body}"
+        );
+        // Unmarked blocks keep the original plain-string shapes untouched.
+        assert_eq!(body["system"], "You are Verevon.");
+        assert_eq!(body["messages"][0]["content"], "Hei");
+    }
+
+    #[test]
+    fn haiku_class_floor_is_higher_so_a_mid_sized_prompt_caches_only_on_sonnet() {
+        assert_eq!(min_cacheable_tokens("claude-haiku-4-5"), 2_048);
+        assert_eq!(min_cacheable_tokens("claude-sonnet-4-6"), 1_024);
+        assert_eq!(min_cacheable_tokens("claude-opus-4-5"), 4_096);
+        // Unknown/future deployment names fall back to the Sonnet-class floor.
+        assert_eq!(min_cacheable_tokens("some-future-claude"), 1_024);
+
+        // ~6 KiB of prompt ≈ 1500 estimated tokens: over Sonnet's 1024 floor,
+        // under Haiku's 2048. The same prompt must cache on one and not the other.
+        let mid_sized = |model: &str| InferRequest {
+            model: model.to_owned(),
+            max_tokens: 512,
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: "y".repeat(6_000),
+                    name: String::new(),
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "Hei".to_owned(),
+                    name: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(
+            count_cache_control(&build_request_body(&mid_sized("claude-sonnet-4-6"))) > 0,
+            "6 KiB clears the Sonnet-class floor"
+        );
+        assert_eq!(
+            count_cache_control(&build_request_body(&mid_sized("claude-haiku-4-5"))),
+            0,
+            "6 KiB is under the Haiku-class floor — marking it would be inert"
+        );
+    }
+
+    #[test]
+    fn input_tokens_still_reports_the_whole_input_when_the_prefix_was_cached() {
+        // Anthropic's `input_tokens` counts only what follows the last
+        // breakpoint. Cost accounting reads it as the request total, so the cache
+        // legs must be folded back in or caching would silently under-bill.
+        let json = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "model": "claude-sonnet-4-6",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 120,
+                "cache_read_input_tokens": 8_000,
+                "cache_creation_input_tokens": 400,
+                "output_tokens": 42
+            }
+        });
+
+        let parsed = parse_response("req-1", &json);
+        assert_eq!(parsed.input_tokens, 8_520);
+        assert_eq!(parsed.output_tokens, 42);
+
+        // An uncached response (no cache fields at all) is unchanged.
+        let uncached = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "usage": { "input_tokens": 120, "output_tokens": 42 }
+        });
+        assert_eq!(parse_response("req-2", &uncached).input_tokens, 120);
+    }
+
+    #[test]
+    fn streaming_usage_comes_from_message_start_and_message_delta_not_message_stop() {
+        // Real Anthropic streaming shape: `message_stop` carries no `usage`
+        // field at all — reading it from there (the historical bug) always
+        // resolves to 0. `input_tokens` (plus any cache legs) lives on
+        // `message_start.message.usage`; the final `output_tokens` lives on
+        // `message_delta.usage`.
+        let message_start = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": 25,
+                    "cache_read_input_tokens": 8_000,
+                    "cache_creation_input_tokens": 0,
+                    "output_tokens": 1
+                }
+            }
+        });
+        let message_delta = serde_json::json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": 63 }
+        });
+        let message_stop = serde_json::json!({ "type": "message_stop" });
+
+        let input_tokens = total_input_tokens(&message_start["message"]["usage"]);
+        let output_tokens = message_delta["usage"]["output_tokens"].as_i64().unwrap();
+
+        assert_eq!(input_tokens, 8_025);
+        assert_eq!(output_tokens, 63);
+        // `message_stop` itself has no usage to read — confirms the fields
+        // must be carried forward from the earlier events instead.
+        assert!(message_stop["usage"].is_null());
     }
 }
 

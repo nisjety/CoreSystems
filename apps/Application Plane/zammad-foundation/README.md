@@ -334,7 +334,7 @@ Let humans and later AI update priority; do not customize the priority model yet
 
 Use Zammad webhooks as the event handoff after ingestion.
 
-- Webhook target later: internal adapter on `velion-net`
+- Webhook target later: internal adapter on `verevon-net`
 - Trigger source: ticket create and customer article update
 - Payload consumer: Convex/NATS/AI orchestration service
 
@@ -421,7 +421,7 @@ Keep the custom frontend outside Zammad until later.
 - [`docker-compose.zammad.yml`](/Volumes/Lagring/Triodelab/CoreSystem/apps/Application%20Plane/docker-compose.zammad.yml)
   - Stock-lean Zammad runtime based on the official Docker Compose stack
   - Keeps internal dependencies inside `zammad-net`
-  - Exposes app services to `velion-net` for future internal webhook/API integration
+  - Exposes app services to `verevon-net` for future internal webhook/API integration
 - [`.env.zammad.example`](/Volumes/Lagring/Triodelab/CoreSystem/apps/Application%20Plane/.env.zammad.example)
   - Runtime variables and future webhook placeholders
 

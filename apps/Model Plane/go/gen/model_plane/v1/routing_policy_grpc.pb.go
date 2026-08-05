@@ -27,9 +27,9 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// RoutingPolicy — runtime-tunable configuration for the Velion intent layer
+// RoutingPolicy — runtime-tunable configuration for the Verevon intent layer
 // (the "model router"). The intent layer in inference-core resolves the
-// velion-budget / velion-balance / velion-genius modes to a concrete model
+// verevon-budget / verevon-balance / verevon-genius modes to a concrete model
 // from request complexity + budget posture; this service makes that policy
 // editable at runtime instead of compile-time constants.
 //
@@ -40,7 +40,7 @@ const (
 // fresh deployment behaves identically until an admin edits the policy.
 //
 // Read path: inference-core polls GetPolicy on a refresh tick (fail-soft to
-// defaults). Write path: the Velion BFF gateway calls SetPolicy on an admin
+// defaults). Write path: the Verevon BFF gateway calls SetPolicy on an admin
 // PUT. The gateway's read for the admin UI hits inference-core's effective-view
 // endpoint, not this service, so the UI shows what routing is actually using.
 type RoutingPolicyClient interface {
@@ -85,9 +85,9 @@ func (c *routingPolicyClient) SetPolicy(ctx context.Context, in *SetRoutingPolic
 // All implementations must embed UnimplementedRoutingPolicyServer
 // for forward compatibility.
 //
-// RoutingPolicy — runtime-tunable configuration for the Velion intent layer
+// RoutingPolicy — runtime-tunable configuration for the Verevon intent layer
 // (the "model router"). The intent layer in inference-core resolves the
-// velion-budget / velion-balance / velion-genius modes to a concrete model
+// verevon-budget / verevon-balance / verevon-genius modes to a concrete model
 // from request complexity + budget posture; this service makes that policy
 // editable at runtime instead of compile-time constants.
 //
@@ -98,7 +98,7 @@ func (c *routingPolicyClient) SetPolicy(ctx context.Context, in *SetRoutingPolic
 // fresh deployment behaves identically until an admin edits the policy.
 //
 // Read path: inference-core polls GetPolicy on a refresh tick (fail-soft to
-// defaults). Write path: the Velion BFF gateway calls SetPolicy on an admin
+// defaults). Write path: the Verevon BFF gateway calls SetPolicy on an admin
 // PUT. The gateway's read for the admin UI hits inference-core's effective-view
 // endpoint, not this service, so the UI shows what routing is actually using.
 type RoutingPolicyServer interface {

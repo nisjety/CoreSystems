@@ -125,14 +125,14 @@ describe('accepted invitation retry contract', () => {
       expect(new URL(request.url).pathname).toBe(
         '/api/auth/organization/accept-invitation',
       );
-      expect(request.headers.get('origin')).toBe('https://velion.example');
+      expect(request.headers.get('origin')).toBe('https://verevon.example');
       expect(request.headers.get('cookie')).toContain('session=opaque');
       const actorAddress = request.headers.get('x-forwarded-for');
       expect(actorAddress).toMatch(/^fd[0-9a-f]{2}(?::[0-9a-f]{4}){7}$/);
       expect(request.headers.get('cf-connecting-ip')).toBe(actorAddress);
       expect(request.headers.get('x-real-ip')).toBe(actorAddress);
       expect(request.headers.get('true-client-ip')).toBe(actorAddress);
-      expect(request.headers.get('x-velion-invitation-acceptance')).toMatch(
+      expect(request.headers.get('x-verevon-invitation-acceptance')).toMatch(
         /^v1\.\d{10}\.[A-Za-z0-9_-]{43}$/,
       );
       await expect(request.json()).resolves.toEqual({
@@ -145,7 +145,7 @@ describe('accepted invitation retry contract', () => {
       new InvitationAcceptanceController().accept(' inv_123 ', {
         headers: {
           cookie: ['session=opaque', 'session_aux=opaque'],
-          origin: 'https://velion.example',
+          origin: 'https://verevon.example',
           'cf-connecting-ip': '203.0.113.1',
           'x-forwarded-for': '203.0.113.2',
           'x-real-ip': '203.0.113.3',

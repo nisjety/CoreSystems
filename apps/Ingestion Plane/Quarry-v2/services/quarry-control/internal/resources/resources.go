@@ -415,7 +415,7 @@ func createJob(db store.DB) http.HandlerFunc {
 		}
 		// Honor `Idempotency-Key` header: if a job with the same key
 		// already exists, return it (200 OK) rather than creating a
-		// duplicate (201). This lets velion safely retry the POST on
+		// duplicate (201). This lets verevon safely retry the POST on
 		// a network hiccup, and turns a user's double-click into a
 		// single crawl. Keys longer than 128 chars are rejected to
 		// bound the index.

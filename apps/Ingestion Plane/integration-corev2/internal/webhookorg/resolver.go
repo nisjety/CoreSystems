@@ -2,7 +2,7 @@
 // provider webhook.
 //
 // Real account-wide callbacks (Meta Page/Instagram/WhatsApp, Slack Events)
-// carry NO Velion organization id — only provider-side account identifiers.
+// carry NO Verevon organization id — only provider-side account identifiers.
 // Before this resolver existed, such events were stored with an empty org and
 // silently dropped by every downstream consumer, which kept the Meta inbox
 // channels dead in real multi-tenant traffic despite fully working
@@ -52,6 +52,21 @@ type ConnectionStore interface {
 // numbers). Implemented by GraphAssetLister; nil disables lazy enrichment.
 type MetaAssetLister interface {
 	ListWebhookAccountIDs(ctx context.Context, conn store.Connection) ([]string, error)
+}
+
+// MetaWebhookAssets preserves the provider's asset type alongside the mixed
+// ID list used for webhook ownership resolution. The typed lists are UI
+// readiness evidence: a Page must not make Instagram or WhatsApp look live.
+type MetaWebhookAssets struct {
+	AccountIDs                 []string
+	InstagramAccountIDs        []string
+	PageIDs                    []string
+	WhatsAppBusinessAccountIDs []string
+	WhatsAppPhoneNumberIDs     []string
+}
+
+type detailedMetaAssetLister interface {
+	ListWebhookAssets(ctx context.Context, conn store.Connection) (MetaWebhookAssets, error)
 }
 
 type metaAssetSubscriber interface {
@@ -104,7 +119,15 @@ func (r *Resolver) ProvisionConnection(ctx context.Context, conn store.Connectio
 	if r == nil || r.Store == nil || r.Meta == nil {
 		return store.Connection{}, fmt.Errorf("Meta webhook provisioning is not configured")
 	}
-	ids, err := r.Meta.ListWebhookAccountIDs(ctx, conn)
+	var ids []string
+	var assets MetaWebhookAssets
+	var err error
+	if detailed, ok := r.Meta.(detailedMetaAssetLister); ok {
+		assets, err = detailed.ListWebhookAssets(ctx, conn)
+		ids = assets.AccountIDs
+	} else {
+		ids, err = r.Meta.ListWebhookAccountIDs(ctx, conn)
+	}
 	if err != nil {
 		return store.Connection{}, err
 	}
@@ -116,6 +139,15 @@ func (r *Resolver) ProvisionConnection(ctx context.Context, conn store.Connectio
 	}
 	updatedContext := cloneContext(conn.ProviderContext)
 	updatedContext["webhook_account_ids"] = strings.Join(ids, ",")
+	if len(assets.PageIDs) > 0 {
+		updatedContext["meta_page_ids"] = strings.Join(assets.PageIDs, ",")
+	}
+	if len(assets.InstagramAccountIDs) > 0 {
+		updatedContext["meta_instagram_account_ids"] = strings.Join(assets.InstagramAccountIDs, ",")
+	}
+	if len(assets.WhatsAppBusinessAccountIDs) > 0 {
+		updatedContext["meta_whatsapp_business_account_ids"] = strings.Join(assets.WhatsAppBusinessAccountIDs, ",")
+	}
 	updated, err := r.Store.UpdateConnectionProviderContext(ctx, conn.ID, updatedContext)
 	if err != nil {
 		return store.Connection{}, fmt.Errorf("claim Meta webhook assets: %w", err)
@@ -177,7 +209,7 @@ func (r *Resolver) Resolve(ctx context.Context, providerKey string, payload map[
 }
 
 // ResolvePayloads partitions a multi-entry Meta callback by authoritative
-// owner. Meta may batch Pages belonging to different Velion organizations in
+// owner. Meta may batch Pages belonging to different Verevon organizations in
 // one signed delivery; persisting the whole batch under one tenant is unsafe,
 // while rejecting it forever is operationally dead. Every entry must resolve
 // before any partition is returned.

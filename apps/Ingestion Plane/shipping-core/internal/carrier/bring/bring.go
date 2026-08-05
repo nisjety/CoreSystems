@@ -22,7 +22,7 @@ import (
 
 const (
 	defaultBaseURL   = "https://api.bring.com/shippingguide/api/v2/products"
-	defaultClientURL = "https://velion.no"
+	defaultClientURL = "https://verevon.no"
 )
 
 // knownProductCodes: Bring's Shipping Guide has no "quote every product for

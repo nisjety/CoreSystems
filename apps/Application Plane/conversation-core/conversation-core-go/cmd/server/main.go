@@ -58,8 +58,9 @@ func main() {
 	// kept separate from natsClient (the Application-Plane-local broker
 	// above) so the cross-plane GDPR org-erasure consumer never shares a
 	// credential/permission surface with plane-local traffic. Optional — an
-	// unset CONVERSATION_GDPR_SHARED_NATS_URL disables only the org-erasure
-	// consumer, mirroring the tolerant natsClient construction above.
+	// unset CONVERSATION_GDPR_SHARED_NATS_URL disables the privacy consumers
+	// (hard org erasure and the draft-only ZDR cleanup), mirroring the tolerant
+	// natsClient construction above.
 	var sharedNatsClient *appnats.Client
 	if cfg.SharedNATSURL != "" {
 		sharedNatsClient, err = appnats.NewClient(appnats.Config{
@@ -67,13 +68,13 @@ func main() {
 			InboxPrefix: "_INBOX.CONVERSATION_CORE_GDPR", Name: cfg.ServiceName + "-gdpr",
 		})
 		if err != nil {
-			log.Printf("conversation-core-go: shared-broker NATS disabled (org-erasure consumer will not run): %v", err)
+			log.Printf("conversation-core-go: shared-broker NATS disabled (privacy consumers will not run): %v", err)
 			sharedNatsClient = nil
 		} else {
 			defer sharedNatsClient.Close()
 		}
 	} else {
-		log.Printf("conversation-core-go: CONVERSATION_GDPR_SHARED_NATS_URL unset — org-erasure consumer disabled")
+		log.Printf("conversation-core-go: CONVERSATION_GDPR_SHARED_NATS_URL unset — privacy consumers disabled")
 	}
 
 	repository := conversation.NewRepository(db.Pool)
@@ -154,7 +155,7 @@ func main() {
 			defer executor.Stop()
 		}
 
-		// Propose leg: model/hook-published velion.model.action.proposed events
+		// Propose leg: model/hook-published verevon.model.action.proposed events
 		// queue suggested actions into the HITL review queue.
 		proposedConsumer := consumers.NewModelActionProposedConsumer(natsClient.JS, service)
 		if err := proposedConsumer.Start(ctx); err != nil {
@@ -168,7 +169,7 @@ func main() {
 		// Reuses the same integration client as draft.reply sends, since both
 		// need INTEGRATION_BASE_URL / INTEGRATION_INTERNAL_API_KEY configured.
 		if integrationClient != nil {
-			webhookConsumer := consumers.NewWebhookReceivedConsumer(natsClient.JS, integrationClient, service)
+			webhookConsumer := consumers.NewWebhookReceivedConsumer(natsClient.JS, integrationClient, service, service)
 			if err := webhookConsumer.Start(ctx); err != nil {
 				log.Printf("conversation-core-go: webhook-received consumer: %v", err)
 			} else {
@@ -180,7 +181,7 @@ func main() {
 	}
 
 	// Cross-plane GDPR erasure fan-out: org-core publishes
-	// velion.gdpr.erasure.requested (explicit hard-delete AND its 30-day
+	// verevon.gdpr.erasure.requested (explicit hard-delete AND its 30-day
 	// auto-purge cron) on the shared Control-Plane bus; this hard-purges
 	// every conversation_* row conversation-core holds for that org. Runs on
 	// the dedicated shared-broker client (conversation-core-gdpr identity)
@@ -192,6 +193,12 @@ func main() {
 			log.Printf("conversation-core-go: org-erasure consumer: %v", err)
 		} else {
 			defer orgErasureConsumer.Stop()
+		}
+		interactiveRetentionConsumer := consumers.NewInteractiveRetentionConsumer(sharedNatsClient.JS, service)
+		if err := interactiveRetentionConsumer.Start(ctx); err != nil {
+			log.Printf("conversation-core-go: interactive-retention consumer: %v", err)
+		} else {
+			defer interactiveRetentionConsumer.Stop()
 		}
 	}
 

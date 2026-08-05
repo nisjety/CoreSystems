@@ -216,7 +216,7 @@ func TestProcess_UnmappedEventSkipped(t *testing.T) {
 		typ     string
 	}{
 		{"unmapped social heartbeat", socialSubjectPrefix + "account.synced", "account.synced"},
-		{"unmapped subject domain", "velion.application.billing.invoice.paid", "invoice.paid"},
+		{"unmapped subject domain", "verevon.application.billing.invoice.paid", "invoice.paid"},
 		{"social type on conversation domain", conversationSubjectPrefix + "post.created", "post.created"},
 		{"conversation type on social domain", socialSubjectPrefix + "message.sent", "message.sent"},
 		{"empty subject", "", "ai_action.executed"},

@@ -10,7 +10,7 @@ export function DashboardComposerSuggestions({
   onSuggestionsOpenChange,
 }: DashboardComposerSuggestionsProps) {
   return (
-    <div className="velion-popover velion-popover-up absolute bottom-full left-0 z-[90] mb-2 w-72 rounded-2xl border border-black/[0.06] bg-white p-2 shadow-[0_8px_32px_rgba(0,0,0,0.12)] dark:border-[#2A2C31] dark:bg-[#141516]">
+    <div className="verevon-popover verevon-popover-up absolute bottom-full left-0 z-[90] mb-2 w-72 rounded-2xl border border-black/[0.06] bg-white p-2 shadow-[0_8px_32px_rgba(0,0,0,0.12)] dark:border-[#2A2C31] dark:bg-[#141516]">
       <p className="px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-[#999]">Suggestions</p>
       {promptSuggestions.map((suggestion) => (
         <button

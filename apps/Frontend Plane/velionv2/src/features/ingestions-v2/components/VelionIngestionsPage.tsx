@@ -15,13 +15,13 @@ import {
   TimerReset,
 } from "lucide-react";
 import {
-  VelionButton,
-  VelionInput,
-  VelionSegmented,
-  VelionSegmentedButton,
-  VelionSelect,
-  VelionTextarea,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonInput,
+  VerevonSegmented,
+  VerevonSegmentedButton,
+  VerevonSelect,
+  VerevonTextarea,
+} from "@/components/ui/verevon-ui";
 import { apiGet, apiSend } from "@/lib/api/client-envelope";
 import { cn } from "@/lib/utils";
 
@@ -154,7 +154,7 @@ const views: Array<{ id: IngestionView; label: string; icon: React.ReactNode }> 
   { id: "profiles", label: "Profiles", icon: <ShieldCheck className="size-4" /> },
 ];
 
-export function VelionIngestionsPage() {
+export function VerevonIngestionsPage() {
   const [activeView, setActiveView] = useState<IngestionView>("runs");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -279,38 +279,38 @@ export function VelionIngestionsPage() {
   }
 
   return (
-    <div className="velion-page-surface h-full min-h-0 overflow-y-auto">
+    <div className="verevon-page-surface h-full min-h-0 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[1560px] flex-col gap-5 p-4 sm:p-5 lg:p-7">
         <header className="flex flex-col gap-4 border-b border-[#DDDCD6] pb-5 dark:border-[#292B31] lg:flex-row lg:items-end lg:justify-between">
           <div className="min-w-0">
-            <h1 className="velion-page-title sm:text-[34px]">Ingestions</h1>
-            <p className="velion-page-body mt-3 max-w-3xl">
+            <h1 className="verevon-page-title sm:text-[34px]">Ingestions</h1>
+            <p className="verevon-page-body mt-3 max-w-3xl">
               Run crawls and extracts, inspect evidence, manage recurring schedules, and hand trusted sources back into Knowledge.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <VelionSegmented>
+            <VerevonSegmented>
               {views.map((view) => (
-                <VelionSegmentedButton
+                <VerevonSegmentedButton
                   key={view.id}
                   aria-pressed={activeView === view.id}
                   onClick={() => setActiveView(view.id)}
                 >
                   {view.icon}
                   {view.label}
-                </VelionSegmentedButton>
+                </VerevonSegmentedButton>
               ))}
-            </VelionSegmented>
-            <VelionButton radius="sm" className="px-3" onClick={() => void loadWorkspace()}>
+            </VerevonSegmented>
+            <VerevonButton radius="sm" className="px-3" onClick={() => void loadWorkspace()}>
               <RefreshCw className={cn("size-4", loading && "animate-spin")} />
               Refresh
-            </VelionButton>
+            </VerevonButton>
           </div>
         </header>
 
         {error ? (
-          <section className="velion-panel border border-[#E7C98B] bg-[#FFF6E5] p-4 text-[13px] text-[#6E5220] dark:border-[#5A4520] dark:bg-[#2A2214] dark:text-[#E6C27A]">
+          <section className="verevon-panel border border-[#E7C98B] bg-[#FFF6E5] p-4 text-[13px] text-[#6E5220] dark:border-[#5A4520] dark:bg-[#2A2214] dark:text-[#E6C27A]">
             {error}
           </section>
         ) : null}
@@ -375,7 +375,7 @@ function RunComposer({
   const isBatch = form.kind === "batch";
 
   return (
-    <form onSubmit={(event) => void onSubmit(event)} className="velion-panel flex flex-col gap-4 p-5">
+    <form onSubmit={(event) => void onSubmit(event)} className="verevon-panel flex flex-col gap-4 p-5">
       <div>
         <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Start a run</h2>
         <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
@@ -384,17 +384,17 @@ function RunComposer({
       </div>
       <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
         Run type
-        <VelionSelect value={form.kind} onChange={(event) => setForm((current) => ({ ...current, kind: event.target.value }))}>
+        <VerevonSelect value={form.kind} onChange={(event) => setForm((current) => ({ ...current, kind: event.target.value }))}>
           <option value="scrape">Scrape</option>
           <option value="crawl">Crawl</option>
           <option value="extract">Extract</option>
           <option value="batch">Batch</option>
-        </VelionSelect>
+        </VerevonSelect>
       </label>
       {isBatch ? (
         <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
           URLs
-          <VelionTextarea
+          <VerevonTextarea
             rows={6}
             value={form.urls}
             onChange={(event) => setForm((current) => ({ ...current, urls: event.target.value }))}
@@ -404,7 +404,7 @@ function RunComposer({
       ) : (
         <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
           Target URL
-          <VelionInput
+          <VerevonInput
             value={form.url}
             onChange={(event) => setForm((current) => ({ ...current, url: event.target.value }))}
             placeholder="https://example.com"
@@ -414,7 +414,7 @@ function RunComposer({
       {form.kind === "extract" ? (
         <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
           Extraction prompt
-          <VelionTextarea
+          <VerevonTextarea
             rows={4}
             value={form.prompt}
             onChange={(event) => setForm((current) => ({ ...current, prompt: event.target.value }))}
@@ -422,10 +422,10 @@ function RunComposer({
           />
         </label>
       ) : null}
-      <VelionButton variant="primary" radius="sm" className="w-full justify-center">
+      <VerevonButton variant="primary" radius="sm" className="w-full justify-center">
         <Play className="size-4" />
         Start run
-      </VelionButton>
+      </VerevonButton>
     </form>
   );
 }
@@ -440,7 +440,7 @@ function RunsPanel({
   onSelectRun: (runId: string) => void;
 }) {
   return (
-    <section className="velion-panel p-5">
+    <section className="verevon-panel p-5">
       <div className="flex items-end justify-between gap-3">
         <div>
           <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Recent runs</h2>
@@ -508,7 +508,7 @@ function ScheduleComposer({
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
 }) {
   return (
-    <form onSubmit={(event) => void onSubmit(event)} className="velion-panel flex flex-col gap-4 p-5">
+    <form onSubmit={(event) => void onSubmit(event)} className="verevon-panel flex flex-col gap-4 p-5">
       <div>
         <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Create schedule</h2>
         <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
@@ -517,30 +517,30 @@ function ScheduleComposer({
       </div>
       <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
         Name
-        <VelionInput value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Docs crawl" />
+        <VerevonInput value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="Docs crawl" />
       </label>
       <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
         Kind
-        <VelionSelect value={form.kind} onChange={(event) => setForm((current) => ({ ...current, kind: event.target.value }))}>
+        <VerevonSelect value={form.kind} onChange={(event) => setForm((current) => ({ ...current, kind: event.target.value }))}>
           <option value="crawl">Crawl</option>
           <option value="extract">Extract</option>
           <option value="search">Search</option>
           <option value="batch">Batch</option>
           <option value="agent">Agent</option>
-        </VelionSelect>
+        </VerevonSelect>
       </label>
       <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
         Target URL
-        <VelionInput value={form.targetUrl} onChange={(event) => setForm((current) => ({ ...current, targetUrl: event.target.value }))} placeholder="https://example.com/docs" />
+        <VerevonInput value={form.targetUrl} onChange={(event) => setForm((current) => ({ ...current, targetUrl: event.target.value }))} placeholder="https://example.com/docs" />
       </label>
       <label className="flex flex-col gap-2 text-[12px] font-medium text-[#555B52] dark:text-[#B7BEC9]">
         Cron
-        <VelionInput value={form.cron} onChange={(event) => setForm((current) => ({ ...current, cron: event.target.value }))} placeholder="0 7 * * *" />
+        <VerevonInput value={form.cron} onChange={(event) => setForm((current) => ({ ...current, cron: event.target.value }))} placeholder="0 7 * * *" />
       </label>
-      <VelionButton variant="primary" radius="sm" className="w-full justify-center">
+      <VerevonButton variant="primary" radius="sm" className="w-full justify-center">
         <CalendarClock className="size-4" />
         Save schedule
-      </VelionButton>
+      </VerevonButton>
     </form>
   );
 }
@@ -553,7 +553,7 @@ function SchedulesPanel({
   onAction: (action: string, scheduleId: string) => Promise<void>;
 }) {
   return (
-    <section className="velion-panel p-5">
+    <section className="verevon-panel p-5">
       <div>
         <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Schedule lifecycle</h2>
         <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
@@ -578,23 +578,23 @@ function SchedulesPanel({
               </div>
               <div className="flex flex-wrap gap-2">
                 {schedule.status === "paused" ? (
-                  <VelionButton size="sm" radius="sm" onClick={() => void onAction("unpause_schedule", schedule.id)}>
+                  <VerevonButton size="sm" radius="sm" onClick={() => void onAction("unpause_schedule", schedule.id)}>
                     <Play className="size-4" />
                     Resume
-                  </VelionButton>
+                  </VerevonButton>
                 ) : (
-                  <VelionButton size="sm" radius="sm" onClick={() => void onAction("pause_schedule", schedule.id)}>
+                  <VerevonButton size="sm" radius="sm" onClick={() => void onAction("pause_schedule", schedule.id)}>
                     <TimerReset className="size-4" />
                     Pause
-                  </VelionButton>
+                  </VerevonButton>
                 )}
-                <VelionButton size="sm" radius="sm" onClick={() => void onAction("trigger_schedule", schedule.id)}>
+                <VerevonButton size="sm" radius="sm" onClick={() => void onAction("trigger_schedule", schedule.id)}>
                   <RefreshCw className="size-4" />
                   Trigger
-                </VelionButton>
-                <VelionButton size="sm" radius="sm" onClick={() => void onAction("delete_schedule", schedule.id)}>
+                </VerevonButton>
+                <VerevonButton size="sm" radius="sm" onClick={() => void onAction("delete_schedule", schedule.id)}>
                   Retire
-                </VelionButton>
+                </VerevonButton>
               </div>
             </div>
           </article>
@@ -612,12 +612,12 @@ function SchedulesPanel({
 function SourcesPanel({ sources }: { sources: SourcePayload | null }) {
   return (
     <section className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-      <div className="velion-panel p-5">
+      <div className="verevon-panel p-5">
         <div className="flex items-end justify-between gap-3">
           <div>
             <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Connected sources</h2>
             <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
-              Integration-backed knowledge and website ingestion targets visible to Velion.
+              Integration-backed knowledge and website ingestion targets visible to Verevon.
             </p>
           </div>
           <Link href="/knowledge" className="inline-flex items-center gap-2 text-[12px] font-medium text-[#4C5A87] hover:text-[#2C3B67] dark:text-[#B8C6FF]">
@@ -648,7 +648,7 @@ function SourcesPanel({ sources }: { sources: SourcePayload | null }) {
           ))}
         </div>
       </div>
-      <div className="velion-panel p-5">
+      <div className="verevon-panel p-5">
         <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Tracked web sources</h2>
         <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
           Durable source resources registered in Quarry for recurring refresh and review.
@@ -697,7 +697,7 @@ function EvidencePanel({
 }) {
   return (
     <section className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
-      <aside className="velion-panel p-5">
+      <aside className="verevon-panel p-5">
         <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Evidence focus</h2>
         <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
           Inspect provenance and warnings before trusting or operationalizing a result.
@@ -724,7 +724,7 @@ function EvidencePanel({
           ))}
         </div>
       </aside>
-      <div className="velion-panel p-5">
+      <div className="verevon-panel p-5">
         <div className="flex items-end justify-between gap-3">
           <div>
             <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Operational evidence</h2>
@@ -802,7 +802,7 @@ function EvidencePanel({
 
 function ProfilesPanel({ profiles }: { profiles: ProfilePayload | null }) {
   return (
-    <section className="velion-panel p-5">
+    <section className="verevon-panel p-5">
       <h2 className="text-[20px] font-semibold text-[#111111] dark:text-white">Profiles</h2>
       <p className="mt-1 text-[13px] leading-5 text-[#6D7169] dark:text-[#AEB4C0]">
         Browser/session profiles for protected sources and stateful refresh flows.

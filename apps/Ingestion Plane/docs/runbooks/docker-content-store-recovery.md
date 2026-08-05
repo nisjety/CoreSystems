@@ -13,7 +13,7 @@ Status: **restart attempted 2026-07-12; Docker Desktop stopped after the VM disk
 Pre-restart evidence captured 2026-07-12: Docker client/server 29.5.3; canonical
 projects Application (16), Control (18), Data v2 (15), Frontend v3 (3),
 Ingestion (18), and Model (21). Several long-running services already report
-unhealthy before maintenance, including Control identity services, the Velion
+unhealthy before maintenance, including Control identity services, the Verevon
 gateway, and Data infrastructure; those states must not be attributed to the
 restart itself.
 

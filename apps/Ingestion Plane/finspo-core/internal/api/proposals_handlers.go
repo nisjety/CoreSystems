@@ -274,7 +274,7 @@ func executeProposalHandler(proposals ProposalStore, executor ProposalExecutor) 
 }
 
 // proposedBy uses the org id header for now; we can swap in a user-id header
-// once velion is forwarding one.
+// once verevon is forwarding one.
 func proposedBy(c *fiber.Ctx) string {
 	if u := strings.TrimSpace(c.Get("X-User-ID")); u != "" {
 		return u

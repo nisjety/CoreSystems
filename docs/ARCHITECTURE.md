@@ -86,7 +86,7 @@ The Frontend Plane assembles the needed planes into end-user applications.
 
 Examples:
 
-- `velion` can compose Control, Data, Ingestion, Model Plane v2, and Application Plane services.
+- `verevon` can compose Control, Data, Ingestion, Model Plane v2, and Application Plane services.
 - A future Quarry-specific frontend can compose only the planes required for Quarry.
 - A future MP v2 frontend can compose only Model Plane v2 with the lower-layer dependencies it needs.
 

@@ -3,10 +3,16 @@ package actions
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net/http"
+	"net/mail"
+	"net/textproto"
 	"net/url"
 	"strings"
 	"time"
@@ -104,10 +110,11 @@ func (s *Service) executeMicrosoft(ctx context.Context, token, operation string,
 		}
 		return s.getBearer(ctx, token, base+"/me/drive/root/children?"+values.Encode(), nil)
 	case "mail.send", "microsoft.mail.send":
-		if len(body) == 0 {
-			return nil, fmt.Errorf("body is required for mail.send")
+		payload, err := microsoftMailSendPayload(body)
+		if err != nil {
+			return nil, err
 		}
-		return s.postBearer(ctx, token, base+"/me/sendMail", body, nil)
+		return s.postBearer(ctx, token, base+"/me/sendMail", payload, nil)
 	default:
 		return nil, fmt.Errorf("unsupported Microsoft operation %q", operation)
 	}
@@ -162,10 +169,11 @@ func (s *Service) executeGoogle(ctx context.Context, token, operation string, pa
 		values := url.Values{"maxResults": {limitParam(params, "maxResults", 10, 100)}}
 		return s.getBearer(ctx, token, base+"/gmail/v1/users/me/messages?"+values.Encode(), nil)
 	case "gmail.send", "google.gmail.send":
-		if len(body) == 0 {
-			return nil, fmt.Errorf("body is required for gmail.send")
+		payload, err := gmailSendPayload(body)
+		if err != nil {
+			return nil, err
 		}
-		return s.postBearer(ctx, token, base+"/gmail/v1/users/me/messages/send", body, nil)
+		return s.postBearer(ctx, token, base+"/gmail/v1/users/me/messages/send", payload, nil)
 	case "calendar.events", "google.calendar.events":
 		values := url.Values{"maxResults": {limitParam(params, "maxResults", 10, 100)}}
 		return s.getBearer(ctx, token, base+"/calendar/v3/calendars/primary/events?"+values.Encode(), nil)
@@ -1349,6 +1357,272 @@ func whatsAppMessagePayload(body map[string]any) (map[string]any, error) {
 		message["messaging_product"] = "whatsapp"
 	}
 	return message, nil
+}
+
+const maxNormalizedMailBodyBytes = 1024 * 1024
+
+type normalizedMailMessage struct {
+	Subject       string
+	Text          string
+	HTML          string
+	Recipients    []string
+	ThreadID      string
+	InReplyTo     string
+	References    string
+	CorrelationID string
+}
+
+// microsoftMailSendPayload translates Verevon's provider-neutral outbound
+// envelope into the Graph sendMail request. Native Graph payloads retain their
+// existing escape hatch for callers that already use Graph's contract.
+func microsoftMailSendPayload(body map[string]any) (map[string]any, error) {
+	if len(body) == 0 {
+		return nil, fmt.Errorf("body is required for mail.send")
+	}
+	if _, ok := body["message"].(map[string]any); ok {
+		return copyMap(body), nil
+	}
+
+	message, err := normalizedMailPayload(body)
+	if err != nil {
+		return nil, err
+	}
+	contentType := "Text"
+	content := message.Text
+	if message.HTML != "" {
+		contentType = "HTML"
+		content = message.HTML
+	}
+	recipients := make([]map[string]any, 0, len(message.Recipients))
+	for _, address := range message.Recipients {
+		recipients = append(recipients, map[string]any{
+			"emailAddress": map[string]any{"address": address},
+		})
+	}
+	payload := map[string]any{
+		"message": map[string]any{
+			"subject": message.Subject,
+			"body": map[string]any{
+				"contentType": contentType,
+				"content":     content,
+			},
+			"toRecipients": recipients,
+		},
+		"saveToSentItems": true,
+	}
+	if message.CorrelationID != "" {
+		graphMessage := payload["message"].(map[string]any)
+		graphMessage["internetMessageHeaders"] = []map[string]any{{
+			"name":  "x-verevon-outbound-intent",
+			"value": message.CorrelationID,
+		}}
+	}
+	return payload, nil
+}
+
+// gmailSendPayload translates Verevon's provider-neutral outbound envelope into
+// Gmail's required base64url-encoded RFC 822 message. Native Gmail requests
+// with raw already present retain their existing escape hatch.
+func gmailSendPayload(body map[string]any) (map[string]any, error) {
+	if len(body) == 0 {
+		return nil, fmt.Errorf("body is required for gmail.send")
+	}
+	if raw, ok := body["raw"].(string); ok && strings.TrimSpace(raw) != "" {
+		return copyMap(body), nil
+	}
+
+	message, err := normalizedMailPayload(body)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := gmailRFC822(message)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"raw": base64.RawURLEncoding.EncodeToString(raw)}
+	if message.ThreadID != "" {
+		payload["threadId"] = message.ThreadID
+	}
+	return payload, nil
+}
+
+func normalizedMailPayload(body map[string]any) (normalizedMailMessage, error) {
+	subject, err := mailHeaderValue(stringParam(body, "subject", ""), "subject", 998)
+	if err != nil {
+		return normalizedMailMessage{}, err
+	}
+	text := stringFromAny(body["bodyText"])
+	html := stringFromAny(body["bodyHtml"])
+	if text == "" && html == "" {
+		return normalizedMailMessage{}, fmt.Errorf("bodyText or bodyHtml is required for mail.send")
+	}
+	if len(text)+len(html) > maxNormalizedMailBodyBytes {
+		return normalizedMailMessage{}, fmt.Errorf("mail body exceeds %d bytes", maxNormalizedMailBodyBytes)
+	}
+	recipients, err := normalizedMailRecipients(body["to"])
+	if err != nil {
+		return normalizedMailMessage{}, err
+	}
+	threadID, err := mailHeaderValue(stringParam(body, "threadId", ""), "threadId", 512)
+	if err != nil {
+		return normalizedMailMessage{}, err
+	}
+	inReplyTo, err := mailHeaderValue(stringParam(body, "inReplyTo", ""), "inReplyTo", 4096)
+	if err != nil {
+		return normalizedMailMessage{}, err
+	}
+	references, err := mailHeaderValue(stringParam(body, "references", ""), "references", 8192)
+	if err != nil {
+		return normalizedMailMessage{}, err
+	}
+	correlationID, err := mailCorrelationID(stringParam(body, "correlationId", ""))
+	if err != nil {
+		return normalizedMailMessage{}, err
+	}
+	return normalizedMailMessage{
+		Subject:       subject,
+		Text:          text,
+		HTML:          html,
+		Recipients:    recipients,
+		ThreadID:      threadID,
+		InReplyTo:     inReplyTo,
+		References:    references,
+		CorrelationID: correlationID,
+	}, nil
+}
+
+func normalizedMailRecipients(value any) ([]string, error) {
+	candidates := stringSliceParam(map[string]any{"to": value}, "to")
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("at least one recipient is required for mail.send")
+	}
+	if len(candidates) > 50 {
+		return nil, fmt.Errorf("mail.send supports at most 50 recipients")
+	}
+	recipients := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		address, err := mail.ParseAddress(candidate)
+		if err != nil || address.Address == "" {
+			return nil, fmt.Errorf("invalid mail recipient %q", candidate)
+		}
+		recipients = append(recipients, address.Address)
+	}
+	return recipients, nil
+}
+
+func mailHeaderValue(value, label string, maximum int) (string, error) {
+	value = strings.TrimSpace(value)
+	if strings.ContainsAny(value, "\r\n") {
+		return "", fmt.Errorf("%s cannot contain line breaks", label)
+	}
+	if len(value) > maximum {
+		return "", fmt.Errorf("%s exceeds %d bytes", label, maximum)
+	}
+	return value, nil
+}
+
+func gmailRFC822(message normalizedMailMessage) ([]byte, error) {
+	var raw bytes.Buffer
+	if _, err := fmt.Fprintf(&raw, "To: %s\r\nSubject: %s\r\n", strings.Join(message.Recipients, ", "), mime.QEncoding.Encode("UTF-8", message.Subject)); err != nil {
+		return nil, fmt.Errorf("write Gmail headers: %w", err)
+	}
+	if message.InReplyTo != "" {
+		if _, err := fmt.Fprintf(&raw, "In-Reply-To: %s\r\n", message.InReplyTo); err != nil {
+			return nil, fmt.Errorf("write Gmail In-Reply-To header: %w", err)
+		}
+	}
+	if message.References != "" {
+		if _, err := fmt.Fprintf(&raw, "References: %s\r\n", message.References); err != nil {
+			return nil, fmt.Errorf("write Gmail References header: %w", err)
+		}
+	}
+	if message.CorrelationID != "" {
+		if _, err := fmt.Fprintf(&raw, "X-Verevon-Outbound-Intent: %s\r\n", message.CorrelationID); err != nil {
+			return nil, fmt.Errorf("write Gmail correlation header: %w", err)
+		}
+	}
+	if _, err := raw.WriteString("MIME-Version: 1.0\r\n"); err != nil {
+		return nil, fmt.Errorf("write Gmail MIME-Version header: %w", err)
+	}
+	if message.HTML == "" {
+		if _, err := raw.WriteString("Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"); err != nil {
+			return nil, fmt.Errorf("write Gmail body headers: %w", err)
+		}
+		if err := writeQuotedPrintable(&raw, message.Text); err != nil {
+			return nil, err
+		}
+		return raw.Bytes(), nil
+	}
+
+	writer := multipart.NewWriter(&raw)
+	if _, err := fmt.Fprintf(&raw, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", writer.Boundary()); err != nil {
+		return nil, fmt.Errorf("write Gmail multipart header: %w", err)
+	}
+	if message.Text != "" {
+		if err := writeGmailMIMEPart(writer, "text/plain", message.Text); err != nil {
+			return nil, err
+		}
+	}
+	if err := writeGmailMIMEPart(writer, "text/html", message.HTML); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("close Gmail MIME message: %w", err)
+	}
+	return raw.Bytes(), nil
+}
+
+func mailCorrelationID(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) > 128 {
+		return "", fmt.Errorf("correlationId exceeds 128 bytes")
+	}
+	for _, character := range value {
+		if !(character >= 'a' && character <= 'z') && !(character >= 'A' && character <= 'Z') && !(character >= '0' && character <= '9') && character != '_' && character != '-' {
+			return "", fmt.Errorf("correlationId contains invalid characters")
+		}
+	}
+	return value, nil
+}
+
+func writeGmailMIMEPart(writer *multipart.Writer, contentType, content string) error {
+	header := textproto.MIMEHeader{}
+	header.Set("Content-Type", contentType+"; charset=UTF-8")
+	header.Set("Content-Transfer-Encoding", "quoted-printable")
+	part, err := writer.CreatePart(header)
+	if err != nil {
+		return fmt.Errorf("create Gmail MIME part: %w", err)
+	}
+	return writeQuotedPrintable(part, content)
+}
+
+func writeQuotedPrintable(target io.Writer, content string) error {
+	writer := quotedprintable.NewWriter(target)
+	if _, err := io.WriteString(writer, normalizeMailLineEndings(content)); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("write Gmail MIME content: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close Gmail MIME content: %w", err)
+	}
+	return nil
+}
+
+func normalizeMailLineEndings(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	return strings.ReplaceAll(content, "\n", "\r\n")
+}
+
+func copyMap(input map[string]any) map[string]any {
+	output := make(map[string]any, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 func stringSliceParam(params map[string]any, key string) []string {

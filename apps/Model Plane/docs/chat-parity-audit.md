@@ -1,7 +1,7 @@
 # Model Plane — Chat Feature-Parity Audit & Implementation Plan
 
 Audited 2026-06-04 against the real Model Plane code (not the brief's assumptions).
-Scope: reach ChatGPT/Claude/Manus parity for the Velion v2 chat without breaking the
+Scope: reach ChatGPT/Claude/Manus parity for the Verevon v2 chat without breaking the
 existing `profile:"chat"` plain-stream path.
 
 > **Verified 2026-07-11 (Model Plane Phase-4 audit).** Re-checked this doc's core
@@ -19,8 +19,8 @@ existing `profile:"chat"` plain-stream path.
 >   is real and non-mocked. `[source-only]`
 > - Live: gateway `/healthz` 200, `/health` 401 (as documented); execution-core
 >   `/healthz` 200; shipping-core `/healthz` 200 + `/api/carriers` 200. `[live-curl]`
-> - **Scope caveat:** this is a point-in-time completion report for the **velionv2**
->   chat (v2 is now deprecated; velionv3 is canonical). The gateway/BFF/SSE layer it
+> - **Scope caveat:** this is a point-in-time completion report for the **verevonv2**
+>   chat (v2 is now deprecated; verevonv3 is canonical). The gateway/BFF/SSE layer it
 >   documents is shared and still live under v3, but the commit hashes and dates here
 >   are historical. Treat the June-5 §0/§8 "DONE + LIVE" lines as point-in-time, not a
 >   fresh runtime attestation.
@@ -85,7 +85,7 @@ dpv2 client (see #3). Switched both to `azure_openai` (direct Azure, same `text-
 Plus inference-core on inter-plane-bus (`ec2e6b5e`) + gateway DATAPLANE_RETRIEVAL_URL/auth
 (`80c77dd1`). **Live:** ingest doc via documents-api `POST /v1/documents` (201) → JetStream
 `DATAPLANE_DOCUMENTS`→index-engine→`DATAPLANE_KNOWLEDGE`→embedding-engine (Azure)→qdrant →
-RAG query returns it: `citation{title:"Index Probe", snippet:"Velion onboarding flow probe…"}`.
+RAG query returns it: `citation{title:"Index Probe", snippet:"Verevon onboarding flow probe…"}`.
 (Note: gateway gRPC `DocumentService.CreateDocument` is deprecated §17.3.4 — ingest via
 documents-api HTTP `POST /v1/documents` with `X-Internal-Api-Key` + `X-Org-ID`.)
 
@@ -267,7 +267,7 @@ Effort S/M/L; Risk L/M/H. "Has" = primitive already exists; "Gap" = the plumbing
 
 **SSE:** new `event:` names per §2; payloads as the brief's table + `error.code`/`retryable`,
 `stopped`, `schema_version` on `done`. The BFF needs **no change** to forward them (already
-re-streams unknown events); the velionv2 client adds handlers per family (it already ignores
+re-streams unknown events); the verevonv2 client adds handlers per family (it already ignores
 unknown events).
 
 **Cancel:** `POST /v1/invoke/{request_id}/cancel` (or a NATS `mp.v1.stream.cancel`) → gateway

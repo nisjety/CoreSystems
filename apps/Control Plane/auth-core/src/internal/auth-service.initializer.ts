@@ -39,8 +39,8 @@ export class AuthServiceInitializer implements OnModuleInit {
       this.logger.log('Organization event publisher initialized');
 
       // Wire the LOCAL control-plane bus (DirectNatsService → controlplane-nats)
-      // into the audit plugin for Auth Core's velion.audit.v2.control.* emission.
-      // primary subscription listens there; the shared velion-nats bus is reserved
+      // into the audit plugin for Auth Core's verevon.audit.v2.control.* emission.
+      // primary subscription listens there; the shared verevon-nats bus is reserved
       // for cross-plane domain/ACL events.
       setAuditNatsPublisher(this.directNats);
       this.logger.log(

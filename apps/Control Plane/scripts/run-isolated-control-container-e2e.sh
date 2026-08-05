@@ -185,11 +185,11 @@ org_database_url="postgres://control_lifecycle:${postgres_password}@${postgres_c
 billing_database_url="postgres://control_lifecycle:${postgres_password}@${postgres_container}:5432/billing_service?sslmode=disable"
 
 org_credentials="$(printf '%s' \
-  '[{"principal":"velion-gateway","audience":"org-core","token":"'"$org_gateway_token"'","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self"]},{"principal":"auth-core","audience":"org-core","token":"'"$org_auth_token"'","scopes":["org:projection:write:any","org:projection:delete:any"]}]')"
+  '[{"principal":"verevon-gateway","audience":"org-core","token":"'"$org_gateway_token"'","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self"]},{"principal":"auth-core","audience":"org-core","token":"'"$org_auth_token"'","scopes":["org:projection:write:any","org:projection:delete:any"]}]')"
 billing_credentials="$(printf '%s' \
-  '[{"principal":"velion-gateway","audience":"billing-core","token":"'"$billing_gateway_token"'","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"'"$billing_auth_token"'","scopes":["billing:organization:deactivate:any"]},{"principal":"lifecycle-writer","audience":"billing-core","token":"'"$billing_writer_token"'","scopes":["billing:account:write:any"]}]')"
+  '[{"principal":"verevon-gateway","audience":"billing-core","token":"'"$billing_gateway_token"'","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"'"$billing_auth_token"'","scopes":["billing:organization:deactivate:any"]},{"principal":"lifecycle-writer","audience":"billing-core","token":"'"$billing_writer_token"'","scopes":["billing:account:write:any"]}]')"
 printf '%s' \
-  '[{"credentialId":"velion-gateway-primary","principal":"velion-gateway","audience":"auth-core","token":"'"$auth_grpc_gateway_token"'","scopes":["auth:token:validate","auth:user:read"]}]' \
+  '[{"credentialId":"verevon-gateway-primary","principal":"verevon-gateway","audience":"auth-core","token":"'"$auth_grpc_gateway_token"'","scopes":["auth:token:validate","auth:user:read"]}]' \
   >"$auth_key_dir/grpc-credentials.json"
 printf '%s' \
   '[{"credentialId":"control-lifecycle-nats-auth","principal":"control-lifecycle","audience":"auth-core-internal","token":"'"$auth_internal_nats_token"'","scopes":["nats:authenticate"]}]' \

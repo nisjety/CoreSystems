@@ -163,7 +163,7 @@ export REAL_AUTHORITY_BILLING_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_PLANE_PRINCIPALS_JSON=$(printf '%s' \
   '{"retrieval-engine":{"credential":"'"$CONTROL_POLICY_SERVICE_API_KEY"'","audiences":["control-policy"],"orgIds":[],"allowAnyOrg":true,"scopes":["data:authorization:decide"],"scopesByAudience":{"control-policy":["data:authorization:decide"]}},"embedding-engine":{"credential":"'"$MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY"'","audiences":["inference-core"],"orgIds":[],"allowAnyOrg":true,"scopes":["inference:invoke"],"scopesByAudience":{"inference-core":["inference:invoke"]}},"browser-fixture-seeder":{"credential":"'"$REAL_AUTHORITY_PERSISTENCE_SERVICE_API_KEY"'","audiences":["data-plane"],"orgIds":[],"allowAnyOrg":true,"allowPersistentData":true,"scopes":["documents:write","org:data:write_all"],"scopesByAudience":{"data-plane":["documents:write","org:data:write_all"]}}}')
 export REAL_AUTHORITY_USER_CREDENTIALS_JSON=$(printf '%s' \
-  '[{"principal":"velion-gateway","audience":"user-core","token":"'"$REAL_AUTHORITY_GATEWAY_TOKEN"'","scopes":["users:read:self","users:write:self"]},{"principal":"retrieval-engine","audience":"user-core","token":"'"$REAL_AUTHORITY_RETRIEVAL_TOKEN"'","scopes":["authz:read"]}]')
+  '[{"principal":"verevon-gateway","audience":"user-core","token":"'"$REAL_AUTHORITY_GATEWAY_TOKEN"'","scopes":["users:read:self","users:write:self"]},{"principal":"retrieval-engine","audience":"user-core","token":"'"$REAL_AUTHORITY_RETRIEVAL_TOKEN"'","scopes":["authz:read"]}]')
 
 compose=(docker compose --project-name "$project" -f "$ROOT/docker-compose.yml" -f "$ISOLATED_OVERRIDE" -f "$AUTHORITY_OVERRIDE")
 readonly -a compose

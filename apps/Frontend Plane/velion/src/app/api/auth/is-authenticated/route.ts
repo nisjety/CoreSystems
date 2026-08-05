@@ -8,7 +8,7 @@ const getBackendUrl = () => {
 async function handler(request: NextRequest) {
   const backendUrl = getBackendUrl();
   // G30 v3: use Better Auth's native /api/auth/get-session (GET) instead of
-  // the custom oRPC /api/v2/auth/getSession (POST). See velion-gap.md §8.9.
+  // the custom oRPC /api/v2/auth/getSession (POST). See verevon-gap.md §8.9.
   const targetUrl = `${backendUrl}/api/auth/get-session`;
 
   try {

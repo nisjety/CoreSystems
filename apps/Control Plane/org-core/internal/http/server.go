@@ -19,7 +19,7 @@ type Server struct {
 	router           *gin.Engine
 	httpServer       *http.Server
 	orgService       *orgcore.Service
-	rbacRepo         *rbac.Repository // U6-3 (ui-ux-velion-gap.md §10)
+	rbacRepo         *rbac.Repository // U6-3 (ui-ux-verevon-gap.md §10)
 	authService      string
 	userService      string
 	userServiceToken string
@@ -146,6 +146,10 @@ func (s *Server) setupRoutes() {
 	// protected by route-scoped machine principals; access is restricted to
 	// explicitly registered control-plane callers and must not be exposed to user traffic.
 	internal := s.router.Group("/internal")
+	// Enumerates every organization — the auto-discovery source for
+	// background services that must service every tenant (no per-request
+	// acting user to scope a normal /orgs read to). See listOrganizationsInternal.
+	internal.GET("/orgs", s.listOrganizationsInternal)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
 	internal.POST("/orgs/:orgId/onboarding/state", s.updateOnboardingState)

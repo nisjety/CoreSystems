@@ -3,7 +3,7 @@ import {
   type ComposerSettings,
 } from "@/features/dashboard-v2/lib/dashboard-composer-model";
 
-const composerSettingsKey = "velion-dashboard-composer-settings";
+const composerSettingsKey = "verevon-dashboard-composer-settings";
 const composerReceiptTimeFormat = new Intl.DateTimeFormat("nb-NO", {
   hour: "2-digit",
   minute: "2-digit",

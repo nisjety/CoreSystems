@@ -8,7 +8,7 @@ Ingestion Plane-specific actions.
   identity-only OAuth sign-ins
 - aqencia.controlplane.org.plan_changed → (future: adjust sync resources)
 - aqencia.controlplane.billing.quota_exceeded → pauses imports for the org
-- velion.ingestion.quota.exceeded → cross-plane quota signal from Quarry
+- verevon.ingestion.quota.exceeded → cross-plane quota signal from Quarry
 """
 
 import asyncio
@@ -50,7 +50,7 @@ class ControlPlaneSubscriber:
         Initialize Control Plane subscriber.
         
         Args:
-            nats_url: NATS broker URL (e.g., "nats://velion-nats:4222")
+            nats_url: NATS broker URL (e.g., "nats://verevon-nats:4222")
             nats_token: Authentication token for shared NATS
             service_name: Local service identifier (for logging)
         """
@@ -164,12 +164,12 @@ class ControlPlaneSubscriber:
 
                 # Subscribe to Quarry's ingestion-level quota exceeded signal
                 sub4 = await self.nc.subscribe(
-                    "velion.ingestion.quota.exceeded",
+                    "verevon.ingestion.quota.exceeded",
                     queue="ingestion-plane-quota-ingestion",
                     cb=self._handle_ingestion_quota_exceeded,
                 )
                 self._subscriptions.append(sub4)
-                logger.info("  ✅ Subscribed to: velion.ingestion.quota.exceeded")
+                logger.info("  ✅ Subscribed to: verevon.ingestion.quota.exceeded")
 
                 logger.info(f"✅ Control Plane Subscriber ({self.service_name}): listening for events")
                 self._initialized = True
@@ -286,7 +286,7 @@ class ControlPlaneSubscriber:
             await self._nak_msg(msg)
 
     async def _handle_ingestion_quota_exceeded(self, msg: Any) -> None:
-        """Handle velion.ingestion.quota.exceeded event (from Quarry).
+        """Handle verevon.ingestion.quota.exceeded event (from Quarry).
         
         Also pauses imports for the affected org since the shared credit pool
         is exhausted across all ingestion services.

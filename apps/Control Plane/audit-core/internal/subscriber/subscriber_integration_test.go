@@ -91,7 +91,7 @@ func TestDurableSubscriberAcknowledgesRetriesAndDeadLetters(t *testing.T) {
 		EventID: "audit-auth-session-1", OccurredAt: time.Now().UTC(), OrgID: "org-test",
 		Plane: "control", Producer: "auth-core", Event: "signed_in",
 	})
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.signed_in", auditPayload); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.signed_in", auditPayload); err != nil {
 		t.Fatalf("publish audit: %v", err)
 	}
 	select {
@@ -107,7 +107,7 @@ func TestDurableSubscriberAcknowledgesRetriesAndDeadLetters(t *testing.T) {
 		EventID: "usage-control-org-test-tokens", OccurredAt: time.Now().UTC(), OrgID: "org-test",
 		Plane: "control", Producer: "billing-core", Op: "tokens",
 	})
-	if _, err := js.Publish("velion.usage.v2.control.billing-core.tokens", usagePayload); err != nil {
+	if _, err := js.Publish("verevon.usage.v2.control.billing-core.tokens", usagePayload); err != nil {
 		t.Fatalf("publish usage: %v", err)
 	}
 	select {
@@ -119,12 +119,12 @@ func TestDurableSubscriberAcknowledgesRetriesAndDeadLetters(t *testing.T) {
 		t.Fatal("usage event was not retried and persisted")
 	}
 
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.malformed", []byte("not-json")); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.malformed", []byte("not-json")); err != nil {
 		t.Fatalf("publish malformed audit: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		message, err := js.GetLastMsg(streamName, "velion.dlq.audit-core.audit")
+		message, err := js.GetLastMsg(streamName, "verevon.dlq.audit-core.audit")
 		if err == nil {
 			if string(message.Data) != "not-json" {
 				t.Fatalf("dead-letter payload = %q", message.Data)
@@ -137,7 +137,7 @@ func TestDurableSubscriberAcknowledgesRetriesAndDeadLetters(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if _, err := js.Publish("velion.usage.v2.control.billing-core.malformed", []byte("not-json-usage")); err != nil {
+	if _, err := js.Publish("verevon.usage.v2.control.billing-core.malformed", []byte("not-json-usage")); err != nil {
 		t.Fatalf("publish malformed usage: %v", err)
 	}
 	waitForDeadLetter(t, js, "usage", "malformed", "not-json-usage")
@@ -146,7 +146,7 @@ func TestDurableSubscriberAcknowledgesRetriesAndDeadLetters(t *testing.T) {
 		EventID: "audit-auth-forged-plane", OccurredAt: time.Now().UTC(), OrgID: "org-test",
 		Plane: "application", Producer: "auth-core", Event: "forged_plane",
 	})
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.forged_plane", tamperedPayload); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.forged_plane", tamperedPayload); err != nil {
 		t.Fatalf("publish plane-tampered audit: %v", err)
 	}
 	waitForDeadLetter(t, js, "audit", "authority_mismatch", string(tamperedPayload))
@@ -156,7 +156,7 @@ func TestDurableSubscriberAcknowledgesRetriesAndDeadLetters(t *testing.T) {
 		EventID: "audit-auth-store-down", OccurredAt: time.Now().UTC(), OrgID: "org-test",
 		Plane: "control", Producer: "auth-core", Event: "store_down",
 	})
-	if _, err := js.Publish("velion.audit.v2.control.auth-core.store_down", exhaustedPayload); err != nil {
+	if _, err := js.Publish("verevon.audit.v2.control.auth-core.store_down", exhaustedPayload); err != nil {
 		t.Fatalf("publish audit for exhausted retry: %v", err)
 	}
 	waitForDeadLetter(t, js, "audit", "delivery_exhausted", string(exhaustedPayload))
@@ -183,7 +183,7 @@ func TestDurableV2UsageWithoutStableEventIDIsDeadLetteredBeforeStore(t *testing.
 	payload, _ := json.Marshal(events.UsageEvent{
 		OccurredAt: time.Now().UTC(), OrgID: "org-test", Plane: "control", Producer: "billing-core", Op: "tokens",
 	})
-	if _, err := js.Publish("velion.usage.v2.control.billing-core.tokens", payload); err != nil {
+	if _, err := js.Publish("verevon.usage.v2.control.billing-core.tokens", payload); err != nil {
 		t.Fatal(err)
 	}
 	waitForDeadLetter(t, js, "usage", "malformed", string(payload))
@@ -196,8 +196,8 @@ func waitForDeadLetter(t *testing.T, js nats.JetStreamContext, kind, reason, pay
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		message, err := js.GetLastMsg(streamName, "velion.dlq.audit-core."+kind)
-		if err == nil && message.Header.Get("Velion-Dead-Letter-Reason") == reason {
+		message, err := js.GetLastMsg(streamName, "verevon.dlq.audit-core."+kind)
+		if err == nil && message.Header.Get("Verevon-Dead-Letter-Reason") == reason {
 			if string(message.Data) != payload {
 				t.Fatalf("dead-letter payload = %q", message.Data)
 			}

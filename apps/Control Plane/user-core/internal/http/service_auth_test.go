@@ -113,9 +113,9 @@ func TestValidateRequiredServiceCredentialRegistry(t *testing.T) {
 		{name: "empty registry", raw: "", wantErr: true},
 		{name: "malformed registry", raw: "{", wantErr: true},
 		{name: "missing gateway", raw: `[{"principal":"session-core","audience":"user-core","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self"]}]`, wantErr: true},
-		{name: "gateway missing write scope", raw: `[{"principal":"velion-gateway","audience":"user-core","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self"]}]`, wantErr: true},
-		{name: "gateway wrong audience", raw: `[{"principal":"velion-gateway","audience":"other","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self","users:write:self"]}]`, wantErr: true},
-		{name: "required gateway policy", raw: `[{"principal":"velion-gateway","audience":"user-core","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self","users:write:self"]}]`},
+		{name: "gateway missing write scope", raw: `[{"principal":"verevon-gateway","audience":"user-core","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self"]}]`, wantErr: true},
+		{name: "gateway wrong audience", raw: `[{"principal":"verevon-gateway","audience":"other","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self","users:write:self"]}]`, wantErr: true},
+		{name: "required gateway policy", raw: `[{"principal":"verevon-gateway","audience":"user-core","token":"0123456789abcdef0123456789abcdef","scopes":["users:read:self","users:write:self"]}]`},
 	}
 
 	for _, test := range tests {
@@ -215,7 +215,7 @@ func TestAuthenticateServicePrincipalRequiresBoundDelegation(t *testing.T) {
 
 func TestAuthenticateServicePrincipalAcceptsOnlyValidSignedSelfDelegation(t *testing.T) {
 	credential := serviceCredential{
-		Principal: "velion-gateway",
+		Principal: "verevon-gateway",
 		Audience:  "user-core",
 		Token:     testServiceToken,
 		Scopes:    []string{"users:read:self", "users:write:self"},
@@ -297,7 +297,7 @@ func TestServiceDelegationCrossLanguageVector(t *testing.T) {
 		t.Fatalf("body digest = %q", digest)
 	}
 	signature := serviceDelegationSignature(testServiceToken, serviceDelegationClaims{
-		Principal:  "velion-gateway",
+		Principal:  "verevon-gateway",
 		Audience:   "user-core",
 		Timestamp:  "2026-07-11T02:00:00+00:00",
 		Method:     http.MethodPatch,

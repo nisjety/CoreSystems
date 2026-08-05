@@ -1,11 +1,11 @@
 import { NextRequest } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
-// U2-15 closed (velion ui-ux-velion-gap.md §10): real image-generation
+// U2-15 closed (verevon ui-ux-verevon-gap.md §10): real image-generation
 // proxy. Forwards to Model Plane v1 Rust gateway at `/v1/ai/images`
 // (Azure OpenAI `gpt-image-1` via `image_routes::generate`).
 //
-// Velion request shape:
+// Verevon request shape:
 //   POST /api/ai/images
 //   {
 //     prompt: string,                    // required, ≤4000 chars

@@ -48,12 +48,12 @@ Self-contained implementation brief for unifying the `/knowledge` page with the 
 
 | Layer | Component | Path | Notes |
 |---|---|---|---|
-| Frontend Plane | `/knowledge` page | `velion/src/app/(dashboard)/knowledge/page.tsx` | SSR; calls `getKnowledgeIntegrations`, `getKnowledgeSources`, `getKnowledgeDocuments` |
-| Frontend Plane | `KnowledgePageClient` | `velion/src/app/(dashboard)/knowledge/KnowledgePageClient.tsx` | Tabs UI; currently throws on initial load |
-| Frontend Plane | `knowledge-data.ts` | `velion/src/app/api/knowledge/_lib/knowledge-data.ts` | Server-side fetchers; calls `documents-service` (port 8001) + `integration-engine-go-api` (port 3126) |
-| Frontend Plane | Ingestion API | `velion/src/app/api/ingestion/crawl/{route,[jobId]/status,[jobId]/stream}.ts` | Quarry trigger + SSE |
-| Frontend Plane | Onboarding website step | `velion/src/app/(onboarding)/onboarding/website/page.tsx` | Currently captures URL; doesn't trigger ingest |
-| Frontend Plane | Agent finetune hook | `velion/src/components/agents/hooks/useAgentFinetune.ts` | Wave 7 — supports JSONL upload + Azure fine-tune jobs |
+| Frontend Plane | `/knowledge` page | `verevon/src/app/(dashboard)/knowledge/page.tsx` | SSR; calls `getKnowledgeIntegrations`, `getKnowledgeSources`, `getKnowledgeDocuments` |
+| Frontend Plane | `KnowledgePageClient` | `verevon/src/app/(dashboard)/knowledge/KnowledgePageClient.tsx` | Tabs UI; currently throws on initial load |
+| Frontend Plane | `knowledge-data.ts` | `verevon/src/app/api/knowledge/_lib/knowledge-data.ts` | Server-side fetchers; calls `documents-service` (port 8001) + `integration-engine-go-api` (port 3126) |
+| Frontend Plane | Ingestion API | `verevon/src/app/api/ingestion/crawl/{route,[jobId]/status,[jobId]/stream}.ts` | Quarry trigger + SSE |
+| Frontend Plane | Onboarding website step | `verevon/src/app/(onboarding)/onboarding/website/page.tsx` | Currently captures URL; doesn't trigger ingest |
+| Frontend Plane | Agent finetune hook | `verevon/src/components/agents/hooks/useAgentFinetune.ts` | Wave 7 — supports JSONL upload + Azure fine-tune jobs |
 | Data Plane | `documents` service | `Data Plane/services/documents` | gRPC + HTTP; stores raw docs + metadata |
 | Data Plane | `knowledge-index` worker | `Data Plane/services/knowledge-index/worker` | Background re-indexing on doc changes |
 | Data Plane | `retrieval` (RAG) | `Data Plane/services/retrieval` | gRPC; serves `/retrieval.Retrieve` to model-gateway |
@@ -89,7 +89,7 @@ Pulled live from Mobbin MCP (24 screens, May 17, 2026). All patterns below are o
 
 ### 3.2 Concrete UX patterns to lift (with screen IDs)
 
-| Pattern | Source | Screen ID | Velion adoption |
+| Pattern | Source | Screen ID | Verevon adoption |
 |---|---|---|---|
 | **Left sub-nav of ingestion modes** (not a modal) | Chatbase | `3109ea55…1ddb` | Adopt — each `Add data` mode becomes its own `/knowledge/<type>` page; faster nav + deep-link friendly |
 | **8-tile source picker modal** for first-time add | Lindy | `04b7331b…2a981` | Adopt for the entry-point "Add knowledge" button; tiles fall through to the sub-nav pages |
@@ -131,9 +131,9 @@ Pulled live from Mobbin MCP (24 screens, May 17, 2026). All patterns below are o
 - [ ] Smoke: load `/knowledge` against a stopped documents-service → empty state + dev-warning toast. Against a running service → real documents.
 
 **Files**
-- `velion/src/app/api/knowledge/_lib/knowledge-data.ts` — header forwarding + ECONNREFUSED catch
-- `velion/src/app/(dashboard)/knowledge/page.tsx` — wrap each `Promise.all` member with `.catch(() => fallback)` so one service outage doesn't 500 the page
-- `velion/src/app/(dashboard)/knowledge/KnowledgePageClient.tsx` — surface per-section warnings
+- `verevon/src/app/api/knowledge/_lib/knowledge-data.ts` — header forwarding + ECONNREFUSED catch
+- `verevon/src/app/(dashboard)/knowledge/page.tsx` — wrap each `Promise.all` member with `.catch(() => fallback)` so one service outage doesn't 500 the page
+- `verevon/src/app/(dashboard)/knowledge/KnowledgePageClient.tsx` — surface per-section warnings
 
 **Exit criteria**: `/knowledge` renders for a user whose org has zero documents AND for a user whose org has 100+ documents, with documents-service running or stopped.
 
@@ -208,27 +208,27 @@ In-agent quick-add (agent Knowledge tab) uses the smaller ElevenLabs 3-tab segme
 #### 2.4 Files to add/change
 
 ```
-velion/src/app/(dashboard)/knowledge/layout.tsx                            (new — left sub-nav shell + right rail)
-velion/src/app/(dashboard)/knowledge/page.tsx                              (rewrite — index/overview)
-velion/src/app/(dashboard)/knowledge/files/page.tsx                        (new)
-velion/src/app/(dashboard)/knowledge/text/page.tsx                         (new)
-velion/src/app/(dashboard)/knowledge/website/page.tsx                      (new)
-velion/src/app/(dashboard)/knowledge/qa/page.tsx                           (new)
-velion/src/app/(dashboard)/knowledge/integrations/page.tsx                 (rewrite from existing — use new shell)
-velion/src/components/knowledge/AddKnowledgeModal.tsx                      (new — Lindy 8-tile grid)
-velion/src/components/knowledge/KnowledgeSidebar.tsx                       (new — left sub-nav, Chatbase)
-velion/src/components/knowledge/KnowledgeStatusRail.tsx                    (new — sticky right rail w/ Retrain CTA)
-velion/src/components/knowledge/DocumentList.tsx                           (new — bulk-select + floating action bar)
-velion/src/components/knowledge/DocumentDrawer.tsx                         (new — Content/Agents tabs, edit, deprecate, extracted-content preview)
-velion/src/components/knowledge/QnAEvaluator.tsx                           (new — Fin G/A/P rating chips w/ keyboard shortcuts)
-velion/src/components/knowledge/modals/CrawlSourceModal.tsx                (new — discover→preview→commit)
-velion/src/components/knowledge/modals/UploadFilesModal.tsx                (new — Fin spec sidecar)
-velion/src/components/knowledge/modals/PasteTextModal.tsx                  (new — Lindy text pattern)
-velion/src/components/knowledge/modals/QnAModal.tsx                        (new — operator-authored pair)
-velion/src/components/knowledge/modals/AddDocumentSegmented.tsx            (new — ElevenLabs 3-tab File/URL/Text for in-agent context)
-velion/src/components/knowledge/hooks/useKnowledgeStats.ts                 (new — totals + dirty flag for right rail)
-velion/src/components/knowledge/hooks/useKnowledgeDocuments.ts             (new)
-velion/src/components/knowledge/hooks/useKnowledgeQnA.ts                   (new)
+verevon/src/app/(dashboard)/knowledge/layout.tsx                            (new — left sub-nav shell + right rail)
+verevon/src/app/(dashboard)/knowledge/page.tsx                              (rewrite — index/overview)
+verevon/src/app/(dashboard)/knowledge/files/page.tsx                        (new)
+verevon/src/app/(dashboard)/knowledge/text/page.tsx                         (new)
+verevon/src/app/(dashboard)/knowledge/website/page.tsx                      (new)
+verevon/src/app/(dashboard)/knowledge/qa/page.tsx                           (new)
+verevon/src/app/(dashboard)/knowledge/integrations/page.tsx                 (rewrite from existing — use new shell)
+verevon/src/components/knowledge/AddKnowledgeModal.tsx                      (new — Lindy 8-tile grid)
+verevon/src/components/knowledge/KnowledgeSidebar.tsx                       (new — left sub-nav, Chatbase)
+verevon/src/components/knowledge/KnowledgeStatusRail.tsx                    (new — sticky right rail w/ Retrain CTA)
+verevon/src/components/knowledge/DocumentList.tsx                           (new — bulk-select + floating action bar)
+verevon/src/components/knowledge/DocumentDrawer.tsx                         (new — Content/Agents tabs, edit, deprecate, extracted-content preview)
+verevon/src/components/knowledge/QnAEvaluator.tsx                           (new — Fin G/A/P rating chips w/ keyboard shortcuts)
+verevon/src/components/knowledge/modals/CrawlSourceModal.tsx                (new — discover→preview→commit)
+verevon/src/components/knowledge/modals/UploadFilesModal.tsx                (new — Fin spec sidecar)
+verevon/src/components/knowledge/modals/PasteTextModal.tsx                  (new — Lindy text pattern)
+verevon/src/components/knowledge/modals/QnAModal.tsx                        (new — operator-authored pair)
+verevon/src/components/knowledge/modals/AddDocumentSegmented.tsx            (new — ElevenLabs 3-tab File/URL/Text for in-agent context)
+verevon/src/components/knowledge/hooks/useKnowledgeStats.ts                 (new — totals + dirty flag for right rail)
+verevon/src/components/knowledge/hooks/useKnowledgeDocuments.ts             (new)
+verevon/src/components/knowledge/hooks/useKnowledgeQnA.ts                   (new)
 ```
 
 **Exit criteria**: All five "Add data" modals work end-to-end against running services; the page reactively reflects status changes; documents-service-down still renders the page.
@@ -286,8 +286,8 @@ velion/src/components/knowledge/hooks/useKnowledgeQnA.ts                   (new)
 
 **Files**:
 - `convex-core/convex/agents.ts` (+`updateKnowledgeBindings`)
-- `velion/src/components/agents/AgentWorkspaceView.tsx` (new tab)
-- `velion/src/components/agents/hooks/useAgentKnowledge.ts` (already exists; extend)
+- `verevon/src/components/agents/AgentWorkspaceView.tsx` (new tab)
+- `verevon/src/components/agents/hooks/useAgentKnowledge.ts` (already exists; extend)
 - `model-gateway/src/tool_registry.rs::kb_search` (forward `bound_document_ids` to retrieval)
 
 **Exit criteria**: An agent bound to a 3-doc subset answers ONLY from those 3 docs; analytics confirms zero citations from out-of-scope documents.
@@ -342,11 +342,11 @@ velion/src/components/knowledge/hooks/useKnowledgeQnA.ts                   (new)
 
 #### 7.3 Files
 ```
-velion/src/app/api/knowledge/route-classify/route.ts                  (new)
-velion/src/lib/knowledge/router-prompt.ts                             (new — the rubric prompt)
-velion/src/lib/knowledge/router-schema.ts                             (new — Zod schema for the structured output)
+verevon/src/app/api/knowledge/route-classify/route.ts                  (new)
+verevon/src/lib/knowledge/router-prompt.ts                             (new — the rubric prompt)
+verevon/src/lib/knowledge/router-schema.ts                             (new — Zod schema for the structured output)
 Data Plane/services/documents/app/routing.py                          (new — column + ingest hooks)
-velion/src/components/knowledge/RoutingMatrix.tsx                     (new — per-doc dropdown override UI)
+verevon/src/components/knowledge/RoutingMatrix.tsx                     (new — per-doc dropdown override UI)
 ```
 
 #### 7.4 Cost/safety
@@ -377,7 +377,7 @@ velion/src/components/knowledge/RoutingMatrix.tsx                     (new — p
 
 ### Phase 9 — Docs + closure (HALF DAY)
 
-- [ ] §21 in `docs/ui-ux-velion-gap.md` mirroring §19's shape.
+- [ ] §21 in `docs/ui-ux-verevon-gap.md` mirroring §19's shape.
 - [ ] Update `docs/CODEMAPS/knowledge.md` (regen via /update-codemaps).
 - [ ] Rename `docs/prompts/wave11-knowledge.md` → `wave11-knowledge.closed.md`.
 

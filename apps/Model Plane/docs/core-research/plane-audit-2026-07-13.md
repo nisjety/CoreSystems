@@ -60,9 +60,9 @@ retention provenance is unknown.
 |---|---|---|
 | Running containers predate the gRPC-removal WIP; chat works. | **Withdrawn.** `model-gateway` and `inference-core` were rebuilt; `:9090` and `:9092` refuse connections. | The former deploy landmine is now a P0 live incident. |
 | Session compaction fails 100%. | **Withdrawn.** Live metrics show 479 successful compactions, no observed errors, and 24 recent checkpoints without duplicate `(run_id, ordinal)`. | Do not change the working loop based on stale evidence; add targeted failure-mode tests. |
-| Ordinary Velion v3 chat accidentally has no tool wiring. | **Withdrawn as stated.** Current Frontend v3 supports explicit selected tools and Plan/Agent Run Console agentic flows; an ordinary no-tool turn is intentional. | The remaining defect is inconsistent capability/catalog semantics and insufficient UX for intentional business-tool selection, not an unconditional default-agentic requirement. |
+| Ordinary Verevon v3 chat accidentally has no tool wiring. | **Withdrawn as stated.** Current Frontend v3 supports explicit selected tools and Plan/Agent Run Console agentic flows; an ordinary no-tool turn is intentional. | The remaining defect is inconsistent capability/catalog semantics and insufficient UX for intentional business-tool selection, not an unconditional default-agentic requirement. |
 | Agentic HITL is decorative. | **False for the guarded `ask` path.** The runtime pauses and persists approval before risky tools. | Preserve the working gate, but close unauthenticated session approval and inline MCP bypasses. |
-| Visma is a Velion capability. | **False.** No deployable Velion Visma MCP server is configured; the live record is malformed and the operator connector is external to Velion runtime. | Report `not_configured`; do not fabricate an integration result. |
+| Visma is a Verevon capability. | **False.** No deployable Verevon Visma MCP server is configured; the live record is malformed and the operator connector is external to Verevon runtime. | Report `not_configured`; do not fabricate an integration result. |
 
 ## Audit method and limitations
 

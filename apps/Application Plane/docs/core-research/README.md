@@ -34,12 +34,12 @@ No stack rebuild was attempted on July 13. Root capacity briefly fell to 3.6 GiB
 - `information-core.md`
 - `insight-core.md`
 - `leads-core.md`
-- `velion-gateway-rs.md`
+- `verevon-gateway-rs.md`
 - `zammad-foundation.md`
 - `plane-audit-2026-07-13.md` — current finding register, evidence matrix, acceptance state, and blockers
 - `plane-audit-2026-07-11.md` — historical audit; retained because it records prior/refuted findings
 
-Cross-plane callers reviewed in the current audit include Velion v3, the Ingestion support-worker, Control identity/org event publishers, and the Model traffic formatter.
+Cross-plane callers reviewed in the current audit include Verevon v3, the Ingestion support-worker, Control identity/org event publishers, and the Model traffic formatter.
 
 ## Current runtime shape
 

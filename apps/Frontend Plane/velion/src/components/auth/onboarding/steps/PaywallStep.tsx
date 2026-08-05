@@ -552,7 +552,7 @@ export function PaywallStep({ machine, fullScreen = false }: PaywallStepProps) {
           />
         </div>
         <style>{`
-          @keyframes velion-elevenlabs-ring {
+          @keyframes verevon-elevenlabs-ring {
             0% { background-position: 0 0, 0% 50%; }
             50% { background-position: 0 0, 100% 50%; }
             100% { background-position: 0 0, 0% 50%; }
@@ -698,7 +698,7 @@ function FullScreenPaywall({
         </div>
       </main>
       <style>{`
-        @keyframes velion-elevenlabs-ring {
+        @keyframes verevon-elevenlabs-ring {
           0% { background-position: 0% 50%; }
           50% { background-position: 100% 50%; }
           100% { background-position: 0% 50%; }
@@ -847,7 +847,7 @@ function PlanCard({
             background:
               'linear-gradient(120deg, #A7E5D3, #F4C5A8, #C8B8E0, #A8C8E8, #A7E5D3)',
             backgroundSize: '260% 260%',
-            animation: 'velion-elevenlabs-ring 8s ease-in-out infinite',
+            animation: 'verevon-elevenlabs-ring 8s ease-in-out infinite',
           }}
           transition={{
             type: 'spring',

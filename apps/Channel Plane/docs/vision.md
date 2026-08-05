@@ -2,9 +2,9 @@
 
 ## Purpose
 
-Channel Plane is the future runtime and deployment surface for external-facing Velion agents.
+Channel Plane is the future runtime and deployment surface for external-facing Verevon agents.
 
-It exists to let an organization create an agent in Velion and deploy that agent into customer-facing channels such as:
+It exists to let an organization create an agent in Verevon and deploy that agent into customer-facing channels such as:
 
 - website chat widgets
 - Shopify storefronts
@@ -16,21 +16,21 @@ This document captures the plan and vision for that future work.
 
 ## Current Decision
 
-Velion should continue focusing on getting the current platform running well before Channel Plane is built.
+Verevon should continue focusing on getting the current platform running well before Channel Plane is built.
 
 That means:
 
 - the current architecture stays as-is for now
 - no current plane needs to be restructured before launch
-- Channel Plane is saved as a future expansion of Velion, not a blocker for the current milestone
+- Channel Plane is saved as a future expansion of Verevon, not a blocker for the current milestone
 
 ## Product Vision
 
-Velion serves two complementary use cases.
+Verevon serves two complementary use cases.
 
-### 1. Internal Velion Workspace
+### 1. Internal Verevon Workspace
 
-Employees use Velion to:
+Employees use Verevon to:
 
 - access organization knowledge
 - ask questions over company documents
@@ -46,15 +46,15 @@ Organization admins can:
 - create agents
 - decide which internal users can monitor or manage those agents
 - deploy agents into external channels
-- monitor conversations in a shared inbox inside Velion
+- monitor conversations in a shared inbox inside Verevon
 
 This is the responsibility of Channel Plane.
 
 ## Architectural Role
 
-Channel Plane should become the external conversation runtime for Velion.
+Channel Plane should become the external conversation runtime for Verevon.
 
-Velion remains the parent platform and control surface.
+Verevon remains the parent platform and control surface.
 
 Channel Plane becomes the operational layer for:
 
@@ -180,11 +180,11 @@ Example:
 2. Admin gives user X and user Y permission to view and manage chatbot Z.
 3. The agent is deployed through a WordPress or WooCommerce adapter.
 4. Customers use the chatbot on the organization's public site.
-5. Internal users with access can open the inbox in Velion and monitor chatbot Z conversations.
+5. Internal users with access can open the inbox in Verevon and monitor chatbot Z conversations.
 
 ## Key Principle
 
-Channel Plane should be built as a new capability on top of Velion, not as a reason to rewrite the current architecture.
+Channel Plane should be built as a new capability on top of Verevon, not as a reason to rewrite the current architecture.
 
 ## Related Future Scope
 
@@ -195,7 +195,7 @@ Channel Plane should be built as a new capability on top of Velion, not as a rea
 
 That is the main advantage of this plan:
 
-- Velion can move forward now
+- Verevon can move forward now
 - Channel Plane can be added later
 - the existing platform remains useful and relevant
 - the future chatbot product can grow from the current system instead of replacing it
@@ -208,7 +208,7 @@ Do not build Channel Plane yet.
 
 Focus on:
 
-- getting Velion stable
+- getting Verevon stable
 - getting current planes running correctly
 - validating the internal product experience
 
@@ -223,7 +223,7 @@ Create the initial `channel-plane` implementation as a focused future module wit
 
 ### Phase 3
 
-Expand Channel Plane into a stronger product surface inside Velion with:
+Expand Channel Plane into a stronger product surface inside Verevon with:
 
 - external inbox operations
 - channel analytics
@@ -232,10 +232,10 @@ Expand Channel Plane into a stronger product surface inside Velion with:
 
 ## Final Position
 
-Channel Plane is a future-facing Velion capability and can eventually become a chatbot-focused product surface inside the larger Velion platform.
+Channel Plane is a future-facing Verevon capability and can eventually become a chatbot-focused product surface inside the larger Verevon platform.
 
 It is the right direction.
 
 It is also intentionally deferred.
 
-The current priority remains getting Velion running well with the architecture that already exists.
+The current priority remains getting Verevon running well with the architecture that already exists.

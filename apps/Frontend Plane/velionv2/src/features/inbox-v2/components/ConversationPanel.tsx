@@ -210,7 +210,7 @@ function ConversationHeader({
             onClick={() => onOpenModal({
               type: "work",
               title: "Watch conversation",
-              description: "Keep this conversation in a monitored queue and let Velion surface changes, SLA risk, and customer replies here.",
+              description: "Keep this conversation in a monitored queue and let Verevon surface changes, SLA risk, and customer replies here.",
               primaryAction: "Start watch",
             })}
           >
@@ -230,7 +230,7 @@ function ConversationHeader({
           <button
             type="button"
             onClick={() => onPatchTicket({ state_id: 4 })}
-            className="velion-button velion-button-primary velion-button-xs velion-button-radius-sm ml-1 px-3 font-semibold"
+            className="verevon-button verevon-button-primary verevon-button-xs verevon-button-radius-sm ml-1 px-3 font-semibold"
           >
             <CheckCheck className="size-3.5" />
             Close
@@ -290,7 +290,7 @@ function ConversationToolbar({
       <button
         type="button"
         onClick={() => onPatchTicket({ state_id: 4 })}
-        className="velion-button velion-button-secondary velion-button-xs velion-button-radius-sm px-3 font-medium"
+        className="verevon-button verevon-button-secondary verevon-button-xs verevon-button-radius-sm px-3 font-medium"
       >
         <CheckCheck className="size-3.5" />
         Close
@@ -527,7 +527,7 @@ function ConversationReplyComposerFooter({
             type="button"
             disabled={!replyText.trim() || replySending}
             onClick={() => onSendReply(replyText, isInternal)}
-            className="velion-button velion-button-secondary velion-button-sm velion-button-radius-sm px-4 disabled:opacity-40"
+            className="verevon-button verevon-button-secondary verevon-button-sm verevon-button-radius-sm px-4 disabled:opacity-40"
           >
             {replySending ? "Sending…" : "Send"}
           </button>
@@ -538,7 +538,7 @@ function ConversationReplyComposerFooter({
               onSendReply(replyText, isInternal);
               onPatchTicket({ state_id: 4 });
             }}
-            className="velion-button velion-button-primary velion-button-sm velion-button-radius-sm px-4 font-semibold disabled:opacity-40"
+            className="verevon-button verevon-button-primary verevon-button-sm verevon-button-radius-sm px-4 font-semibold disabled:opacity-40"
           >
             Send & Close
           </button>
@@ -623,7 +623,7 @@ function ArticleBubble({ article, ticket }: { article: ZammadArticle; ticket: Za
       <div className="min-w-0 flex-1">
         <div className="mb-2 flex flex-wrap items-center gap-2 text-[13px]">
           <span className={cn("font-semibold", agentMessage ? "text-[#006ADC]" : "text-[#111111] dark:text-white")}>
-            {article.from || (agentMessage ? "Velion Support" : customerName(ticket))}
+            {article.from || (agentMessage ? "Verevon Support" : customerName(ticket))}
           </span>
           <Mail className="size-3.5 text-[#9C9A96]" />
           <span className="text-[#9C9A96]">{formatTimestamp(article.created_at)}</span>
@@ -715,7 +715,7 @@ function ModeButton({ active, icon: Icon, label, onClick, warning = false }: { a
 
 function IconButton({ children, label, onClick }: { children: ReactNode; label: string; onClick?: () => void }) {
   return (
-    <button type="button" onClick={onClick} aria-label={label} title={label} className="velion-icon-button velion-icon-button-xs velion-button-radius-sm">
+    <button type="button" onClick={onClick} aria-label={label} title={label} className="verevon-icon-button verevon-icon-button-xs verevon-button-radius-sm">
       {children}
     </button>
   );
@@ -723,7 +723,7 @@ function IconButton({ children, label, onClick }: { children: ReactNode; label: 
 
 function HeaderIconButton({ children, label, onClick }: { children: ReactNode; label: string; onClick?: () => void }) {
   return (
-    <button type="button" onClick={onClick} aria-label={label} title={label} className="velion-icon-button velion-button-radius-sm">
+    <button type="button" onClick={onClick} aria-label={label} title={label} className="verevon-icon-button verevon-button-radius-sm">
       {children}
     </button>
   );

@@ -1,7 +1,7 @@
 // email-worker polls connected Gmail (Google) and Outlook (Microsoft)
 // mailboxes — plus Microsoft Teams, Slack, X direct messages, and Discord
 // guild channels — for new inbound messages and forwards them to the
-// conversation-ingest-rs bridge, which lands them in the Velion Inbox.
+// conversation-ingest-rs bridge, which lands them in the Verevon Inbox.
 // It is the caller side of the /internal/ingest/email pathway.
 package main
 
@@ -22,6 +22,7 @@ import (
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
 	"github.com/triodelab/integration-corev2/internal/db"
 	"github.com/triodelab/integration-corev2/internal/emailsync"
+	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -68,8 +69,9 @@ func main() {
 
 	providerHTTP := &http.Client{Timeout: 20 * time.Second}
 	worker := emailsync.Worker{
-		Store:  repo,
-		Tokens: tokens,
+		Store:       repo,
+		Tokens:      tokens,
+		Integration: handoff.NewIntegrationClientFromConfig(cfg, &http.Client{Timeout: 15 * time.Second}),
 		Ingest: &emailsync.IngestClient{
 			BaseURL:      cfg.ConversationIngestURL,
 			ServiceToken: cfg.ConversationIngestServiceToken,
@@ -81,14 +83,15 @@ func main() {
 			HTTP:         providerHTTP,
 			FullBackfill: cfg.EmailSyncGraphFullBackfill,
 		},
-		Teams:          &emailsync.TeamsFetcher{BaseURL: strings.TrimRight(cfg.MicrosoftGraphBaseURL, "/") + "/v1.0", HTTP: providerHTTP},
-		Slack:          &emailsync.SlackFetcher{BaseURL: cfg.SlackAPIBaseURL, HTTP: providerHTTP},
-		XDM:            &emailsync.XDMFetcher{BaseURL: cfg.XAPIBaseURL, HTTP: providerHTTP},
-		Discord:        &emailsync.DiscordFetcher{BaseURL: cfg.DiscordAPIBaseURL, BotToken: cfg.DiscordBotToken, HTTP: providerHTTP},
-		Logger:         &logger,
-		PollInterval:   cfg.EmailSyncInterval,
-		BackfillWindow: cfg.EmailSyncBackfillWindow,
-		MaxPerCycle:    cfg.EmailSyncMaxPerCycle,
+		Teams:              &emailsync.TeamsFetcher{BaseURL: strings.TrimRight(cfg.MicrosoftGraphBaseURL, "/") + "/v1.0", HTTP: providerHTTP},
+		Slack:              &emailsync.SlackFetcher{BaseURL: cfg.SlackAPIBaseURL, HTTP: providerHTTP},
+		XDM:                &emailsync.XDMFetcher{BaseURL: cfg.XAPIBaseURL, HTTP: providerHTTP},
+		Discord:            &emailsync.DiscordFetcher{BaseURL: cfg.DiscordAPIBaseURL, BotToken: cfg.DiscordBotToken, HTTP: providerHTTP},
+		Logger:             &logger,
+		PollInterval:       cfg.EmailSyncInterval,
+		ManualPollInterval: 2 * time.Second,
+		BackfillWindow:     cfg.EmailSyncBackfillWindow,
+		MaxPerCycle:        cfg.EmailSyncMaxPerCycle,
 	}
 
 	logger.Info().

@@ -22,7 +22,7 @@ single DLQ, and ownership receipt. Runtime stream/consumer administration and
 Documents request forgery are denied in the fresh-broker integration test.
 
 The temporary compatibility bridge ACKs but does not forward any
-`velion.gdpr.*` subject, preventing deletion/security evidence from reaching the
+`verevon.gdpr.*` subject, preventing deletion/security evidence from reaching the
 legacy shared-token broker. Full Audit tests/vet and changed-package race tests
 pass. Provisioner package coverage is 83.2%, the GDPR consumer config is 100%,
 and the forwarder is 81.0%. This topology has not been rolled into the existing
@@ -37,17 +37,17 @@ An isolated current Audit image with disposable Postgres and three scoped broker
 
 The final source pass gives topology ownership only to the one-shot provisioner, adds logical `(source_bus,event_id)` persistence de-duplication, and bridges the temporary token-only bus with stable message IDs and ACK-after-target-confirmation semantics. Auth identity, Org plan, and Billing plan security-critical producers now use transactionally durable outbox/PubAck paths; release runtime producers use scoped user/password principals with token fallback disabled. The long-running dev Audit image still reflects the older deployment and was not recreated. Coordinated secret rotation and integration-image rollout remain operational evidence gaps; the source no longer has the previously inventoried Control runtime token-only/admin paths.
 
-## 2026-07-14 Velion/current-runtime addendum (historical deployment evidence)
+## 2026-07-14 Verevon/current-runtime addendum (historical deployment evidence)
 
 Audit Core is healthy and `/readyz` returns 200 with `database_connected=true`, `primary_nats_connected=true`, and `delivery_mode=jetstream_durable`. Unlike the earlier 2026-07-11 runtime, the current stack reports `extra_nats_connected=[]`: the primary Control bus is live, but no extra-plane consumer is configured or proven. Cross-plane aggregation is therefore degraded and acceptance G remains open.
 
-Velion now uses the shared Audit client instead of page-local raw parsing. It validates and normalizes the live snake_case row contract (`event`/`action`, actor/user/role, resource/subject, outcome, request ID, and occurrence timestamps), propagates abort signals, and distinguishes request failure from an empty event set. Its focused line coverage is 98.55%, and the settings rendering regression passes. No audit row was injected or mutated during this continuation. Shared-key replacement, extra-plane connectivity, producer outboxes, pending/lag visibility, and replay proof remain MVP work.
+Verevon now uses the shared Audit client instead of page-local raw parsing. It validates and normalizes the live snake_case row contract (`event`/`action`, actor/user/role, resource/subject, outcome, request ID, and occurrence timestamps), propagates abort signals, and distinguishes request failure from an empty event set. Its focused line coverage is 98.55%, and the settings rendering regression passes. No audit row was injected or mutated during this continuation. Shared-key replacement, extra-plane connectivity, producer outboxes, pending/lag visibility, and replay proof remain MVP work.
 
 ## 2026-07-11 production-readiness addendum (historical)
 
 Both 2026-07-10 live defects are fixed and deployed. `/v1/usage/summary` executes the corrected aggregate query and returned 200 against the live schema. `/readyz` returned 200 with `database_connected=true`, `primary_nats_connected=true`, `extra_nats_connected=[true]`, and `delivery_mode="jetstream_durable"`. Prometheus exposes per-bus connectivity plus event result/age metrics.
 
-Audit and usage subjects on both buses now feed named durable consumers on a file-backed `VELION_CONTROL_OBSERVABILITY` stream. Database success is ACKed; a transient store failure is NAKed for bounded redelivery; malformed or five-times-failed messages are durably copied under `velion.dlq.audit-core.*` before TERM. Readiness marks an extra bus degraded if it connects but cannot create its consumers. Live startup logs confirm `audit-core-primary-{audit,usage}` and `audit-core-extra-1-{audit,usage}`.
+Audit and usage subjects on both buses now feed named durable consumers on a file-backed `VEREVON_CONTROL_OBSERVABILITY` stream. Database success is ACKed; a transient store failure is NAKed for bounded redelivery; malformed or five-times-failed messages are durably copied under `verevon.dlq.audit-core.*` before TERM. Readiness marks an extra bus degraded if it connects but cannot create its consumers. Live startup logs confirm `audit-core-primary-{audit,usage}` and `audit-core-extra-1-{audit,usage}`.
 
 `go test ./...` and `go vet ./...` pass. An embedded JetStream integration/race test proves successful persistence/ACK, transient retry, malformed DLQ, five-delivery exhaustion, and stream update. Final review then added migration `002_jetstream_inbox`: `(source_bus, source_stream_sequence)` is unique per audit/usage table, duplicate delivery ACKs without insertion, and a source message is TERM'd only after confirmed durable DLQ publication. Disposable Postgres 16 proves the migration ledger and one-row redelivery semantics. Subscriber coverage is 72.0% after the new branches.
 
@@ -57,9 +57,9 @@ The final Audit image was recreated, but Docker Desktop immediately developed co
 
 `audit-core` is still the smallest Control Plane core, but it is no longer just "subscribe, persist, read." Since the 2026-06-07 pass it picked up:
 
-- a daily retention-purge loop (`AUDIT_RETENTION_DAYS`, default 365, matching the velion settings-UI copy)
+- a daily retention-purge loop (`AUDIT_RETENTION_DAYS`, default 365, matching the verevon settings-UI copy)
 - a dedicated Prometheus `/metrics` server on port 9091 (Phase 6 B13), separate from the app port so scraping doesn't need the internal-API-key
-- an HTTP ingest endpoint (`POST /v1/audit`) so non-NATS callers (e.g. the velionv2 BFF) can write audit rows through the same validate/normalize path as the subscriber
+- an HTTP ingest endpoint (`POST /v1/audit`) so non-NATS callers (e.g. the verevonv2 BFF) can write audit rows through the same validate/normalize path as the subscriber
 - a versioned `schema_migrations` ledger (Phase 6 B4) replacing the old "re-run idempotent DDL on every boot" approach
 - cross-plane NATS aggregation via `EXTRA_NATS_URLS` — audit-core is meant to be the single sink across all plane buses, not just the Control Plane's own bus
 - a hardened internal-auth default: the docker-compose `INTERNAL_API_KEY` default was a weak `dev-super-secret-...` string until commit `49dc5720` ("fix(security): harden internal-auth — kill weak defaults + close fail-open holes", 2026-07-07) made it fail loud (`:?INTERNAL_API_KEY must be set`) instead
@@ -84,7 +84,7 @@ Key runtime entrypoints:
   - `GET /healthz`, `GET /readyz` (unauthenticated, both just return `{"status":"ok"}`)
   - `/v1/*` routes behind `internalAuth` middleware (constant-time compare against `INTERNAL_API_KEY`, header `X-Internal-Api-Key` or `X-Api-Key`)
 - `internal/subscriber/subscriber.go`
-  - queue-subscribes `velion.audit.v1.>` and `velion.usage.v1.>` under queue group `audit-core` on whichever `*nats.Conn` it's given (used once for the primary bus, once per extra bus)
+  - queue-subscribes `verevon.audit.v1.>` and `verevon.usage.v1.>` under queue group `audit-core` on whichever `*nats.Conn` it's given (used once for the primary bus, once per extra bus)
 - `internal/events/events.go`
   - shared wire-format structs (`AuditEvent`, `UsageEvent`) + `Validate()`/`Decode*()` — same functions used by both the NATS path and the HTTP ingest path, so the two paths can't drift
 - `internal/store/store.go` + `migrate.go` + `schema.sql`
@@ -112,8 +112,8 @@ Current relationships:
 - `audit-core` → primary NATS (`controlplane-nats:4223` externally / `controlplane-nats:4222` in-network) — **confirmed subscribed and healthy** (see live checks)
 - `audit-core` → extra plane NATS buses via `EXTRA_NATS_URLS` — **configured but not currently connected**, see Bugs below
 - `audit-core` → Postgres (`controlplane-postgres`) — durable audit + usage persistence, schema-ledgered
-- upstream publishers of `velion.audit.v1.*` / `velion.usage.v1.*` confirmed present in code today (grep, not just the 2026-06-07 doc's claim): `auth-core` (`audit-plugin.ts`, `organization-hooks.ts`, `auth-event.publisher.ts`, `direct-nats.service.ts`), `user-core` (`gdpr.go`, `service.go`), `org-core` (`service_enhanced.go`, `gdpr_handlers.go`, `nats/client.go`)
-- downstream consumer: the velion `/settings/audit-log` and `/settings/usage` UI views read `GET /v1/audit` and `GET /v1/usage/summary` respectively (per the API doc-comments in `api.go`) — the summary path being broken (below) means the usage dashboard is not actually servable right now, independent of whether any usage data exists
+- upstream publishers of `verevon.audit.v1.*` / `verevon.usage.v1.*` confirmed present in code today (grep, not just the 2026-06-07 doc's claim): `auth-core` (`audit-plugin.ts`, `organization-hooks.ts`, `auth-event.publisher.ts`, `direct-nats.service.ts`), `user-core` (`gdpr.go`, `service.go`), `org-core` (`service_enhanced.go`, `gdpr_handlers.go`, `nats/client.go`)
+- downstream consumer: the verevon `/settings/audit-log` and `/settings/usage` UI views read `GET /v1/audit` and `GET /v1/usage/summary` respectively (per the API doc-comments in `api.go`) — the summary path being broken (below) means the usage dashboard is not actually servable right now, independent of whether any usage data exists
 
 ## Live Verification (2026-07-10)
 
@@ -125,7 +125,7 @@ Container: `audit-core-service`, healthy, port 8187 exposed to host. `docker ins
 - Auth checks: no key → 401; wrong key → 401; correct key + `org_id` → 200. Confirms the constant-time compare and the "no weak default" fail-loud path both work as coded.
 - `GET /v1/audit?org_id=org_1782152609927&since=2020-01-01T00:00:00Z` returned 8 **real** rows — genuine historical events, not fixtures: Model Plane `tool_action` events (tools `news`, `yr_weather`, `fetch_url`, `company_lookup`, with `details.data_category`/`details.zdr` fields present, matching the ZDR/GDPR tagging described elsewhere in the program), and an Application Plane `lead_export` event referencing a real lead list. `audit_events` table total: 11 rows (the above 8, plus 2 `erasure` test rows from 2026-06-26, now 12 after the round-trip test below).
 - Live round-trip test performed: `POST /v1/audit` with a synthetic event (`org_id=audit-live-verify-20260710`) → 202 Accepted; immediate `GET /v1/audit?org_id=audit-live-verify-20260710` → the row comes back with the correct `id`, `ingested_at`, and normalized `outcome:"ok"` default. This proves the full ingest → validate → persist → query path is genuinely wired end-to-end today, not mocked.
-- `usage_events` table: **0 rows**, always has been in this environment. `GET /v1/usage?org_id=...` correctly returns `{"data":[],"meta":{"count":0}}` (200) — the list path itself is fine with no data. No conclusion is drawn about whether usage/cost producers are broken elsewhere; this environment simply has never received a `velion.usage.v1.*` message or an ingest for usage.
+- `usage_events` table: **0 rows**, always has been in this environment. `GET /v1/usage?org_id=...` correctly returns `{"data":[],"meta":{"count":0}}` (200) — the list path itself is fine with no data. No conclusion is drawn about whether usage/cost producers are broken elsewhere; this environment simply has never received a `verevon.usage.v1.*` message or an ingest for usage.
 - All 11 pre-existing `audit_events` rows have `ingested_at` **older** than the current container's `Created` timestamp (2026-07-07T21:12:33Z) — i.e. every real event in the table today was written by a *previous* instance of this container (Postgres data survives recreation; the app container does not carry state). Since the current container came up, exactly one row has landed: the synthetic test event injected above via HTTP, not via NATS. This is not by itself alarming (it may simply mean no audit-worthy action has occurred against this live stack in the last 3 days), but it does mean the NATS ingestion path has had zero live exercise on the current container instance — so the bug below could have been silently open the entire time without symptoms.
 
 ## NATS Wiring — Confirmed Present, Partially Broken
@@ -142,7 +142,7 @@ However, live logs show it is not actually working right now:
 
 Root cause, confirmed via `docker inspect`: `docker-compose.yml` declares `audit-core-service` on **two** networks (`controlplane-net` and `inter-plane-bus` — `model-plane-nats-1` lives on `inter-plane-bus`), but the **currently-running container is attached to `controlplane-net` only**. Git history pins this precisely: the `inter-plane-bus` line for `audit-core` was added in commit `49dc5720` at `2026-07-07 23:16:21 +0200` (`21:16:21 UTC`) — **4 minutes after** the running container's `Created` timestamp (`21:12:33 UTC`). The same commit also removed the weak `INTERNAL_API_KEY` default (confirmed deployed, per the printenv check above), so the container was clearly recreated for that change, but recreated a few minutes *before* the network line was added to the compose file — and nothing has recreated it since.
 
-Effect: cross-plane audit aggregation for Model Plane `tool_action` events (the exact use case the code's own comments describe — "session-core publishes `velion.audit.v1.model.tool_action`" on the model-plane bus) is currently **not happening**. By design this fails soft (logged warning, not fatal), so the service itself is healthy and nothing pages — but it means the tool_action audit trail this program has repeatedly described as "closed" is not actually flowing at runtime right now. The 8 real `tool_action` rows already in the table (dated 2026-06-22/23) predate this container entirely, so they don't prove current connectivity — see the timestamp analysis above.
+Effect: cross-plane audit aggregation for Model Plane `tool_action` events (the exact use case the code's own comments describe — "session-core publishes `verevon.audit.v1.model.tool_action`" on the model-plane bus) is currently **not happening**. By design this fails soft (logged warning, not fatal), so the service itself is healthy and nothing pages — but it means the tool_action audit trail this program has repeatedly described as "closed" is not actually flowing at runtime right now. The 8 real `tool_action` rows already in the table (dated 2026-06-22/23) predate this container entirely, so they don't prove current connectivity — see the timestamp analysis above.
 
 **Fix**: recreate the container so it picks up the network config already committed in `docker-compose.yml` — `docker compose -f "apps/Control Plane/docker-compose.yml" up -d --force-recreate audit-core` (or an equivalent `docker compose up -d` that detects the network diff). No code or compose change is needed; this is a pure "the file says two networks, the live instance has one" drift, not a design gap. Recommend verifying after recreate: `docker exec audit-core-service getent hosts model-plane-nats-1` should resolve, and the boot log should show `"audit-core aggregating extra plane bus"` for `nats://model-plane-nats-1:4222` instead of the warn line above.
 
@@ -154,7 +154,7 @@ Effect: cross-plane audit aggregation for Model Plane `tool_action` events (the 
    or be used in an aggregate function (SQLSTATE 42803)
    ```
    Cause, in `internal/store/store.go` `SummariseUsage`: the query does `GROUP BY plane, op` and selects `COALESCE(SUM(cost_cents), 0)`, but the `ORDER BY` clause sorts by the bare `cost_cents DESC NULLS LAST, events DESC` instead of the aggregated expression (`SUM(cost_cents)` or a column alias). Postgres rejects this at parse time regardless of whether any rows would actually match — it is broken for every `org_id`, including ones with zero usage rows, which is exactly what live-reproduced it here (usage_events is empty in this environment). Note `events DESC` in the same ORDER BY is fine since `events` is itself the `COUNT(*)` alias — only the `cost_cents` reference is the problem.
-   - Impact: this is the exact endpoint the velion `/settings/usage` dashboard is documented (in the handler's own comment) to read directly — so that dashboard is unconditionally broken today, independent of whether Model Plane cost/usage events ever start flowing.
+   - Impact: this is the exact endpoint the verevon `/settings/usage` dashboard is documented (in the handler's own comment) to read directly — so that dashboard is unconditionally broken today, independent of whether Model Plane cost/usage events ever start flowing.
    - Test coverage: neither `internal/store/store_test.go` nor `internal/api/api_test.go` has any test that calls `SummariseUsage`/`summariseUsage` — confirmed by grep (zero hits). This is why the bug shipped and has stayed unnoticed; `go test ./...` is green today only because nothing exercises this path.
    - Fix shape (not applied — out of scope for this audit pass): change `ORDER BY` to reference the aggregate, e.g. `ORDER BY SUM(cost_cents) DESC NULLS LAST, COUNT(*) DESC`, and add a test that calls it against an empty and a populated `usage_events` table.
 

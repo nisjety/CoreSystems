@@ -3,7 +3,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Frontend (Velion)                         │
+│                        Frontend (Verevon)                         │
 │                       :3000 (Next.js)                            │
 └──────────────┬──────────────────────────────────────────────────┘
                │ HTTP requests
@@ -264,7 +264,7 @@ curl -I http://localhost:3012
 
 1. **Start services:** `./scripts/start_external_services.sh`
 2. **Generate secure credentials:** Already done in `generate_external_services_credentials.sh`
-3. **Integrate with Velion Frontend:** Update environment variables
+3. **Integrate with Verevon Frontend:** Update environment variables
 4. **Set up webhooks:** Configure event listeners
 5. **Monitor and log:** Add observability stack
 

@@ -81,13 +81,13 @@ Issue: Authorization Violation
   - Root Cause: Reasoning Plane trying to connect to local reasoning-nats
     with shared NATS token (aqencia-shared-nats-token-2026)
   - Local reasoning-nats doesn't have token auth configured
-  - Solution: Need to configure NATS connection to use velion-nats
+  - Solution: Need to configure NATS connection to use verevon-nats
     (shared NATS on triodelab-net) instead of local reasoning-nats
 
 Network Architecture Insight:
   - reasoning-nats: Local to Reasoning Plane (no auth)
-  - velion-nats: Shared across all planes (has token auth)
-  - Reasoning Plane needs to connect to velion-nats, not reasoning-nats
+  - verevon-nats: Shared across all planes (has token auth)
+  - Reasoning Plane needs to connect to verevon-nats, not reasoning-nats
 ```
 
 ---
@@ -106,9 +106,9 @@ Control Plane Subscriber: Trying to use aqencia-shared-nats-token-2026
 
 **Solution (TODO):**
 1. Option A: Configure reasoning-nats to accept token (modify docker-compose)
-2. Option B: Make Control Plane Subscriber connect to shared velion-nats instead
+2. Option B: Make Control Plane Subscriber connect to shared verevon-nats instead
 
-**Recommended:** Option B (Use shared velion-nats)
+**Recommended:** Option B (Use shared verevon-nats)
 - Keeps cross-plane event bus separate from intra-plane NATS
 - Aligns with Phase 5 architecture (shared event bus pattern)
 - No local NATS config needed
@@ -146,13 +146,13 @@ Control Plane Subscriber: Trying to use aqencia-shared-nats-token-2026
 ## Immediate Next Steps (< 30 mins to Complete)
 
 ### Step 1: Fix Reasoning Plane NATS Connection (5-10 mins)
-**Option:** Modify Control Plane Subscriber to use velion-nats directly
-- Current: Uses settings.nats_shared_url (defaults to velion-nats:4222)
+**Option:** Modify Control Plane Subscriber to use verevon-nats directly
+- Current: Uses settings.nats_shared_url (defaults to verevon-nats:4222)
 - Issue: Local networks may block external NATS access
 - Solution: Add network configuration to docker-compose
 
 **Action:**
-1. Check if reasoning-ai-core can access velion-nats:4222
+1. Check if reasoning-ai-core can access verevon-nats:4222
 2. If network issue: connect via docker host bridge
 3. If credential issue: Use different token for local reasoning-nats
 4. Test subscription logs

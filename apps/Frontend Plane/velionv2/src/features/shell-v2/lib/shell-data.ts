@@ -1,4 +1,4 @@
-export type VelionRoute =
+export type VerevonRoute =
   | "/dashboard"
   | "/search"
   | "/chat"

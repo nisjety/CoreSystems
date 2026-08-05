@@ -294,7 +294,7 @@ If using the enhanced service layer:
 ```go
 // In org-core main.go or server initialization
 orgService := orgcore.NewService(repo, publisher, redisClient)
-orgService.SetSharedPublisher(sp)      // cross-plane velion-nats events
+orgService.SetSharedPublisher(sp)      // cross-plane verevon-nats events
 orgService.SetAuditPublisher(natsClient) // local audit bus
 
 // Now you can use:

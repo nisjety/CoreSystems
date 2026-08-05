@@ -5,7 +5,7 @@ let onboardingTableReady: Promise<void> | null = null;
 
 async function ensureOnboardingCompletionTable() {
   onboardingTableReady ??= getAuthDatabasePool().query(`
-    CREATE TABLE IF NOT EXISTS velion_onboarding_completions (
+    CREATE TABLE IF NOT EXISTS verevon_onboarding_completions (
       user_id TEXT PRIMARY KEY,
       completed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -22,7 +22,7 @@ export async function readLocalOnboardingComplete(userId: string) {
 
   await ensureOnboardingCompletionTable();
   const result = await getAuthDatabasePool().query<{ completed_at: Date }>(
-    "SELECT completed_at FROM velion_onboarding_completions WHERE user_id = $1 LIMIT 1",
+    "SELECT completed_at FROM verevon_onboarding_completions WHERE user_id = $1 LIMIT 1",
     [userId],
   );
 
@@ -33,7 +33,7 @@ export async function markLocalOnboardingComplete(userId: string) {
   await ensureOnboardingCompletionTable();
   await getAuthDatabasePool().query(
     `
-      INSERT INTO velion_onboarding_completions (user_id, completed_at, updated_at)
+      INSERT INTO verevon_onboarding_completions (user_id, completed_at, updated_at)
       VALUES ($1, NOW(), NOW())
       ON CONFLICT (user_id)
       DO UPDATE SET updated_at = NOW()

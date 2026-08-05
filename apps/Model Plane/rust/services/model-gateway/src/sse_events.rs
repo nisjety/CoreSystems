@@ -1,7 +1,7 @@
 //! Chat-parity rich SSE event taxonomy (docs/chat-parity-audit.md §2).
 //!
 //! ONE forward-compatible event set for `/v1/invoke/stream`. Each [`ChatEvent`]
-//! maps to an SSE `event:` name + JSON `data:` payload the velionv2 client
+//! maps to an SSE `event:` name + JSON `data:` payload the verevonv2 client
 //! consumes. Rich events are **gated** by the request's opt-in `features[]`, so
 //! `profile:"chat"` (empty features) keeps emitting only
 //! connected/chunk/done/error — the plain path is untouched and the BFF

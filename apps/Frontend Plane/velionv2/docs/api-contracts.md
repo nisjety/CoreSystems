@@ -1,6 +1,6 @@
 # API Contracts
 
-Velion v2 route handlers are the frontend L5 ingress. They normalize upstream plane responses into a small REST contract.
+Verevon v2 route handlers are the frontend L5 ingress. They normalize upstream plane responses into a small REST contract.
 
 ## Response Envelope
 

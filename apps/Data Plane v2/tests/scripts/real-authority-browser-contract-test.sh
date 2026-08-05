@@ -5,10 +5,10 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RUNNER="$ROOT/tests/scripts/run-isolated-real-authority-browser.sh"
 OVERLAY="$ROOT/tests/e2e/isolated/real-authority-browser-compose.yml"
 MODEL_FIXTURE="$ROOT/tests/e2e/isolated/model-plane-http-fixture.mjs"
-SPEC="$ROOT/../Frontend Plane/velionv3/tests/e2e/real-authority-knowledge.spec.ts"
-CONFIG="$ROOT/../Frontend Plane/velionv3/playwright.real-authority.config.ts"
-SWITCH="$ROOT/../Frontend Plane/velionv3/apps/gateway/src/domains/orgs/switch.rs"
-MIDDLEWARE="$ROOT/../Frontend Plane/velionv3/apps/gateway/src/middleware.rs"
+SPEC="$ROOT/../Frontend Plane/verevonv3/tests/e2e/real-authority-knowledge.spec.ts"
+CONFIG="$ROOT/../Frontend Plane/verevonv3/playwright.real-authority.config.ts"
+SWITCH="$ROOT/../Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/switch.rs"
+MIDDLEWARE="$ROOT/../Frontend Plane/verevonv3/apps/gateway/src/middleware.rs"
 
 for file in "$RUNNER" "$OVERLAY" "$MODEL_FIXTURE" "$SPEC" "$CONFIG"; do
   test -f "$file" || { echo "missing real-authority browser artifact: $file" >&2; exit 1; }
@@ -71,9 +71,9 @@ grep -q 'outputDir: process.env.REAL_AUTHORITY_PLAYWRIGHT_OUTPUT_DIR' "$CONFIG"
 test "$(rg -c 'invalidate_session_context_cache' "$SWITCH")" -eq 2
 grep -q 'has_authorized_org_role' "$MIDDLEWARE"
 if rg -q 'resolve_session_context' \
-  "$ROOT/../Frontend Plane/velionv3/apps/gateway/src/domains/mcp.rs" \
-  "$ROOT/../Frontend Plane/velionv3/apps/gateway/src/domains/billing.rs" \
-  "$ROOT/../Frontend Plane/velionv3/apps/gateway/src/domains/agent_actions.rs"; then
+  "$ROOT/../Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs" \
+  "$ROOT/../Frontend Plane/verevonv3/apps/gateway/src/domains/billing.rs" \
+  "$ROOT/../Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs"; then
   echo "tenant admin gates must use the live authorized membership" >&2
   exit 1
 fi

@@ -113,7 +113,7 @@ func (c *Claims) HasScope(scope string) bool {
 }
 
 // IsExpired reports whether `exp` is in the past. Defensive against
-// clock-skew with a 30s grace window — matches the velion mint-side
+// clock-skew with a 30s grace window — matches the verevon mint-side
 // `REFRESH_SAFETY_MS` so the two sides treat the boundary consistently.
 func (c *Claims) IsExpired(now time.Time) bool {
 	if c == nil || c.ExpiresAt == 0 {

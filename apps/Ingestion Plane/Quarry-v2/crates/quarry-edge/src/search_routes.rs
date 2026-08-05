@@ -5,7 +5,7 @@
 //! and never persisted, so ZDR=on is fine), and returns ranked URLs ready
 //! for crawl seeding via `/v1/crawl` or one-shot scrape.
 //!
-//! Tavily-parity options (for Velion's search/answer UX):
+//! Tavily-parity options (for Verevon's search/answer UX):
 //!   * `topic` (general|news|finance), `time_range`/`days` recency window,
 //!   * `exact_match` (quoted-phrase), `chunks_per_source`,
 //!   * `include_answer` (fuse `/v1/answer`), `format=context` (token-bounded
@@ -475,7 +475,7 @@ pub async fn search(
     let results = diversify_results(results);
     let count = results.len();
 
-    // format=context — token-bounded RAG context for Velion.
+    // format=context — token-bounded RAG context for Verevon.
     let context = match req.format.as_deref() {
         Some("context") => Some(build_context(
             &results,

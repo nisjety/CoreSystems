@@ -37,8 +37,8 @@ The gitleaks backstop (full history) found that **live cross-service keys are co
 
 | Key (fingerprint) | Live footprint | Committed at HEAD in (de-hardcode these) |
 |---|---|---|
-| `INTERNAL_API_KEY` (`651696`, 64ch) | 19 gitignored env files (all planes) | `apps/Control Plane/session-core/internal/internalkey/assert_test.go`, `apps/Frontend Plane/velion/velion-gap.md`, `apps/Model Plane v2/docker-compose.yml` |
-| `x-internal-api-key` (`b67177`, 33ch) | 2 env files | `apps/Control Plane/docker-compose.yml`, `apps/Frontend Plane/velionv2/docker-compose.yml`, `apps/Ingestion Plane/docker-compose.yml`, `apps/Control Plane/auth-core/scripts/test-nats-direct.ts`, `apps/Ingestion Plane/smoke-test-integration-api.sh`, `pprof-profile.sh`, `apps/Control Plane/docs/USER_PROFILE_500_ERROR_ANALYSIS.md`, `apps/Frontend Plane/velion/src/components/auth/AUTH_ARCHITECTURE.md`, `docs/FRONTEND_AUTH_UPDATE_SUMMARY.md` |
+| `INTERNAL_API_KEY` (`651696`, 64ch) | 19 gitignored env files (all planes) | `apps/Control Plane/session-core/internal/internalkey/assert_test.go`, `apps/Frontend Plane/verevon/verevon-gap.md`, `apps/Model Plane v2/docker-compose.yml` |
+| `x-internal-api-key` (`b67177`, 33ch) | 2 env files | `apps/Control Plane/docker-compose.yml`, `apps/Frontend Plane/verevonv2/docker-compose.yml`, `apps/Ingestion Plane/docker-compose.yml`, `apps/Control Plane/auth-core/scripts/test-nats-direct.ts`, `apps/Ingestion Plane/smoke-test-integration-api.sh`, `pprof-profile.sh`, `apps/Control Plane/docs/USER_PROFILE_500_ERROR_ANALYSIS.md`, `apps/Frontend Plane/verevon/src/components/auth/AUTH_ARCHITECTURE.md`, `docs/FRONTEND_AUTH_UPDATE_SUMMARY.md` |
 | internal key (`88ad0c`, 18ch) | 1 env file | `apps/Ingestion Plane/integration-corev2/internal/{auth/middleware.go,config/config.go,api/server_test.go,handoff/integration.go,handoff/integration_test.go}`, `.../integration-corev2/.env.example`, `.../README.md`, `apps/Application Plane/social-core/internal/integration/client.go`, `apps/Ingestion Plane/docker-compose.yml`, `finspo-core` source/docs |
 | keys `069012`, `b2fe6f`, `3610ce` | 1 env file each | various `docker-compose.yml`, `scripts/*.sh/.py`, docs |
 

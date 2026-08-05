@@ -347,7 +347,7 @@ function buildGraphExpectedOutcomes(
       {
         label: "Grafdekning",
         value: `${dataPlane.nodeCount} noder`,
-        detail: `${dataPlane.edgeCount} relasjoner gir Velion et startkart over hva agenten kan svare fra.`,
+        detail: `${dataPlane.edgeCount} relasjoner gir Verevon et startkart over hva agenten kan svare fra.`,
       },
     ];
   }
@@ -355,7 +355,7 @@ function buildGraphExpectedOutcomes(
     {
       label: "Graph coverage",
       value: `${dataPlane.nodeCount} nodes`,
-      detail: `${dataPlane.edgeCount} relationships give Velion a starting map of what the agent can answer from.`,
+      detail: `${dataPlane.edgeCount} relationships give Verevon a starting map of what the agent can answer from.`,
     },
   ];
 }

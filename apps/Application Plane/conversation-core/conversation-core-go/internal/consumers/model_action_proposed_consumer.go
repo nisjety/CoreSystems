@@ -22,7 +22,7 @@ type ActionProposer interface {
 }
 
 // ModelActionProposedConsumer bridges the Model Plane → Application Plane: when a
-// model (or hook) publishes velion.model.action.proposed, it queues a suggested
+// model (or hook) publishes verevon.model.action.proposed, it queues a suggested
 // AIAction into the HITL review queue so a human can approve it end-to-end. This
 // closes the propose leg of propose→approve→act.
 //

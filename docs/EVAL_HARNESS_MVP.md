@@ -30,7 +30,7 @@ per case and in aggregate.
 
 | Metric | Source | How measured |
 |---|---|---|
-| **Accuracy** | run output | Per-case assertions: deterministic checks where possible (structured fields, tool calls made, entities present), LLM-judge rubric otherwise (judged via inference-core, `velion-balance`) |
+| **Accuracy** | run output | Per-case assertions: deterministic checks where possible (structured fields, tool calls made, entities present), LLM-judge rubric otherwise (judged via inference-core, `verevon-balance`) |
 | **Groundedness** | run output + retrieval traces | Claims in the answer must be attributable to retrieved sources; retrieval-engine already returns `trace_id` per query — the judge receives answer + traced sources and scores support/contradiction/unsupported |
 | **Cost per task** | already emitted | Phase 7 B5 priced ledger: `cost_usd` on the run stream, aggregated per case and compared to a per-case budget ceiling |
 | **Retry / loop health** | run event stream | Tool-call retries, failed steps, pause/approval counts, loop iterations per run — from the same SSE/run-events stream the Agent Run Console uses |
@@ -59,7 +59,7 @@ per case and in aggregate.
    respected), not publish.
 8. Risky-tool read vs write gating (op-aware permission behavior from
    Stream 1 P3).
-9. Budget ceiling: `velion-budget` alias must downgrade model, stay under
+9. Budget ceiling: `verevon-budget` alias must downgrade model, stay under
    cost ceiling.
 10. Multi-tool loop task (research → summarize) — retry/loop health bounds.
 11. Cross-org isolation probe: eval org B's agent must see zero of org A's

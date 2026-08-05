@@ -79,8 +79,8 @@
             - generic [ref=e148] [box=648,405,328,40]
             - generic [ref=e159] [box=1382,407,78,36]
           - generic [ref=e166] [box=644,457,820,143]:
-            - generic [ref=e167] [box=659,472,1,1]: Message Velion
-            - textbox "Message Velion" [ref=e168] [box=660,473,788,64]:
+            - generic [ref=e167] [box=659,472,1,1]: Message Verevon
+            - textbox "Message Verevon" [ref=e168] [box=660,473,788,64]:
               - /placeholder: How can I help you today?
             - generic [ref=e169] [box=660,543,788,44]
         - generic [ref=e216] [box=464,623,1180,368]:

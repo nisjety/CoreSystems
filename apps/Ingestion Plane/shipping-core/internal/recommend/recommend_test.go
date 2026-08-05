@@ -63,7 +63,7 @@ func TestRecommend_ValidResponse_ParsesAndValidatesCarrierCode(t *testing.T) {
 		configured: true,
 		response: modelplane.InvokeResponse{
 			Content:   `{"recommended_carrier_code":"mock-bring","recommended_service_name":"Bring Standard","reasoning":"Cheapest with acceptable transit time.","confidence":0.8,"tradeoffs":["slower than UPS"]}`,
-			ModelUsed: "velion-balance",
+			ModelUsed: "verevon-balance",
 		},
 	}
 	rec := Recommend(context.Background(), client, testReq(), testQuotes())

@@ -191,7 +191,7 @@ export async function resolveActiveOrgId(
  *
  * Results are cached in-process keyed by `(cookie, audience)` until the token's
  * `exp` claim (with a 30s safety margin) — every chat turn was previously
- * paying ~1.6s to re-mint the same token (see [velion-chat timing]). The cache
+ * paying ~1.6s to re-mint the same token (see [verevon-chat timing]). The cache
  * is per server instance and bounded; cookies are hashed before use as a key.
  */
 type CachedToken = { token: string; expiresAtMs: number };

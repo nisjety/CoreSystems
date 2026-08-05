@@ -125,7 +125,7 @@ export async function requestReasoningPlaneAnswer(options: {
    */
   cookieHeader?: string
   /**
-   * §15 (ui-ux-velion-gap.md): when calling on behalf of a configured
+   * §15 (ui-ux-verevon-gap.md): when calling on behalf of a configured
    * agent, forward the agent's enabled tool ids. The gateway's
    * `/v1/invoke` runs the tool-use loop when this array is non-empty
    * (`tool_registry::build_registry` + `tool_loop::run_tool_loop`).

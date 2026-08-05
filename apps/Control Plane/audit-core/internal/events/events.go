@@ -1,7 +1,7 @@
 // Package events defines the wire shapes for audit + usage events.
 // Mirrored on the producing side by every plane that emits to NATS
-// (`velion.audit.v2.<plane>.<producer>.<event>` and
-// `velion.usage.v2.<plane>.<producer>.<op>`).
+// (`verevon.audit.v2.<plane>.<producer>.<event>` and
+// `verevon.usage.v2.<plane>.<producer>.<op>`).
 //
 // Keeping the structs in one shared package — even if it's only consumed
 // by audit-core today — means future Go services that produce events
@@ -51,7 +51,7 @@ type AuditEvent struct {
 
 // UsageEvent represents a single billable / observable resource usage
 // record. Cost-core aggregates these by (org_id, plane, op, period) and
-// surfaces totals to the velion usage dashboard.
+// surfaces totals to the verevon usage dashboard.
 type UsageEvent struct {
 	EventID    string         `json:"event_id"`
 	OccurredAt time.Time      `json:"occurred_at"`

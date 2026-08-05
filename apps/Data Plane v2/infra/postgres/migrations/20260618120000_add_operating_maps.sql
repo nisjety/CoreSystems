@@ -85,7 +85,7 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 COMMENT ON TABLE operating_maps IS
-    'Org-scoped Velion AI Operating Map root owned by Data Plane wiki-store.';
+    'Org-scoped Verevon AI Operating Map root owned by Data Plane wiki-store.';
 COMMENT ON TABLE operating_map_versions IS
     'Accepted, evidence-referenced Operating Map versions that can be mirrored into wiki knowledge.';
 COMMENT ON TABLE operating_map_proposals IS

@@ -1,6 +1,6 @@
-# Velion Connect — Frontend Roadmap
+# Verevon Connect — Frontend Roadmap
 
-> **Last verified against code**: 2026-05-09. When this doc and code disagree, code wins. For cross-cutting integration contracts see [velion-gap.md](../velion-gap.md); for architectural decisions see [docs/adr/](./adr/).
+> **Last verified against code**: 2026-05-09. When this doc and code disagree, code wins. For cross-cutting integration contracts see [verevon-gap.md](../verevon-gap.md); for architectural decisions see [docs/adr/](./adr/).
 
 **Product 1: Knowledge / Connect**  
 **Goal:** User connects company → system understands organization → team collaborates with company knowledge via search + chat.
@@ -48,7 +48,7 @@ SECURITY      (mTLS, tenant isolation, GDPR)
 /onboarding/complete      → Step 6: finish  [✅ exists]
 # Plan selection is DEFERRED — every new org gets plan='free' on creation
 # and may upgrade later from /settings/billing. Was originally drafted as
-# step 6 in this roadmap; the active wizard is 6 steps. See velion-gap.md G20.
+# step 6 in this roadmap; the active wizard is 6 steps. See verevon-gap.md G20.
 /dashboard                → main home  [✅ done]
 /search                   → global search workspace  [✅ Phase 4]
 /chat                     → chat workspace  [✅ Phase 5]
@@ -76,14 +76,14 @@ SECURITY      (mTLS, tenant isolation, GDPR)
 | 5 | Chat Workspace | ✅ Complete | Week 6–8 |
 | 6 | Knowledge View | ✅ Complete | Week 8–9 |
 | 7 | Team & Permissions | ✅ Complete | Week 9–10 |
-| 8 | Realtime (Convex) | 🟡 Partial — Chat (Phase 5) ships with Convex realtime; the Control Session aggregator + notification-core's `app.session.*` subscriber landed in Wave 3 (velion-gap.md §8.17 / ADR 0002). The remaining "Convex projection of the Control Session" is filed as **velion-gap.md G35**. Full reactive workspace + presence + activity feed still pending. | Week 10–12 |
+| 8 | Realtime (Convex) | 🟡 Partial — Chat (Phase 5) ships with Convex realtime; the Control Session aggregator + notification-core's `app.session.*` subscriber landed in Wave 3 (verevon-gap.md §8.17 / ADR 0002). The remaining "Convex projection of the Control Session" is filed as **verevon-gap.md G35**. Full reactive workspace + presence + activity feed still pending. | Week 10–12 |
 
 ---
 
 ## Phase 1 — Auth + Entry ✅
 
 ### Completed
-- [x] `src/proxy.ts` — edge route protection (Next.js 15+ `proxy.ts` convention; was previously `middleware.ts`). Validates the session against auth-core `/api/v2/auth/getSession` once per request and caches the verdict by `sha256(cookieHeader)` for 30s. Accepts the cookie names `better-auth.session_token`, `auth_session`, `idknuten.sid`, `idknuten.session_token`, `session_token`, plus three `__Secure-*` patterns. See [velion-gap.md](../velion-gap.md) §8.2 for the gate's implementation and the cache caveats.
+- [x] `src/proxy.ts` — edge route protection (Next.js 15+ `proxy.ts` convention; was previously `middleware.ts`). Validates the session against auth-core `/api/v2/auth/getSession` once per request and caches the verdict by `sha256(cookieHeader)` for 30s. Accepts the cookie names `better-auth.session_token`, `auth_session`, `idknuten.sid`, `idknuten.session_token`, `session_token`, plus three `__Secure-*` patterns. See [verevon-gap.md](../verevon-gap.md) §8.2 for the gate's implementation and the cache caveats.
 - [x] Sign-in page default redirect → `/dashboard`
 - [x] OAuth callback default redirect → `/dashboard`
 - [x] `/dashboard` route exists (was 404 due to Next.js route group)
@@ -160,7 +160,7 @@ Live status ticker:
 **Calls:** `org-core:8080 POST /api/v1/organizations/{id}/members`
 
 #### ~~Step 6: Choose Plan~~ — DEFERRED
-**Status:** Auto-assign `plan='free'` on org create. Upgrade flow lives at `/settings/billing`, not in onboarding. Not on the MVP path. See velion-gap.md G20.
+**Status:** Auto-assign `plan='free'` on org create. Upgrade flow lives at `/settings/billing`, not in onboarding. Not on the MVP path. See verevon-gap.md G20.
 
 #### Step 6: Complete `/onboarding/complete`
 **Status:** ✅ Component exists (`CompleteStep.tsx`)  
@@ -327,7 +327,7 @@ Convex (`apps/Application Plane/convex-core`) powers:
 ### Not MVP
 - HR / Marketing modules
 - Automation & workflows
-- Velion builder UI
+- Verevon builder UI
 - Analytics dashboards
 - Billing UI (auto-assign free plan)
 

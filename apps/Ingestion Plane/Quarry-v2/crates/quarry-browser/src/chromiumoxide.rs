@@ -8,12 +8,15 @@
 //! each lease owns a small tab set keyed by its session affinity key.
 
 use ::chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
+use ::chromiumoxide::cdp::browser_protocol::fetch::{
+    ContinueRequestParams, EventRequestPaused, FailRequestParams,
+};
 use ::chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventPointerType, DispatchMouseEventType, MouseButton,
 };
 use ::chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
 use ::chromiumoxide::cdp::browser_protocol::network::{
-    CookieParam, EventRequestWillBeSent, EventResponseReceived,
+    CookieParam, ErrorReason, EventRequestWillBeSent, EventResponseReceived,
 };
 use ::chromiumoxide::cdp::browser_protocol::target::{
     CreateBrowserContextParams, CreateTargetParamsBuilder,
@@ -42,6 +45,7 @@ use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::{BrowserLease, BrowserViewport};
 
 use crate::actions::ScrollTarget;
+use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::session::{Cookie, ProfileStore, SessionSnapshot, Viewport};
 use crate::{
     BrowserDevtoolsEvent, BrowserDriver, BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat,
@@ -150,6 +154,7 @@ impl ChromiumoxideDriver {
         })?;
         let mut builder = BrowserConfig::builder()
             .user_data_dir(&launch_dirs.user_data)
+            .enable_request_intercept()
             .arg("--disable-dev-shm-usage")
             .arg("--disable-breakpad")
             .arg("--disable-crash-reporter")
@@ -222,6 +227,8 @@ impl ChromiumoxideDriver {
         session: &BrowserSession,
         url: Option<&str>,
     ) -> QuarryResult<(String, Page)> {
+        let initial_url = url.unwrap_or("about:blank");
+        guard_navigation_target(initial_url).await?;
         self.ensure_browser(session.lease.viewport).await?;
         let browser_guard = self.browser.lock().await;
         let browser = browser_guard.as_ref().ok_or_else(|| {
@@ -266,7 +273,6 @@ impl ChromiumoxideDriver {
         };
 
         let snapshot = self.load_snapshot(&session.lease).await;
-        let initial_url = url.unwrap_or("about:blank");
         let new_page_params = CreateTargetParamsBuilder::default()
             .url("about:blank")
             .browser_context_id(context_id)
@@ -284,6 +290,7 @@ impl ChromiumoxideDriver {
         })?;
         self.install_devtools_collectors(session_key.clone(), tab_id.clone(), &page)
             .await;
+        install_network_guard(&page).await?;
         if initial_url != "about:blank" {
             page.goto(initial_url).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
@@ -475,6 +482,54 @@ impl ChromiumoxideDriver {
             .save(&session.lease.org_id, &session.lease.profile_id, &snapshot)
             .await
     }
+}
+
+/// Install a fail-closed CDP Fetch listener before a page can navigate.
+///
+/// The direct `goto`/`new_tab` guard protects only caller-provided URLs. This
+/// listener covers redirects and requests initiated by the page itself (such
+/// as fetch/XHR, iframes, images, and stylesheet resources) before Chromium
+/// is permitted to open the connection.
+async fn install_network_guard(page: &Page) -> QuarryResult<()> {
+    let mut events = page
+        .event_listener::<EventRequestPaused>()
+        .await
+        .map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide request guard listener failed",
+            )
+            .with_details(json!({ "error": e.to_string() }))
+        })?;
+    let guarded_page = page.clone();
+    tokio::spawn(async move {
+        while let Some(event) = events.next().await {
+            let request_id = event.request_id.clone();
+            let request_url = event.request.url.clone();
+            let command_result = match guard_page_request_target(&request_url).await {
+                Ok(()) => guarded_page
+                    .execute(ContinueRequestParams::new(request_id))
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                Err(error) => {
+                    tracing::warn!(
+                        code = ?error.code,
+                        "chromiumoxide blocked unsafe page request"
+                    );
+                    guarded_page
+                        .execute(FailRequestParams::new(request_id, ErrorReason::Aborted))
+                        .await
+                        .map(|_| ())
+                        .map_err(|failure| failure.to_string())
+                }
+            };
+            if let Err(error) = command_result {
+                tracing::warn!(error = %error, "chromiumoxide request guard resolution failed");
+            }
+        }
+    });
+    Ok(())
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -1070,6 +1125,7 @@ impl BrowserDriver for ChromiumoxideDriver {
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        guard_navigation_target(url).await?;
         self.ensure_browser(session.lease.viewport).await?;
         let (tab_id, page, created) = match self.active_tab_page(session).await {
             Some((tab_id, page)) => (tab_id, page, false),
@@ -1593,6 +1649,7 @@ mod tests {
     use super::*;
     use quarry_core::ids::kinds;
     use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
+    use wiremock::MockServer;
 
     fn make_lease() -> BrowserLease {
         BrowserLease {
@@ -1667,6 +1724,33 @@ mod tests {
         assert_eq!(options.max_height, 2160);
         assert_eq!(options.every_nth_frame, 1);
         assert_eq!(options.timeout_ms, 100);
+    }
+
+    #[tokio::test]
+    async fn blocks_loopback_subresources_before_they_reach_the_server() {
+        let target = MockServer::start().await;
+        let driver = ChromiumoxideDriver::new();
+        let session = driver.acquire(&make_lease()).await.expect("acquire");
+        driver
+            .new_tab(&session, None)
+            .await
+            .expect("open blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+
+        page.set_content(format!("<img src=\"{}/private.png\">", target.uri()))
+            .await
+            .expect("inject page-controlled subresource");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert!(
+            target
+                .received_requests()
+                .await
+                .expect("request log")
+                .is_empty(),
+            "the browser must never contact a loopback subresource"
+        );
+        driver.release(session).await.expect("release");
     }
 
     /// Integration test that requires a local Chromium/Chrome binary.
@@ -1762,7 +1846,7 @@ mod tests {
         // have: a snapshot with at least one real cookie for a real origin.
         let snapshot = SessionSnapshot {
             cookies: vec![Cookie {
-                name: "velion_test".into(),
+                name: "verevon_test".into(),
                 value: "livecheck123".into(),
                 domain: "example.com".into(),
                 path: "/".into(),

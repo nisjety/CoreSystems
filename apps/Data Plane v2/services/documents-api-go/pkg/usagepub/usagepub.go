@@ -1,11 +1,11 @@
 // Package usagepub is the Phase A · A1.5 helper that every Go service
-// uses to emit usage + audit events onto the shared `velion-nats` bus.
+// uses to emit usage + audit events onto the shared `verevon-nats` bus.
 //
 // The contract matches the subscriber-side struct in
 // `apps/Control Plane/audit-core/internal/events`. The subjects are:
 //
-//   - `velion.usage.v1.<plane>.<op>`  — billable resource usage
-//   - `velion.audit.v1.<plane>.<event>` — operational / security audit
+//   - `verevon.usage.v1.<plane>.<op>`  — billable resource usage
+//   - `verevon.audit.v1.<plane>.<event>` — operational / security audit
 //
 // Failures (no connection, serialization error, NATS publish error)
 // are logged but never propagate back to the caller. Telemetry events
@@ -95,7 +95,7 @@ func (p *Publisher) Usage(_ context.Context, op string, u Usage) {
 		log.Warn().Str("plane", p.plane).Str("op", op).Msg("usagepub: drop event with empty org_id or op")
 		return
 	}
-	subject := fmt.Sprintf("velion.usage.v1.%s.%s", p.plane, op)
+	subject := fmt.Sprintf("verevon.usage.v1.%s.%s", p.plane, op)
 	body := struct {
 		OccurredAt time.Time `json:"occurred_at"`
 		Plane      string    `json:"plane"`
@@ -131,7 +131,7 @@ func (p *Publisher) Audit(_ context.Context, event string, a Audit) {
 	if a.Outcome == "" {
 		a.Outcome = "ok"
 	}
-	subject := fmt.Sprintf("velion.audit.v1.%s.%s", p.plane, event)
+	subject := fmt.Sprintf("verevon.audit.v1.%s.%s", p.plane, event)
 	body := struct {
 		OccurredAt time.Time `json:"occurred_at"`
 		Plane      string    `json:"plane"`

@@ -106,7 +106,7 @@ func defaultActivityOpts() workflow.ActivityOptions {
 // emitEvent builds an Event with a deterministic idempotency key and
 // dispatches it as an activity. Sets both RunID and JobID on the event
 // (when ids.JobID is non-empty) so control's `ForJob` index returns it
-// for ad-hoc job consumers (e.g. velion's onboarding wizard).
+// for ad-hoc job consumers (e.g. verevon's onboarding wizard).
 //
 // CRITICAL: this runs inside a Temporal workflow, so every value it
 // writes into the Event MUST be deterministic across replays.

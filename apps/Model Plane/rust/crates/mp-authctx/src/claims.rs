@@ -43,7 +43,7 @@ impl Claims {
     }
 
     /// True when `exp` lies in the past with a small clock-skew grace
-    /// window. Matches the velion mint-side 30-second refresh-safety so
+    /// window. Matches the verevon mint-side 30-second refresh-safety so
     /// both sides treat the boundary consistently.
     #[must_use]
     pub fn is_expired(&self, now_secs: i64) -> bool {

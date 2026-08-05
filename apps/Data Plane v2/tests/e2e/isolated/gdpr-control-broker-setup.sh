@@ -3,11 +3,11 @@ set -eu
 
 stream="AQENCIA_CONTROLPLANE"
 consumer="documents-api-gdpr-erasure-v1"
-delivery="_VELION.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
-subject="velion.gdpr.erasure.requested"
+delivery="_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure"
+subject="verevon.gdpr.erasure.requested"
 
 nats stream add "$stream" \
-  --subjects="velion.gdpr.erasure.requested,velion.gdpr.ownership.transferred,velion.gdpr.erasure.dlq.documents-api" \
+  --subjects="verevon.gdpr.erasure.requested,verevon.gdpr.ownership.transferred,verevon.gdpr.erasure.dlq.documents-api" \
   --retention=limits \
   --storage=file \
   --replicas=1 \

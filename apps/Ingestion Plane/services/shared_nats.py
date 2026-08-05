@@ -1,11 +1,11 @@
 """
 Shared NATS Publisher for Ingestion Plane Services
 
-Provides async cross-plane event publishing to velion-nats broker.
+Provides async cross-plane event publishing to verevon-nats broker.
 Gracefully handles unavailable NATS (service continues without events).
 
 Usage:
-    publisher = SharedNatsPublisher("nats://velion-nats:4222", "token", "service-name")
+    publisher = SharedNatsPublisher("nats://verevon-nats:4222", "token", "service-name")
     if await publisher.initialize():
         await publisher.publish_crawl_completed(org_id, url, page_count)
     # If unavailable, service continues normally (no events published)
@@ -23,12 +23,12 @@ logger = logging.getLogger(__name__)
 class SharedNatsPublisher:
     """
     Async NATS JetStream publisher for Ingestion Plane events.
-    
+
     Features:
-    - Automatic VELION_INGESTION stream creation on first use
+    - Automatic VEREVON_INGESTION stream creation on first use
     - Fire-and-forget publishing (async, non-blocking)
     - Graceful degradation: continues if NATS unavailable
-    - Subject convention: velion.ingestion.<domain>.<action>
+    - Subject convention: verevon.ingestion.<domain>.<action>
     """
 
     def __init__(
@@ -39,9 +39,9 @@ class SharedNatsPublisher:
     ):
         """
         Initialize publisher with connection details.
-        
+
         Args:
-            nats_url: NATS server URL (e.g., nats://velion-nats:4222)
+            nats_url: NATS server URL (e.g., nats://verevon-nats:4222)
             nats_token: Authentication token
             service_name: Service identifier for logging
         """
@@ -56,10 +56,10 @@ class SharedNatsPublisher:
     async def initialize(self) -> bool:
         """
         Connect to shared NATS and ensure stream exists.
-        
+
         Returns:
             True if connected, False if NATS unavailable or disabled.
-            
+
         Note:
             Always returns True to caller for graceful degradation.
             Connection failures are logged but never raised.
@@ -83,7 +83,7 @@ class SharedNatsPublisher:
                 )
                 return False
 
-            # Connect to velion-nats
+            # Connect to verevon-nats
             try:
                 self.nc = await nats.connect(
                     self.nats_url,
@@ -103,11 +103,11 @@ class SharedNatsPublisher:
                 self._connecting = False
                 return False
 
-            # Ensure VELION_INGESTION stream exists
+            # Ensure VEREVON_INGESTION stream exists
             try:
                 await self.js.add_stream(
-                    name="VELION_INGESTION",
-                    subjects=["velion.ingestion.>"],
+                    name="VEREVON_INGESTION",
+                    subjects=["verevon.ingestion.>"],
                     max_age=14 * 24 * 60 * 60,
                     max_msgs=100_000,
                 )
@@ -116,7 +116,7 @@ class SharedNatsPublisher:
                 pass
 
             self._stream_created = True
-            logger.info(f"[{self.service_name}] VELION_INGESTION stream ready")
+            logger.info(f"[{self.service_name}] VEREVON_INGESTION stream ready")
             self._connecting = False
             return True
 
@@ -134,8 +134,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish crawl started event.
-        
-        Subject: velion.ingestion.crawl.started
+
+        Subject: verevon.ingestion.crawl.started
         """
         payload = {
             "org_id": org_id,
@@ -144,7 +144,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.crawl.started", payload)
+        return await self._publish("verevon.ingestion.crawl.started", payload)
 
     async def publish_crawl_completed(
         self,
@@ -156,8 +156,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish crawl completed event.
-        
-        Subject: velion.ingestion.crawl.completed
+
+        Subject: verevon.ingestion.crawl.completed
         """
         payload = {
             "org_id": org_id,
@@ -167,7 +167,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.crawl.completed", payload)
+        return await self._publish("verevon.ingestion.crawl.completed", payload)
 
     async def publish_crawl_failed(
         self,
@@ -179,8 +179,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish crawl failed event.
-        
-        Subject: velion.ingestion.crawl.failed
+
+        Subject: verevon.ingestion.crawl.failed
         """
         payload = {
             "org_id": org_id,
@@ -190,7 +190,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.crawl.failed", payload)
+        return await self._publish("verevon.ingestion.crawl.failed", payload)
 
     async def publish_m365_connected(
         self,
@@ -201,8 +201,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish M365 provider connected event.
-        
-        Subject: velion.ingestion.m365.connected
+
+        Subject: verevon.ingestion.m365.connected
         """
         payload = {
             "org_id": org_id,
@@ -211,7 +211,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.m365.connected", payload)
+        return await self._publish("verevon.ingestion.m365.connected", payload)
 
     async def publish_m365_disconnected(
         self,
@@ -222,8 +222,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish M365 provider disconnected event.
-        
-        Subject: velion.ingestion.m365.disconnected
+
+        Subject: verevon.ingestion.m365.disconnected
         """
         payload = {
             "org_id": org_id,
@@ -232,7 +232,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.m365.disconnected", payload)
+        return await self._publish("verevon.ingestion.m365.disconnected", payload)
 
     async def publish_import_started(
         self,
@@ -243,8 +243,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish import started event.
-        
-        Subject: velion.ingestion.import.started
+
+        Subject: verevon.ingestion.import.started
         """
         payload = {
             "org_id": org_id,
@@ -253,7 +253,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.import.started", payload)
+        return await self._publish("verevon.ingestion.import.started", payload)
 
     async def publish_import_completed(
         self,
@@ -265,8 +265,8 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Publish import completed event.
-        
-        Subject: velion.ingestion.import.completed
+
+        Subject: verevon.ingestion.import.completed
         """
         payload = {
             "org_id": org_id,
@@ -276,7 +276,7 @@ class SharedNatsPublisher:
             "service": self.service_name,
             "metadata": metadata or {},
         }
-        return await self._publish("velion.ingestion.import.completed", payload)
+        return await self._publish("verevon.ingestion.import.completed", payload)
 
     async def _publish(
         self,
@@ -285,10 +285,10 @@ class SharedNatsPublisher:
     ) -> bool:
         """
         Internal publish method.
-        
+
         Publishes to JetStream asynchronously (fire-and-forget).
         Never blocks caller or raises exceptions.
-        
+
         Returns:
             True if published, False if NATS unavailable.
         """
@@ -309,7 +309,7 @@ class SharedNatsPublisher:
     async def close(self):
         """
         Close connection to NATS.
-        
+
         Should be called on shutdown.
         """
         if self.nc:

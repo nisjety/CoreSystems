@@ -11,7 +11,7 @@ import { getCorrelationId } from '../../_lib/control-plane-auth'
 //
 // Why a thin proxy and not a direct fetch from the browser to an external
 // telemetry endpoint? Three reasons:
-//   - keeps PII inside the velion-net (no third-party host learns user
+//   - keeps PII inside the verevon-net (no third-party host learns user
 //     attributes from the browser),
 //   - lets us enrich every event with the G15 correlation id server-side,
 //   - gives us one place to add sampling / rate limiting / DLP if the event

@@ -187,7 +187,7 @@ func TestOrgDeletionCancelled_NoMemberRoster_FallsBackToCancelledBy(t *testing.T
 	accepter := &fakeAccepter{}
 	s := &OrgDeletionSubscriber{service: accepter}
 
-	// Matches the actual published contract: velion.org.deletion.cancelled
+	// Matches the actual published contract: verevon.org.deletion.cancelled
 	// carries org_id/org_name/cancelled_by only, no member_user_ids.
 	if got := s.processCancelled(context.Background(), cancelledEvent()); got != orgDeletionAck {
 		t.Fatalf("outcome = %v, want orgDeletionAck", got)

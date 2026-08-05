@@ -1,4 +1,4 @@
-// U2-1 follow-up (ui-ux-velion-gap.md §10): model registry aligned with
+// U2-1 follow-up (ui-ux-verevon-gap.md §10): model registry aligned with
 // the actual Azure OpenAI deployments on `core-ai-rg.cognitiveservices.
 // azure.com`. Previous defaults referenced fictional names like
 // `gpt-5.4-mini` which Azure returned 404 for — chat broke with

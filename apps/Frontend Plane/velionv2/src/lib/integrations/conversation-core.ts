@@ -156,9 +156,9 @@ export async function listSupportTickets(actor: RequestActor, params: URLSearchP
 export async function createSupportTicket(actor: RequestActor, input: { title: string; body: string; customer_email: string }) {
   const now = new Date().toISOString();
   const payload = {
-    idempotency_key: `velionv2:create:${actor.userId}:${input.customer_email}:${input.title}:${now}`,
+    idempotency_key: `verevonv2:create:${actor.userId}:${input.customer_email}:${input.title}:${now}`,
     org_id: getSupportOrgId(),
-    provider: "velion",
+    provider: "verevon",
     provider_event_id: crypto.randomUUID(),
     provider_message_id: crypto.randomUUID(),
     provider_thread_id: crypto.randomUUID(),
@@ -244,9 +244,9 @@ export async function listSupportGroups(actor: RequestActor) {
 export function listSupportAgents(actor: RequestActor) {
   return [{
     id: actor.userId,
-    firstname: actor.name?.split(" ")[0] ?? "Velion",
+    firstname: actor.name?.split(" ")[0] ?? "Verevon",
     lastname: actor.name?.split(" ").slice(1).join(" ") || "Agent",
-    email: actor.email ?? "agent@velion.local",
+    email: actor.email ?? "agent@verevon.local",
   }];
 }
 
@@ -311,7 +311,7 @@ export function toSupportArticle(message: ConversationMessage): SupportArticle {
     type: message.internal ? "note" : "email",
     internal: message.internal,
     body: message.body_html || message.body_text,
-    from: message.sender_name || message.sender_email || (agentMessage ? "Velion Support" : "Customer"),
+    from: message.sender_name || message.sender_email || (agentMessage ? "Verevon Support" : "Customer"),
     sender: agentMessage ? "Agent" : "Customer",
     created_at: message.occurred_at || message.created_at,
   };

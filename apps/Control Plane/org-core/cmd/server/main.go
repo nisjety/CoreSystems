@@ -67,7 +67,7 @@ func main() {
 	}
 
 	repo := orgcore.NewRepository(db)
-	// U6-3 (ui-ux-velion-gap.md §10): role/permission editor backend.
+	// U6-3 (ui-ux-verevon-gap.md §10): role/permission editor backend.
 	// NewRepository takes *database.DB (not db.Pool) so every rbac query
 	// runs through WithOrgScope — see internal/rbac/repository.go.
 	rbacRepo := rbac.NewRepository(db)
@@ -119,7 +119,7 @@ func main() {
 		go runGDPRAuditOutbox(ctx, orgService, 5*time.Second)
 	}
 
-	// Wire shared cross-plane publisher (velion-nats)
+	// Wire shared cross-plane publisher (verevon-nats)
 	if sp, spErr := nats.NewSharedPublisher(cfg.NATSSharedURL, nats.SharedCredentials{
 		User: cfg.NATSSharedUser, Password: cfg.NATSSharedPass,
 		Token: cfg.NATSSharedToken, AllowTokenFallback: cfg.NATSSharedAllowTokenFallback,
@@ -128,7 +128,8 @@ func main() {
 	} else if sp != nil {
 		defer sp.Close()
 		orgService.SetSharedPublisher(sp)
-		log.Println("✅ org-core connected to shared NATS (velion-nats)")
+		log.Println("✅ org-core connected to shared NATS (verevon-nats)")
+		go runInteractiveRetentionOutbox(ctx, orgService, 5*time.Second)
 	}
 
 	var subscriber *nats.BridgeSubscriber
@@ -205,6 +206,30 @@ func runPlanChangeOutbox(ctx context.Context, service *orgcore.Service, interval
 		}
 		if published > 0 {
 			log.Printf("org-core published %d pending plan change event(s)", published)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+func runInteractiveRetentionOutbox(ctx context.Context, service *orgcore.Service, interval time.Duration) {
+	flush := func() {
+		published, err := service.FlushInteractiveRetentionOutbox(ctx, 100)
+		if err != nil {
+			log.Printf("org-core interactive retention outbox retry failed: %v", err)
+			return
+		}
+		if published > 0 {
+			log.Printf("org-core published %d interactive retention cleanup event(s)", published)
 		}
 	}
 	flush()
@@ -310,7 +335,7 @@ const orgDeletionReminderInterval = 6 * time.Hour
 
 // runOrgDeletionReminderSweep finds organizations pending deletion whose
 // 30-day grace window is 7 (or 1) days from expiring and have not yet had
-// that reminder sent, publishes velion.org.deletion.reminder for each, and
+// that reminder sent, publishes verevon.org.deletion.reminder for each, and
 // marks the reminder sent so the next sweep does not re-fire it — the
 // idempotency guard for this at-least-once ticker. Runs once immediately,
 // then on orgDeletionReminderInterval, and returns when ctx is cancelled.

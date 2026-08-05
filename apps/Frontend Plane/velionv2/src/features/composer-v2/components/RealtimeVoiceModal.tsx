@@ -139,7 +139,7 @@ export function RealtimeVoiceModal({
         className="absolute inset-0 cursor-default"
         onClick={handleClose}
       />
-      <div className="velion-panel-in relative z-10 w-full max-w-sm rounded-[24px] bg-white p-4 shadow-[0_24px_80px_rgba(0,0,0,0.18)] dark:bg-[#141516]">
+      <div className="verevon-panel-in relative z-10 w-full max-w-sm rounded-[24px] bg-white p-4 shadow-[0_24px_80px_rgba(0,0,0,0.18)] dark:bg-[#141516]">
         <div className="flex items-start justify-between gap-4">
           <div className="flex items-center gap-3">
             <span className="grid size-10 place-items-center rounded-2xl bg-black/[0.04] text-[#1a1a1a] dark:bg-white/10 dark:text-white">
@@ -167,7 +167,7 @@ export function RealtimeVoiceModal({
             className={cn(
               "mx-auto grid size-16 place-items-center rounded-full transition-colors",
               listening
-                ? "velion-voice-pulse bg-[#FBF0E4] text-[#C07B33]"
+                ? "verevon-voice-pulse bg-[#FBF0E4] text-[#C07B33]"
                 : "bg-white text-[#666] dark:bg-[#141516] dark:text-[#D3D7DE]",
             )}
           >

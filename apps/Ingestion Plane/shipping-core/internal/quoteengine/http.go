@@ -80,7 +80,7 @@ type quoteResponse struct {
 // carrierDTO is one entry in GET /api/carriers: the adapter fleet as
 // currently assembled (mock adapters carry the "mock-" code prefix; a real
 // adapter replaces or extends them once its credentials are configured).
-// Consumers: the Velion integration catalog (shipping provider readiness),
+// Consumers: the Verevon integration catalog (shipping provider readiness),
 // the Model Plane shipping tools, and the future shipping page.
 type carrierDTO struct {
 	Code           string     `json:"code"`

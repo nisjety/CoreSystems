@@ -1,6 +1,6 @@
 // Package clients — auth-core OAuth token client.
 //
-// G41 (velion-gap.md §8.30 / Slice D): closes the "Graph enrichment worker"
+// G41 (verevon-gap.md §8.30 / Slice D): closes the "Graph enrichment worker"
 // gap by giving user-core a thin client to exchange an opaque tokenRef
 // for a short-lived OAuth access token. The handler that consumes
 // `auth.user.provider_linked` events then uses that access token to fetch

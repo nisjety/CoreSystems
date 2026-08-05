@@ -229,17 +229,17 @@
   ],
   "webhooks": [
     {
-      "name": "velion-support-events",
+      "name": "verevon-support-events",
       "endpoint": "http://integration-core:3026/api/v1/webhooks/zammad",
       "sslVerify": false,
       "active": true,
-      "note": "Velion support event bus — routes ticket events to integration-core NATS bridge. Override endpoint with ZAMMAD_WEBHOOK_ENDPOINT env var."
+      "note": "Verevon support event bus — routes ticket events to integration-core NATS bridge. Override endpoint with ZAMMAD_WEBHOOK_ENDPOINT env var."
     }
   ],
   "triggers": [
     {
-      "name": "50-velion-ticket-created",
-      "webhookName": "velion-support-events",
+      "name": "50-verevon-ticket-created",
+      "webhookName": "verevon-support-events",
       "active": true,
       "condition": {
         "ticket.action": {
@@ -247,11 +247,11 @@
           "value": ["create"]
         }
       },
-      "note": "Fire velion-support-events webhook on ticket create"
+      "note": "Fire verevon-support-events webhook on ticket create"
     },
     {
-      "name": "51-velion-ticket-updated",
-      "webhookName": "velion-support-events",
+      "name": "51-verevon-ticket-updated",
+      "webhookName": "verevon-support-events",
       "active": true,
       "condition": {
         "ticket.action": {
@@ -259,11 +259,11 @@
           "value": ["update"]
         }
       },
-      "note": "Fire velion-support-events webhook on ticket update"
+      "note": "Fire verevon-support-events webhook on ticket update"
     },
     {
-      "name": "52-velion-article-created",
-      "webhookName": "velion-support-events",
+      "name": "52-verevon-article-created",
+      "webhookName": "verevon-support-events",
       "active": true,
       "condition": {
         "article.action": {
@@ -271,7 +271,7 @@
           "value": ["create"]
         }
       },
-      "note": "Fire velion-support-events webhook on new article (customer reply)"
+      "note": "Fire verevon-support-events webhook on new article (customer reply)"
     }
   ]
 }

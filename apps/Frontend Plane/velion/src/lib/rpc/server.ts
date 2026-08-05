@@ -172,7 +172,7 @@ export const getDashboardStatsRPC = cache(async (cookieHeader?: string) => {
 
   const [members, sources, documents, crawlJobs] = await Promise.allSettled([
     orgApi.get<unknown>('/api/v1/orgs/me/members', { headers, timeoutMs: 3_000, safe: true }),
-    // U1-2 (ui-ux-velion-gap.md §10): sources count comes from the Data
+    // U1-2 (ui-ux-verevon-gap.md §10): sources count comes from the Data
     // Plane v2 distinct-sources facet (new GET /v1/sources endpoint in
     // dpv2-documents-api). Quarry-v2 writes every scrape into Data Plane
     // with its source URL — so the answer is COUNT(DISTINCT source)

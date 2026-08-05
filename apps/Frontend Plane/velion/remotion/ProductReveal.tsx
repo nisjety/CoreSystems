@@ -762,7 +762,7 @@ function FinalReplyCard({ frame, focus }: { frame: number; focus: number }) {
           </div>
           <div>
             <p style={{ margin: 0, fontSize: 22, fontWeight: 900 }}>
-              Velion agent
+              Verevon agent
             </p>
             <p style={{ margin: '5px 0 0', color: MUTED, fontSize: 14 }}>
               Answer grounded in your connected sources
@@ -999,7 +999,7 @@ function Wordmark({ frame }: { frame: number }) {
           lineHeight: 1,
         }}
       >
-        Velion
+        Verevon
       </span>
     </div>
   )

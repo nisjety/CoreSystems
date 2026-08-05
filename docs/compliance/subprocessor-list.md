@@ -1,4 +1,4 @@
-# Velion Subprocessor List
+# Verevon Subprocessor List
 
 > **DRAFT — INTERNAL TEMPLATE, NOT LEGAL ADVICE.** Not reviewed by Norwegian
 > privacy counsel. Regions and transfer bases marked **TBC — verify** are
@@ -10,7 +10,7 @@
 
 ## How this list is governed
 
-Velion's architecture **denies third-party processing by default** for
+Verevon's architecture **denies third-party processing by default** for
 `customer_private`, `personal`, `sensitive_personal`, `credential_or_secret`, and
 `zdr_ephemeral` data. A subprocessor may only process such data when (a) the
 customer's org policy allows it for a specific purpose, (b) the subprocessor holds
@@ -28,11 +28,11 @@ Framework certification (under legal challenge — not relied on alone);
 | Subprocessor | Purpose | Data categories | Region (processing/storage) | Transfer basis |
 |--------------|---------|-----------------|------------------------------|----------------|
 | **Microsoft Azure — Azure OpenAI** | AI model inference (prompts/completions) and embeddings generation | `customer_private`, `personal`, prompts, completions, embeddings | **Sweden Central (EU/EEA)** — Tier 1 default; Norway East for Tier 2 | EEA-resident + ZDR + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
-| **Microsoft Azure — Hosting / infrastructure** | Compute, storage, networking for Velion services (app data, run-history, audit, vector store, object storage) | All classes processed by the platform (per classification policy) | **EU/EEA** | EEA-resident + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
+| **Microsoft Azure — Hosting / infrastructure** | Compute, storage, networking for Verevon services (app data, run-history, audit, vector store, object storage) | All classes processed by the platform (per classification policy) | **EU/EEA** | EEA-resident + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
 | **Microsoft Azure — Text-to-Speech (TTS)** | Speech synthesis | Text submitted for synthesis | **East US 2 (United States)** — *known exception, remediation in progress* | US processing — **excluded for protected classes until relocated to EEA** |
 | **Resend** | Transactional email delivery (notifications) | Recipient email address, message content (minimised) | **TBC — verify** | **TBC — verify (likely SCCs/DPF + supplementary)** |
 | **Twilio** | SMS delivery and 2FA / one-time passcodes | Phone number, OTP, delivery metadata | **TBC — verify** | **TBC — verify (likely SCCs/DPF + supplementary)** |
-| **Browser-automation / residential-proxy / unblocker vendor(s) (behind Quarry egress broker)** | Web fetch/crawl/browse for agent retrieval, only when Velion-owned egress is insufficient and policy permits | Crawled/retrieved content, target URLs/metadata | **TBC — verify per vendor** | Default-deny; per-processor approval; **TBC — verify** |
+| **Browser-automation / residential-proxy / unblocker vendor(s) (behind Quarry egress broker)** | Web fetch/crawl/browse for agent retrieval, only when Verevon-owned egress is insufficient and policy permits | Crawled/retrieved content, target URLs/metadata | **TBC — verify per vendor** | Default-deny; per-processor approval; **TBC — verify** |
 | **Additional model vendors (via Model Plane routing)** | Alternative LLM inference where routed | prompts, completions | **TBC — confirm ZDR + EEA per vendor** | **TBC — verify; only the Azure OpenAI Sweden Central path is confirmed today** |
 
 ## Notes

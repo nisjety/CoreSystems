@@ -12,11 +12,11 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// U6-3 (ui-ux-velion-gap.md §10): handlers for the role/permission editor.
+// U6-3 (ui-ux-verevon-gap.md §10): handlers for the role/permission editor.
 //
 // All handlers expect `:id` (org id) in the path. The internal-auth
 // middleware (server.go) gates the entire surface — no per-user auth here.
-// Velion's /settings/permissions page is responsible for verifying that
+// Verevon's /settings/permissions page is responsible for verifying that
 // the caller has `roles:manage` before exposing these UIs.
 
 func (s *Server) rbacContext(c *gin.Context) (context.Context, context.CancelFunc) {

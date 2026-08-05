@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Local-only demo seed for Velion v3.
+# Local-only demo seed for Verevon v3.
 # This seeds product data into the running Docker databases so the UI can use
 # database-backed mock data instead of hardcoded frontend fallback records.
 
 ORG_ID="${ORG_ID:-org_1781699307874}"
-ORG_NAME="${ORG_NAME:-Velion AS}"
-ORG_SLUG="${ORG_SLUG:-velion}"
+ORG_NAME="${ORG_NAME:-Verevon AS}"
+ORG_SLUG="${ORG_SLUG:-verevon}"
 
 ADMIN_USER_ID="${ADMIN_USER_ID:-mxDNys1MNRyda7LqdQzUtqx0wFRKxMIc}"
-NORMAL_USER_ID="${NORMAL_USER_ID:-user_velion_normal}"
-EDITOR_USER_ID="${EDITOR_USER_ID:-user_velion_editor}"
+NORMAL_USER_ID="${NORMAL_USER_ID:-user_verevon_normal}"
+EDITOR_USER_ID="${EDITOR_USER_ID:-user_verevon_editor}"
 
-ADMIN_EMAIL="${ADMIN_EMAIL:-local@velion.dev}"
-NORMAL_EMAIL="${NORMAL_EMAIL:-normal@velion.dev}"
-EDITOR_EMAIL="${EDITOR_EMAIL:-editor@velion.dev}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-local@verevon.dev}"
+NORMAL_EMAIL="${NORMAL_EMAIL:-normal@verevon.dev}"
+EDITOR_EMAIL="${EDITOR_EMAIL:-editor@verevon.dev}"
 
-ADMIN_NAME="${ADMIN_NAME:-Velion Admin}"
-NORMAL_NAME="${NORMAL_NAME:-Velion Normal}"
-EDITOR_NAME="${EDITOR_NAME:-Velion Editor}"
+ADMIN_NAME="${ADMIN_NAME:-Verevon Admin}"
+NORMAL_NAME="${NORMAL_NAME:-Verevon Normal}"
+EDITOR_NAME="${EDITOR_NAME:-Verevon Editor}"
 
 require_container() {
   local container="$1"
   if ! docker inspect "$container" >/dev/null 2>&1; then
     echo "Missing Docker container: $container" >&2
-    echo "Start the local Velion stack before running this seed." >&2
+    echo "Start the local Verevon stack before running this seed." >&2
     exit 1
   fi
 }
@@ -90,8 +90,8 @@ INSERT INTO account (id, account_id, provider_id, user_id, password, created_at,
 SELECT id, account_id, 'credential', user_id, COALESCE((SELECT password FROM local_password), ''), now() - interval '9 days', now()
 FROM (
   VALUES
-    ('acct_velion_normal', :'normal_user_id', :'normal_user_id'),
-    ('acct_velion_editor', :'editor_user_id', :'editor_user_id')
+    ('acct_verevon_normal', :'normal_user_id', :'normal_user_id'),
+    ('acct_verevon_editor', :'editor_user_id', :'editor_user_id')
 ) AS seed(id, account_id, user_id)
 ON CONFLICT (id) DO UPDATE
 SET account_id = EXCLUDED.account_id,
@@ -107,9 +107,9 @@ VALUES (
   :'org_slug',
   null,
   jsonb_build_object(
-    'seed', 'velion-local-demo',
+    'seed', 'verevon-local-demo',
     'plan', 'standard',
-    'plan_label', 'Velion Advanced',
+    'plan_label', 'Verevon Advanced',
     'locale', 'nb-NO'
   )::text,
   now() - interval '14 days'
@@ -121,9 +121,9 @@ SET name = EXCLUDED.name,
 
 INSERT INTO member (id, organization_id, user_id, role, created_at)
 VALUES
-  ('member_velion_admin', :'org_id', :'admin_user_id', 'admin', now() - interval '14 days'),
-  ('member_velion_normal', :'org_id', :'normal_user_id', 'member', now() - interval '9 days'),
-  ('member_velion_editor', :'org_id', :'editor_user_id', 'editor', now() - interval '8 days')
+  ('member_verevon_admin', :'org_id', :'admin_user_id', 'admin', now() - interval '14 days'),
+  ('member_verevon_normal', :'org_id', :'normal_user_id', 'member', now() - interval '9 days'),
+  ('member_verevon_editor', :'org_id', :'editor_user_id', 'editor', now() - interval '8 days')
 ON CONFLICT (id) DO UPDATE
 SET organization_id = EXCLUDED.organization_id,
     user_id = EXCLUDED.user_id,
@@ -166,14 +166,14 @@ VALUES (
   'standard',
   'active',
   jsonb_build_object(
-    'seed', 'velion-local-demo',
-    'plan_label', 'Velion Advanced',
+    'seed', 'verevon-local-demo',
+    'plan_label', 'Verevon Advanced',
     'mock_data', true,
     'support_timezone', 'Europe/Oslo'
   ),
   '999888777',
   'verified',
-  'velion.dev',
+  'verevon.dev',
   'eu',
   'nb-NO',
   now() - interval '14 days',
@@ -207,9 +207,9 @@ INSERT INTO organization_members (
   invited_email
 )
 VALUES
-  ('orgmem_velion_admin', :'org_id', :'admin_user_id', 'admin', 'active', null, null, now() - interval '14 days', now() - interval '14 days', now(), :'admin_email'),
-  ('orgmem_velion_normal', :'org_id', :'normal_user_id', 'member', 'active', :'admin_user_id', now() - interval '9 days', now() - interval '9 days', now() - interval '9 days', now(), :'normal_email'),
-  ('orgmem_velion_editor', :'org_id', :'editor_user_id', 'editor', 'active', :'admin_user_id', now() - interval '8 days', now() - interval '8 days', now() - interval '8 days', now(), :'editor_email')
+  ('orgmem_verevon_admin', :'org_id', :'admin_user_id', 'admin', 'active', null, null, now() - interval '14 days', now() - interval '14 days', now(), :'admin_email'),
+  ('orgmem_verevon_normal', :'org_id', :'normal_user_id', 'member', 'active', :'admin_user_id', now() - interval '9 days', now() - interval '9 days', now() - interval '9 days', now(), :'normal_email'),
+  ('orgmem_verevon_editor', :'org_id', :'editor_user_id', 'editor', 'active', :'admin_user_id', now() - interval '8 days', now() - interval '8 days', now() - interval '8 days', now(), :'editor_email')
 ON CONFLICT (org_id, user_id) DO UPDATE
 SET role = EXCLUDED.role,
     status = EXCLUDED.status,
@@ -235,8 +235,8 @@ INSERT INTO org_billing (
 )
 VALUES (
   :'org_id',
-  'billing@velion.dev',
-  'sub_velion_advanced_demo',
+  'billing@verevon.dev',
+  'sub_verevon_advanced_demo',
   'active',
   null,
   date_trunc('month', now()),
@@ -329,14 +329,14 @@ SET enabled = EXCLUDED.enabled,
 
 INSERT INTO org_plan_history (id, org_id, previous_plan, new_plan, changed_by, change_reason, changed_at, metadata)
 VALUES (
-  'planhist_velion_advanced_seed',
+  'planhist_verevon_advanced_seed',
   :'org_id',
   'trial',
   'standard',
   :'admin_user_id',
-  'Local demo seed sets Velion AS to the Advanced product tier.',
+  'Local demo seed sets Verevon AS to the Advanced product tier.',
   now() - interval '14 days',
-  jsonb_build_object('seed', 'velion-local-demo', 'plan_label', 'Velion Advanced')
+  jsonb_build_object('seed', 'verevon-local-demo', 'plan_label', 'Verevon Advanced')
 )
 ON CONFLICT (id) DO UPDATE
 SET previous_plan = EXCLUDED.previous_plan,
@@ -369,9 +369,9 @@ INSERT INTO users (
   onboarding_state
 )
 VALUES
-  (:'admin_user_id', :'admin_email', :'admin_name', '', 'active', true, now() - interval '14 days', now(), now() - interval '1 hour', true, 'completed', jsonb_build_object('seed', 'velion-local-demo', 'role', 'admin')),
-  (:'normal_user_id', :'normal_email', :'normal_name', '', 'active', true, now() - interval '9 days', now(), now() - interval '3 hours', true, 'completed', jsonb_build_object('seed', 'velion-local-demo', 'role', 'member')),
-  (:'editor_user_id', :'editor_email', :'editor_name', '', 'active', true, now() - interval '8 days', now(), now() - interval '2 hours', true, 'completed', jsonb_build_object('seed', 'velion-local-demo', 'role', 'editor'))
+  (:'admin_user_id', :'admin_email', :'admin_name', '', 'active', true, now() - interval '14 days', now(), now() - interval '1 hour', true, 'completed', jsonb_build_object('seed', 'verevon-local-demo', 'role', 'admin')),
+  (:'normal_user_id', :'normal_email', :'normal_name', '', 'active', true, now() - interval '9 days', now(), now() - interval '3 hours', true, 'completed', jsonb_build_object('seed', 'verevon-local-demo', 'role', 'member')),
+  (:'editor_user_id', :'editor_email', :'editor_name', '', 'active', true, now() - interval '8 days', now(), now() - interval '2 hours', true, 'completed', jsonb_build_object('seed', 'verevon-local-demo', 'role', 'editor'))
 ON CONFLICT (id) DO UPDATE
 SET email = EXCLUDED.email,
     name = EXCLUDED.name,
@@ -386,9 +386,9 @@ SET email = EXCLUDED.email,
 
 INSERT INTO user_profiles (user_id, bio, phone, location, timezone, language, metadata, updated_at)
 VALUES
-  (:'admin_user_id', 'Local Velion administrator for testing organization, billing, and support workflows.', '+47 400 00 001', 'Oslo, Norway', 'Europe/Oslo', 'nb', jsonb_build_object('department', 'Operations', 'seed', 'velion-local-demo'), now()),
-  (:'normal_user_id', 'Support specialist with customer ticket and knowledge-base test data.', '+47 400 00 002', 'Bergen, Norway', 'Europe/Oslo', 'nb', jsonb_build_object('department', 'Support', 'seed', 'velion-local-demo'), now()),
-  (:'editor_user_id', 'Content editor for social planning and approval workflow testing.', '+47 400 00 003', 'Trondheim, Norway', 'Europe/Oslo', 'nb', jsonb_build_object('department', 'Content', 'seed', 'velion-local-demo'), now())
+  (:'admin_user_id', 'Local Verevon administrator for testing organization, billing, and support workflows.', '+47 400 00 001', 'Oslo, Norway', 'Europe/Oslo', 'nb', jsonb_build_object('department', 'Operations', 'seed', 'verevon-local-demo'), now()),
+  (:'normal_user_id', 'Support specialist with customer ticket and knowledge-base test data.', '+47 400 00 002', 'Bergen, Norway', 'Europe/Oslo', 'nb', jsonb_build_object('department', 'Support', 'seed', 'verevon-local-demo'), now()),
+  (:'editor_user_id', 'Content editor for social planning and approval workflow testing.', '+47 400 00 003', 'Trondheim, Norway', 'Europe/Oslo', 'nb', jsonb_build_object('department', 'Content', 'seed', 'verevon-local-demo'), now())
 ON CONFLICT (user_id) DO UPDATE
 SET bio = EXCLUDED.bio,
     phone = EXCLUDED.phone,
@@ -400,9 +400,9 @@ SET bio = EXCLUDED.bio,
 
 INSERT INTO user_org_memberships (id, user_id, org_id, role, status, invited_by, created_at, updated_at)
 VALUES
-  ('uom_velion_admin', :'admin_user_id', :'org_id', 'admin', 'active', null, now() - interval '14 days', now()),
-  ('uom_velion_normal', :'normal_user_id', :'org_id', 'member', 'active', :'admin_user_id', now() - interval '9 days', now()),
-  ('uom_velion_editor', :'editor_user_id', :'org_id', 'editor', 'active', :'admin_user_id', now() - interval '8 days', now())
+  ('uom_verevon_admin', :'admin_user_id', :'org_id', 'admin', 'active', null, now() - interval '14 days', now()),
+  ('uom_verevon_normal', :'normal_user_id', :'org_id', 'member', 'active', :'admin_user_id', now() - interval '9 days', now()),
+  ('uom_verevon_editor', :'editor_user_id', :'org_id', 'editor', 'active', :'admin_user_id', now() - interval '8 days', now())
 ON CONFLICT (user_id, org_id) DO UPDATE
 SET role = EXCLUDED.role,
     status = EXCLUDED.status,
@@ -411,9 +411,9 @@ SET role = EXCLUDED.role,
 
 INSERT INTO roles (id, name, description, permissions, created_at, updated_at)
 VALUES
-  ('role_velion_admin', 'velion_admin', 'Velion local demo administrator', jsonb_build_array('org:manage', 'billing:manage', 'tickets:manage', 'knowledge:manage', 'social:approve'), now(), now()),
-  ('role_velion_member', 'velion_member', 'Velion local demo normal user', jsonb_build_array('tickets:read', 'tickets:reply', 'knowledge:read'), now(), now()),
-  ('role_velion_editor', 'velion_editor', 'Velion local demo editor', jsonb_build_array('tickets:read', 'knowledge:write', 'social:write'), now(), now())
+  ('role_verevon_admin', 'verevon_admin', 'Verevon local demo administrator', jsonb_build_array('org:manage', 'billing:manage', 'tickets:manage', 'knowledge:manage', 'social:approve'), now(), now()),
+  ('role_verevon_member', 'verevon_member', 'Verevon local demo normal user', jsonb_build_array('tickets:read', 'tickets:reply', 'knowledge:read'), now(), now()),
+  ('role_verevon_editor', 'verevon_editor', 'Verevon local demo editor', jsonb_build_array('tickets:read', 'knowledge:write', 'social:write'), now(), now())
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -422,17 +422,17 @@ SET name = EXCLUDED.name,
 
 INSERT INTO user_roles (user_id, role_id, assigned_at)
 VALUES
-  (:'admin_user_id', 'role_velion_admin', now() - interval '14 days'),
-  (:'normal_user_id', 'role_velion_member', now() - interval '9 days'),
-  (:'editor_user_id', 'role_velion_editor', now() - interval '8 days')
+  (:'admin_user_id', 'role_verevon_admin', now() - interval '14 days'),
+  (:'normal_user_id', 'role_verevon_member', now() - interval '9 days'),
+  (:'editor_user_id', 'role_verevon_editor', now() - interval '8 days')
 ON CONFLICT (user_id, role_id) DO UPDATE
 SET assigned_at = EXCLUDED.assigned_at;
 
 INSERT INTO user_settings (id, user_id, category, settings, created_at, updated_at)
 VALUES
-  ('settings_velion_admin_ui', :'admin_user_id', 'ui', jsonb_build_object('theme', 'system', 'locale', 'nb-NO', 'ticket_queue', 'my'), now(), now()),
-  ('settings_velion_normal_ui', :'normal_user_id', 'ui', jsonb_build_object('theme', 'light', 'locale', 'nb-NO', 'ticket_queue', 'waiting-customer'), now(), now()),
-  ('settings_velion_editor_ui', :'editor_user_id', 'ui', jsonb_build_object('theme', 'light', 'locale', 'nb-NO', 'ticket_queue', 'suggested'), now(), now())
+  ('settings_verevon_admin_ui', :'admin_user_id', 'ui', jsonb_build_object('theme', 'system', 'locale', 'nb-NO', 'ticket_queue', 'my'), now(), now()),
+  ('settings_verevon_normal_ui', :'normal_user_id', 'ui', jsonb_build_object('theme', 'light', 'locale', 'nb-NO', 'ticket_queue', 'waiting-customer'), now(), now()),
+  ('settings_verevon_editor_ui', :'editor_user_id', 'ui', jsonb_build_object('theme', 'light', 'locale', 'nb-NO', 'ticket_queue', 'suggested'), now(), now())
 ON CONFLICT (id) DO UPDATE
 SET settings = EXCLUDED.settings,
     updated_at = now();
@@ -444,9 +444,9 @@ SET settings = EXCLUDED.settings,
 -- grants and are intentionally not reproduced here.
 INSERT INTO resource_grants (grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by, granted_at)
 VALUES
-  ('grant_velion_admin_doc_normal',  :'org_id', 'document', 'doc_velion_admin_runbook',        'user', :'normal_user_id', 'view', :'admin_user_id',  now() - interval '3 days'),
-  ('grant_velion_support_doc_admin', :'org_id', 'document', 'doc_velion_normal_support_guide', 'user', :'admin_user_id',  'edit', :'normal_user_id', now() - interval '2 days'),
-  ('grant_velion_brand_doc_admin',   :'org_id', 'document', 'doc_velion_editor_brand_voice',   'user', :'admin_user_id',  'edit', :'editor_user_id', now() - interval '1 day')
+  ('grant_verevon_admin_doc_normal',  :'org_id', 'document', 'doc_verevon_admin_runbook',        'user', :'normal_user_id', 'view', :'admin_user_id',  now() - interval '3 days'),
+  ('grant_verevon_support_doc_admin', :'org_id', 'document', 'doc_verevon_normal_support_guide', 'user', :'admin_user_id',  'edit', :'normal_user_id', now() - interval '2 days'),
+  ('grant_verevon_brand_doc_admin',   :'org_id', 'document', 'doc_verevon_editor_brand_voice',   'user', :'admin_user_id',  'edit', :'editor_user_id', now() - interval '1 day')
 ON CONFLICT (org_id, resource_type, resource_id, subject_type, subject_id) DO UPDATE
 SET role = EXCLUDED.role, granted_by = EXCLUDED.granted_by, granted_at = EXCLUDED.granted_at;
 
@@ -479,7 +479,7 @@ VALUES (
   'standard',
   'active',
   250000,
-  jsonb_build_object('suite', 'velion', 'tier', 'advanced', 'seats', 25),
+  jsonb_build_object('suite', 'verevon', 'tier', 'advanced', 'seats', 25),
   jsonb_build_object('advanced_ticketing', true, 'knowledge_base', true, 'social_planner', true, 'web_search', true),
   jsonb_build_object(
     'feature.chat', true,
@@ -492,8 +492,8 @@ VALUES (
     'feature.social_planner', true
   ),
   jsonb_build_object('users', 25, 'api_calls', 100000, 'storage_mb', 102400, 'tickets', 5000, 'documents', 20000),
-  jsonb_build_object('local_demo', 'cus_velion_advanced_demo'),
-  jsonb_build_object('seed', 'velion-local-demo', 'org_name', :'org_name', 'plan_label', 'Velion Advanced'),
+  jsonb_build_object('local_demo', 'cus_verevon_advanced_demo'),
+  jsonb_build_object('seed', 'verevon-local-demo', 'org_name', :'org_name', 'plan_label', 'Verevon Advanced'),
   now() - interval '14 days',
   now(),
   null
@@ -513,8 +513,8 @@ SET plan = EXCLUDED.plan,
 
 INSERT INTO billing_invoices (invoice_id, org_id, provider, amount_cents, currency, status, issued_at, due_at, metadata, created_at, last_modified)
 VALUES
-  ('inv_velion_advanced_202606', :'org_id', 'local_demo', 249900, 'NOK', 'paid', date_trunc('month', now()), date_trunc('month', now()) + interval '14 days', jsonb_build_object('plan_label', 'Velion Advanced', 'seats', 3), now() - interval '14 days', now()),
-  ('inv_velion_advanced_202605', :'org_id', 'local_demo', 249900, 'NOK', 'paid', date_trunc('month', now()) - interval '1 month', date_trunc('month', now()) - interval '1 month' + interval '14 days', jsonb_build_object('plan_label', 'Velion Advanced', 'seats', 3), now() - interval '1 month', now())
+  ('inv_verevon_advanced_202606', :'org_id', 'local_demo', 249900, 'NOK', 'paid', date_trunc('month', now()), date_trunc('month', now()) + interval '14 days', jsonb_build_object('plan_label', 'Verevon Advanced', 'seats', 3), now() - interval '14 days', now()),
+  ('inv_verevon_advanced_202605', :'org_id', 'local_demo', 249900, 'NOK', 'paid', date_trunc('month', now()) - interval '1 month', date_trunc('month', now()) - interval '1 month' + interval '14 days', jsonb_build_object('plan_label', 'Verevon Advanced', 'seats', 3), now() - interval '1 month', now())
 ON CONFLICT (invoice_id) DO UPDATE
 SET org_id = EXCLUDED.org_id,
     provider = EXCLUDED.provider,
@@ -527,19 +527,19 @@ SET org_id = EXCLUDED.org_id,
     last_modified = now();
 
 INSERT INTO billing_usage_events (org_id, metric, quantity, source, occurred_at, metadata, created_at)
-SELECT :'org_id', metric, quantity, 'velion-local-demo', occurred_at, metadata, now()
+SELECT :'org_id', metric, quantity, 'verevon-local-demo', occurred_at, metadata, now()
 FROM (
   VALUES
-    ('tickets.created', 6::double precision, now() - interval '2 hours', jsonb_build_object('seed', 'velion-local-demo')),
-    ('messages.processed', 18::double precision, now() - interval '90 minutes', jsonb_build_object('seed', 'velion-local-demo')),
-    ('documents.indexed', 3::double precision, now() - interval '80 minutes', jsonb_build_object('seed', 'velion-local-demo')),
-    ('model.tokens', 7842::double precision, now() - interval '45 minutes', jsonb_build_object('seed', 'velion-local-demo'))
+    ('tickets.created', 6::double precision, now() - interval '2 hours', jsonb_build_object('seed', 'verevon-local-demo')),
+    ('messages.processed', 18::double precision, now() - interval '90 minutes', jsonb_build_object('seed', 'verevon-local-demo')),
+    ('documents.indexed', 3::double precision, now() - interval '80 minutes', jsonb_build_object('seed', 'verevon-local-demo')),
+    ('model.tokens', 7842::double precision, now() - interval '45 minutes', jsonb_build_object('seed', 'verevon-local-demo'))
 ) AS seed(metric, quantity, occurred_at, metadata)
 WHERE NOT EXISTS (
   SELECT 1
   FROM billing_usage_events e
   WHERE e.org_id = :'org_id'
-    AND e.source = 'velion-local-demo'
+    AND e.source = 'verevon-local-demo'
     AND e.metric = seed.metric
 );
 
@@ -577,16 +577,16 @@ INSERT INTO integration_connections (
   deleted_at
 )
 VALUES
-  ('conn_velion_microsoft', 'microsoft', 'microsoft-graph', :'org_id', 'workspace_velion_demo', :'admin_user_id', :'admin_email', 'connected', 'Velion Microsoft 365', 'velion-as.onmicrosoft.com', 'tenant_velion_demo', jsonb_build_object('tenant_name', 'Velion AS', 'primary_domain', 'velion.dev'), ARRAY['profile.read','sharepoint.read','teams.read','mail.read','mail.send','calendar.read']::text[], ARRAY['openid','profile','email','offline_access','User.Read','Files.Read.All','Sites.Read.All','Mail.Read','Mail.Send','Calendars.Read']::text[], 'local-demo-token-microsoft', 'local-demo-refresh-microsoft', now() + interval '30 days', now() - interval '35 minutes', 'completed', now() - interval '10 days', now(), null),
-  ('conn_velion_google', 'google', 'google-workspace', :'org_id', 'workspace_velion_demo', :'admin_user_id', :'admin_email', 'connected', 'Velion Google Workspace', 'admin@velion.dev', 'google_workspace_velion_demo', jsonb_build_object('workspace_domain', 'velion.dev'), ARRAY['profile.read','drive.metadata','drive.read','gmail.read','gmail.send','calendar.read']::text[], ARRAY['openid','email','profile','https://www.googleapis.com/auth/drive.readonly','https://www.googleapis.com/auth/gmail.readonly','https://www.googleapis.com/auth/gmail.send','https://www.googleapis.com/auth/calendar.readonly']::text[], 'local-demo-token-google', 'local-demo-refresh-google', now() + interval '30 days', now() - interval '32 minutes', 'completed', now() - interval '9 days', now(), null),
-  ('conn_velion_slack', 'slack', 'slack', :'org_id', 'workspace_velion_demo', :'normal_user_id', :'normal_email', 'connected', 'Velion Slack', 'T-VELION-DEMO', 'slack_team_velion_demo', jsonb_build_object('team_name', 'Velion AS', 'workspace_url', 'velion-demo.slack.com'), ARRAY['workspace.read','users.read','channels.read','channels.history','files.read','messages.write']::text[], ARRAY['team:read','users:read','channels:read','channels:history','files:read','chat:write']::text[], 'local-demo-token-slack', 'local-demo-refresh-slack', now() + interval '30 days', now() - interval '28 minutes', 'completed', now() - interval '8 days', now(), null),
-  ('conn_velion_github', 'github', 'github', :'org_id', 'workspace_velion_demo', :'admin_user_id', :'admin_email', 'connected', 'Velion GitHub', 'triodelab/velion-demo', 'github_install_velion_demo', jsonb_build_object('installation_id', '1234567', 'org', 'triodelab'), ARRAY['profile.read','org.read','repo.public.read','repo.private.read','issues.write']::text[], ARRAY['read:org','repo','write:discussion']::text[], 'local-demo-token-github', 'local-demo-refresh-github', now() + interval '30 days', now() - interval '25 minutes', 'completed', now() - interval '8 days', now(), null),
-  ('conn_velion_linkedin', 'linkedin', 'linkedin', :'org_id', 'workspace_velion_demo', :'editor_user_id', :'editor_email', 'connected', 'Velion LinkedIn', 'urn:li:organization:997711', 'linkedin_org_velion_demo', jsonb_build_object('handle', 'Velion AS', 'author_urn', 'urn:li:organization:997711', 'organization_urn', 'urn:li:organization:997711'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['openid','profile','w_member_social','r_organization_social','rw_organization_admin']::text[], 'local-demo-token-linkedin', 'local-demo-refresh-linkedin', now() + interval '30 days', now() - interval '22 minutes', 'completed', now() - interval '7 days', now(), null),
-  ('conn_velion_x', 'x', 'x', :'org_id', 'workspace_velion_demo', :'editor_user_id', :'editor_email', 'connected', 'Velion X', '@veliondemo', 'x_account_velion_demo', jsonb_build_object('handle', '@veliondemo', 'user_id', '900100200'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['tweet.read','tweet.write','users.read','offline.access']::text[], 'local-demo-token-x', 'local-demo-refresh-x', now() + interval '30 days', now() - interval '20 minutes', 'completed', now() - interval '7 days', now(), null),
-  ('conn_velion_instagram', 'instagram', 'instagram', :'org_id', 'workspace_velion_demo', :'editor_user_id', :'editor_email', 'connected', 'Velion Instagram', '@veliondemo', 'ig_business_velion_demo', jsonb_build_object('handle', '@veliondemo', 'ig_user_id', '17841400000000000', 'page_id', '1122334455'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['instagram_basic','instagram_content_publish','pages_read_engagement','pages_show_list']::text[], 'local-demo-token-instagram', 'local-demo-refresh-instagram', now() + interval '30 days', now() - interval '18 minutes', 'completed', now() - interval '7 days', now(), null),
-  ('conn_velion_facebook', 'facebook', 'facebook', :'org_id', 'workspace_velion_demo', :'editor_user_id', :'editor_email', 'connected', 'Velion Facebook', 'Velion AS', 'fb_page_velion_demo', jsonb_build_object('handle', 'Velion AS', 'page_id', '1122334455', 'page_access_token_ref', 'local-demo'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.inbox.read','social.analytics.read']::text[], ARRAY['pages_read_engagement','pages_manage_posts','pages_messaging','pages_show_list']::text[], 'local-demo-token-facebook', 'local-demo-refresh-facebook', now() + interval '30 days', now() - interval '16 minutes', 'completed', now() - interval '7 days', now(), null),
-  ('conn_velion_tiktok', 'tiktok', 'tiktok', :'org_id', 'workspace_velion_demo', :'editor_user_id', :'editor_email', 'connected', 'Velion TikTok', '@veliondemo', 'tiktok_business_velion_demo', jsonb_build_object('handle', '@veliondemo', 'open_id', 'tt_velion_demo'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['user.info.basic','video.publish','video.upload']::text[], 'local-demo-token-tiktok', 'local-demo-refresh-tiktok', now() + interval '30 days', now() - interval '14 minutes', 'completed', now() - interval '6 days', now(), null),
-  ('conn_velion_snapchat', 'snapchat', 'snapchat', :'org_id', 'workspace_velion_demo', :'editor_user_id', :'editor_email', 'connected', 'Velion Snapchat', 'veliondemo', 'snap_ad_account_velion_demo', jsonb_build_object('handle', 'veliondemo', 'ad_account_id', 'snap-ad-velion-demo'), ARRAY['social.profile.read','social.ads.manage','social.analytics.read']::text[], ARRAY['snapchat-marketing-api']::text[], 'local-demo-token-snapchat', 'local-demo-refresh-snapchat', now() + interval '30 days', now() - interval '12 minutes', 'completed', now() - interval '6 days', now(), null)
+  ('conn_verevon_microsoft', 'microsoft', 'microsoft-graph', :'org_id', 'workspace_verevon_demo', :'admin_user_id', :'admin_email', 'connected', 'Verevon Microsoft 365', 'verevon-as.onmicrosoft.com', 'tenant_verevon_demo', jsonb_build_object('tenant_name', 'Verevon AS', 'primary_domain', 'verevon.dev'), ARRAY['profile.read','sharepoint.read','teams.read','mail.read','mail.send','calendar.read']::text[], ARRAY['openid','profile','email','offline_access','User.Read','Files.Read.All','Sites.Read.All','Mail.Read','Mail.Send','Calendars.Read']::text[], 'local-demo-token-microsoft', 'local-demo-refresh-microsoft', now() + interval '30 days', now() - interval '35 minutes', 'completed', now() - interval '10 days', now(), null),
+  ('conn_verevon_google', 'google', 'google-workspace', :'org_id', 'workspace_verevon_demo', :'admin_user_id', :'admin_email', 'connected', 'Verevon Google Workspace', 'admin@verevon.dev', 'google_workspace_verevon_demo', jsonb_build_object('workspace_domain', 'verevon.dev'), ARRAY['profile.read','drive.metadata','drive.read','gmail.read','gmail.send','calendar.read']::text[], ARRAY['openid','email','profile','https://www.googleapis.com/auth/drive.readonly','https://www.googleapis.com/auth/gmail.readonly','https://www.googleapis.com/auth/gmail.send','https://www.googleapis.com/auth/calendar.readonly']::text[], 'local-demo-token-google', 'local-demo-refresh-google', now() + interval '30 days', now() - interval '32 minutes', 'completed', now() - interval '9 days', now(), null),
+  ('conn_verevon_slack', 'slack', 'slack', :'org_id', 'workspace_verevon_demo', :'normal_user_id', :'normal_email', 'connected', 'Verevon Slack', 'T-VEREVON-DEMO', 'slack_team_verevon_demo', jsonb_build_object('team_name', 'Verevon AS', 'workspace_url', 'verevon-demo.slack.com'), ARRAY['workspace.read','users.read','channels.read','channels.history','files.read','messages.write']::text[], ARRAY['team:read','users:read','channels:read','channels:history','files:read','chat:write']::text[], 'local-demo-token-slack', 'local-demo-refresh-slack', now() + interval '30 days', now() - interval '28 minutes', 'completed', now() - interval '8 days', now(), null),
+  ('conn_verevon_github', 'github', 'github', :'org_id', 'workspace_verevon_demo', :'admin_user_id', :'admin_email', 'connected', 'Verevon GitHub', 'triodelab/verevon-demo', 'github_install_verevon_demo', jsonb_build_object('installation_id', '1234567', 'org', 'triodelab'), ARRAY['profile.read','org.read','repo.public.read','repo.private.read','issues.write']::text[], ARRAY['read:org','repo','write:discussion']::text[], 'local-demo-token-github', 'local-demo-refresh-github', now() + interval '30 days', now() - interval '25 minutes', 'completed', now() - interval '8 days', now(), null),
+  ('conn_verevon_linkedin', 'linkedin', 'linkedin', :'org_id', 'workspace_verevon_demo', :'editor_user_id', :'editor_email', 'connected', 'Verevon LinkedIn', 'urn:li:organization:997711', 'linkedin_org_verevon_demo', jsonb_build_object('handle', 'Verevon AS', 'author_urn', 'urn:li:organization:997711', 'organization_urn', 'urn:li:organization:997711'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['openid','profile','w_member_social','r_organization_social','rw_organization_admin']::text[], 'local-demo-token-linkedin', 'local-demo-refresh-linkedin', now() + interval '30 days', now() - interval '22 minutes', 'completed', now() - interval '7 days', now(), null),
+  ('conn_verevon_x', 'x', 'x', :'org_id', 'workspace_verevon_demo', :'editor_user_id', :'editor_email', 'connected', 'Verevon X', '@verevondemo', 'x_account_verevon_demo', jsonb_build_object('handle', '@verevondemo', 'user_id', '900100200'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['tweet.read','tweet.write','users.read','offline.access']::text[], 'local-demo-token-x', 'local-demo-refresh-x', now() + interval '30 days', now() - interval '20 minutes', 'completed', now() - interval '7 days', now(), null),
+  ('conn_verevon_instagram', 'instagram', 'instagram', :'org_id', 'workspace_verevon_demo', :'editor_user_id', :'editor_email', 'connected', 'Verevon Instagram', '@verevondemo', 'ig_business_verevon_demo', jsonb_build_object('handle', '@verevondemo', 'ig_user_id', '17841400000000000', 'page_id', '1122334455'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['instagram_basic','instagram_content_publish','pages_read_engagement','pages_show_list']::text[], 'local-demo-token-instagram', 'local-demo-refresh-instagram', now() + interval '30 days', now() - interval '18 minutes', 'completed', now() - interval '7 days', now(), null),
+  ('conn_verevon_facebook', 'facebook', 'facebook', :'org_id', 'workspace_verevon_demo', :'editor_user_id', :'editor_email', 'connected', 'Verevon Facebook', 'Verevon AS', 'fb_page_verevon_demo', jsonb_build_object('handle', 'Verevon AS', 'page_id', '1122334455', 'page_access_token_ref', 'local-demo'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.inbox.read','social.analytics.read']::text[], ARRAY['pages_read_engagement','pages_manage_posts','pages_messaging','pages_show_list']::text[], 'local-demo-token-facebook', 'local-demo-refresh-facebook', now() + interval '30 days', now() - interval '16 minutes', 'completed', now() - interval '7 days', now(), null),
+  ('conn_verevon_tiktok', 'tiktok', 'tiktok', :'org_id', 'workspace_verevon_demo', :'editor_user_id', :'editor_email', 'connected', 'Verevon TikTok', '@verevondemo', 'tiktok_business_verevon_demo', jsonb_build_object('handle', '@verevondemo', 'open_id', 'tt_verevon_demo'), ARRAY['social.profile.read','social.post.write','social.media.upload','social.analytics.read']::text[], ARRAY['user.info.basic','video.publish','video.upload']::text[], 'local-demo-token-tiktok', 'local-demo-refresh-tiktok', now() + interval '30 days', now() - interval '14 minutes', 'completed', now() - interval '6 days', now(), null),
+  ('conn_verevon_snapchat', 'snapchat', 'snapchat', :'org_id', 'workspace_verevon_demo', :'editor_user_id', :'editor_email', 'connected', 'Verevon Snapchat', 'verevondemo', 'snap_ad_account_verevon_demo', jsonb_build_object('handle', 'verevondemo', 'ad_account_id', 'snap-ad-verevon-demo'), ARRAY['social.profile.read','social.ads.manage','social.analytics.read']::text[], ARRAY['snapchat-marketing-api']::text[], 'local-demo-token-snapchat', 'local-demo-refresh-snapchat', now() + interval '30 days', now() - interval '12 minutes', 'completed', now() - interval '6 days', now(), null)
 ON CONFLICT (id) DO UPDATE
 SET status = EXCLUDED.status,
     display_name = EXCLUDED.display_name,
@@ -620,12 +620,12 @@ INSERT INTO integration_sync_jobs (
   completed_at
 )
 VALUES
-  ('sync_velion_microsoft_initial', :'org_id', 'conn_velion_microsoft', :'admin_user_id', 'microsoft', 'completed', 'local_demo_seed', 'incremental', jsonb_build_object('documents', 42, 'mailboxes', 2), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '8 days', now() - interval '35 minutes', now() - interval '8 days', now() - interval '35 minutes'),
-  ('sync_velion_google_initial', :'org_id', 'conn_velion_google', :'admin_user_id', 'google', 'completed', 'local_demo_seed', 'incremental', jsonb_build_object('drive_files', 31, 'gmail_threads', 9), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '8 days', now() - interval '32 minutes', now() - interval '8 days', now() - interval '32 minutes'),
-  ('sync_velion_slack_initial', :'org_id', 'conn_velion_slack', :'normal_user_id', 'slack', 'completed', 'local_demo_seed', 'incremental', jsonb_build_object('channels', 6, 'messages', 128), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '7 days', now() - interval '28 minutes', now() - interval '7 days', now() - interval '28 minutes'),
-  ('sync_velion_social_daily', :'org_id', 'conn_velion_instagram', :'editor_user_id', 'instagram', 'completed', 'local_demo_seed', 'analytics_refresh', jsonb_build_object('accounts', 6, 'posts', 7), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '6 hours', now() - interval '18 minutes', now() - interval '6 hours', now() - interval '18 minutes'),
-  ('sync_velion_social_x', :'org_id', 'conn_velion_x', :'editor_user_id', 'x', 'completed', 'local_demo_seed', 'analytics_refresh', jsonb_build_object('tweets', 4), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '5 hours', now() - interval '20 minutes', now() - interval '5 hours', now() - interval '20 minutes'),
-  ('sync_velion_social_linkedin', :'org_id', 'conn_velion_linkedin', :'editor_user_id', 'linkedin', 'completed', 'local_demo_seed', 'analytics_refresh', jsonb_build_object('organization_posts', 5), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '5 hours', now() - interval '22 minutes', now() - interval '5 hours', now() - interval '22 minutes')
+  ('sync_verevon_microsoft_initial', :'org_id', 'conn_verevon_microsoft', :'admin_user_id', 'microsoft', 'completed', 'local_demo_seed', 'incremental', jsonb_build_object('documents', 42, 'mailboxes', 2), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '8 days', now() - interval '35 minutes', now() - interval '8 days', now() - interval '35 minutes'),
+  ('sync_verevon_google_initial', :'org_id', 'conn_verevon_google', :'admin_user_id', 'google', 'completed', 'local_demo_seed', 'incremental', jsonb_build_object('drive_files', 31, 'gmail_threads', 9), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '8 days', now() - interval '32 minutes', now() - interval '8 days', now() - interval '32 minutes'),
+  ('sync_verevon_slack_initial', :'org_id', 'conn_verevon_slack', :'normal_user_id', 'slack', 'completed', 'local_demo_seed', 'incremental', jsonb_build_object('channels', 6, 'messages', 128), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '7 days', now() - interval '28 minutes', now() - interval '7 days', now() - interval '28 minutes'),
+  ('sync_verevon_social_daily', :'org_id', 'conn_verevon_instagram', :'editor_user_id', 'instagram', 'completed', 'local_demo_seed', 'analytics_refresh', jsonb_build_object('accounts', 6, 'posts', 7), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '6 hours', now() - interval '18 minutes', now() - interval '6 hours', now() - interval '18 minutes'),
+  ('sync_verevon_social_x', :'org_id', 'conn_verevon_x', :'editor_user_id', 'x', 'completed', 'local_demo_seed', 'analytics_refresh', jsonb_build_object('tweets', 4), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '5 hours', now() - interval '20 minutes', now() - interval '5 hours', now() - interval '20 minutes'),
+  ('sync_verevon_social_linkedin', :'org_id', 'conn_verevon_linkedin', :'editor_user_id', 'linkedin', 'completed', 'local_demo_seed', 'analytics_refresh', jsonb_build_object('organization_posts', 5), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '5 hours', now() - interval '22 minutes', now() - interval '5 hours', now() - interval '22 minutes')
 ON CONFLICT (id) DO UPDATE
 SET status = EXCLUDED.status,
     reason = EXCLUDED.reason,
@@ -638,10 +638,10 @@ SET status = EXCLUDED.status,
 
 INSERT INTO integration_sync_events (id, job_id, type, message, metadata, created_at)
 VALUES
-  ('syncevent_velion_microsoft_done', 'sync_velion_microsoft_initial', 'completed', 'Microsoft demo sync completed.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '35 minutes'),
-  ('syncevent_velion_google_done', 'sync_velion_google_initial', 'completed', 'Google demo sync completed.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '32 minutes'),
-  ('syncevent_velion_slack_done', 'sync_velion_slack_initial', 'completed', 'Slack demo sync completed.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '28 minutes'),
-  ('syncevent_velion_social_done', 'sync_velion_social_daily', 'completed', 'Social analytics demo sync completed.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '18 minutes')
+  ('syncevent_verevon_microsoft_done', 'sync_verevon_microsoft_initial', 'completed', 'Microsoft demo sync completed.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '35 minutes'),
+  ('syncevent_verevon_google_done', 'sync_verevon_google_initial', 'completed', 'Google demo sync completed.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '32 minutes'),
+  ('syncevent_verevon_slack_done', 'sync_verevon_slack_initial', 'completed', 'Slack demo sync completed.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '28 minutes'),
+  ('syncevent_verevon_social_done', 'sync_verevon_social_daily', 'completed', 'Social analytics demo sync completed.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '18 minutes')
 ON CONFLICT (id) DO UPDATE
 SET type = EXCLUDED.type,
     message = EXCLUDED.message,
@@ -664,12 +664,12 @@ INSERT INTO integration_connection_consents (
   revoked_at
 )
 VALUES
-  ('consent_velion_linkedin_publish', :'org_id', 'conn_velion_linkedin', :'editor_user_id', 'linkedin', 'organization_page', 'social_publish', true, jsonb_build_object('seed', 'velion-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
-  ('consent_velion_instagram_publish', :'org_id', 'conn_velion_instagram', :'editor_user_id', 'instagram', 'business_account', 'social_publish', true, jsonb_build_object('seed', 'velion-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
-  ('consent_velion_facebook_inbox', :'org_id', 'conn_velion_facebook', :'editor_user_id', 'facebook', 'page_inbox', 'social_inbox_triage', true, jsonb_build_object('seed', 'velion-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
-  ('consent_velion_x_publish', :'org_id', 'conn_velion_x', :'editor_user_id', 'x', 'profile', 'social_publish', true, jsonb_build_object('seed', 'velion-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
-  ('consent_velion_microsoft_knowledge', :'org_id', 'conn_velion_microsoft', :'admin_user_id', 'microsoft', 'sharepoint', 'knowledge_sync', true, jsonb_build_object('seed', 'velion-local-demo'), now() + interval '365 days', now() - interval '10 days', now(), null),
-  ('consent_velion_google_knowledge', :'org_id', 'conn_velion_google', :'admin_user_id', 'google', 'drive', 'knowledge_sync', true, jsonb_build_object('seed', 'velion-local-demo'), now() + interval '365 days', now() - interval '9 days', now(), null)
+  ('consent_verevon_linkedin_publish', :'org_id', 'conn_verevon_linkedin', :'editor_user_id', 'linkedin', 'organization_page', 'social_publish', true, jsonb_build_object('seed', 'verevon-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
+  ('consent_verevon_instagram_publish', :'org_id', 'conn_verevon_instagram', :'editor_user_id', 'instagram', 'business_account', 'social_publish', true, jsonb_build_object('seed', 'verevon-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
+  ('consent_verevon_facebook_inbox', :'org_id', 'conn_verevon_facebook', :'editor_user_id', 'facebook', 'page_inbox', 'social_inbox_triage', true, jsonb_build_object('seed', 'verevon-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
+  ('consent_verevon_x_publish', :'org_id', 'conn_verevon_x', :'editor_user_id', 'x', 'profile', 'social_publish', true, jsonb_build_object('seed', 'verevon-local-demo'), now() + interval '365 days', now() - interval '7 days', now(), null),
+  ('consent_verevon_microsoft_knowledge', :'org_id', 'conn_verevon_microsoft', :'admin_user_id', 'microsoft', 'sharepoint', 'knowledge_sync', true, jsonb_build_object('seed', 'verevon-local-demo'), now() + interval '365 days', now() - interval '10 days', now(), null),
+  ('consent_verevon_google_knowledge', :'org_id', 'conn_verevon_google', :'admin_user_id', 'google', 'drive', 'knowledge_sync', true, jsonb_build_object('seed', 'verevon-local-demo'), now() + interval '365 days', now() - interval '9 days', now(), null)
 ON CONFLICT (connection_id, source, purpose) DO UPDATE
 SET granted = EXCLUDED.granted,
     metadata = EXCLUDED.metadata,
@@ -679,19 +679,19 @@ SET granted = EXCLUDED.granted,
 
 INSERT INTO integration_token_leases (id, organization_id, connection_id, user_id, provider_key, connector_type, consumer, expires_at, created_at)
 VALUES
-  ('lease_velion_social_core_linkedin', :'org_id', 'conn_velion_linkedin', :'editor_user_id', 'linkedin', 'linkedin', 'social-core', now() + interval '15 minutes', now() - interval '5 minutes'),
-  ('lease_velion_social_core_instagram', :'org_id', 'conn_velion_instagram', :'editor_user_id', 'instagram', 'instagram', 'social-core', now() + interval '15 minutes', now() - interval '5 minutes'),
-  ('lease_velion_social_core_x', :'org_id', 'conn_velion_x', :'editor_user_id', 'x', 'x', 'social-core', now() + interval '15 minutes', now() - interval '5 minutes')
+  ('lease_verevon_social_core_linkedin', :'org_id', 'conn_verevon_linkedin', :'editor_user_id', 'linkedin', 'linkedin', 'social-core', now() + interval '15 minutes', now() - interval '5 minutes'),
+  ('lease_verevon_social_core_instagram', :'org_id', 'conn_verevon_instagram', :'editor_user_id', 'instagram', 'instagram', 'social-core', now() + interval '15 minutes', now() - interval '5 minutes'),
+  ('lease_verevon_social_core_x', :'org_id', 'conn_verevon_x', :'editor_user_id', 'x', 'x', 'social-core', now() + interval '15 minutes', now() - interval '5 minutes')
 ON CONFLICT (id) DO UPDATE
 SET expires_at = EXCLUDED.expires_at,
     created_at = EXCLUDED.created_at;
 
 INSERT INTO integration_audit_events (id, organization_id, user_id, connection_id, event_type, provider_key, metadata, created_at)
 VALUES
-  ('intaudit_velion_linkedin_connected', :'org_id', :'editor_user_id', 'conn_velion_linkedin', 'velion.ingestion.integration.connected', 'linkedin', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '7 days'),
-  ('intaudit_velion_instagram_connected', :'org_id', :'editor_user_id', 'conn_velion_instagram', 'velion.ingestion.integration.connected', 'instagram', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '7 days'),
-  ('intaudit_velion_google_connected', :'org_id', :'admin_user_id', 'conn_velion_google', 'velion.ingestion.integration.connected', 'google', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '9 days'),
-  ('intaudit_velion_slack_connected', :'org_id', :'normal_user_id', 'conn_velion_slack', 'velion.ingestion.integration.connected', 'slack', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '8 days')
+  ('intaudit_verevon_linkedin_connected', :'org_id', :'editor_user_id', 'conn_verevon_linkedin', 'verevon.ingestion.integration.connected', 'linkedin', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '7 days'),
+  ('intaudit_verevon_instagram_connected', :'org_id', :'editor_user_id', 'conn_verevon_instagram', 'verevon.ingestion.integration.connected', 'instagram', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '7 days'),
+  ('intaudit_verevon_google_connected', :'org_id', :'admin_user_id', 'conn_verevon_google', 'verevon.ingestion.integration.connected', 'google', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '9 days'),
+  ('intaudit_verevon_slack_connected', :'org_id', :'normal_user_id', 'conn_verevon_slack', 'verevon.ingestion.integration.connected', 'slack', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '8 days')
 ON CONFLICT (id) DO UPDATE
 SET metadata = EXCLUDED.metadata,
     created_at = EXCLUDED.created_at;
@@ -707,21 +707,21 @@ BEGIN;
 
 INSERT INTO conversation_inboxes (id, org_id, name, channel, created_at, updated_at)
 VALUES
-  ('inbox_velion_email', :'org_id', 'Support email', 'email', now() - interval '14 days', now()),
-  ('inbox_velion_whatsapp', :'org_id', 'WhatsApp support', 'whatsapp', now() - interval '13 days', now()),
-  ('inbox_velion_instagram', :'org_id', 'Instagram DMs', 'instagram', now() - interval '12 days', now())
+  ('inbox_verevon_email', :'org_id', 'Support email', 'email', now() - interval '14 days', now()),
+  ('inbox_verevon_whatsapp', :'org_id', 'WhatsApp support', 'whatsapp', now() - interval '13 days', now()),
+  ('inbox_verevon_instagram', :'org_id', 'Instagram DMs', 'instagram', now() - interval '12 days', now())
 ON CONFLICT (org_id, channel) DO UPDATE
 SET name = EXCLUDED.name,
     updated_at = now();
 
 INSERT INTO conversation_contacts (id, org_id, name, email, phone, external_ref, created_at, updated_at)
 VALUES
-  ('contact_velion_anne', :'org_id', 'Anne Larsen', 'anne.larsen@example.test', '+47 410 00 101', 'demo:anne', now() - interval '7 days', now()),
-  ('contact_velion_marius', :'org_id', 'Marius Berg', 'marius.berg@example.test', '+47 410 00 102', 'demo:marius', now() - interval '6 days', now()),
-  ('contact_velion_sara', :'org_id', 'Sara Nilsen', 'sara.nilsen@example.test', '+47 410 00 103', 'demo:sara', now() - interval '5 days', now()),
-  ('contact_velion_emil', :'org_id', 'Emil Johansen', 'emil.johansen@example.test', '+47 410 00 104', 'demo:emil', now() - interval '4 days', now()),
-  ('contact_velion_linnea', :'org_id', 'Linnea Solberg', 'linnea.solberg@example.test', '+47 410 00 105', 'demo:linnea', now() - interval '3 days', now()),
-  ('contact_velion_ole', :'org_id', 'Ole Haug', 'ole.haug@example.test', '+47 410 00 106', 'demo:ole', now() - interval '2 days', now())
+  ('contact_verevon_anne', :'org_id', 'Anne Larsen', 'anne.larsen@example.test', '+47 410 00 101', 'demo:anne', now() - interval '7 days', now()),
+  ('contact_verevon_marius', :'org_id', 'Marius Berg', 'marius.berg@example.test', '+47 410 00 102', 'demo:marius', now() - interval '6 days', now()),
+  ('contact_verevon_sara', :'org_id', 'Sara Nilsen', 'sara.nilsen@example.test', '+47 410 00 103', 'demo:sara', now() - interval '5 days', now()),
+  ('contact_verevon_emil', :'org_id', 'Emil Johansen', 'emil.johansen@example.test', '+47 410 00 104', 'demo:emil', now() - interval '4 days', now()),
+  ('contact_verevon_linnea', :'org_id', 'Linnea Solberg', 'linnea.solberg@example.test', '+47 410 00 105', 'demo:linnea', now() - interval '3 days', now()),
+  ('contact_verevon_ole', :'org_id', 'Ole Haug', 'ole.haug@example.test', '+47 410 00 106', 'demo:ole', now() - interval '2 days', now())
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name,
     email = EXCLUDED.email,
@@ -748,12 +748,12 @@ INSERT INTO conversations (
   updated_at
 )
 VALUES
-  ('conv_refund_delivery', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_velion_anne', 'Refund blocked after delivery issue', 'open', 'high', :'admin_user_id', :'admin_name', 'email', 'local_demo', 'thread_refund_delivery', 'Customer needs delivery evidence before refund can be released.', now() - interval '28 minutes', now() - interval '2 days', now()),
-  ('conv_security_login', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_velion_marius', 'Suspicious login on account', 'open', 'urgent', :'admin_user_id', :'admin_name', 'email', 'local_demo', 'thread_security_login', 'Customer reports login from unknown device.', now() - interval '18 minutes', now() - interval '1 day', now()),
-  ('conv_whatsapp_setup', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'whatsapp'), 'contact_velion_sara', 'WhatsApp setup waiting on customer', 'waiting_customer', 'normal', :'normal_user_id', :'normal_name', 'whatsapp', 'local_demo', 'thread_whatsapp_setup', 'Waiting for business verification screenshot.', now() - interval '50 minutes', now() - interval '22 hours', now()),
-  ('conv_invoice_copy', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_velion_emil', 'Invoice copy requested by finance', 'waiting_team', 'normal', :'normal_user_id', :'normal_name', 'email', 'local_demo', 'thread_invoice_copy', 'Finance needs the paid invoice for May.', now() - interval '75 minutes', now() - interval '20 hours', now()),
-  ('conv_product_copy', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_velion_linnea', 'Product page copy needs approval', 'open', 'normal', :'editor_user_id', :'editor_name', 'email', 'local_demo', 'thread_product_copy', 'Editor needs approval on updated product wording.', now() - interval '2 hours', now() - interval '18 hours', now()),
-  ('conv_social_schedule', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'instagram'), 'contact_velion_ole', 'Schedule campaign follow-up from Instagram', 'open', 'low', :'editor_user_id', :'editor_name', 'instagram', 'local_demo', 'thread_social_schedule', 'Customer asked when the campaign follow-up goes live.', now() - interval '3 hours', now() - interval '16 hours', now())
+  ('conv_refund_delivery', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_verevon_anne', 'Refund blocked after delivery issue', 'open', 'high', :'admin_user_id', :'admin_name', 'email', 'local_demo', 'thread_refund_delivery', 'Customer needs delivery evidence before refund can be released.', now() - interval '28 minutes', now() - interval '2 days', now()),
+  ('conv_security_login', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_verevon_marius', 'Suspicious login on account', 'open', 'urgent', :'admin_user_id', :'admin_name', 'email', 'local_demo', 'thread_security_login', 'Customer reports login from unknown device.', now() - interval '18 minutes', now() - interval '1 day', now()),
+  ('conv_whatsapp_setup', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'whatsapp'), 'contact_verevon_sara', 'WhatsApp setup waiting on customer', 'waiting_customer', 'normal', :'normal_user_id', :'normal_name', 'whatsapp', 'local_demo', 'thread_whatsapp_setup', 'Waiting for business verification screenshot.', now() - interval '50 minutes', now() - interval '22 hours', now()),
+  ('conv_invoice_copy', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_verevon_emil', 'Invoice copy requested by finance', 'waiting_team', 'normal', :'normal_user_id', :'normal_name', 'email', 'local_demo', 'thread_invoice_copy', 'Finance needs the paid invoice for May.', now() - interval '75 minutes', now() - interval '20 hours', now()),
+  ('conv_product_copy', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'email'), 'contact_verevon_linnea', 'Product page copy needs approval', 'open', 'normal', :'editor_user_id', :'editor_name', 'email', 'local_demo', 'thread_product_copy', 'Editor needs approval on updated product wording.', now() - interval '2 hours', now() - interval '18 hours', now()),
+  ('conv_social_schedule', :'org_id', (SELECT id FROM conversation_inboxes WHERE org_id = :'org_id' AND channel = 'instagram'), 'contact_verevon_ole', 'Schedule campaign follow-up from Instagram', 'open', 'low', :'editor_user_id', :'editor_name', 'instagram', 'local_demo', 'thread_social_schedule', 'Customer asked when the campaign follow-up goes live.', now() - interval '3 hours', now() - interval '16 hours', now())
 ON CONFLICT (id) DO UPDATE
 SET inbox_id = EXCLUDED.inbox_id,
     contact_id = EXCLUDED.contact_id,
@@ -787,7 +787,7 @@ VALUES
   ('msg_refund_customer_1', :'org_id', 'conv_refund_delivery', 'inbound', 'customer', 'Anne Larsen', 'anne.larsen@example.test', 'The package arrived damaged and the refund is still blocked. Can someone check the handoff?', false, 'local_demo', now() - interval '2 days', now() - interval '2 days'),
   ('msg_refund_agent_1', :'org_id', 'conv_refund_delivery', 'outbound', 'agent', :'admin_name', :'admin_email', 'We are checking the delivery evidence and billing handoff now.', false, 'local_demo', now() - interval '28 minutes', now() - interval '28 minutes'),
   ('msg_security_customer_1', :'org_id', 'conv_security_login', 'inbound', 'customer', 'Marius Berg', 'marius.berg@example.test', 'I saw a login from a device I do not recognize.', false, 'local_demo', now() - interval '1 day', now() - interval '1 day'),
-  ('msg_security_agent_1', :'org_id', 'conv_security_login', 'internal', 'system', 'Velion', '', 'Security review created and escalated for manual verification.', true, 'local_demo', now() - interval '18 minutes', now() - interval '18 minutes'),
+  ('msg_security_agent_1', :'org_id', 'conv_security_login', 'internal', 'system', 'Verevon', '', 'Security review created and escalated for manual verification.', true, 'local_demo', now() - interval '18 minutes', now() - interval '18 minutes'),
   ('msg_whatsapp_customer_1', :'org_id', 'conv_whatsapp_setup', 'inbound', 'customer', 'Sara Nilsen', 'sara.nilsen@example.test', 'I need help connecting WhatsApp. The verification screen is confusing.', false, 'local_demo', now() - interval '22 hours', now() - interval '22 hours'),
   ('msg_whatsapp_agent_1', :'org_id', 'conv_whatsapp_setup', 'outbound', 'agent', :'normal_name', :'normal_email', 'Please send the verification screenshot and we will finish the setup.', false, 'local_demo', now() - interval '50 minutes', now() - interval '50 minutes'),
   ('msg_invoice_customer_1', :'org_id', 'conv_invoice_copy', 'inbound', 'customer', 'Emil Johansen', 'emil.johansen@example.test', 'Can you resend the paid invoice for May to our finance team?', false, 'local_demo', now() - interval '20 hours', now() - interval '20 hours'),
@@ -1016,17 +1016,17 @@ INSERT INTO conversation_linked_resources (
   created_at
 )
 VALUES
-  ('link_refund_runbook', :'org_id', 'ticket_refund_delivery', 'conv_refund_delivery', 'normal', 'document', 'doc_velion_admin_runbook', '', 'Refund escalation runbook', jsonb_build_object('seed', 'velion-local-demo'), :'admin_user_id', now() - interval '2 days'),
-  ('link_security_runbook', :'org_id', 'ticket_security_login', 'conv_security_login', 'normal', 'document', 'doc_velion_admin_runbook', '', 'Security review process', jsonb_build_object('seed', 'velion-local-demo'), :'admin_user_id', now() - interval '1 day'),
-  ('link_whatsapp_guide', :'org_id', 'ticket_whatsapp_setup', 'conv_whatsapp_setup', 'normal', 'document', 'doc_velion_normal_support_guide', '', 'WhatsApp setup guide', jsonb_build_object('seed', 'velion-local-demo'), :'normal_user_id', now() - interval '22 hours'),
-  ('link_social_plan', :'org_id', 'ticket_social_schedule', 'conv_social_schedule', 'normal', 'social_post', 'post_velion_campaign_followup', '', 'Campaign follow-up draft', jsonb_build_object('seed', 'velion-local-demo'), :'editor_user_id', now() - interval '16 hours')
+  ('link_refund_runbook', :'org_id', 'ticket_refund_delivery', 'conv_refund_delivery', 'normal', 'document', 'doc_verevon_admin_runbook', '', 'Refund escalation runbook', jsonb_build_object('seed', 'verevon-local-demo'), :'admin_user_id', now() - interval '2 days'),
+  ('link_security_runbook', :'org_id', 'ticket_security_login', 'conv_security_login', 'normal', 'document', 'doc_verevon_admin_runbook', '', 'Security review process', jsonb_build_object('seed', 'verevon-local-demo'), :'admin_user_id', now() - interval '1 day'),
+  ('link_whatsapp_guide', :'org_id', 'ticket_whatsapp_setup', 'conv_whatsapp_setup', 'normal', 'document', 'doc_verevon_normal_support_guide', '', 'WhatsApp setup guide', jsonb_build_object('seed', 'verevon-local-demo'), :'normal_user_id', now() - interval '22 hours'),
+  ('link_social_plan', :'org_id', 'ticket_social_schedule', 'conv_social_schedule', 'normal', 'social_post', 'post_verevon_campaign_followup', '', 'Campaign follow-up draft', jsonb_build_object('seed', 'verevon-local-demo'), :'editor_user_id', now() - interval '16 hours')
 ON CONFLICT (id) DO UPDATE
 SET label = EXCLUDED.label,
     metadata = EXCLUDED.metadata,
     created_by_user_id = EXCLUDED.created_by_user_id;
 
 DELETE FROM social_accounts
-WHERE id IN ('social_account_instagram_velion', 'social_account_linkedin_velion');
+WHERE id IN ('social_account_instagram_verevon', 'social_account_linkedin_verevon');
 
 INSERT INTO social_accounts (
   id,
@@ -1044,12 +1044,12 @@ INSERT INTO social_accounts (
   updated_at
 )
 VALUES
-  ('socacct_' || replace(replace(lower(:'org_id' || '_linkedin_conn_velion_linkedin'), ':', '_'), '/', '_'), :'org_id', 'linkedin', 'conn_velion_linkedin', 'Velion LinkedIn', 'Velion AS', 'connected', jsonb_build_array('publish','media_upload','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'velion-local-demo', 'provider_account_id', 'urn:li:organization:997711'), now() - interval '7 days', now()),
-  ('socacct_' || replace(replace(lower(:'org_id' || '_x_conn_velion_x'), ':', '_'), '/', '_'), :'org_id', 'x', 'conn_velion_x', 'Velion X', '@veliondemo', 'connected', jsonb_build_array('publish','media_upload','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'velion-local-demo', 'provider_account_id', 'x_account_velion_demo'), now() - interval '7 days', now()),
-  ('socacct_' || replace(replace(lower(:'org_id' || '_instagram_conn_velion_instagram'), ':', '_'), '/', '_'), :'org_id', 'instagram', 'conn_velion_instagram', 'Velion Instagram', '@veliondemo', 'connected', jsonb_build_array('publish','comments','insights','media_upload'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'velion-local-demo', 'provider_account_id', 'ig_business_velion_demo'), now() - interval '7 days', now()),
-  ('socacct_' || replace(replace(lower(:'org_id' || '_facebook_conn_velion_facebook'), ':', '_'), '/', '_'), :'org_id', 'facebook', 'conn_velion_facebook', 'Velion Facebook', 'Velion AS', 'connected', jsonb_build_array('publish','comments','inbox','insights','media_upload'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'velion-local-demo', 'provider_account_id', 'fb_page_velion_demo'), now() - interval '7 days', now()),
-  ('socacct_' || replace(replace(lower(:'org_id' || '_tiktok_conn_velion_tiktok'), ':', '_'), '/', '_'), :'org_id', 'tiktok', 'conn_velion_tiktok', 'Velion TikTok', '@veliondemo', 'connected', jsonb_build_array('publish','media_upload','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'velion-local-demo', 'provider_account_id', 'tiktok_business_velion_demo'), now() - interval '6 days', now()),
-  ('socacct_' || replace(replace(lower(:'org_id' || '_snapchat_conn_velion_snapchat'), ':', '_'), '/', '_'), :'org_id', 'snapchat', 'conn_velion_snapchat', 'Velion Snapchat', 'veliondemo', 'connected', jsonb_build_array('ads_manage','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'velion-local-demo', 'provider_account_id', 'snap_ad_account_velion_demo'), now() - interval '6 days', now())
+  ('socacct_' || replace(replace(lower(:'org_id' || '_linkedin_conn_verevon_linkedin'), ':', '_'), '/', '_'), :'org_id', 'linkedin', 'conn_verevon_linkedin', 'Verevon LinkedIn', 'Verevon AS', 'connected', jsonb_build_array('publish','media_upload','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'verevon-local-demo', 'provider_account_id', 'urn:li:organization:997711'), now() - interval '7 days', now()),
+  ('socacct_' || replace(replace(lower(:'org_id' || '_x_conn_verevon_x'), ':', '_'), '/', '_'), :'org_id', 'x', 'conn_verevon_x', 'Verevon X', '@verevondemo', 'connected', jsonb_build_array('publish','media_upload','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'verevon-local-demo', 'provider_account_id', 'x_account_verevon_demo'), now() - interval '7 days', now()),
+  ('socacct_' || replace(replace(lower(:'org_id' || '_instagram_conn_verevon_instagram'), ':', '_'), '/', '_'), :'org_id', 'instagram', 'conn_verevon_instagram', 'Verevon Instagram', '@verevondemo', 'connected', jsonb_build_array('publish','comments','insights','media_upload'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'verevon-local-demo', 'provider_account_id', 'ig_business_verevon_demo'), now() - interval '7 days', now()),
+  ('socacct_' || replace(replace(lower(:'org_id' || '_facebook_conn_verevon_facebook'), ':', '_'), '/', '_'), :'org_id', 'facebook', 'conn_verevon_facebook', 'Verevon Facebook', 'Verevon AS', 'connected', jsonb_build_array('publish','comments','inbox','insights','media_upload'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'verevon-local-demo', 'provider_account_id', 'fb_page_verevon_demo'), now() - interval '7 days', now()),
+  ('socacct_' || replace(replace(lower(:'org_id' || '_tiktok_conn_verevon_tiktok'), ':', '_'), '/', '_'), :'org_id', 'tiktok', 'conn_verevon_tiktok', 'Verevon TikTok', '@verevondemo', 'connected', jsonb_build_array('publish','media_upload','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'verevon-local-demo', 'provider_account_id', 'tiktok_business_verevon_demo'), now() - interval '6 days', now()),
+  ('socacct_' || replace(replace(lower(:'org_id' || '_snapchat_conn_verevon_snapchat'), ':', '_'), '/', '_'), :'org_id', 'snapchat', 'conn_verevon_snapchat', 'Verevon Snapchat', 'verevondemo', 'connected', jsonb_build_array('ads_manage','insights'), 'available', now() + interval '30 days', jsonb_build_object('seed', 'verevon-local-demo', 'provider_account_id', 'snap_ad_account_verevon_demo'), now() - interval '6 days', now())
 ON CONFLICT (id) DO UPDATE
 SET connection_id = EXCLUDED.connection_id,
     display_name = EXCLUDED.display_name,
@@ -1078,9 +1078,9 @@ INSERT INTO social_campaigns (
   updated_at
 )
 VALUES
-  ('campaign_velion_summer_support', :'org_id', 'Summer support readiness', 'Explain response times, support coverage, and self-service before summer.', 'Reduce repeated support questions during summer staffing.', 'active', jsonb_build_array('instagram','facebook','linkedin'), date_trunc('day', now()), date_trunc('day', now()) + interval '21 days', jsonb_build_object('kind', 'ticket_insight', 'label', 'Support queue analysis', 'href', '/tickets'), jsonb_build_object('seed', 'velion-local-demo', 'audience', 'customers'), :'editor_user_id', now() - interval '3 days', now()),
-  ('campaign_velion_product_launch', :'org_id', 'Advanced workspace launch', 'Show how Velion Advanced combines integrations, ticketing, approvals, and reporting.', 'Create interest in the Advanced plan for operational teams.', 'active', jsonb_build_array('linkedin','x','snapchat'), date_trunc('day', now()) - interval '2 days', date_trunc('day', now()) + interval '28 days', jsonb_build_object('kind', 'billing_plan', 'label', 'Velion Advanced', 'href', '/settings/billing'), jsonb_build_object('seed', 'velion-local-demo', 'funnel', 'trial_to_paid'), :'admin_user_id', now() - interval '4 days', now()),
-  ('campaign_velion_customer_story', :'org_id', 'Support operations customer story', 'Turn a resolved support workflow into reusable social proof and evergreen content.', 'Increase trust with teams evaluating Velion for support operations.', 'draft', jsonb_build_array('linkedin','facebook','instagram','tiktok'), date_trunc('day', now()) + interval '3 days', date_trunc('day', now()) + interval '45 days', jsonb_build_object('kind', 'case_study', 'label', 'Refund workflow resolution', 'href', '/tickets'), jsonb_build_object('seed', 'velion-local-demo', 'approval_lane', 'content'), :'editor_user_id', now() - interval '1 day', now())
+  ('campaign_verevon_summer_support', :'org_id', 'Summer support readiness', 'Explain response times, support coverage, and self-service before summer.', 'Reduce repeated support questions during summer staffing.', 'active', jsonb_build_array('instagram','facebook','linkedin'), date_trunc('day', now()), date_trunc('day', now()) + interval '21 days', jsonb_build_object('kind', 'ticket_insight', 'label', 'Support queue analysis', 'href', '/tickets'), jsonb_build_object('seed', 'verevon-local-demo', 'audience', 'customers'), :'editor_user_id', now() - interval '3 days', now()),
+  ('campaign_verevon_product_launch', :'org_id', 'Advanced workspace launch', 'Show how Verevon Advanced combines integrations, ticketing, approvals, and reporting.', 'Create interest in the Advanced plan for operational teams.', 'active', jsonb_build_array('linkedin','x','snapchat'), date_trunc('day', now()) - interval '2 days', date_trunc('day', now()) + interval '28 days', jsonb_build_object('kind', 'billing_plan', 'label', 'Verevon Advanced', 'href', '/settings/billing'), jsonb_build_object('seed', 'verevon-local-demo', 'funnel', 'trial_to_paid'), :'admin_user_id', now() - interval '4 days', now()),
+  ('campaign_verevon_customer_story', :'org_id', 'Support operations customer story', 'Turn a resolved support workflow into reusable social proof and evergreen content.', 'Increase trust with teams evaluating Verevon for support operations.', 'draft', jsonb_build_array('linkedin','facebook','instagram','tiktok'), date_trunc('day', now()) + interval '3 days', date_trunc('day', now()) + interval '45 days', jsonb_build_object('kind', 'case_study', 'label', 'Refund workflow resolution', 'href', '/tickets'), jsonb_build_object('seed', 'verevon-local-demo', 'approval_lane', 'content'), :'editor_user_id', now() - interval '1 day', now())
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name,
     brief = EXCLUDED.brief,
@@ -1115,19 +1115,19 @@ INSERT INTO social_posts (
 )
 VALUES
   (
-    'post_velion_campaign_followup',
+    'post_verevon_campaign_followup',
     :'org_id',
     'Support hours summer reminder',
     'Summer support is ready. Customers can use self-service first, then reach us in the priority queue during staffed hours.',
     'scheduled',
     jsonb_build_array('instagram','facebook'),
-    jsonb_build_array(jsonb_build_object('id', 'media_velion_support_hours', 'type', 'image', 'storage_ref', 'seed/social/support-hours.png', 'alt_text', 'Velion support hours summary card')),
-    jsonb_build_object('kind', 'campaign', 'label', 'Summer support readiness', 'href', '/social/campaigns/campaign_velion_summer_support'),
+    jsonb_build_array(jsonb_build_object('id', 'media_verevon_support_hours', 'type', 'image', 'storage_ref', 'seed/social/support-hours.png', 'alt_text', 'Verevon support hours summary card')),
+    jsonb_build_object('kind', 'campaign', 'label', 'Summer support readiness', 'href', '/social/campaigns/campaign_verevon_summer_support'),
     jsonb_build_array(
       jsonb_build_object('platform', 'instagram', 'mode', 'feed', 'content', 'Summer support is ready. Use self-service first, then reach us in priority support during staffed hours.', 'character_limit', 2200, 'warnings', jsonb_build_array(), 'media_required', true),
       jsonb_build_object('platform', 'facebook', 'mode', 'page_post', 'content', 'Summer support is ready. Customers can use self-service first, then reach us in the priority queue during staffed hours.', 'character_limit', 63206, 'warnings', jsonb_build_array(), 'media_required', false)
     ),
-    jsonb_build_object('tone', 'clear and calm', 'seed', 'velion-local-demo', 'sourceTicketCount', 6),
+    jsonb_build_object('tone', 'clear and calm', 'seed', 'verevon-local-demo', 'sourceTicketCount', 6),
     true,
     'approved',
     now() + interval '1 day',
@@ -1137,16 +1137,16 @@ VALUES
     now()
   ),
   (
-    'post_velion_linkedin_update',
+    'post_verevon_linkedin_update',
     :'org_id',
     'LinkedIn update: advanced support workflows',
-    'Velion AS now has connected workflows for ticket triage, social approvals, integrations, and reporting in the Advanced workspace.',
+    'Verevon AS now has connected workflows for ticket triage, social approvals, integrations, and reporting in the Advanced workspace.',
     'draft',
     jsonb_build_array('linkedin'),
     jsonb_build_array(),
-    jsonb_build_object('kind', 'campaign', 'label', 'Advanced workspace launch', 'href', '/social/campaigns/campaign_velion_product_launch'),
-    jsonb_build_array(jsonb_build_object('platform', 'linkedin', 'mode', 'organization_post', 'content', 'Velion AS now has connected workflows for ticket triage, social approvals, integrations, and reporting in the Advanced workspace.', 'character_limit', 3000, 'warnings', jsonb_build_array(), 'media_required', false)),
-    jsonb_build_object('tone', 'professional', 'seed', 'velion-local-demo', 'persona', 'operations_lead'),
+    jsonb_build_object('kind', 'campaign', 'label', 'Advanced workspace launch', 'href', '/social/campaigns/campaign_verevon_product_launch'),
+    jsonb_build_array(jsonb_build_object('platform', 'linkedin', 'mode', 'organization_post', 'content', 'Verevon AS now has connected workflows for ticket triage, social approvals, integrations, and reporting in the Advanced workspace.', 'character_limit', 3000, 'warnings', jsonb_build_array(), 'media_required', false)),
+    jsonb_build_object('tone', 'professional', 'seed', 'verevon-local-demo', 'persona', 'operations_lead'),
     true,
     'pending',
     null,
@@ -1156,16 +1156,16 @@ VALUES
     now()
   ),
   (
-    'post_velion_x_thread_support_metrics',
+    'post_verevon_x_thread_support_metrics',
     :'org_id',
     'X thread: support metrics snapshot',
-    'This week in Velion support: faster triage, fewer repeated questions, and clearer handoffs between support, billing, and content.',
+    'This week in Verevon support: faster triage, fewer repeated questions, and clearer handoffs between support, billing, and content.',
     'published',
     jsonb_build_array('x'),
     jsonb_build_array(),
     jsonb_build_object('kind', 'report', 'label', 'Support operations dashboard', 'href', '/reports'),
-    jsonb_build_array(jsonb_build_object('platform', 'x', 'mode', 'thread', 'content', 'This week in Velion support: faster triage, fewer repeated questions, and clearer handoffs between support, billing, and content.', 'character_limit', 280, 'warnings', jsonb_build_array(), 'media_required', false)),
-    jsonb_build_object('tone', 'concise', 'seed', 'velion-local-demo', 'metricWindow', '7d'),
+    jsonb_build_array(jsonb_build_object('platform', 'x', 'mode', 'thread', 'content', 'This week in Verevon support: faster triage, fewer repeated questions, and clearer handoffs between support, billing, and content.', 'character_limit', 280, 'warnings', jsonb_build_array(), 'media_required', false)),
+    jsonb_build_object('tone', 'concise', 'seed', 'verevon-local-demo', 'metricWindow', '7d'),
     false,
     'not_required',
     now() - interval '6 hours',
@@ -1175,16 +1175,16 @@ VALUES
     now() - interval '6 hours'
   ),
   (
-    'post_velion_facebook_inbox_coverage',
+    'post_verevon_facebook_inbox_coverage',
     :'org_id',
     'Facebook reminder: inbox coverage',
     'Our social inbox is monitored alongside support tickets, so customer questions can move from comment to case without losing context.',
     'scheduled',
     jsonb_build_array('facebook'),
-    jsonb_build_array(jsonb_build_object('id', 'media_velion_inbox_coverage', 'type', 'image', 'storage_ref', 'seed/social/inbox-coverage.png', 'alt_text', 'Connected social inbox workflow')),
+    jsonb_build_array(jsonb_build_object('id', 'media_verevon_inbox_coverage', 'type', 'image', 'storage_ref', 'seed/social/inbox-coverage.png', 'alt_text', 'Connected social inbox workflow')),
     jsonb_build_object('kind', 'integration', 'label', 'Facebook page inbox', 'href', '/settings/integrations'),
     jsonb_build_array(jsonb_build_object('platform', 'facebook', 'mode', 'page_post', 'content', 'Our social inbox is monitored alongside support tickets, so customer questions can move from comment to case without losing context.', 'character_limit', 63206, 'warnings', jsonb_build_array(), 'media_required', false)),
-    jsonb_build_object('tone', 'helpful', 'seed', 'velion-local-demo', 'source', 'facebook_inbox'),
+    jsonb_build_object('tone', 'helpful', 'seed', 'verevon-local-demo', 'source', 'facebook_inbox'),
     true,
     'pending',
     now() + interval '2 days',
@@ -1194,7 +1194,7 @@ VALUES
     now()
   ),
   (
-    'post_velion_tiktok_support_tip',
+    'post_verevon_tiktok_support_tip',
     :'org_id',
     'TikTok short: where to find invoice help',
     'A quick support tip showing where customers can find invoice copies and how to contact finance when ownership is verified.',
@@ -1203,7 +1203,7 @@ VALUES
     jsonb_build_array(),
     jsonb_build_object('kind', 'ticket_pattern', 'label', 'Invoice copy requests', 'href', '/tickets'),
     jsonb_build_array(jsonb_build_object('platform', 'tiktok', 'mode', 'video', 'content', 'A quick support tip showing where customers can find invoice copies and how to contact finance after verification.', 'character_limit', 2200, 'warnings', jsonb_build_array('TikTok requires a video asset before publishing.'), 'media_required', true)),
-    jsonb_build_object('tone', 'short_video', 'seed', 'velion-local-demo', 'blockedReason', 'missing_video'),
+    jsonb_build_object('tone', 'short_video', 'seed', 'verevon-local-demo', 'blockedReason', 'missing_video'),
     true,
     'rejected',
     null,
@@ -1213,16 +1213,16 @@ VALUES
     now()
   ),
   (
-    'post_velion_snapchat_offer',
+    'post_verevon_snapchat_offer',
     :'org_id',
     'Snapchat awareness concept',
-    'Short awareness concept for Velion Advanced teams that want connected support, social, and reporting data in one workspace.',
+    'Short awareness concept for Verevon Advanced teams that want connected support, social, and reporting data in one workspace.',
     'draft',
     jsonb_build_array('snapchat'),
-    jsonb_build_array(jsonb_build_object('id', 'media_velion_snap_storyboard', 'type', 'image', 'storage_ref', 'seed/social/snap-storyboard.png', 'alt_text', 'Snapchat storyboard concept')),
-    jsonb_build_object('kind', 'campaign', 'label', 'Advanced workspace launch', 'href', '/social/campaigns/campaign_velion_product_launch'),
+    jsonb_build_array(jsonb_build_object('id', 'media_verevon_snap_storyboard', 'type', 'image', 'storage_ref', 'seed/social/snap-storyboard.png', 'alt_text', 'Snapchat storyboard concept')),
+    jsonb_build_object('kind', 'campaign', 'label', 'Advanced workspace launch', 'href', '/social/campaigns/campaign_verevon_product_launch'),
     jsonb_build_array(jsonb_build_object('platform', 'snapchat', 'mode', 'ad_concept', 'content', 'Connected support, social, and reporting data for modern operations teams.', 'character_limit', 80, 'warnings', jsonb_build_array('Snapchat publishing uses ads permissions in this demo.'), 'media_required', true)),
-    jsonb_build_object('tone', 'awareness', 'seed', 'velion-local-demo'),
+    jsonb_build_object('tone', 'awareness', 'seed', 'verevon-local-demo'),
     false,
     'not_required',
     null,
@@ -1232,19 +1232,19 @@ VALUES
     now()
   ),
   (
-    'post_velion_case_study_evergreen',
+    'post_verevon_case_study_evergreen',
     :'org_id',
     'Evergreen customer story: cleaner handoffs',
     'A resolved support workflow became a reusable playbook: every handoff kept the customer, evidence, status, and approval trail together.',
     'published',
     jsonb_build_array('linkedin','facebook'),
-    jsonb_build_array(jsonb_build_object('id', 'media_velion_case_study', 'type', 'image', 'storage_ref', 'seed/social/case-study.png', 'alt_text', 'Support handoff playbook summary')),
-    jsonb_build_object('kind', 'case_study', 'label', 'Support operations customer story', 'href', '/social/campaigns/campaign_velion_customer_story'),
+    jsonb_build_array(jsonb_build_object('id', 'media_verevon_case_study', 'type', 'image', 'storage_ref', 'seed/social/case-study.png', 'alt_text', 'Support handoff playbook summary')),
+    jsonb_build_object('kind', 'case_study', 'label', 'Support operations customer story', 'href', '/social/campaigns/campaign_verevon_customer_story'),
     jsonb_build_array(
       jsonb_build_object('platform', 'linkedin', 'mode', 'organization_post', 'content', 'A resolved support workflow became a reusable playbook: customer, evidence, status, and approval trail stayed together.', 'character_limit', 3000, 'warnings', jsonb_build_array(), 'media_required', false),
       jsonb_build_object('platform', 'facebook', 'mode', 'page_post', 'content', 'A resolved support workflow became a reusable playbook: every handoff kept customer context and approval history together.', 'character_limit', 63206, 'warnings', jsonb_build_array(), 'media_required', false)
     ),
-    jsonb_build_object('tone', 'evergreen', 'seed', 'velion-local-demo', 'reuseScore', 0.86),
+    jsonb_build_object('tone', 'evergreen', 'seed', 'verevon-local-demo', 'reuseScore', 0.86),
     true,
     'approved',
     now() - interval '2 days',
@@ -1286,11 +1286,11 @@ INSERT INTO social_approvals (
   updated_at
 )
 VALUES
-  ('approval_velion_campaign_followup', :'org_id', 'post_velion_campaign_followup', 'campaign_velion_summer_support', 'approved', :'editor_user_id', :'admin_user_id', :'admin_user_id', 'Approved for local demo schedule.', now() + interval '12 hours', now() - interval '2 hours', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '14 hours', now()),
-  ('approval_velion_linkedin_update', :'org_id', 'post_velion_linkedin_update', 'campaign_velion_product_launch', 'pending', :'editor_user_id', :'admin_user_id', '', '', now() + interval '1 day', null, jsonb_build_object('seed', 'velion-local-demo'), now() - interval '12 hours', now()),
-  ('approval_velion_facebook_inbox', :'org_id', 'post_velion_facebook_inbox_coverage', 'campaign_velion_summer_support', 'pending', :'editor_user_id', :'admin_user_id', '', '', now() + interval '18 hours', null, jsonb_build_object('seed', 'velion-local-demo'), now() - interval '8 hours', now()),
-  ('approval_velion_tiktok_support_tip', :'org_id', 'post_velion_tiktok_support_tip', 'campaign_velion_customer_story', 'rejected', :'editor_user_id', :'admin_user_id', :'admin_user_id', 'Needs a real vertical video asset before publishing.', now() + interval '2 days', now() - interval '4 hours', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '6 hours', now()),
-  ('approval_velion_case_study_evergreen', :'org_id', 'post_velion_case_study_evergreen', 'campaign_velion_customer_story', 'approved', :'editor_user_id', :'admin_user_id', :'admin_user_id', 'Approved as evergreen support operations content.', now() - interval '2 days', now() - interval '2 days', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '3 days', now())
+  ('approval_verevon_campaign_followup', :'org_id', 'post_verevon_campaign_followup', 'campaign_verevon_summer_support', 'approved', :'editor_user_id', :'admin_user_id', :'admin_user_id', 'Approved for local demo schedule.', now() + interval '12 hours', now() - interval '2 hours', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '14 hours', now()),
+  ('approval_verevon_linkedin_update', :'org_id', 'post_verevon_linkedin_update', 'campaign_verevon_product_launch', 'pending', :'editor_user_id', :'admin_user_id', '', '', now() + interval '1 day', null, jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '12 hours', now()),
+  ('approval_verevon_facebook_inbox', :'org_id', 'post_verevon_facebook_inbox_coverage', 'campaign_verevon_summer_support', 'pending', :'editor_user_id', :'admin_user_id', '', '', now() + interval '18 hours', null, jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '8 hours', now()),
+  ('approval_verevon_tiktok_support_tip', :'org_id', 'post_verevon_tiktok_support_tip', 'campaign_verevon_customer_story', 'rejected', :'editor_user_id', :'admin_user_id', :'admin_user_id', 'Needs a real vertical video asset before publishing.', now() + interval '2 days', now() - interval '4 hours', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '6 hours', now()),
+  ('approval_verevon_case_study_evergreen', :'org_id', 'post_verevon_case_study_evergreen', 'campaign_verevon_customer_story', 'approved', :'editor_user_id', :'admin_user_id', :'admin_user_id', 'Approved as evergreen support operations content.', now() - interval '2 days', now() - interval '2 days', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '3 days', now())
 ON CONFLICT (id) DO UPDATE
 SET campaign_id = EXCLUDED.campaign_id,
     state = EXCLUDED.state,
@@ -1319,10 +1319,10 @@ INSERT INTO social_publish_jobs (
   updated_at
 )
 VALUES
-  ('pubjob_velion_campaign_followup', :'org_id', 'post_velion_campaign_followup', 'queued', 'velion-demo-post-campaign-followup', :'editor_user_id', now() + interval '1 day', null, '', 0, '', now() - interval '2 hours', now()),
-  ('pubjob_velion_x_metrics', :'org_id', 'post_velion_x_thread_support_metrics', 'completed', 'velion-demo-post-x-metrics', :'admin_user_id', now() - interval '6 hours', now() - interval '6 hours', 'social-worker-local', 1, '', now() - interval '7 hours', now() - interval '6 hours'),
-  ('pubjob_velion_case_study', :'org_id', 'post_velion_case_study_evergreen', 'completed', 'velion-demo-post-case-study', :'editor_user_id', now() - interval '2 days', now() - interval '2 days', 'social-worker-local', 2, '', now() - interval '2 days', now() - interval '2 days'),
-  ('pubjob_velion_tiktok_tip', :'org_id', 'post_velion_tiktok_support_tip', 'blocked', 'velion-demo-post-tiktok-tip', :'editor_user_id', now() + interval '3 days', null, '', 0, 'Missing vertical video asset.', now() - interval '4 hours', now())
+  ('pubjob_verevon_campaign_followup', :'org_id', 'post_verevon_campaign_followup', 'queued', 'verevon-demo-post-campaign-followup', :'editor_user_id', now() + interval '1 day', null, '', 0, '', now() - interval '2 hours', now()),
+  ('pubjob_verevon_x_metrics', :'org_id', 'post_verevon_x_thread_support_metrics', 'completed', 'verevon-demo-post-x-metrics', :'admin_user_id', now() - interval '6 hours', now() - interval '6 hours', 'social-worker-local', 1, '', now() - interval '7 hours', now() - interval '6 hours'),
+  ('pubjob_verevon_case_study', :'org_id', 'post_verevon_case_study_evergreen', 'completed', 'verevon-demo-post-case-study', :'editor_user_id', now() - interval '2 days', now() - interval '2 days', 'social-worker-local', 2, '', now() - interval '2 days', now() - interval '2 days'),
+  ('pubjob_verevon_tiktok_tip', :'org_id', 'post_verevon_tiktok_support_tip', 'blocked', 'verevon-demo-post-tiktok-tip', :'editor_user_id', now() + interval '3 days', null, '', 0, 'Missing vertical video asset.', now() - interval '4 hours', now())
 ON CONFLICT (id) DO UPDATE
 SET status = EXCLUDED.status,
     requested_by_user_id = EXCLUDED.requested_by_user_id,
@@ -1350,10 +1350,10 @@ INSERT INTO social_publish_attempts (
   created_at
 )
 VALUES
-  ('pubattempt_velion_x_metrics', :'org_id', 'pubjob_velion_x_metrics', 'post_velion_x_thread_support_metrics', 'x', 'succeeded', 'api', '/2/tweets', 'x-demo-1781710', 'Published local demo X thread.', jsonb_build_array(), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '6 hours', now() - interval '6 hours'),
-  ('pubattempt_velion_case_study_linkedin', :'org_id', 'pubjob_velion_case_study', 'post_velion_case_study_evergreen', 'linkedin', 'succeeded', 'api', '/v2/ugcPosts', 'linkedin-demo-997711', 'Published local demo LinkedIn post.', jsonb_build_array(), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now() - interval '2 days'),
-  ('pubattempt_velion_case_study_facebook', :'org_id', 'pubjob_velion_case_study', 'post_velion_case_study_evergreen', 'facebook', 'succeeded', 'api', '/me/feed', 'facebook-demo-112233', 'Published local demo Facebook page post.', jsonb_build_array(), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now() - interval '2 days'),
-  ('pubattempt_velion_tiktok_tip_blocked', :'org_id', 'pubjob_velion_tiktok_tip', 'post_velion_tiktok_support_tip', 'tiktok', 'blocked', 'api', '/v2/post/publish', '', 'Blocked before publish because media is missing.', jsonb_build_array('TikTok requires a video asset.'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '4 hours', now() - interval '4 hours')
+  ('pubattempt_verevon_x_metrics', :'org_id', 'pubjob_verevon_x_metrics', 'post_verevon_x_thread_support_metrics', 'x', 'succeeded', 'api', '/2/tweets', 'x-demo-1781710', 'Published local demo X thread.', jsonb_build_array(), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '6 hours', now() - interval '6 hours'),
+  ('pubattempt_verevon_case_study_linkedin', :'org_id', 'pubjob_verevon_case_study', 'post_verevon_case_study_evergreen', 'linkedin', 'succeeded', 'api', '/v2/ugcPosts', 'linkedin-demo-997711', 'Published local demo LinkedIn post.', jsonb_build_array(), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now() - interval '2 days'),
+  ('pubattempt_verevon_case_study_facebook', :'org_id', 'pubjob_verevon_case_study', 'post_verevon_case_study_evergreen', 'facebook', 'succeeded', 'api', '/me/feed', 'facebook-demo-112233', 'Published local demo Facebook page post.', jsonb_build_array(), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now() - interval '2 days'),
+  ('pubattempt_verevon_tiktok_tip_blocked', :'org_id', 'pubjob_verevon_tiktok_tip', 'post_verevon_tiktok_support_tip', 'tiktok', 'blocked', 'api', '/v2/post/publish', '', 'Blocked before publish because media is missing.', jsonb_build_array('TikTok requires a video asset.'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '4 hours', now() - interval '4 hours')
 ON CONFLICT (id) DO UPDATE
 SET status = EXCLUDED.status,
     mode = EXCLUDED.mode,
@@ -1366,10 +1366,10 @@ SET status = EXCLUDED.status,
 
 INSERT INTO social_audit_events (id, org_id, post_id, actor_user_id, action, payload, created_at)
 VALUES
-  ('socaudit_velion_accounts_seeded', :'org_id', '', :'admin_user_id', 'social.accounts.seeded', jsonb_build_object('seed', 'velion-local-demo', 'account_count', 6), now() - interval '7 days'),
-  ('socaudit_velion_campaign_followup_approved', :'org_id', 'post_velion_campaign_followup', :'admin_user_id', 'social.approval.approved', jsonb_build_object('seed', 'velion-local-demo', 'campaign_id', 'campaign_velion_summer_support'), now() - interval '2 hours'),
-  ('socaudit_velion_x_published', :'org_id', 'post_velion_x_thread_support_metrics', :'admin_user_id', 'social.post.published', jsonb_build_object('seed', 'velion-local-demo', 'provider', 'x'), now() - interval '6 hours'),
-  ('socaudit_velion_tiktok_blocked', :'org_id', 'post_velion_tiktok_support_tip', :'admin_user_id', 'social.post.blocked', jsonb_build_object('seed', 'velion-local-demo', 'reason', 'missing_video'), now() - interval '4 hours')
+  ('socaudit_verevon_accounts_seeded', :'org_id', '', :'admin_user_id', 'social.accounts.seeded', jsonb_build_object('seed', 'verevon-local-demo', 'account_count', 6), now() - interval '7 days'),
+  ('socaudit_verevon_campaign_followup_approved', :'org_id', 'post_verevon_campaign_followup', :'admin_user_id', 'social.approval.approved', jsonb_build_object('seed', 'verevon-local-demo', 'campaign_id', 'campaign_verevon_summer_support'), now() - interval '2 hours'),
+  ('socaudit_verevon_x_published', :'org_id', 'post_verevon_x_thread_support_metrics', :'admin_user_id', 'social.post.published', jsonb_build_object('seed', 'verevon-local-demo', 'provider', 'x'), now() - interval '6 hours'),
+  ('socaudit_verevon_tiktok_blocked', :'org_id', 'post_verevon_tiktok_support_tip', :'admin_user_id', 'social.post.blocked', jsonb_build_object('seed', 'verevon-local-demo', 'reason', 'missing_video'), now() - interval '4 hours')
 ON CONFLICT (id) DO UPDATE
 SET actor_user_id = EXCLUDED.actor_user_id,
     action = EXCLUDED.action,
@@ -1434,9 +1434,9 @@ INSERT INTO source_objects (
   updated_at
 )
 VALUES
-  ('src_velion_admin_runbook', :'org_id', 'local_seed', 'drive', 'seed/admin-runbook', '/Velion/Runbooks/refund-security.md', 'Refund and security runbook', 'text/markdown', 4096, 'sha1-admin-runbook-demo', ARRAY['org:' || :'org_id', 'role:admin'], jsonb_build_object('seed', 'velion-local-demo'), now() - interval '3 days', now() - interval '3 days', now()),
-  ('src_velion_support_guide', :'org_id', 'local_seed', 'drive', 'seed/support-guide', '/Velion/Support/whatsapp-invoice.md', 'WhatsApp and invoice support guide', 'text/markdown', 3584, 'sha1-support-guide-demo', ARRAY['org:' || :'org_id', 'role:member'], jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now() - interval '2 days', now()),
-  ('src_velion_brand_voice', :'org_id', 'local_seed', 'drive', 'seed/brand-voice', '/Velion/Content/brand-voice.md', 'Brand voice and campaign notes', 'text/markdown', 5120, 'sha1-brand-voice-demo', ARRAY['org:' || :'org_id', 'role:editor'], jsonb_build_object('seed', 'velion-local-demo'), now() - interval '1 day', now() - interval '1 day', now())
+  ('src_verevon_admin_runbook', :'org_id', 'local_seed', 'drive', 'seed/admin-runbook', '/Verevon/Runbooks/refund-security.md', 'Refund and security runbook', 'text/markdown', 4096, 'sha1-admin-runbook-demo', ARRAY['org:' || :'org_id', 'role:admin'], jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '3 days', now() - interval '3 days', now()),
+  ('src_verevon_support_guide', :'org_id', 'local_seed', 'drive', 'seed/support-guide', '/Verevon/Support/whatsapp-invoice.md', 'WhatsApp and invoice support guide', 'text/markdown', 3584, 'sha1-support-guide-demo', ARRAY['org:' || :'org_id', 'role:member'], jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now() - interval '2 days', now()),
+  ('src_verevon_brand_voice', :'org_id', 'local_seed', 'drive', 'seed/brand-voice', '/Verevon/Content/brand-voice.md', 'Brand voice and campaign notes', 'text/markdown', 5120, 'sha1-brand-voice-demo', ARRAY['org:' || :'org_id', 'role:editor'], jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '1 day', now() - interval '1 day', now())
 ON CONFLICT (source_object_id) DO UPDATE
 SET path = EXCLUDED.path,
     name = EXCLUDED.name,
@@ -1465,9 +1465,9 @@ INSERT INTO documents (
   updated_at
 )
 VALUES
-  ('doc_velion_admin_runbook', :'org_id', 'local_seed', 'runbook', 'Refund and security escalation runbook', 'Refund tickets with delivery evidence should be routed to Billing. Security tickets must be escalated to manual review, device checks, and customer verification before closure.', 'indexed', jsonb_build_object('source_object_id', 'src_velion_admin_runbook', 'owner_user_id', :'admin_user_id', 'seed', 'velion-local-demo'), 'internal', 'Demo runbook for local testing.', jsonb_build_object('parser', 'seed', 'chunks', 2), :'admin_user_id', 'velion-demo-admin-runbook', now() - interval '3 days', now()),
-  ('doc_velion_normal_support_guide', :'org_id', 'local_seed', 'guide', 'WhatsApp setup and invoice support guide', 'For WhatsApp setup, request the business verification screenshot and confirm the display name. For invoice requests, verify account ownership and send the paid invoice copy to finance.', 'indexed', jsonb_build_object('source_object_id', 'src_velion_support_guide', 'owner_user_id', :'normal_user_id', 'seed', 'velion-local-demo'), 'internal', 'Demo support guide for local testing.', jsonb_build_object('parser', 'seed', 'chunks', 2), :'normal_user_id', 'velion-demo-support-guide', now() - interval '2 days', now()),
-  ('doc_velion_editor_brand_voice', :'org_id', 'local_seed', 'brand', 'Brand voice and campaign approvals', 'Velion brand voice is clear, calm, and practical. Social posts require approval from an admin before publishing when they reference support availability or customer workflows.', 'indexed', jsonb_build_object('source_object_id', 'src_velion_brand_voice', 'owner_user_id', :'editor_user_id', 'seed', 'velion-local-demo'), 'internal', 'Demo content guide for local testing.', jsonb_build_object('parser', 'seed', 'chunks', 2), :'editor_user_id', 'velion-demo-brand-voice', now() - interval '1 day', now())
+  ('doc_verevon_admin_runbook', :'org_id', 'local_seed', 'runbook', 'Refund and security escalation runbook', 'Refund tickets with delivery evidence should be routed to Billing. Security tickets must be escalated to manual review, device checks, and customer verification before closure.', 'indexed', jsonb_build_object('source_object_id', 'src_verevon_admin_runbook', 'owner_user_id', :'admin_user_id', 'seed', 'verevon-local-demo'), 'internal', 'Demo runbook for local testing.', jsonb_build_object('parser', 'seed', 'chunks', 2), :'admin_user_id', 'verevon-demo-admin-runbook', now() - interval '3 days', now()),
+  ('doc_verevon_normal_support_guide', :'org_id', 'local_seed', 'guide', 'WhatsApp setup and invoice support guide', 'For WhatsApp setup, request the business verification screenshot and confirm the display name. For invoice requests, verify account ownership and send the paid invoice copy to finance.', 'indexed', jsonb_build_object('source_object_id', 'src_verevon_support_guide', 'owner_user_id', :'normal_user_id', 'seed', 'verevon-local-demo'), 'internal', 'Demo support guide for local testing.', jsonb_build_object('parser', 'seed', 'chunks', 2), :'normal_user_id', 'verevon-demo-support-guide', now() - interval '2 days', now()),
+  ('doc_verevon_editor_brand_voice', :'org_id', 'local_seed', 'brand', 'Brand voice and campaign approvals', 'Verevon brand voice is clear, calm, and practical. Social posts require approval from an admin before publishing when they reference support availability or customer workflows.', 'indexed', jsonb_build_object('source_object_id', 'src_verevon_brand_voice', 'owner_user_id', :'editor_user_id', 'seed', 'verevon-local-demo'), 'internal', 'Demo content guide for local testing.', jsonb_build_object('parser', 'seed', 'chunks', 2), :'editor_user_id', 'verevon-demo-brand-voice', now() - interval '1 day', now())
 ON CONFLICT (document_id) DO UPDATE
 SET source = EXCLUDED.source,
     type = EXCLUDED.type,
@@ -1498,12 +1498,12 @@ INSERT INTO knowledge_units (
   updated_at
 )
 VALUES
-  ('ku_velion_admin_runbook_1', 'doc_velion_admin_runbook', :'org_id', 1, 'Refund tickets with delivery evidence should be routed to Billing with customer-visible status waiting_team.', 'indexed', 'ku-admin-runbook-1', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '3 days', now()),
-  ('ku_velion_admin_runbook_2', 'doc_velion_admin_runbook', :'org_id', 2, 'Security tickets must be escalated for manual device checks, password reset review, and customer verification before closure.', 'indexed', 'ku-admin-runbook-2', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '3 days', now()),
-  ('ku_velion_support_guide_1', 'doc_velion_normal_support_guide', :'org_id', 1, 'WhatsApp setup requires a verification screenshot and confirmation of the business display name.', 'indexed', 'ku-support-guide-1', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now()),
-  ('ku_velion_support_guide_2', 'doc_velion_normal_support_guide', :'org_id', 2, 'Invoice copy requests should verify account ownership before sending paid invoices to finance contacts.', 'indexed', 'ku-support-guide-2', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now()),
-  ('ku_velion_brand_voice_1', 'doc_velion_editor_brand_voice', :'org_id', 1, 'Velion brand voice is clear, calm, practical, and focused on operational clarity.', 'indexed', 'ku-brand-voice-1', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '1 day', now()),
-  ('ku_velion_brand_voice_2', 'doc_velion_editor_brand_voice', :'org_id', 2, 'Social posts about support availability require admin approval before publishing.', 'indexed', 'ku-brand-voice-2', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '1 day', now())
+  ('ku_verevon_admin_runbook_1', 'doc_verevon_admin_runbook', :'org_id', 1, 'Refund tickets with delivery evidence should be routed to Billing with customer-visible status waiting_team.', 'indexed', 'ku-admin-runbook-1', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '3 days', now()),
+  ('ku_verevon_admin_runbook_2', 'doc_verevon_admin_runbook', :'org_id', 2, 'Security tickets must be escalated for manual device checks, password reset review, and customer verification before closure.', 'indexed', 'ku-admin-runbook-2', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '3 days', now()),
+  ('ku_verevon_support_guide_1', 'doc_verevon_normal_support_guide', :'org_id', 1, 'WhatsApp setup requires a verification screenshot and confirmation of the business display name.', 'indexed', 'ku-support-guide-1', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now()),
+  ('ku_verevon_support_guide_2', 'doc_verevon_normal_support_guide', :'org_id', 2, 'Invoice copy requests should verify account ownership before sending paid invoices to finance contacts.', 'indexed', 'ku-support-guide-2', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now()),
+  ('ku_verevon_brand_voice_1', 'doc_verevon_editor_brand_voice', :'org_id', 1, 'Verevon brand voice is clear, calm, practical, and focused on operational clarity.', 'indexed', 'ku-brand-voice-1', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '1 day', now()),
+  ('ku_verevon_brand_voice_2', 'doc_verevon_editor_brand_voice', :'org_id', 2, 'Social posts about support availability require admin approval before publishing.', 'indexed', 'ku-brand-voice-2', '1', 'text-embedding-3-small', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '1 day', now())
 ON CONFLICT (knowledge_id) DO UPDATE
 SET text = EXCLUDED.text,
     embedding_status = EXCLUDED.embedding_status,
@@ -1531,9 +1531,9 @@ INSERT INTO wiki_pages (
   updated_at
 )
 VALUES
-  ('wiki_velion_support_playbook', :'org_id', 'workspace_velion_demo', 'Support playbook', '/support/playbook', 'wikiver_velion_support_playbook_v1', 'published', jsonb_build_array(), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now()),
-  ('wiki_velion_billing_escalations', :'org_id', 'workspace_velion_demo', 'Billing escalations', '/support/billing-escalations', 'wikiver_velion_billing_v1', 'published', jsonb_build_array('/support/playbook'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now()),
-  ('wiki_velion_brand_social', :'org_id', 'workspace_velion_demo', 'Brand and social approvals', '/content/brand-social', 'wikiver_velion_brand_social_v1', 'published', jsonb_build_array('/support/playbook'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '1 day', now())
+  ('wiki_verevon_support_playbook', :'org_id', 'workspace_verevon_demo', 'Support playbook', '/support/playbook', 'wikiver_verevon_support_playbook_v1', 'published', jsonb_build_array(), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now()),
+  ('wiki_verevon_billing_escalations', :'org_id', 'workspace_verevon_demo', 'Billing escalations', '/support/billing-escalations', 'wikiver_verevon_billing_v1', 'published', jsonb_build_array('/support/playbook'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now()),
+  ('wiki_verevon_brand_social', :'org_id', 'workspace_verevon_demo', 'Brand and social approvals', '/content/brand-social', 'wikiver_verevon_brand_social_v1', 'published', jsonb_build_array('/support/playbook'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '1 day', now())
 ON CONFLICT (page_id) DO UPDATE
 SET title = EXCLUDED.title,
     path = EXCLUDED.path,
@@ -1558,9 +1558,9 @@ INSERT INTO wiki_page_versions (
   published_at
 )
 VALUES
-  ('wikiver_velion_support_playbook_v1', 'wiki_velion_support_playbook', 'Use ticket queues for support triage. Refund and security work should stay visible in ticket history with SLA context.', jsonb_build_array(jsonb_build_object('document_id', 'doc_velion_admin_runbook')), 'seed-agent', :'admin_user_id', :'admin_user_id', 'Local demo baseline.', 'published', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now() - interval '2 days'),
-  ('wikiver_velion_billing_v1', 'wiki_velion_billing_escalations', 'Billing escalations should include the customer, ticket key, refund evidence, and invoice status before handoff.', jsonb_build_array(jsonb_build_object('document_id', 'doc_velion_admin_runbook')), 'seed-agent', :'normal_user_id', :'admin_user_id', 'Local demo baseline.', 'published', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 days', now() - interval '2 days'),
-  ('wikiver_velion_brand_social_v1', 'wiki_velion_brand_social', 'Content editors draft social posts, then admins approve customer-facing support availability updates before publishing.', jsonb_build_array(jsonb_build_object('document_id', 'doc_velion_editor_brand_voice')), 'seed-agent', :'editor_user_id', :'admin_user_id', 'Local demo baseline.', 'published', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '1 day', now() - interval '1 day')
+  ('wikiver_verevon_support_playbook_v1', 'wiki_verevon_support_playbook', 'Use ticket queues for support triage. Refund and security work should stay visible in ticket history with SLA context.', jsonb_build_array(jsonb_build_object('document_id', 'doc_verevon_admin_runbook')), 'seed-agent', :'admin_user_id', :'admin_user_id', 'Local demo baseline.', 'published', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now() - interval '2 days'),
+  ('wikiver_verevon_billing_v1', 'wiki_verevon_billing_escalations', 'Billing escalations should include the customer, ticket key, refund evidence, and invoice status before handoff.', jsonb_build_array(jsonb_build_object('document_id', 'doc_verevon_admin_runbook')), 'seed-agent', :'normal_user_id', :'admin_user_id', 'Local demo baseline.', 'published', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 days', now() - interval '2 days'),
+  ('wikiver_verevon_brand_social_v1', 'wiki_verevon_brand_social', 'Content editors draft social posts, then admins approve customer-facing support availability updates before publishing.', jsonb_build_array(jsonb_build_object('document_id', 'doc_verevon_editor_brand_voice')), 'seed-agent', :'editor_user_id', :'admin_user_id', 'Local demo baseline.', 'published', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '1 day', now() - interval '1 day')
 ON CONFLICT (version_id) DO UPDATE
 SET content = EXCLUDED.content,
     source_refs = EXCLUDED.source_refs,
@@ -1597,8 +1597,8 @@ INSERT INTO retrieval_runs (
   mode_mix_applied
 )
 VALUES
-  ('retrieval_velion_refund_demo', :'org_id', 'refund blocked delivery evidence billing handoff', 'text-embedding-3-small', 'local-demo-v1', jsonb_build_object('ticket_id', 'ticket_refund_delivery'), 'rrf', 'local-rerank', 'internal', 5, 22, 8, 4, 39, 8, 5, 6, 3, now() - interval '1 hour', jsonb_build_object('dense', 0.7, 'sparse', 0.3), jsonb_build_array('allow_internal'), jsonb_build_object('dense', true, 'sparse', true)),
-  ('retrieval_velion_social_demo', :'org_id', 'brand voice social approval support availability', 'text-embedding-3-small', 'local-demo-v1', jsonb_build_object('ticket_id', 'ticket_social_schedule'), 'rrf', 'local-rerank', 'internal', 5, 20, 9, 5, 42, 7, 6, 6, 3, now() - interval '45 minutes', jsonb_build_object('dense', 0.6, 'sparse', 0.4), jsonb_build_array('allow_internal'), jsonb_build_object('dense', true, 'sparse', true))
+  ('retrieval_verevon_refund_demo', :'org_id', 'refund blocked delivery evidence billing handoff', 'text-embedding-3-small', 'local-demo-v1', jsonb_build_object('ticket_id', 'ticket_refund_delivery'), 'rrf', 'local-rerank', 'internal', 5, 22, 8, 4, 39, 8, 5, 6, 3, now() - interval '1 hour', jsonb_build_object('dense', 0.7, 'sparse', 0.3), jsonb_build_array('allow_internal'), jsonb_build_object('dense', true, 'sparse', true)),
+  ('retrieval_verevon_social_demo', :'org_id', 'brand voice social approval support availability', 'text-embedding-3-small', 'local-demo-v1', jsonb_build_object('ticket_id', 'ticket_social_schedule'), 'rrf', 'local-rerank', 'internal', 5, 20, 9, 5, 42, 7, 6, 6, 3, now() - interval '45 minutes', jsonb_build_object('dense', 0.6, 'sparse', 0.4), jsonb_build_array('allow_internal'), jsonb_build_object('dense', true, 'sparse', true))
 ON CONFLICT (trace_id) DO UPDATE
 SET query = EXCLUDED.query,
     filters_json = EXCLUDED.filters_json,
@@ -1611,9 +1611,9 @@ INSERT INTO access_audit_log (request_id, user_id, org_id, endpoint, http_status
 SELECT request_id, user_id, :'org_id', endpoint, 200, latency_ms, 'session', document_ids, 'ok', created_at
 FROM (
   VALUES
-    ('audit_velion_admin_doc_lookup', :'admin_user_id', '/api/v1/documents/search', 42, ARRAY['doc_velion_admin_runbook'], now() - interval '1 hour'),
-    ('audit_velion_normal_doc_lookup', :'normal_user_id', '/api/v1/documents/search', 38, ARRAY['doc_velion_normal_support_guide'], now() - interval '50 minutes'),
-    ('audit_velion_editor_doc_lookup', :'editor_user_id', '/api/v1/documents/search', 40, ARRAY['doc_velion_editor_brand_voice'], now() - interval '45 minutes')
+    ('audit_verevon_admin_doc_lookup', :'admin_user_id', '/api/v1/documents/search', 42, ARRAY['doc_verevon_admin_runbook'], now() - interval '1 hour'),
+    ('audit_verevon_normal_doc_lookup', :'normal_user_id', '/api/v1/documents/search', 38, ARRAY['doc_verevon_normal_support_guide'], now() - interval '50 minutes'),
+    ('audit_verevon_editor_doc_lookup', :'editor_user_id', '/api/v1/documents/search', 40, ARRAY['doc_verevon_editor_brand_voice'], now() - interval '45 minutes')
 ) AS seed(request_id, user_id, endpoint, latency_ms, document_ids, created_at)
 WHERE NOT EXISTS (
   SELECT 1
@@ -1632,9 +1632,9 @@ BEGIN;
 
 INSERT INTO threads (id, session_key, org_id, user_id, created_at)
 VALUES
-  ('thread_velion_admin_triage', 'velion-demo-admin-triage', :'org_id', :'admin_user_id', now() - interval '2 hours'),
-  ('thread_velion_normal_support', 'velion-demo-normal-support', :'org_id', :'normal_user_id', now() - interval '90 minutes'),
-  ('thread_velion_editor_campaign', 'velion-demo-editor-campaign', :'org_id', :'editor_user_id', now() - interval '75 minutes')
+  ('thread_verevon_admin_triage', 'verevon-demo-admin-triage', :'org_id', :'admin_user_id', now() - interval '2 hours'),
+  ('thread_verevon_normal_support', 'verevon-demo-normal-support', :'org_id', :'normal_user_id', now() - interval '90 minutes'),
+  ('thread_verevon_editor_campaign', 'verevon-demo-editor-campaign', :'org_id', :'editor_user_id', now() - interval '75 minutes')
 ON CONFLICT (id) DO UPDATE
 SET session_key = EXCLUDED.session_key,
     org_id = EXCLUDED.org_id,
@@ -1642,12 +1642,12 @@ SET session_key = EXCLUDED.session_key,
 
 INSERT INTO messages (id, thread_id, role, content, metadata, created_at)
 VALUES
-  ('mp_msg_admin_user_1', 'thread_velion_admin_triage', 'user', 'Find tickets that need security or billing escalation for Velion AS.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 hours'),
-  ('mp_msg_admin_assistant_1', 'thread_velion_admin_triage', 'assistant', 'I found the security login case and the refund delivery handoff. Both are linked to runbook guidance and SLA context.', jsonb_build_object('seed', 'velion-local-demo', 'tickets', jsonb_build_array('ticket_security_login','ticket_refund_delivery')), now() - interval '119 minutes'),
-  ('mp_msg_normal_user_1', 'thread_velion_normal_support', 'user', 'Show me what to ask the customer for WhatsApp setup.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '90 minutes'),
-  ('mp_msg_normal_assistant_1', 'thread_velion_normal_support', 'assistant', 'Ask for the business verification screenshot and confirm the WhatsApp display name before completing setup.', jsonb_build_object('seed', 'velion-local-demo', 'document_id', 'doc_velion_normal_support_guide'), now() - interval '89 minutes'),
-  ('mp_msg_editor_user_1', 'thread_velion_editor_campaign', 'user', 'Prepare a social follow-up for the support availability campaign.', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '75 minutes'),
-  ('mp_msg_editor_assistant_1', 'thread_velion_editor_campaign', 'assistant', 'I created a scheduled Instagram follow-up and kept the LinkedIn version pending for admin approval.', jsonb_build_object('seed', 'velion-local-demo', 'post_id', 'post_velion_campaign_followup'), now() - interval '74 minutes')
+  ('mp_msg_admin_user_1', 'thread_verevon_admin_triage', 'user', 'Find tickets that need security or billing escalation for Verevon AS.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 hours'),
+  ('mp_msg_admin_assistant_1', 'thread_verevon_admin_triage', 'assistant', 'I found the security login case and the refund delivery handoff. Both are linked to runbook guidance and SLA context.', jsonb_build_object('seed', 'verevon-local-demo', 'tickets', jsonb_build_array('ticket_security_login','ticket_refund_delivery')), now() - interval '119 minutes'),
+  ('mp_msg_normal_user_1', 'thread_verevon_normal_support', 'user', 'Show me what to ask the customer for WhatsApp setup.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '90 minutes'),
+  ('mp_msg_normal_assistant_1', 'thread_verevon_normal_support', 'assistant', 'Ask for the business verification screenshot and confirm the WhatsApp display name before completing setup.', jsonb_build_object('seed', 'verevon-local-demo', 'document_id', 'doc_verevon_normal_support_guide'), now() - interval '89 minutes'),
+  ('mp_msg_editor_user_1', 'thread_verevon_editor_campaign', 'user', 'Prepare a social follow-up for the support availability campaign.', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '75 minutes'),
+  ('mp_msg_editor_assistant_1', 'thread_verevon_editor_campaign', 'assistant', 'I created a scheduled Instagram follow-up and kept the LinkedIn version pending for admin approval.', jsonb_build_object('seed', 'verevon-local-demo', 'post_id', 'post_verevon_campaign_followup'), now() - interval '74 minutes')
 ON CONFLICT (id) DO UPDATE
 SET role = EXCLUDED.role,
     content = EXCLUDED.content,
@@ -1671,9 +1671,9 @@ INSERT INTO runs (
   residency
 )
 VALUES
-  ('run_velion_admin_triage', 'thread_velion_admin_triage', 'velion-balance', 'Triage security and billing tickets for Velion AS.', 'execute', 'completed', :'org_id', :'admin_user_id', 'Security and refund tickets need active follow-up.', jsonb_build_object('seed', 'velion-local-demo', 'tools', jsonb_build_array('ticket_search','knowledge_lookup')), now() - interval '2 hours', now() - interval '119 minutes', now() - interval '119 minutes', 'swedencentral'),
-  ('run_velion_normal_support', 'thread_velion_normal_support', 'velion-balance', 'Retrieve WhatsApp setup steps for a support ticket.', 'execute', 'completed', :'org_id', :'normal_user_id', 'Ask for verification screenshot and display name.', jsonb_build_object('seed', 'velion-local-demo', 'tools', jsonb_build_array('knowledge_lookup')), now() - interval '90 minutes', now() - interval '89 minutes', now() - interval '89 minutes', 'swedencentral'),
-  ('run_velion_editor_campaign', 'thread_velion_editor_campaign', 'velion-balance', 'Create campaign follow-up draft and approval context.', 'execute', 'completed', :'org_id', :'editor_user_id', 'Instagram scheduled; LinkedIn pending approval.', jsonb_build_object('seed', 'velion-local-demo', 'tools', jsonb_build_array('social_draft','approval_lookup')), now() - interval '75 minutes', now() - interval '74 minutes', now() - interval '74 minutes', 'swedencentral')
+  ('run_verevon_admin_triage', 'thread_verevon_admin_triage', 'verevon-balance', 'Triage security and billing tickets for Verevon AS.', 'execute', 'completed', :'org_id', :'admin_user_id', 'Security and refund tickets need active follow-up.', jsonb_build_object('seed', 'verevon-local-demo', 'tools', jsonb_build_array('ticket_search','knowledge_lookup')), now() - interval '2 hours', now() - interval '119 minutes', now() - interval '119 minutes', 'swedencentral'),
+  ('run_verevon_normal_support', 'thread_verevon_normal_support', 'verevon-balance', 'Retrieve WhatsApp setup steps for a support ticket.', 'execute', 'completed', :'org_id', :'normal_user_id', 'Ask for verification screenshot and display name.', jsonb_build_object('seed', 'verevon-local-demo', 'tools', jsonb_build_array('knowledge_lookup')), now() - interval '90 minutes', now() - interval '89 minutes', now() - interval '89 minutes', 'swedencentral'),
+  ('run_verevon_editor_campaign', 'thread_verevon_editor_campaign', 'verevon-balance', 'Create campaign follow-up draft and approval context.', 'execute', 'completed', :'org_id', :'editor_user_id', 'Instagram scheduled; LinkedIn pending approval.', jsonb_build_object('seed', 'verevon-local-demo', 'tools', jsonb_build_array('social_draft','approval_lookup')), now() - interval '75 minutes', now() - interval '74 minutes', now() - interval '74 minutes', 'swedencentral')
 ON CONFLICT (id) DO UPDATE
 SET goal = EXCLUDED.goal,
     status = EXCLUDED.status,
@@ -1684,9 +1684,9 @@ SET goal = EXCLUDED.goal,
 
 INSERT INTO plans (id, thread_id, run_id, status, goal, org_id, user_id, metadata, created_at, updated_at)
 VALUES
-  ('plan_velion_admin_triage', 'thread_velion_admin_triage', 'run_velion_admin_triage', 'completed', 'Inspect tickets, pull knowledge, and summarize next actions.', :'org_id', :'admin_user_id', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 hours', now() - interval '119 minutes'),
-  ('plan_velion_normal_support', 'thread_velion_normal_support', 'run_velion_normal_support', 'completed', 'Retrieve support guide and answer the setup question.', :'org_id', :'normal_user_id', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '90 minutes', now() - interval '89 minutes'),
-  ('plan_velion_editor_campaign', 'thread_velion_editor_campaign', 'run_velion_editor_campaign', 'completed', 'Draft social follow-up and track approval.', :'org_id', :'editor_user_id', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '75 minutes', now() - interval '74 minutes')
+  ('plan_verevon_admin_triage', 'thread_verevon_admin_triage', 'run_verevon_admin_triage', 'completed', 'Inspect tickets, pull knowledge, and summarize next actions.', :'org_id', :'admin_user_id', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 hours', now() - interval '119 minutes'),
+  ('plan_verevon_normal_support', 'thread_verevon_normal_support', 'run_verevon_normal_support', 'completed', 'Retrieve support guide and answer the setup question.', :'org_id', :'normal_user_id', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '90 minutes', now() - interval '89 minutes'),
+  ('plan_verevon_editor_campaign', 'thread_verevon_editor_campaign', 'run_verevon_editor_campaign', 'completed', 'Draft social follow-up and track approval.', :'org_id', :'editor_user_id', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '75 minutes', now() - interval '74 minutes')
 ON CONFLICT (id) DO UPDATE
 SET status = EXCLUDED.status,
     goal = EXCLUDED.goal,
@@ -1695,13 +1695,13 @@ SET status = EXCLUDED.status,
 
 INSERT INTO plan_steps (id, plan_id, ordinal, kind, status, payload, metadata, created_at, updated_at)
 VALUES
-  ('step_velion_admin_1', 'plan_velion_admin_triage', 1, 'tool', 'completed', jsonb_build_object('tool', 'ticket_search', 'query', 'security billing escalation'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '2 hours', now() - interval '119 minutes'),
-  ('step_velion_admin_2', 'plan_velion_admin_triage', 2, 'tool', 'completed', jsonb_build_object('tool', 'knowledge_lookup', 'documents', jsonb_build_array('doc_velion_admin_runbook')), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '119 minutes', now() - interval '119 minutes'),
-  ('step_velion_admin_3', 'plan_velion_admin_triage', 3, 'response', 'completed', jsonb_build_object('summary', 'Security and refund tickets need follow-up.'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '119 minutes', now() - interval '119 minutes'),
-  ('step_velion_normal_1', 'plan_velion_normal_support', 1, 'tool', 'completed', jsonb_build_object('tool', 'knowledge_lookup', 'documents', jsonb_build_array('doc_velion_normal_support_guide')), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '90 minutes', now() - interval '89 minutes'),
-  ('step_velion_normal_2', 'plan_velion_normal_support', 2, 'response', 'completed', jsonb_build_object('summary', 'Ask for screenshot and display name.'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '89 minutes', now() - interval '89 minutes'),
-  ('step_velion_editor_1', 'plan_velion_editor_campaign', 1, 'tool', 'completed', jsonb_build_object('tool', 'social_draft', 'post_id', 'post_velion_campaign_followup'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '75 minutes', now() - interval '74 minutes'),
-  ('step_velion_editor_2', 'plan_velion_editor_campaign', 2, 'response', 'completed', jsonb_build_object('summary', 'Instagram scheduled and LinkedIn pending approval.'), jsonb_build_object('seed', 'velion-local-demo'), now() - interval '74 minutes', now() - interval '74 minutes')
+  ('step_verevon_admin_1', 'plan_verevon_admin_triage', 1, 'tool', 'completed', jsonb_build_object('tool', 'ticket_search', 'query', 'security billing escalation'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '2 hours', now() - interval '119 minutes'),
+  ('step_verevon_admin_2', 'plan_verevon_admin_triage', 2, 'tool', 'completed', jsonb_build_object('tool', 'knowledge_lookup', 'documents', jsonb_build_array('doc_verevon_admin_runbook')), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '119 minutes', now() - interval '119 minutes'),
+  ('step_verevon_admin_3', 'plan_verevon_admin_triage', 3, 'response', 'completed', jsonb_build_object('summary', 'Security and refund tickets need follow-up.'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '119 minutes', now() - interval '119 minutes'),
+  ('step_verevon_normal_1', 'plan_verevon_normal_support', 1, 'tool', 'completed', jsonb_build_object('tool', 'knowledge_lookup', 'documents', jsonb_build_array('doc_verevon_normal_support_guide')), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '90 minutes', now() - interval '89 minutes'),
+  ('step_verevon_normal_2', 'plan_verevon_normal_support', 2, 'response', 'completed', jsonb_build_object('summary', 'Ask for screenshot and display name.'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '89 minutes', now() - interval '89 minutes'),
+  ('step_verevon_editor_1', 'plan_verevon_editor_campaign', 1, 'tool', 'completed', jsonb_build_object('tool', 'social_draft', 'post_id', 'post_verevon_campaign_followup'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '75 minutes', now() - interval '74 minutes'),
+  ('step_verevon_editor_2', 'plan_verevon_editor_campaign', 2, 'response', 'completed', jsonb_build_object('summary', 'Instagram scheduled and LinkedIn pending approval.'), jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '74 minutes', now() - interval '74 minutes')
 ON CONFLICT (id) DO UPDATE
 SET ordinal = EXCLUDED.ordinal,
     kind = EXCLUDED.kind,
@@ -1712,10 +1712,10 @@ SET ordinal = EXCLUDED.ordinal,
 
 INSERT INTO todos (id, plan_id, thread_id, ordinal, content, status, priority, metadata, created_at, updated_at)
 VALUES
-  ('todo_velion_admin_refund', 'plan_velion_admin_triage', 'thread_velion_admin_triage', 1, 'Confirm refund evidence with Billing.', 'pending', 'high', jsonb_build_object('ticket_id', 'ticket_refund_delivery', 'seed', 'velion-local-demo'), now() - interval '119 minutes', now()),
-  ('todo_velion_admin_security', 'plan_velion_admin_triage', 'thread_velion_admin_triage', 2, 'Complete manual security review.', 'pending', 'urgent', jsonb_build_object('ticket_id', 'ticket_security_login', 'seed', 'velion-local-demo'), now() - interval '119 minutes', now()),
-  ('todo_velion_normal_whatsapp', 'plan_velion_normal_support', 'thread_velion_normal_support', 1, 'Wait for WhatsApp verification screenshot.', 'pending', 'normal', jsonb_build_object('ticket_id', 'ticket_whatsapp_setup', 'seed', 'velion-local-demo'), now() - interval '89 minutes', now()),
-  ('todo_velion_editor_linkedin', 'plan_velion_editor_campaign', 'thread_velion_editor_campaign', 1, 'Get admin approval for LinkedIn update.', 'pending', 'normal', jsonb_build_object('post_id', 'post_velion_linkedin_update', 'seed', 'velion-local-demo'), now() - interval '74 minutes', now())
+  ('todo_verevon_admin_refund', 'plan_verevon_admin_triage', 'thread_verevon_admin_triage', 1, 'Confirm refund evidence with Billing.', 'pending', 'high', jsonb_build_object('ticket_id', 'ticket_refund_delivery', 'seed', 'verevon-local-demo'), now() - interval '119 minutes', now()),
+  ('todo_verevon_admin_security', 'plan_verevon_admin_triage', 'thread_verevon_admin_triage', 2, 'Complete manual security review.', 'pending', 'urgent', jsonb_build_object('ticket_id', 'ticket_security_login', 'seed', 'verevon-local-demo'), now() - interval '119 minutes', now()),
+  ('todo_verevon_normal_whatsapp', 'plan_verevon_normal_support', 'thread_verevon_normal_support', 1, 'Wait for WhatsApp verification screenshot.', 'pending', 'normal', jsonb_build_object('ticket_id', 'ticket_whatsapp_setup', 'seed', 'verevon-local-demo'), now() - interval '89 minutes', now()),
+  ('todo_verevon_editor_linkedin', 'plan_verevon_editor_campaign', 'thread_verevon_editor_campaign', 1, 'Get admin approval for LinkedIn update.', 'pending', 'normal', jsonb_build_object('post_id', 'post_verevon_linkedin_update', 'seed', 'verevon-local-demo'), now() - interval '74 minutes', now())
 ON CONFLICT (id) DO UPDATE
 SET content = EXCLUDED.content,
     status = EXCLUDED.status,
@@ -1725,9 +1725,9 @@ SET content = EXCLUDED.content,
 
 INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, idempotency_key, resource_ref, producer)
 VALUES
-  ('event_velion_admin_run_completed', 'run.completed', 'run_velion_admin_triage', jsonb_build_object('final_output', 'Security and refund tickets need active follow-up.'), now() - interval '119 minutes', :'org_id', :'admin_user_id', 'corr_velion_admin_triage', 'idem_velion_admin_run_completed', 'run:run_velion_admin_triage', 'velion-local-demo'),
-  ('event_velion_normal_run_completed', 'run.completed', 'run_velion_normal_support', jsonb_build_object('final_output', 'Ask for verification screenshot and display name.'), now() - interval '89 minutes', :'org_id', :'normal_user_id', 'corr_velion_normal_support', 'idem_velion_normal_run_completed', 'run:run_velion_normal_support', 'velion-local-demo'),
-  ('event_velion_editor_run_completed', 'run.completed', 'run_velion_editor_campaign', jsonb_build_object('final_output', 'Instagram scheduled; LinkedIn pending approval.'), now() - interval '74 minutes', :'org_id', :'editor_user_id', 'corr_velion_editor_campaign', 'idem_velion_editor_run_completed', 'run:run_velion_editor_campaign', 'velion-local-demo')
+  ('event_verevon_admin_run_completed', 'run.completed', 'run_verevon_admin_triage', jsonb_build_object('final_output', 'Security and refund tickets need active follow-up.'), now() - interval '119 minutes', :'org_id', :'admin_user_id', 'corr_verevon_admin_triage', 'idem_verevon_admin_run_completed', 'run:run_verevon_admin_triage', 'verevon-local-demo'),
+  ('event_verevon_normal_run_completed', 'run.completed', 'run_verevon_normal_support', jsonb_build_object('final_output', 'Ask for verification screenshot and display name.'), now() - interval '89 minutes', :'org_id', :'normal_user_id', 'corr_verevon_normal_support', 'idem_verevon_normal_run_completed', 'run:run_verevon_normal_support', 'verevon-local-demo'),
+  ('event_verevon_editor_run_completed', 'run.completed', 'run_verevon_editor_campaign', jsonb_build_object('final_output', 'Instagram scheduled; LinkedIn pending approval.'), now() - interval '74 minutes', :'org_id', :'editor_user_id', 'corr_verevon_editor_campaign', 'idem_verevon_editor_run_completed', 'run:run_verevon_editor_campaign', 'verevon-local-demo')
 ON CONFLICT (id) DO UPDATE
 SET event_type = EXCLUDED.event_type,
     payload = EXCLUDED.payload,
@@ -1760,8 +1760,8 @@ INSERT INTO tasks (
   updated_at
 )
 VALUES
-  ('task_velion_admin_triage', :'org_id', 'run_velion_admin_triage', 'agent', 'Ticket triage summary', 'Summarize admin ticket escalations for local demo.', 'velion-balance', 'completed', 20, jsonb_build_array(jsonb_build_object('ticket_ids', jsonb_build_array('ticket_refund_delivery','ticket_security_login'))), jsonb_build_array(jsonb_build_object('kind', 'summary', 'value', 'Two active escalations found.')), jsonb_build_object('seed', 'velion-local-demo'), 'idem_task_velion_admin_triage', now() - interval '2 hours', now() - interval '119 minutes', :'admin_user_id', now() - interval '2 hours', now()),
-  ('task_velion_editor_campaign', :'org_id', 'run_velion_editor_campaign', 'agent', 'Social campaign follow-up', 'Draft and track social campaign follow-up.', 'velion-balance', 'completed', 10, jsonb_build_array(jsonb_build_object('campaign_id', 'campaign_velion_summer_support')), jsonb_build_array(jsonb_build_object('post_id', 'post_velion_campaign_followup')), jsonb_build_object('seed', 'velion-local-demo'), 'idem_task_velion_editor_campaign', now() - interval '75 minutes', now() - interval '74 minutes', :'editor_user_id', now() - interval '75 minutes', now())
+  ('task_verevon_admin_triage', :'org_id', 'run_verevon_admin_triage', 'agent', 'Ticket triage summary', 'Summarize admin ticket escalations for local demo.', 'verevon-balance', 'completed', 20, jsonb_build_array(jsonb_build_object('ticket_ids', jsonb_build_array('ticket_refund_delivery','ticket_security_login'))), jsonb_build_array(jsonb_build_object('kind', 'summary', 'value', 'Two active escalations found.')), jsonb_build_object('seed', 'verevon-local-demo'), 'idem_task_verevon_admin_triage', now() - interval '2 hours', now() - interval '119 minutes', :'admin_user_id', now() - interval '2 hours', now()),
+  ('task_verevon_editor_campaign', :'org_id', 'run_verevon_editor_campaign', 'agent', 'Social campaign follow-up', 'Draft and track social campaign follow-up.', 'verevon-balance', 'completed', 10, jsonb_build_array(jsonb_build_object('campaign_id', 'campaign_verevon_summer_support')), jsonb_build_array(jsonb_build_object('post_id', 'post_verevon_campaign_followup')), jsonb_build_object('seed', 'verevon-local-demo'), 'idem_task_verevon_editor_campaign', now() - interval '75 minutes', now() - interval '74 minutes', :'editor_user_id', now() - interval '75 minutes', now())
 ON CONFLICT (id) DO UPDATE
 SET title = EXCLUDED.title,
     description = EXCLUDED.description,
@@ -1779,8 +1779,8 @@ SET title = EXCLUDED.title,
 
 INSERT INTO task_events (id, task_id, event_type, actor, payload, ts)
 VALUES
-  ('taskevent_velion_admin_completed', 'task_velion_admin_triage', 'completed', 'velion-balance', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '119 minutes'),
-  ('taskevent_velion_editor_completed', 'task_velion_editor_campaign', 'completed', 'velion-balance', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '74 minutes')
+  ('taskevent_verevon_admin_completed', 'task_verevon_admin_triage', 'completed', 'verevon-balance', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '119 minutes'),
+  ('taskevent_verevon_editor_completed', 'task_verevon_editor_campaign', 'completed', 'verevon-balance', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '74 minutes')
 ON CONFLICT (id) DO UPDATE
 SET event_type = EXCLUDED.event_type,
     actor = EXCLUDED.actor,
@@ -1789,8 +1789,8 @@ SET event_type = EXCLUDED.event_type,
 
 INSERT INTO task_artifacts (id, task_id, role, kind, name, mime_type, uri, size_bytes, checksum, metadata, created_at)
 VALUES
-  ('artifact_velion_admin_summary', 'task_velion_admin_triage', 'output', 'json', 'ticket-triage-summary.json', 'application/json', 'local://velion-demo/ticket-triage-summary.json', 1024, 'sha256-admin-summary-demo', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '119 minutes'),
-  ('artifact_velion_editor_post', 'task_velion_editor_campaign', 'output', 'json', 'social-followup-draft.json', 'application/json', 'local://velion-demo/social-followup-draft.json', 2048, 'sha256-editor-post-demo', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '74 minutes')
+  ('artifact_verevon_admin_summary', 'task_verevon_admin_triage', 'output', 'json', 'ticket-triage-summary.json', 'application/json', 'local://verevon-demo/ticket-triage-summary.json', 1024, 'sha256-admin-summary-demo', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '119 minutes'),
+  ('artifact_verevon_editor_post', 'task_verevon_editor_campaign', 'output', 'json', 'social-followup-draft.json', 'application/json', 'local://verevon-demo/social-followup-draft.json', 2048, 'sha256-editor-post-demo', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '74 minutes')
 ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name,
     mime_type = EXCLUDED.mime_type,
@@ -1814,9 +1814,9 @@ INSERT INTO cost_entries (
   created_at
 )
 VALUES
-  ('11111111-1111-4111-8111-111111111111', :'org_id', :'admin_user_id', 'run_velion_admin_triage', 'req_velion_admin_triage', 'velion-balance', 2200, 560, 0.0064000000, 'cost_velion_admin_triage', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '119 minutes'),
-  ('22222222-2222-4222-8222-222222222222', :'org_id', :'normal_user_id', 'run_velion_normal_support', 'req_velion_normal_support', 'velion-balance', 960, 240, 0.0024000000, 'cost_velion_normal_support', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '89 minutes'),
-  ('33333333-3333-4333-8333-333333333333', :'org_id', :'editor_user_id', 'run_velion_editor_campaign', 'req_velion_editor_campaign', 'velion-balance', 1340, 420, 0.0041000000, 'cost_velion_editor_campaign', jsonb_build_object('seed', 'velion-local-demo'), now() - interval '74 minutes')
+  ('11111111-1111-4111-8111-111111111111', :'org_id', :'admin_user_id', 'run_verevon_admin_triage', 'req_verevon_admin_triage', 'verevon-balance', 2200, 560, 0.0064000000, 'cost_verevon_admin_triage', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '119 minutes'),
+  ('22222222-2222-4222-8222-222222222222', :'org_id', :'normal_user_id', 'run_verevon_normal_support', 'req_verevon_normal_support', 'verevon-balance', 960, 240, 0.0024000000, 'cost_verevon_normal_support', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '89 minutes'),
+  ('33333333-3333-4333-8333-333333333333', :'org_id', :'editor_user_id', 'run_verevon_editor_campaign', 'req_verevon_editor_campaign', 'verevon-balance', 1340, 420, 0.0041000000, 'cost_verevon_editor_campaign', jsonb_build_object('seed', 'verevon-local-demo'), now() - interval '74 minutes')
 ON CONFLICT (id) DO UPDATE
 SET user_id = EXCLUDED.user_id,
     run_id = EXCLUDED.run_id,
@@ -1843,13 +1843,13 @@ INSERT INTO routing_policies (
   updated_at
 )
 VALUES (
-  'routing_velion_advanced_demo',
+  'routing_verevon_advanced_demo',
   :'org_id',
-  'Velion Advanced demo routing',
+  'Verevon Advanced demo routing',
   'Local demo policy for advanced plan balancing.',
   'weighted',
-  jsonb_build_object('default_model', 'velion-balance', 'web_search_allowed', true, 'image_generation_allowed', true),
-  ARRAY['velion-balance','gpt-image-1'],
+  jsonb_build_object('default_model', 'verevon-balance', 'web_search_allowed', true, 'image_generation_allowed', true),
+  ARRAY['verevon-balance','gpt-image-1'],
   100,
   true,
   :'admin_user_id',
@@ -1878,12 +1878,12 @@ seed_controlplane_events() {
 BEGIN;
 
 INSERT INTO audit_events (occurred_at, org_id, user_id, actor_role, plane, event, subject, resource_id, outcome, details, request_id, user_agent)
-SELECT occurred_at, :'org_id', user_id, actor_role, plane, event, subject, resource_id, 'ok', details, request_id, 'velion-local-demo-seed'
+SELECT occurred_at, :'org_id', user_id, actor_role, plane, event, subject, resource_id, 'ok', details, request_id, 'verevon-local-demo-seed'
 FROM (
   VALUES
-    (now() - interval '2 hours', :'admin_user_id', 'admin', 'application', 'ticket.triage', 'Ticket triage opened', 'ticket_refund_delivery', jsonb_build_object('seed', 'velion-local-demo'), 'audit_velion_ticket_triage'),
-    (now() - interval '90 minutes', :'normal_user_id', 'member', 'data', 'document.search', 'Support guide searched', 'doc_velion_normal_support_guide', jsonb_build_object('seed', 'velion-local-demo'), 'audit_velion_support_search'),
-    (now() - interval '75 minutes', :'editor_user_id', 'editor', 'application', 'social.post.draft', 'Social post drafted', 'post_velion_campaign_followup', jsonb_build_object('seed', 'velion-local-demo'), 'audit_velion_social_draft')
+    (now() - interval '2 hours', :'admin_user_id', 'admin', 'application', 'ticket.triage', 'Ticket triage opened', 'ticket_refund_delivery', jsonb_build_object('seed', 'verevon-local-demo'), 'audit_verevon_ticket_triage'),
+    (now() - interval '90 minutes', :'normal_user_id', 'member', 'data', 'document.search', 'Support guide searched', 'doc_verevon_normal_support_guide', jsonb_build_object('seed', 'verevon-local-demo'), 'audit_verevon_support_search'),
+    (now() - interval '75 minutes', :'editor_user_id', 'editor', 'application', 'social.post.draft', 'Social post drafted', 'post_verevon_campaign_followup', jsonb_build_object('seed', 'verevon-local-demo'), 'audit_verevon_social_draft')
 ) AS seed(occurred_at, user_id, actor_role, plane, event, subject, resource_id, details, request_id)
 WHERE NOT EXISTS (
   SELECT 1
@@ -1895,9 +1895,9 @@ INSERT INTO usage_events (occurred_at, org_id, user_id, plane, op, tokens_in, to
 SELECT occurred_at, :'org_id', user_id, plane, op, tokens_in, tokens_out, bytes_in, bytes_out, cost_cents, request_id, metadata
 FROM (
   VALUES
-    (now() - interval '119 minutes', :'admin_user_id', 'model', 'agent.run', 2200::bigint, 560::bigint, 4096::bigint, 2048::bigint, 0.640000::numeric, 'usage_velion_admin_triage', jsonb_build_object('seed', 'velion-local-demo')),
-    (now() - interval '89 minutes', :'normal_user_id', 'model', 'agent.run', 960::bigint, 240::bigint, 2048::bigint, 1024::bigint, 0.240000::numeric, 'usage_velion_normal_support', jsonb_build_object('seed', 'velion-local-demo')),
-    (now() - interval '74 minutes', :'editor_user_id', 'model', 'agent.run', 1340::bigint, 420::bigint, 3072::bigint, 1536::bigint, 0.410000::numeric, 'usage_velion_editor_campaign', jsonb_build_object('seed', 'velion-local-demo'))
+    (now() - interval '119 minutes', :'admin_user_id', 'model', 'agent.run', 2200::bigint, 560::bigint, 4096::bigint, 2048::bigint, 0.640000::numeric, 'usage_verevon_admin_triage', jsonb_build_object('seed', 'verevon-local-demo')),
+    (now() - interval '89 minutes', :'normal_user_id', 'model', 'agent.run', 960::bigint, 240::bigint, 2048::bigint, 1024::bigint, 0.240000::numeric, 'usage_verevon_normal_support', jsonb_build_object('seed', 'verevon-local-demo')),
+    (now() - interval '74 minutes', :'editor_user_id', 'model', 'agent.run', 1340::bigint, 420::bigint, 3072::bigint, 1536::bigint, 0.410000::numeric, 'usage_verevon_editor_campaign', jsonb_build_object('seed', 'verevon-local-demo'))
 ) AS seed(occurred_at, user_id, plane, op, tokens_in, tokens_out, bytes_in, bytes_out, cost_cents, request_id, metadata)
 WHERE NOT EXISTS (
   SELECT 1
@@ -1927,8 +1927,8 @@ main() {
   seed_controlplane_events
 
   echo
-  echo "Velion local demo seed complete."
-  echo "Org: $ORG_NAME ($ORG_ID / $ORG_SLUG), stored plan: standard (Velion Advanced)"
+  echo "Verevon local demo seed complete."
+  echo "Org: $ORG_NAME ($ORG_ID / $ORG_SLUG), stored plan: standard (Verevon Advanced)"
   echo "Users:"
   echo "  admin:  $ADMIN_EMAIL ($ADMIN_USER_ID)"
   echo "  member: $NORMAL_EMAIL ($NORMAL_USER_ID)"

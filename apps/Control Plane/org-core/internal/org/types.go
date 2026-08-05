@@ -112,7 +112,7 @@ type PlanChangeOutboxRow struct {
 const (
 	// GDPRErasureAuditSubject is the producer-authoritative v2 subject consumed
 	// by audit-core's durable Control Plane JetStream consumer.
-	GDPRErasureAuditSubject = "velion.audit.v2.control.org-core.erasure"
+	GDPRErasureAuditSubject = "verevon.audit.v2.control.org-core.erasure"
 	// GDPRAuditMaxAttempts bounds poison/transient publication retries before the
 	// row becomes operator-visible dead-letter state.
 	GDPRAuditMaxAttempts = 8
@@ -142,6 +142,15 @@ type GDPRAuditOutboxRow struct {
 type GDPRAuditFlushResult struct {
 	Published    int `json:"published"`
 	DeadLettered int `json:"dead_lettered"`
+}
+
+// InteractiveRetentionOutboxRow is a content-free cross-plane cleanup intent.
+// It is emitted only for a false-to-true ZDR transition, and its consumer may
+// remove personal recovery drafts but must not erase durable support records.
+type InteractiveRetentionOutboxRow struct {
+	EventID  int64
+	OrgID    string
+	Attempts int
 }
 
 type GDPRAuditOutboxStatus struct {
@@ -188,7 +197,7 @@ type DeletionLedgerEntry struct {
 
 // OrgPendingDeletionReminder is the minimal shape ListOrgsNeeding7DayReminder
 // and ListOrgsNeeding1DayReminder return: enough for the caller to publish
-// velion.org.deletion.reminder without a second lookup.
+// verevon.org.deletion.reminder without a second lookup.
 type OrgPendingDeletionReminder struct {
 	OrgID    string    `json:"org_id"`
 	OrgName  string    `json:"org_name"`

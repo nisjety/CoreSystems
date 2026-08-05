@@ -5,7 +5,7 @@ import { useCallback, useState } from 'react';
 import type { KnowledgeSource, PersistedAgent } from '../types';
 
 /**
- * U3-7 (ui-ux-velion-gap.md §14): per-agent knowledge sources.
+ * U3-7 (ui-ux-verevon-gap.md §14): per-agent knowledge sources.
  *
  * Agents own a `knowledgeSources` array on their Convex record. Each
  * entry is a `{ type, name, id? }` reference — files uploaded into the

@@ -6,11 +6,11 @@
 
 ## Context
 
-Velion v1 contains valuable product learning, but it also accumulated broad global providers, heavy dependencies, mixed ownership, and route surfaces that are difficult to reason about. Velion v2 needs to use v1 as product evidence without importing its dirty code or architecture.
+Verevon v1 contains valuable product learning, but it also accumulated broad global providers, heavy dependencies, mixed ownership, and route surfaces that are difficult to reason about. Verevon v2 needs to use v1 as product evidence without importing its dirty code or architecture.
 
 ## Decision
 
-Velion v2 uses a clean Next.js App Router project with feature-sliced folders under `src/features/*`, shared primitives under `src/components/ui`, and typed contracts under `src/lib/api`. Server Components remain the default; Client Components are pushed to interactive leaves.
+Verevon v2 uses a clean Next.js App Router project with feature-sliced folders under `src/features/*`, shared primitives under `src/components/ui`, and typed contracts under `src/lib/api`. Server Components remain the default; Client Components are pushed to interactive leaves.
 
 ## Alternatives Considered
 
@@ -21,7 +21,7 @@ Velion v2 uses a clean Next.js App Router project with feature-sliced folders un
 
 ### Generic SaaS dashboard starter
 - **Pros**: Quick clean baseline.
-- **Cons**: Would miss Velion-specific support, knowledge, and agent workflows.
+- **Cons**: Would miss Verevon-specific support, knowledge, and agent workflows.
 - **Why not**: V2 must compete in support and AI-agent operations, not look like a generic admin template.
 
 ## Consequences

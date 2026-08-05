@@ -280,7 +280,7 @@ func connectorGaps(connectors []ConnectorSlot) []ConnectorGap {
 // the underlying value, source, or unit — it is presentation only.
 var scorecardLabelOverrides = map[string]string{
 	// "Conversations handled" is the pilot's first headline number (see
-	// velion-feature-map.md's Insights "done-enough gate"): the real count of
+	// verevon-feature-map.md's Insights "done-enough gate"): the real count of
 	// conversation-core tickets marked resolved.
 	"inbox.tickets_resolved": "Conversations handled",
 	// Feeds the "AI draft acceptance %" headline number as

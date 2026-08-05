@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 
 from eval_lab import metrics
-from eval_lab.client import VelionClient
+from eval_lab.client import VerevonClient
 from eval_lab.judge import make_judge
 from eval_lab.types import CaseResult, CaseSpec, MetricOutcome
 
@@ -36,7 +36,7 @@ def available_capabilities() -> set[str]:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
-def run_case(client: VelionClient, case: CaseSpec) -> CaseResult:
+def run_case(client: VerevonClient, case: CaseSpec) -> CaseResult:
     missing = [r for r in case.requires if r not in available_capabilities()]
     if missing:
         return CaseResult(

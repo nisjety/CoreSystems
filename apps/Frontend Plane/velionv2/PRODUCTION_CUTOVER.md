@@ -1,4 +1,4 @@
-# velionv2 → Control Plane: Production Cutover & Verification (Phase 5)
+# verevonv2 → Control Plane: Production Cutover & Verification (Phase 5)
 
 Build/test verification is green (tsc 0 · 120 unit tests · `next build` ok). The
 steps below are what's required to verify the wiring against a **live Control
@@ -9,8 +9,8 @@ artifacts alone — it needs the cores running.
 
 | Var | Purpose | Local | Docker (in-cluster) |
 |---|---|---|---|
-| `NEXT_PUBLIC_APP_URL` | app origin | `http://localhost:3000` | `https://app.velion…` |
-| `NEXT_PUBLIC_AUTH_BASE_URL` | Better Auth client base (= app origin) | `http://localhost:3000` | `https://app.velion…` |
+| `NEXT_PUBLIC_APP_URL` | app origin | `http://localhost:3000` | `https://app.verevon…` |
+| `NEXT_PUBLIC_AUTH_BASE_URL` | Better Auth client base (= app origin) | `http://localhost:3000` | `https://app.verevon…` |
 | `AUTH_CORE_URL` | auth-core (proxy target) | `http://localhost:3011` | `http://auth-service:3011` |
 | `USER_CORE_URL` | user-core | `http://localhost:3012` | `http://user-service:3012` |
 | `ORG_SERVICE_URL` | org-core (+BREG) | `http://localhost:8080` | `http://org-core-service:8080` |
@@ -23,8 +23,8 @@ artifacts alone — it needs the cores running.
 > **Service-name alignment (prior drift risk):** the in-cluster defaults above
 > match `apps/Control Plane/docker-compose.yml` `container_name:` values
 > (`auth-service`, `user-service`, `org-core-service`, `billing-core-service`,
-> `audit-core-service`). Confirm velionv2's runtime env points at these exact
-> names and that velionv2 is attached to the `inter-plane-bus` network.
+> `audit-core-service`). Confirm verevonv2's runtime env points at these exact
+> names and that verevonv2 is attached to the `inter-plane-bus` network.
 
 ## 2. Pre-flight assertions
 - `GET /api/v1/auth/config` returns `mode: "control-plane"` (NOT `standalone`). If `standalone`, `AUTH_CORE_URL` is unset → the prod auth route now returns **503** by design (fail-closed).

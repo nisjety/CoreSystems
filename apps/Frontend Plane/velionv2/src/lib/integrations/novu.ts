@@ -66,7 +66,7 @@ function inferSource(item: NovuFeedItem): "notification" | "message" {
     feed.includes("chat") ||
     source.includes("inbox") ||
     source.includes("chat") ||
-    source.includes("velion_ai")
+    source.includes("verevon_ai")
   ) {
     return "message";
   }

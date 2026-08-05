@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 
 import { resolveChatActor } from '../chat/_lib/session-store'
 
-// U2-2 / U3-2 (ui-ux-velion-gap.md §10): Live model registry proxy.
+// U2-2 / U3-2 (ui-ux-verevon-gap.md §10): Live model registry proxy.
 //
 // Replaces the previous hardcoded `gpt-5.4-mini` defaults in the chat
 // ModelSelector + agents page with a real catalog fetched from
@@ -32,7 +32,7 @@ import { resolveChatActor } from '../chat/_lib/session-store'
 //     detail?: <error string>,
 //   }
 //
-// Velion callers (ModelSelector, agents/data.ts) fall back to a static
+// Verevon callers (ModelSelector, agents/data.ts) fall back to a static
 // list if `status === 'service_unavailable'` so the UI stays functional
 // when capability-core is down.
 

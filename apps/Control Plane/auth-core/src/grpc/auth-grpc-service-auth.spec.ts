@@ -48,7 +48,7 @@ function registry({
       : []),
     {
       credentialId: 'gateway-2026-07',
-      principal: 'velion-gateway',
+      principal: 'verevon-gateway',
       audience: 'auth-core',
       token: GATEWAY_TOKEN,
       scopes: ['auth:signin', 'auth:signout', 'auth:user:read'],
@@ -140,7 +140,7 @@ describe('Auth gRPC scoped service credentials', () => {
         },
         {
           credentialId: 'duplicate-id',
-          principal: 'velion-gateway',
+          principal: 'verevon-gateway',
           audience: 'auth-core',
           token: GATEWAY_TOKEN,
           scopes: ['auth:user:read'],
@@ -159,7 +159,7 @@ describe('Auth gRPC scoped service credentials', () => {
         },
         {
           credentialId: 'gateway-2026-07',
-          principal: 'velion-gateway',
+          principal: 'verevon-gateway',
           audience: 'auth-core',
           token: RETRIEVAL_TOKEN_OLD,
           scopes: ['auth:user:read'],
@@ -304,7 +304,7 @@ describe('Auth gRPC scoped service credentials', () => {
 
     try {
       authorizeAuthGrpcService(
-        metadata('gateway-2026-07', 'velion-gateway', GATEWAY_TOKEN),
+        metadata('gateway-2026-07', 'verevon-gateway', GATEWAY_TOKEN),
         credentials,
         'auth:signup',
       );

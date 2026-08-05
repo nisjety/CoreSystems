@@ -1,4 +1,4 @@
-# velionv2 — Auth & Onboarding architecture review
+# verevonv2 — Auth & Onboarding architecture review
 
 Companion to [AUTH_ONBOARDING_PORT_PLAN.md](./AUTH_ONBOARDING_PORT_PLAN.md). This
 document maps the **real backend API surface** the auth page and onboarding
@@ -13,7 +13,7 @@ Zod 4, Tailwind 4**. No data-fetching lib, no `next-intl`, no `framer-motion`.
 
 ## 1. The system as it actually is
 
-**velionv2 (`:3107`) is itself the gateway/BFF.** There is no separate API
+**verevonv2 (`:3107`) is itself the gateway/BFF.** There is no separate API
 gateway. The browser holds only the better-auth session cookie (`sid`, httpOnly,
 prefix `idknuten`). Same-origin route handlers proxy server-side to each core,
 forwarding the cookie for identity and injecting `INTERNAL_API_KEY` +
@@ -167,7 +167,7 @@ verify / SSO / passkey; the work is client wiring + `authClient` plugins.
   `LeftPane/RightPane/PrimaryButton/StepTitle` into the shared primitives
   (already planned in Phase 2) and treat them as the design-system seed.
 - **UX copy** (ux-copy): the copy is bilingual and strong; once full i18n lands,
-  run a consistency pass (sentence case, "Velion" casing, error tone) and ensure
+  run a consistency pass (sentence case, "Verevon" casing, error tone) and ensure
   every error has a recovery action.
 - **Code quality**: collapse the two proxy styles (§3.1), delete the
   hand-rolled in-flight/poll refs in favor of React Query (§3.2), and add unit
@@ -208,7 +208,7 @@ Attribute-rich schema earns materially higher AI-citation rates. ([AEO 2026](htt
 
 ## 9. Paywall & plan strategy (Intercom/Linear-informed)
 
-**Velion's model is Intercom-shaped** — per-seat tiers + **per-AI-resolution**
+**Verevon's model is Intercom-shaped** — per-seat tiers + **per-AI-resolution**
 usage ("X kr per henvendelse løst av AI") + free **Lite seats** — with a
 **Linear-shaped generous Free tier**. The existing V2 paywall copy already
 encodes this (Essential / Advanced / Expert / Custom + Free/trial). Reference
@@ -230,7 +230,7 @@ Free**. This must be modeled in **billing-core**, not just the UI:
   *"14-day Pro trial · Due today: 0 kr · Reverts to Free on {date}"*. ([Intercom build-subscription screen](https://mobbin.com/screens/55743b8c-e496-4d99-b5ad-f3ee32364d64))
 - A **"Current trial" badge** on the Pro card + a trial-ends banner, à la Melio's
   onboarding paywall. ([Melio plan step](https://mobbin.com/screens/67518093-a65c-482d-92cb-93b57cc6f88c))
-- Keep the **recommended-plan highlight** (Velion's animated ring) + the
+- Keep the **recommended-plan highlight** (Verevon's animated ring) + the
   monthly/yearly toggle with savings badge (Arcade/Intercom/Melio all do this).
 - **"Need help choosing? Chat"** affordance (Arcade/Intercom).
 - **Plan↔integration compatibility**: connected sources that a lower tier doesn't
@@ -284,4 +284,4 @@ performance + quality + consistency, and a dedicated endpoint wins on all three:
 | Intercom | "What would you like to trial?" radio path selector | [link](https://mobbin.com/screens/5576b5d7-7908-4c6e-8919-fffce0f69b6a) |
 | Melio | Onboarding paywall: **"Current trial" badge** + trial-ends banner + monthly/annual "Save 20%" | [link](https://mobbin.com/screens/67518093-a65c-482d-92cb-93b57cc6f88c) |
 | Arcade | Recommended plan highlight ("For your team") + per-tier credits + "Chat with us" | [link](https://mobbin.com/screens/db2eec9e-5b2e-47fc-b9af-8d4bfa9ffd55) |
-| Webflow | Audience segmentation tabs (in-house vs agency) — relevant if Velion adds buyer types | [link](https://mobbin.com/screens/aa8edb35-1f2f-4e96-b541-4b8ecedd7d00) |
+| Webflow | Audience segmentation tabs (in-house vs agency) — relevant if Verevon adds buyer types | [link](https://mobbin.com/screens/aa8edb35-1f2f-4e96-b541-4b8ecedd7d00) |

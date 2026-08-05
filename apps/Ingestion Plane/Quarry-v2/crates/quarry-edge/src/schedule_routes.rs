@@ -493,7 +493,7 @@ mod tests {
     #[test]
     fn control_schedule_create_serializes_store_schedule_shape() {
         let body = ControlScheduleCreate {
-            org_id: "org_velion".into(),
+            org_id: "org_verevon".into(),
             created_by: "user_42".into(),
             cron: None,
             target_kind: "change_monitor".into(),
@@ -502,7 +502,7 @@ mod tests {
             preset: Some("daily".into()),
         };
         let s = serde_json::to_string(&body).unwrap();
-        assert!(s.contains("\"org_id\":\"org_velion\""));
+        assert!(s.contains("\"org_id\":\"org_verevon\""));
         assert!(s.contains("\"created_by\":\"user_42\""));
         assert!(s.contains("\"target_kind\":\"change_monitor\""));
         assert!(s.contains("\"target_ref\":\"https://example.com\""));

@@ -24,11 +24,11 @@ import {
   UserRound,
 } from "lucide-react";
 import {
-  VelionButton,
-  VelionIconButton,
-  VelionInput,
-  VelionTextarea,
-} from "@/components/ui/velion-ui";
+  VerevonButton,
+  VerevonIconButton,
+  VerevonInput,
+  VerevonTextarea,
+} from "@/components/ui/verevon-ui";
 import { customerName, type ZammadTicket } from "@/features/inbox-v2/lib/inbox-model";
 import type { InboxModalRequest } from "@/features/inbox-v2/components/InboxWorkModal";
 import { formatDateKey } from "@/features/inbox-v2/lib/calendar-format";
@@ -51,7 +51,7 @@ import {
 import { apiGet, apiSend } from "@/lib/api/client-envelope";
 import { cn } from "@/lib/utils";
 
-type AsideTab = "details" | "velion" | "calendar" | "activity";
+type AsideTab = "details" | "verevon" | "calendar" | "activity";
 
 type CalendarState = {
   configured?: boolean;
@@ -64,7 +64,7 @@ const emptyCalendar: CalendarState = {
   notes: [],
 };
 
-type VelionPanelState = {
+type VerevonPanelState = {
   ticketId: number | null;
   quickReplies: string[];
   quickLoading: boolean;
@@ -73,7 +73,7 @@ type VelionPanelState = {
   question: string;
 };
 
-type VelionPanelAction =
+type VerevonPanelAction =
   | { type: "ticket-changed"; ticketId: number | null }
   | { type: "question-changed"; value: string }
   | { type: "quick-start"; ticketId: number }
@@ -83,7 +83,7 @@ type VelionPanelAction =
   | { type: "summary-success"; summary: string; ticketId: number }
   | { type: "summary-failure"; message: string; ticketId: number };
 
-function createInitialVelionPanelState(ticketId: number | null): VelionPanelState {
+function createInitialVerevonPanelState(ticketId: number | null): VerevonPanelState {
   return {
     ticketId,
     quickReplies: [],
@@ -94,14 +94,14 @@ function createInitialVelionPanelState(ticketId: number | null): VelionPanelStat
   };
 }
 
-function velionPanelReducer(state: VelionPanelState, action: VelionPanelAction): VelionPanelState {
+function verevonPanelReducer(state: VerevonPanelState, action: VerevonPanelAction): VerevonPanelState {
   switch (action.type) {
     case "ticket-changed":
       if (state.ticketId === action.ticketId) {
         return state;
       }
 
-      return createInitialVelionPanelState(action.ticketId);
+      return createInitialVerevonPanelState(action.ticketId);
     case "question-changed":
       return { ...state, question: action.value };
     case "quick-start":
@@ -230,13 +230,13 @@ export function InboxAside({
   return (
     <aside
       aria-label="AI and customer context"
-      className="velion-sidebar-type hidden h-full min-h-0 overflow-hidden rounded-[16px] border border-[#D8D2C8] bg-white text-[#111111] lg:flex lg:flex-col dark:border-[#2A2C31] dark:bg-[#101114] dark:text-white"
+      className="verevon-sidebar-type hidden h-full min-h-0 overflow-hidden rounded-[16px] border border-[#D8D2C8] bg-white text-[#111111] lg:flex lg:flex-col dark:border-[#2A2C31] dark:bg-[#101114] dark:text-white"
     >
       <div className="flex h-[64px] shrink-0 items-center justify-between border-b border-[#E7E1D8] px-4 dark:border-[#2A2C31]">
         <div className="flex h-full min-w-0 items-end gap-4 overflow-x-auto">
           {[
             { id: "details", label: "Details" },
-            { id: "velion", label: "Velion" },
+            { id: "verevon", label: "Verevon" },
             { id: "calendar", label: "Calendar" },
             { id: "activity", label: "Activity" },
           ].map((tab) => (
@@ -249,7 +249,7 @@ export function InboxAside({
             </AsideTabButton>
           ))}
         </div>
-        <VelionIconButton
+        <VerevonIconButton
           onClick={() => onOpenModal({
             type: "work",
             title: "Inbox side panel",
@@ -260,12 +260,12 @@ export function InboxAside({
           title="Open side panel settings"
         >
           <Settings className="size-4" />
-        </VelionIconButton>
+        </VerevonIconButton>
       </div>
 
       {activeTab === "details" ? <DetailsPanel onOpenModal={onOpenModal} selectedTicket={selectedTicket} /> : null}
-      {activeTab === "velion" ? (
-        <VelionPanel
+      {activeTab === "verevon" ? (
+        <VerevonPanel
           onInsertQuickReply={onInsertQuickReply}
           onMacroExecuted={onMacroExecuted}
           onOpenModal={onOpenModal}
@@ -292,7 +292,7 @@ function DetailsPanel({
       <div className="border-b border-[#E7E1D8] p-4 dark:border-[#2A2C31]">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[#9C9A96]" />
-          <VelionInput
+          <VerevonInput
             type="search"
             aria-label="Search customer context"
             placeholder="Search customers by email, order, or phone"
@@ -318,18 +318,18 @@ function DetailsPanel({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <h2 className="truncate text-[16px] font-semibold">{selectedTicket.customer?.email ?? customerName(selectedTicket)}</h2>
-                  <VelionIconButton
+                  <VerevonIconButton
                     onClick={() => onOpenModal({
                       type: "work",
                       title: "Customer actions",
-                      description: "Edit customer profile fields, add notes, link orders, and let Velion run customer-context tools in this modal.",
+                      description: "Edit customer profile fields, add notes, link orders, and let Verevon run customer-context tools in this modal.",
                       primaryAction: "Save customer action",
                     })}
                     aria-label="Customer actions"
                     className="ml-auto"
                   >
                     <MoreHorizontal className="size-4" />
-                  </VelionIconButton>
+                  </VerevonIconButton>
                 </div>
                 <p className="mt-1 text-[13px] text-[#626260]">{customerName(selectedTicket)}</p>
               </div>
@@ -351,14 +351,14 @@ function DetailsPanel({
           <AccordionSection defaultOpen icon={<FileText className="size-4" />} title="Conversation attributes">
             <FieldRow label="ID" value={String(selectedTicket.id)} />
             <FieldRow label="Company" value="No company" muted />
-            <FieldRow label="Brand" value="Velion" />
+            <FieldRow label="Brand" value="Verevon" />
             <FieldRow label="Subject" value={selectedTicket.title} />
           </AccordionSection>
 
           <section className="border-b border-[#E7E1D8] p-4 dark:border-[#2A2C31]">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h3 className="text-[14px] font-semibold">Commerce context</h3>
-              <VelionIconButton
+              <VerevonIconButton
                 onClick={() => onOpenModal({
                   type: "work",
                   title: "Commerce context",
@@ -371,7 +371,7 @@ function DetailsPanel({
                 className="text-[#9C9A96]"
               >
                 <ExternalLink className="size-4" />
-              </VelionIconButton>
+              </VerevonIconButton>
             </div>
             {context?.shopify?.orders?.length ? (
               <div className="space-y-2">
@@ -398,7 +398,7 @@ function DetailsPanel({
           <section className="p-4">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h3 className="text-[14px] font-semibold">Stripe</h3>
-              <VelionIconButton
+              <VerevonIconButton
                 onClick={() => onOpenModal({
                   type: "work",
                   title: "Stripe context",
@@ -411,7 +411,7 @@ function DetailsPanel({
                 className="text-[#9C9A96]"
               >
                 <ExternalLink className="size-4" />
-              </VelionIconButton>
+              </VerevonIconButton>
             </div>
             {context?.stripe ? (
               <div className="space-y-2 rounded-[9px] border border-[#E1DAD1] bg-[#FAF8F5] p-2.5 text-[12px]">
@@ -429,7 +429,7 @@ function DetailsPanel({
   );
 }
 
-function VelionPanel({
+function VerevonPanel({
   onInsertQuickReply,
   onMacroExecuted,
   onOpenModal,
@@ -441,9 +441,9 @@ function VelionPanel({
   selectedTicket: ZammadTicket | null;
 }) {
   const [panelState, dispatchPanelAction] = useReducer(
-    velionPanelReducer,
+    verevonPanelReducer,
     selectedTicket?.id ?? null,
-    createInitialVelionPanelState,
+    createInitialVerevonPanelState,
   );
 
   useEffect(() => {
@@ -499,38 +499,38 @@ function VelionPanel({
           <EmptyAsideState
             icon={<Bot className="size-6" />}
             title="Select a ticket"
-            body="Velion can draft replies, summarize context, and surface relevant sources once a conversation is open."
+            body="Verevon can draft replies, summarize context, and surface relevant sources once a conversation is open."
           />
         ) : (
           <div className="space-y-4">
-            <section className="velion-aside-card p-4">
+            <section className="verevon-aside-card p-4">
               <div className="mb-3 flex items-center gap-2">
                 <Bot className="size-4 text-[#DD7A1F]" />
-                <h2 className="text-[14px] font-semibold">Velion action plan</h2>
+                <h2 className="text-[14px] font-semibold">Verevon action plan</h2>
               </div>
               <div className="space-y-2">
                 <ActionSuggestion
                   title="Confirm intent"
                   body="Customer is asking for resolution timing and next step clarity."
                   actionLabel="Run"
-                  onRun={() => onOpenModal({ type: "velion", prompt: "Confirm customer intent, draft the next reply, and add a private action note." })}
+                  onRun={() => onOpenModal({ type: "verevon", prompt: "Confirm customer intent, draft the next reply, and add a private action note." })}
                 />
                 <ActionSuggestion
                   title="Use source-backed reply"
                   body="Insert policy excerpts only when a connected source supports the answer."
                   actionLabel="Run"
-                  onRun={() => onOpenModal({ type: "velion", prompt: "Draft a source-backed reply and keep the evidence in the audit stream." })}
+                  onRun={() => onOpenModal({ type: "verevon", prompt: "Draft a source-backed reply and keep the evidence in the audit stream." })}
                 />
                 <ActionSuggestion
                   title="Route if overdue"
                   body="If SLA risk is high, assign to the owning support queue before replying."
                   actionLabel="Run"
-                  onRun={() => onOpenModal({ type: "velion", prompt: "Check SLA risk, raise priority if needed, and route this conversation to the right queue." })}
+                  onRun={() => onOpenModal({ type: "verevon", prompt: "Check SLA risk, raise priority if needed, and route this conversation to the right queue." })}
                 />
               </div>
             </section>
 
-            <section className="velion-aside-card velion-aside-card-soft p-4">
+            <section className="verevon-aside-card verevon-aside-card-soft p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2">
                   <Sparkles className="size-4 text-[#DD7A1F]" />
@@ -568,7 +568,7 @@ function VelionPanel({
               )}
             </section>
 
-            <section className="velion-aside-card p-4">
+            <section className="verevon-aside-card p-4">
               <div className="mb-3 flex items-center justify-between">
                 <h2 className="text-[14px] font-semibold">Conversation summary</h2>
                 <button type="button" onClick={generateSummary} className="text-[12px] font-medium text-[#006ADC]">
@@ -576,11 +576,11 @@ function VelionPanel({
                 </button>
               </div>
               <p className="text-[13px] leading-5 text-[#626260]">
-                {panelState.summaryLoading ? "Generating summary…" : panelState.summary ?? "Ask Velion to summarize the conversation and extract the customer intent."}
+                {panelState.summaryLoading ? "Generating summary…" : panelState.summary ?? "Ask Verevon to summarize the conversation and extract the customer intent."}
               </p>
             </section>
 
-            <section className="velion-aside-card p-4">
+            <section className="verevon-aside-card p-4">
               <h2 className="mb-3 text-[14px] font-semibold">Relevant sources</h2>
               <div className="space-y-2 text-[13px] text-[#626260]">
                 <SourceRow title="Refund policy" />
@@ -600,19 +600,19 @@ function VelionPanel({
             <input
               value={panelState.question}
               onChange={(event) => dispatchPanelAction({ type: "question-changed", value: event.target.value })}
-              placeholder="Ask Velion"
+              placeholder="Ask Verevon"
               className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-[#9C9A96]"
-              aria-label="Ask Velion a question"
+              aria-label="Ask Verevon a question"
             />
-            <VelionIconButton
-              onClick={() => onOpenModal({ type: "velion", prompt: panelState.question })}
-              aria-label="Send Velion question"
+            <VerevonIconButton
+              onClick={() => onOpenModal({ type: "verevon", prompt: panelState.question })}
+              aria-label="Send Verevon question"
               size="xs"
               radius="pill"
               className="bg-[#111111] text-white hover:bg-[#2A2A2A] hover:text-white"
             >
               <Send className="size-3.5" />
-            </VelionIconButton>
+            </VerevonIconButton>
           </div>
         </div>
       </div>
@@ -723,7 +723,7 @@ function CalendarPanel({ selectedTicket }: { selectedTicket: ZammadTicket | null
         onSelect={(date) => dispatchCalendarAction({ type: "date-selected", date })}
       />
 
-      <section className="velion-aside-card mt-4 p-3">
+      <section className="verevon-aside-card mt-4 p-3">
         <div className="mb-2 flex items-center justify-between">
           <h3 className="text-[13px] font-semibold">
             {selectedDate.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
@@ -737,7 +737,7 @@ function CalendarPanel({ selectedTicket }: { selectedTicket: ZammadTicket | null
         </div>
       </section>
 
-      <section className="velion-aside-card velion-aside-card-muted mt-4 p-3">
+      <section className="verevon-aside-card verevon-aside-card-muted mt-4 p-3">
         <h3 className="text-[13px] font-semibold">Schedule follow-up</h3>
         {/* Backend handoff: when the calendar service supports linked resources, include the ticket id and channel in the event metadata. */}
         <p className="mt-1 text-[12px] leading-5 text-[#7B7B78]">
@@ -755,29 +755,29 @@ function CalendarPanel({ selectedTicket }: { selectedTicket: ZammadTicket | null
             aria-label="Follow-up title"
             className="min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-[#9C9A96]"
           />
-          <VelionButton variant="primary" size="xs" radius="sm" disabled={saving} onClick={() => void saveFollowUp()} className="px-2 font-semibold disabled:opacity-50">
+          <VerevonButton variant="primary" size="xs" radius="sm" disabled={saving} onClick={() => void saveFollowUp()} className="px-2 font-semibold disabled:opacity-50">
             Add
-          </VelionButton>
+          </VerevonButton>
         </div>
       </section>
 
-      <section className="velion-aside-card mt-4 p-3">
+      <section className="verevon-aside-card mt-4 p-3">
         <h3 className="text-[13px] font-semibold">Calendar note</h3>
-        <VelionTextarea
+        <VerevonTextarea
           rows={3}
           value={noteText}
           onChange={(event) => dispatchCalendarAction({ type: "note-text-changed", value: event.target.value })}
           placeholder="Add a private follow-up note…"
           aria-label="Private follow-up note"
           variant="compact"
-          className="velion-textarea-sm mt-2 resize-none bg-[#FAF8F5] text-[12px]"
+          className="verevon-textarea-sm mt-2 resize-none bg-[#FAF8F5] text-[12px]"
         />
-        <VelionButton variant="primary" size="xs" radius="sm" disabled={!noteText.trim() || saving} onClick={() => void saveNote()} className="mt-2 px-3 text-[12px] font-semibold disabled:opacity-40">
+        <VerevonButton variant="primary" size="xs" radius="sm" disabled={!noteText.trim() || saving} onClick={() => void saveNote()} className="mt-2 px-3 text-[12px] font-semibold disabled:opacity-40">
           Save note
-        </VelionButton>
+        </VerevonButton>
       </section>
 
-      <section className="velion-aside-card mt-4 p-3">
+      <section className="verevon-aside-card mt-4 p-3">
         <h3 className="mb-2 text-[13px] font-semibold">Upcoming</h3>
         {!upcomingEvents.length ? <p className="text-[12px] text-[#7B7B78]">No upcoming calendar events.</p> : null}
         {upcomingEvents.map((event) => <CalendarEventRow key={event.id} event={event} />)}
@@ -879,7 +879,7 @@ function MacrosPanel({ onMacroExecuted, selectedTicket }: { onMacroExecuted: () 
           {macros.length ? macros.map((macro) => (
             <li key={macro.id} className="flex items-center justify-between gap-2 px-4 py-3">
               <span className="truncate text-[13px] text-[#626260]">{macro.name}</span>
-              <VelionButton
+              <VerevonButton
                 disabled={!selectedTicket || runningMacroId === macro.id}
                 onClick={() => void runMacro(macro.id)}
                 size="xs"
@@ -888,7 +888,7 @@ function MacrosPanel({ onMacroExecuted, selectedTicket }: { onMacroExecuted: () 
               >
                 <Play className={cn("size-3", runningMacroId === macro.id ? "animate-pulse" : "")} />
                 {runningMacroId === macro.id ? "Running" : "Run"}
-              </VelionButton>
+              </VerevonButton>
             </li>
           )) : (
             <li className="px-4 py-3 text-[12px] text-[#7B7B78]">No macros available.</li>
@@ -915,7 +915,7 @@ function ActionSuggestion({
       <div className="flex items-center justify-between gap-2">
         <p className="text-[12px] font-semibold text-[#111111]">{title}</p>
         {onRun ? (
-          <VelionButton
+          <VerevonButton
             onClick={onRun}
             variant="primary"
             size="xs"
@@ -923,7 +923,7 @@ function ActionSuggestion({
             className="h-7 shrink-0 px-2 py-1 text-[11px] font-semibold"
           >
             {actionLabel ?? "Open"}
-          </VelionButton>
+          </VerevonButton>
         ) : null}
       </div>
       <p className="mt-1 text-[12px] leading-5 text-[#626260]">{body}</p>

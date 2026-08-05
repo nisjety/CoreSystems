@@ -5,8 +5,8 @@
 -- preference rows in 004 are the per-user overrides on top of these
 -- defaults.
 --
--- The seed below covers the events velion-core publishes today (see
--- velion-gap.md §8.30 G44 and §11). Add a new row whenever a new workflow
+-- The seed below covers the events verevon-core publishes today (see
+-- verevon-gap.md §8.30 G44 and §11). Add a new row whenever a new workflow
 -- ships in notification-core or in an upstream service.
 CREATE TABLE IF NOT EXISTS notification_channel_configs (
     org_id                  TEXT        NOT NULL,

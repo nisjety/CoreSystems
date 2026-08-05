@@ -60,10 +60,10 @@ pub struct InferenceConfig {
     /// Prompt cache TTL in seconds.
     pub cache_ttl_secs: u64,
 
-    /// Master switch for the Velion intent layer (from `VELION_INTENT_ENABLED`,
-    /// default on). When off, `velion-*` model ids fall through to the legacy
+    /// Master switch for the Verevon intent layer (from `VEREVON_INTENT_ENABLED`,
+    /// default on). When off, `verevon-*` model ids fall through to the legacy
     /// per-provider default resolution.
-    pub velion_intent_enabled: bool,
+    pub verevon_intent_enabled: bool,
 
     /// cost-core base URL for the intent layer's budget check (from
     /// `COST_CORE_URL`). `None` disables the budget gate (posture is always
@@ -71,9 +71,9 @@ pub struct InferenceConfig {
     pub cost_core_url: Option<String>,
 
     /// Monthly USD budget cap used as the denominator for the budget posture
-    /// (from `VELION_INTENT_BUDGET_USD`, default 50.0). Seeds the bootstrap
+    /// (from `VEREVON_INTENT_BUDGET_USD`, default 50.0). Seeds the bootstrap
     /// `RoutingPolicy::budget_cap_usd`; a session-core policy overrides it.
-    pub velion_intent_budget_usd: f64,
+    pub verevon_intent_budget_usd: f64,
 
     /// session-core base URL for the runtime `RoutingPolicy` store (from
     /// `SESSION_CORE_URL` or the compose `SESSION_CORE_ADDR`). `None` disables
@@ -129,8 +129,8 @@ impl InferenceConfig {
             .parse()
             .context("INFERENCE_CACHE_TTL_SECS must be a valid u64")?;
 
-        // Velion intent layer — on unless explicitly disabled with a falsey value.
-        let velion_intent_enabled = std::env::var("VELION_INTENT_ENABLED")
+        // Verevon intent layer — on unless explicitly disabled with a falsey value.
+        let verevon_intent_enabled = std::env::var("VEREVON_INTENT_ENABLED")
             .map(|v| {
                 !matches!(
                     v.trim().to_ascii_lowercase().as_str(),
@@ -144,7 +144,7 @@ impl InferenceConfig {
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty());
 
-        let velion_intent_budget_usd: f64 = std::env::var("VELION_INTENT_BUDGET_USD")
+        let verevon_intent_budget_usd: f64 = std::env::var("VEREVON_INTENT_BUDGET_USD")
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(50.0);
@@ -214,9 +214,9 @@ impl InferenceConfig {
             ),
             max_retries_per_provider: max_retries,
             cache_ttl_secs: cache_ttl,
-            velion_intent_enabled,
+            verevon_intent_enabled,
             cost_core_url,
-            velion_intent_budget_usd,
+            verevon_intent_budget_usd,
             session_core_url,
             router_policy_refresh_secs,
             azure_openai_region,

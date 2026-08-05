@@ -7,6 +7,7 @@
 
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
+use mp_ids::new_ulid;
 use sqlx::FromRow;
 use uuid::Uuid;
 
@@ -38,6 +39,17 @@ const ALLOWED_FAILURE_CODES: &[&str] = &[
     "cancelled",
 ];
 
+/// Verified Outcome Foundation (verevon-roadmap.md §3b) status strings, kept
+/// in exact sync with migration `0020_verification_result.sql`'s CHECK
+/// constraint and `model_plane.v1.VerificationStatus`'s non-`UNSPECIFIED`
+/// variants.
+const ALLOWED_VERIFICATION_STATUSES: &[&str] = &[
+    "unknown",
+    "verified_success",
+    "verified_failure",
+    "partially_verified",
+];
+
 /// The exact record returned to an authenticated worker after it claims a
 /// lease. It has identifiers and a one-time opaque capability only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +68,48 @@ pub struct ClaimedApprovalDelivery {
 pub struct AcknowledgedApprovalDelivery {
     pub attempt: u32,
     pub terminal: bool,
+    pub settled: bool,
     pub next_attempt_at: Option<DateTime<Utc>>,
+}
+
+/// A durable, immutable record that a worker began one exact approved action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartedContinuationReceipt {
+    pub receipt_id: String,
+    pub already_started: bool,
+}
+
+/// The only terminal outcome facts permitted for a started continuation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContinuationOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuationOutcomeWrite {
+    pub recorded: bool,
+    pub already_finalized: bool,
+    /// Populated only when `recorded` — the run this outcome belongs to, so a
+    /// caller can broadcast an `ApprovalContinuationVerified` event without a
+    /// second round trip. Empty on the `already_finalized` (no-op replay)
+    /// path, since nothing new happened worth broadcasting.
+    pub run_id: String,
+}
+
+/// Verified Outcome Foundation (verevon-roadmap.md §3b): an optional
+/// independent judgment on whether a completed/failed continuation's claimed
+/// outcome actually happened, distinct from `ContinuationOutcome` itself (a
+/// workflow-state concept — did the dispatcher consider this delivery done).
+/// Absent for a caller that doesn't yet produce one — stored as all-NULL,
+/// never inferred from the outcome.
+#[derive(Debug, Clone, Copy)]
+pub struct VerificationFields<'a> {
+    /// One of `ALLOWED_VERIFICATION_STATUSES`.
+    pub status: &'a str,
+    pub method: &'a str,
+    pub reason: &'a str,
 }
 
 /// The only acknowledgements currently accepted by the outbox. There is no
@@ -66,6 +119,7 @@ pub struct AcknowledgedApprovalDelivery {
 pub enum DeliveryAcknowledgement {
     Retry,
     Terminal,
+    Settled,
 }
 
 #[derive(FromRow)]
@@ -188,6 +242,88 @@ WHERE d.org_id = $1 \
   AND d.lease_expires_at > now() \
 FOR UPDATE";
 
+/// A descriptor can be read only through the same live worker lease that will
+/// later consume it. Normal approval APIs deliberately never project this
+/// retained action input.
+const LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL: &str =
+    "SELECT a.metadata -> 'continuation_descriptor' \
+FROM approval_delivery_outbox AS d \
+JOIN approvals AS a ON a.id = d.approval_id \
+  AND a.run_id = d.run_id \
+  AND a.org_id = d.org_id \
+  AND a.user_id = d.user_id \
+WHERE d.org_id = $1 \
+  AND d.lease_owner = $2 \
+  AND d.lease_token_hash = $3 \
+  AND d.delivery_id = $4 \
+  AND d.approval_id = $5 \
+  AND d.state = 'processing' \
+  AND d.lease_expires_at > now() \
+  AND a.status = 'granted' \
+  AND a.metadata ? 'continuation_descriptor'";
+
+/// The descriptor's version and action fingerprint come exclusively from the
+/// persisted descriptor. A worker cannot choose either. The receipt ID is
+/// unique to the delivery so a retry must reuse proof of the first start.
+const INSERT_CONTINUATION_START_RECEIPT_SQL: &str = "INSERT INTO approval_continuation_receipts \
+    (receipt_id, delivery_id, approval_id, run_id, org_id, user_id, descriptor_version, \
+     action_fingerprint, execution_service_id) \
+SELECT $6, d.delivery_id, d.approval_id, d.run_id, d.org_id, d.user_id, \
+       (a.metadata -> 'continuation_descriptor' ->> 'version')::smallint, \
+       a.metadata -> 'continuation_descriptor' ->> 'action_fingerprint', \
+       $2 \
+FROM approval_delivery_outbox AS d \
+JOIN approvals AS a ON a.id = d.approval_id \
+  AND a.run_id = d.run_id \
+  AND a.org_id = d.org_id \
+  AND a.user_id = d.user_id \
+WHERE d.org_id = $1 \
+  AND d.lease_owner = $2 \
+  AND d.lease_token_hash = $3 \
+  AND d.delivery_id = $4 \
+  AND d.approval_id = $5 \
+  AND d.state = 'processing' \
+  AND d.lease_expires_at > now() \
+  AND a.status = 'granted' \
+  AND a.metadata ? 'continuation_descriptor' \
+  AND a.metadata -> 'continuation_descriptor' ->> 'run_id' = d.run_id \
+  AND a.metadata -> 'continuation_descriptor' ->> 'org_id' = d.org_id \
+  AND a.metadata -> 'continuation_descriptor' ->> 'user_id' = d.user_id \
+ON CONFLICT (delivery_id) DO NOTHING \
+RETURNING receipt_id";
+
+const GET_CONTINUATION_START_RECEIPT_SQL: &str = "SELECT receipt_id \
+FROM approval_continuation_receipts \
+WHERE delivery_id = $1";
+
+const INSERT_CONTINUATION_OUTCOME_SQL: &str = "INSERT INTO approval_continuation_outcomes \
+    (receipt_id, outcome, provider_receipt_id, failure_code, \
+     verification_status, verification_method, verification_reason) \
+SELECT r.receipt_id, $6, $7, $8, $10, $11, $12 \
+FROM approval_continuation_receipts AS r \
+JOIN approval_delivery_outbox AS d ON d.delivery_id = r.delivery_id \
+WHERE d.org_id = $1 \
+  AND d.lease_owner = $2 \
+  AND d.lease_token_hash = $3 \
+  AND d.delivery_id = $4 \
+  AND d.approval_id = $5 \
+  AND r.receipt_id = $9 \
+  AND d.state = 'processing' \
+  AND d.lease_expires_at > now() \
+ON CONFLICT (receipt_id) DO NOTHING \
+RETURNING receipt_id";
+
+const GET_CONTINUATION_OUTCOME_SQL: &str = "SELECT receipt_id \
+FROM approval_continuation_outcomes \
+WHERE receipt_id = $1";
+
+/// `receipt_id` is `approval_continuation_receipts`' primary key, so this is
+/// a single indexed lookup — used only to attach `run_id` to a fresh outcome
+/// write for event broadcast (see `record_continuation_outcome`).
+const GET_CONTINUATION_RECEIPT_RUN_ID_SQL: &str = "SELECT run_id \
+FROM approval_continuation_receipts \
+WHERE receipt_id = $1";
+
 /// Terminal settlement is also lease-bound. It never records a successful
 /// continuation and therefore cannot cause a `RunResumedAfterApproval` event.
 const ACK_TERMINAL_APPROVAL_DELIVERY_SQL: &str = "UPDATE approval_delivery_outbox AS d \
@@ -203,6 +339,30 @@ WHERE d.org_id = $1 \
   AND d.delivery_id = $4 \
   AND d.state = 'processing' \
   AND d.lease_expires_at > now() \
+RETURNING d.attempts, d.state, d.next_attempt_at";
+
+/// Settlement is possible only after the same active lease recorded a
+/// completed immutable continuation outcome with a non-empty provider receipt.
+const ACK_SETTLED_APPROVAL_DELIVERY_SQL: &str = "UPDATE approval_delivery_outbox AS d \
+SET state = 'settled', \
+    settled_at = now(), \
+    lease_owner = NULL, \
+    lease_token_hash = NULL, \
+    lease_expires_at = NULL, \
+    last_failure_code = NULL \
+FROM approval_continuation_receipts AS r \
+JOIN approval_continuation_outcomes AS o ON o.receipt_id = r.receipt_id \
+WHERE d.org_id = $1 \
+  AND d.lease_owner = $2 \
+  AND d.lease_token_hash = $3 \
+  AND d.delivery_id = $4 \
+  AND r.receipt_id = $5 \
+  AND r.delivery_id = d.delivery_id \
+  AND r.approval_id = d.approval_id \
+  AND d.state = 'processing' \
+  AND d.lease_expires_at > now() \
+  AND o.outcome = 'completed' \
+  AND o.provider_receipt_id IS NOT NULL \
 RETURNING d.attempts, d.state, d.next_attempt_at";
 
 /// Deterministic capped exponential backoff. Attempt 1 waits 5 seconds,
@@ -288,11 +448,13 @@ fn row_to_acknowledged(
     let terminal = match row.state.as_str() {
         "terminal" => true,
         "pending" => false,
+        "settled" => false,
         _ => bail!("unexpected approval delivery acknowledgement state"),
     };
     Ok(AcknowledgedApprovalDelivery {
         attempt,
         terminal,
+        settled: row.state == "settled",
         next_attempt_at: (!terminal).then_some(row.next_attempt_at),
     })
 }
@@ -352,10 +514,24 @@ pub async fn acknowledge_delivery(
     lease_token: &str,
     acknowledgement: DeliveryAcknowledgement,
     failure_code: &str,
+    continuation_receipt_id: &str,
 ) -> Result<Option<AcknowledgedApprovalDelivery>> {
     validate_delivery_scope(org_id, worker_id)?;
     validate_acknowledgement_input(delivery_id, lease_token)?;
-    validate_failure_code(failure_code)?;
+    match acknowledgement {
+        DeliveryAcknowledgement::Retry | DeliveryAcknowledgement::Terminal => {
+            validate_failure_code(failure_code)?;
+            if !continuation_receipt_id.is_empty() {
+                bail!("failure acknowledgement must not include a continuation receipt");
+            }
+        }
+        DeliveryAcknowledgement::Settled => {
+            validate_nonempty_bounded(continuation_receipt_id, "continuation_receipt_id", 128)?;
+            if !failure_code.is_empty() {
+                bail!("settled acknowledgement must not include a failure code");
+            }
+        }
+    }
     let token_hash = hash_lease_token(lease_token);
     let max_attempts = i32::try_from(MAX_APPROVAL_DELIVERY_ATTEMPTS).unwrap_or(i32::MAX);
 
@@ -398,10 +574,191 @@ pub async fn acknowledge_delivery(
                 .fetch_optional(&mut *transaction)
                 .await?
         }
+        DeliveryAcknowledgement::Settled => {
+            sqlx::query_as::<_, AcknowledgedApprovalDeliveryRow>(ACK_SETTLED_APPROVAL_DELIVERY_SQL)
+                .bind(org_id)
+                .bind(worker_id)
+                .bind(&token_hash)
+                .bind(delivery_id)
+                .bind(continuation_receipt_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+        }
     };
     let acknowledged = row.as_ref().map(row_to_acknowledged).transpose()?;
     transaction.commit().await?;
     Ok(acknowledged)
+}
+
+/// Return the immutable descriptor only to the worker holding the exact
+/// active lease. Missing, stale, foreign, and descriptor-free records are
+/// intentionally indistinguishable.
+pub async fn load_active_continuation_descriptor(
+    pool: &Pool,
+    org_id: &str,
+    worker_id: &str,
+    delivery_id: &str,
+    approval_id: &str,
+    lease_token: &str,
+) -> Result<Option<serde_json::Value>> {
+    validate_delivery_scope(org_id, worker_id)?;
+    validate_acknowledgement_input(delivery_id, lease_token)?;
+    validate_nonempty_bounded(approval_id, "approval_id", 128)?;
+    let token_hash = hash_lease_token(lease_token);
+    sqlx::query_scalar(LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL)
+        .bind(org_id)
+        .bind(worker_id)
+        .bind(token_hash)
+        .bind(delivery_id)
+        .bind(approval_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(Into::into)
+}
+
+/// Record exactly one immutable start receipt for an active lease. A duplicate
+/// result tells a recovered worker not to execute the action a second time.
+pub async fn record_continuation_started(
+    pool: &Pool,
+    org_id: &str,
+    worker_id: &str,
+    delivery_id: &str,
+    approval_id: &str,
+    lease_token: &str,
+) -> Result<Option<StartedContinuationReceipt>> {
+    validate_delivery_scope(org_id, worker_id)?;
+    validate_acknowledgement_input(delivery_id, lease_token)?;
+    validate_nonempty_bounded(approval_id, "approval_id", 128)?;
+    let token_hash = hash_lease_token(lease_token);
+    let receipt_id = format!("continuation_receipt_{}", new_ulid());
+    let inserted: Option<String> = sqlx::query_scalar(INSERT_CONTINUATION_START_RECEIPT_SQL)
+        .bind(org_id)
+        .bind(worker_id)
+        .bind(token_hash)
+        .bind(delivery_id)
+        .bind(approval_id)
+        .bind(&receipt_id)
+        .fetch_optional(pool)
+        .await?;
+    if let Some(receipt_id) = inserted {
+        return Ok(Some(StartedContinuationReceipt {
+            receipt_id,
+            already_started: false,
+        }));
+    }
+    let existing: Option<String> = sqlx::query_scalar(GET_CONTINUATION_START_RECEIPT_SQL)
+        .bind(delivery_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(existing.map(|receipt_id| StartedContinuationReceipt {
+        receipt_id,
+        already_started: true,
+    }))
+}
+
+fn validate_continuation_outcome(
+    outcome: ContinuationOutcome,
+    provider_receipt_id: &str,
+    failure_code: &str,
+) -> Result<()> {
+    match outcome {
+        ContinuationOutcome::Completed => {
+            validate_nonempty_bounded(provider_receipt_id, "provider_receipt_id", 256)?;
+            if !failure_code.is_empty() {
+                bail!("completed continuation must not have a failure code");
+            }
+        }
+        ContinuationOutcome::Failed | ContinuationOutcome::Cancelled => {
+            if !provider_receipt_id.is_empty() {
+                bail!("failed continuation must not have a provider receipt");
+            }
+            validate_failure_code(failure_code)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_verification_fields(verification: Option<VerificationFields<'_>>) -> Result<()> {
+    let Some(verification) = verification else {
+        return Ok(());
+    };
+    if !ALLOWED_VERIFICATION_STATUSES.contains(&verification.status) {
+        bail!("unsupported verification status");
+    }
+    validate_nonempty_bounded(verification.method, "verification_method", 64)?;
+    if verification.reason.len() > 512 || verification.reason.chars().any(char::is_control) {
+        bail!("invalid verification_reason");
+    }
+    Ok(())
+}
+
+/// Append the only terminal outcome for a started continuation. The active
+/// lease and receipt binding make a stale worker incapable of finalizing a
+/// later worker's attempt.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_continuation_outcome(
+    pool: &Pool,
+    org_id: &str,
+    worker_id: &str,
+    delivery_id: &str,
+    approval_id: &str,
+    receipt_id: &str,
+    lease_token: &str,
+    outcome: ContinuationOutcome,
+    provider_receipt_id: &str,
+    failure_code: &str,
+    verification: Option<VerificationFields<'_>>,
+) -> Result<Option<ContinuationOutcomeWrite>> {
+    validate_delivery_scope(org_id, worker_id)?;
+    validate_acknowledgement_input(delivery_id, lease_token)?;
+    validate_nonempty_bounded(approval_id, "approval_id", 128)?;
+    validate_nonempty_bounded(receipt_id, "receipt_id", 128)?;
+    validate_continuation_outcome(outcome, provider_receipt_id, failure_code)?;
+    validate_verification_fields(verification)?;
+    let token_hash = hash_lease_token(lease_token);
+    let outcome = match outcome {
+        ContinuationOutcome::Completed => "completed",
+        ContinuationOutcome::Failed => "failed",
+        ContinuationOutcome::Cancelled => "cancelled",
+    };
+    let inserted: Option<String> = sqlx::query_scalar(INSERT_CONTINUATION_OUTCOME_SQL)
+        .bind(org_id)
+        .bind(worker_id)
+        .bind(token_hash)
+        .bind(delivery_id)
+        .bind(approval_id)
+        .bind(outcome)
+        .bind((!provider_receipt_id.is_empty()).then_some(provider_receipt_id))
+        .bind((!failure_code.is_empty()).then_some(failure_code))
+        .bind(receipt_id)
+        .bind(verification.map(|v| v.status))
+        .bind(verification.map(|v| v.method))
+        .bind(verification.map(|v| v.reason))
+        .fetch_optional(pool)
+        .await?;
+    if inserted.is_some() {
+        // The INSERT...SELECT...RETURNING above can only return
+        // approval_continuation_outcomes' own columns, not the joined
+        // receipt's run_id — a second, indexed (PK) lookup is simplest.
+        let run_id: Option<String> = sqlx::query_scalar(GET_CONTINUATION_RECEIPT_RUN_ID_SQL)
+            .bind(receipt_id)
+            .fetch_optional(pool)
+            .await?;
+        return Ok(Some(ContinuationOutcomeWrite {
+            recorded: true,
+            already_finalized: false,
+            run_id: run_id.unwrap_or_default(),
+        }));
+    }
+    let existing: Option<String> = sqlx::query_scalar(GET_CONTINUATION_OUTCOME_SQL)
+        .bind(receipt_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(existing.map(|_| ContinuationOutcomeWrite {
+        recorded: false,
+        already_finalized: true,
+        run_id: String::new(),
+    }))
 }
 
 #[cfg(test)]
@@ -432,6 +789,138 @@ mod tests {
         ] {
             assert!(CLAIM_APPROVAL_DELIVERY_SQL.contains(required));
         }
+    }
+
+    #[test]
+    fn descriptor_lookup_is_lease_bound_and_never_uses_general_approval_reads() {
+        for required in [
+            "d.lease_owner = $2",
+            "d.lease_token_hash = $3",
+            "d.delivery_id = $4",
+            "d.approval_id = $5",
+            "d.lease_expires_at > now()",
+            "a.metadata ? 'continuation_descriptor'",
+        ] {
+            assert!(
+                LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL.contains(required),
+                "descriptor lookup must require {required}"
+            );
+        }
+        assert!(!LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL.contains("SELECT a.metadata FROM"));
+    }
+
+    #[test]
+    fn continuation_receipts_are_append_only_and_distinct_from_delivery_leases() {
+        let migration = include_str!("../migrations/0018_approval_continuation_receipts.sql");
+        for required in [
+            "CREATE TABLE IF NOT EXISTS approval_continuation_receipts",
+            "delivery_id TEXT NOT NULL UNIQUE",
+            "action_fingerprint TEXT NOT NULL",
+            "CREATE TABLE IF NOT EXISTS approval_continuation_outcomes",
+            "outcome IN ('completed', 'failed', 'cancelled')",
+        ] {
+            assert!(
+                migration.contains(required),
+                "receipt migration requires {required}"
+            );
+        }
+        assert!(!migration.contains("UPDATE approval_continuation_receipts"));
+        assert!(!migration.contains("provider_response"));
+        assert!(!migration.contains("tool_input"));
+    }
+
+    #[test]
+    fn receipt_start_derives_scope_and_fingerprint_from_the_live_descriptor() {
+        for required in [
+            "d.lease_owner = $2",
+            "d.lease_token_hash = $3",
+            "d.delivery_id = $4",
+            "d.approval_id = $5",
+            "a.metadata -> 'continuation_descriptor' ->> 'action_fingerprint'",
+            "a.metadata -> 'continuation_descriptor' ->> 'run_id' = d.run_id",
+            "ON CONFLICT (delivery_id) DO NOTHING",
+        ] {
+            assert!(
+                INSERT_CONTINUATION_START_RECEIPT_SQL.contains(required),
+                "start receipt must require {required}"
+            );
+        }
+        assert!(!INSERT_CONTINUATION_START_RECEIPT_SQL.contains("tool_input"));
+        assert!(!INSERT_CONTINUATION_START_RECEIPT_SQL.contains("provider_response"));
+    }
+
+    #[test]
+    fn continuation_outcome_requires_live_lease_and_authoritative_completion_receipt() {
+        for required in [
+            "d.lease_owner = $2",
+            "d.lease_token_hash = $3",
+            "d.delivery_id = $4",
+            "d.approval_id = $5",
+            "r.receipt_id = $9",
+            "verification_status, verification_method, verification_reason",
+            "ON CONFLICT (receipt_id) DO NOTHING",
+        ] {
+            assert!(
+                INSERT_CONTINUATION_OUTCOME_SQL.contains(required),
+                "outcome write must require {required}"
+            );
+        }
+        assert!(validate_continuation_outcome(
+            ContinuationOutcome::Completed,
+            "provider-receipt-1",
+            ""
+        )
+        .is_ok());
+        assert!(validate_continuation_outcome(ContinuationOutcome::Completed, "", "").is_err());
+        assert!(validate_continuation_outcome(
+            ContinuationOutcome::Failed,
+            "provider-receipt-1",
+            "invalid_continuation"
+        )
+        .is_err());
+        assert!(validate_continuation_outcome(
+            ContinuationOutcome::Failed,
+            "",
+            "invalid_continuation"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn verification_fields_are_optional_and_validated_against_the_fixed_allowlist() {
+        assert!(validate_verification_fields(None).is_ok());
+        assert!(validate_verification_fields(Some(VerificationFields {
+            status: "verified_success",
+            method: "structural",
+            reason: "provider returned an authoritative receipt id",
+        }))
+        .is_ok());
+        assert!(validate_verification_fields(Some(VerificationFields {
+            status: "made_up_status",
+            method: "structural",
+            reason: "",
+        }))
+        .is_err());
+        assert!(validate_verification_fields(Some(VerificationFields {
+            status: "verified_success",
+            method: "",
+            reason: "",
+        }))
+        .is_err());
+        // An empty reason is allowed (not every judgment needs a justification
+        // string) — only a control character or an over-long one is rejected.
+        assert!(validate_verification_fields(Some(VerificationFields {
+            status: "unknown",
+            method: "structural",
+            reason: "",
+        }))
+        .is_ok());
+        assert!(validate_verification_fields(Some(VerificationFields {
+            status: "unknown",
+            method: "structural",
+            reason: "contains a \0 control byte",
+        }))
+        .is_err());
     }
 
     #[test]
@@ -473,5 +962,34 @@ mod tests {
             assert!(query.contains("d.state = 'processing'"));
             assert!(!query.contains("'delivered'"));
         }
+    }
+
+    #[test]
+    fn settlement_requires_a_completed_receipt_and_never_claims_customer_delivery() {
+        for required in [
+            "d.lease_owner = $2",
+            "d.lease_token_hash = $3",
+            "r.receipt_id = $5",
+            "r.delivery_id = d.delivery_id",
+            "o.outcome = 'completed'",
+            "o.provider_receipt_id IS NOT NULL",
+            "state = 'settled'",
+        ] {
+            assert!(
+                ACK_SETTLED_APPROVAL_DELIVERY_SQL.contains(required),
+                "settlement must require {required}"
+            );
+        }
+        assert!(!ACK_SETTLED_APPROVAL_DELIVERY_SQL.contains("'delivered'"));
+        assert!(!ACK_SETTLED_APPROVAL_DELIVERY_SQL.contains("customer"));
+    }
+
+    #[test]
+    fn settlement_migration_names_internal_settlement_without_customer_delivery_claims() {
+        let migration = include_str!("../migrations/0019_approval_delivery_settlement.sql");
+        assert!(migration.contains("state IN ('pending', 'processing', 'terminal', 'settled')"));
+        assert!(migration.contains("ADD COLUMN IF NOT EXISTS settled_at"));
+        assert!(!migration.contains("customer_delivered"));
+        assert!(!migration.contains("provider_response"));
     }
 }

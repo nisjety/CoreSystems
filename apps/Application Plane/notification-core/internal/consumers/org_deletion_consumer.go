@@ -27,10 +27,10 @@ import (
 const (
 	// Subjects published by org-core's owner-gated GDPR soft-delete HTTP
 	// handlers (apps/Control Plane/org-core/internal/http) on the shared
-	// velion-nats bus.
-	SubjectOrgDeletionPending   = "velion.org.deletion.pending"
-	SubjectOrgDeletionReminder  = "velion.org.deletion.reminder"
-	SubjectOrgDeletionCancelled = "velion.org.deletion.cancelled"
+	// verevon-nats bus.
+	SubjectOrgDeletionPending   = "verevon.org.deletion.pending"
+	SubjectOrgDeletionReminder  = "verevon.org.deletion.reminder"
+	SubjectOrgDeletionCancelled = "verevon.org.deletion.cancelled"
 
 	// NotificationTypeOrgDeletion* are the notification.Request.Type values
 	// the runtime client (Novu workflow ID) and any future email template
@@ -54,7 +54,7 @@ const (
 	controlSharedStream = "AQENCIA_CONTROLPLANE"
 )
 
-// orgDeletionPendingEvent is the wire shape for velion.org.deletion.pending.
+// orgDeletionPendingEvent is the wire shape for verevon.org.deletion.pending.
 type orgDeletionPendingEvent struct {
 	OrgID         string   `json:"org_id"`
 	OrgName       string   `json:"org_name"`
@@ -63,7 +63,7 @@ type orgDeletionPendingEvent struct {
 	MemberUserIDs []string `json:"member_user_ids"`
 }
 
-// orgDeletionReminderEvent is the wire shape for velion.org.deletion.reminder.
+// orgDeletionReminderEvent is the wire shape for verevon.org.deletion.reminder.
 // Fired with days_remaining: 7 and again with days_remaining: 1.
 type orgDeletionReminderEvent struct {
 	OrgID         string   `json:"org_id"`
@@ -72,7 +72,7 @@ type orgDeletionReminderEvent struct {
 	MemberUserIDs []string `json:"member_user_ids"`
 }
 
-// orgDeletionCancelledEvent is the wire shape for velion.org.deletion.cancelled.
+// orgDeletionCancelledEvent is the wire shape for verevon.org.deletion.cancelled.
 // The published contract carries only org_id/org_name/cancelled_by — no
 // member roster. MemberUserIDs is decoded defensively (omitempty) so a
 // future org-core revision that adds a roster fans out automatically
@@ -225,7 +225,7 @@ func (s *OrgDeletionSubscriber) finish(msg *nats.Msg, outcome orgDeletionOutcome
 	}
 }
 
-// processPending maps velion.org.deletion.pending to one notification.Request
+// processPending maps verevon.org.deletion.pending to one notification.Request
 // per member. Testable without NATS.
 func (s *OrgDeletionSubscriber) processPending(ctx context.Context, event orgDeletionPendingEvent) orgDeletionOutcome {
 	orgID := strings.TrimSpace(event.OrgID)
@@ -250,7 +250,7 @@ func (s *OrgDeletionSubscriber) processPending(ctx context.Context, event orgDel
 	)
 }
 
-// processReminder maps velion.org.deletion.reminder to one notification.Request
+// processReminder maps verevon.org.deletion.reminder to one notification.Request
 // per member. Fired with days_remaining 7 and 1 today; any positive value is
 // accepted so a future additional reminder cadence isn't poison-terminated.
 func (s *OrgDeletionSubscriber) processReminder(ctx context.Context, event orgDeletionReminderEvent) orgDeletionOutcome {
@@ -274,7 +274,7 @@ func (s *OrgDeletionSubscriber) processReminder(ctx context.Context, event orgDe
 	)
 }
 
-// processCancelled maps velion.org.deletion.cancelled to one
+// processCancelled maps verevon.org.deletion.cancelled to one
 // notification.Request per member. The published contract carries no
 // member roster, so this falls back to notifying cancelled_by alone unless
 // member_user_ids is present (forward-compatible with a future org-core

@@ -20,14 +20,14 @@ import (
 // (AUTH_DATABASE_URL). When that pool is not configured the hard/anonymize
 // operations fail loudly rather than silently skipping auth-side data.
 //
-// Subjects (mirror auth-core's publishVelionAudit + the cross-plane contract):
-//   - velion.audit.v1.control.erasure       (durable audit)
-//   - velion.audit.v1.control.dsar_export    (durable audit)
-//   - velion.gdpr.erasure.requested          (cross-plane fan-out)
+// Subjects (mirror auth-core's publishVerevonAudit + the cross-plane contract):
+//   - verevon.audit.v1.control.erasure       (durable audit)
+//   - verevon.audit.v1.control.dsar_export    (durable audit)
+//   - verevon.gdpr.erasure.requested          (cross-plane fan-out)
 const (
-	ErasureAuditSubject      = "velion.audit.v2.control.user-core.erasure"
-	DSARExportAuditSubject   = "velion.audit.v2.control.user-core.dsar_export"
-	GDPRErasureFanoutSubject = "velion.gdpr.erasure.requested"
+	ErasureAuditSubject      = "verevon.audit.v2.control.user-core.erasure"
+	DSARExportAuditSubject   = "verevon.audit.v2.control.user-core.dsar_export"
+	GDPRErasureFanoutSubject = "verevon.gdpr.erasure.requested"
 )
 
 // DSARExport assembles a GDPR Art. 15 data-subject export from the Control
@@ -52,8 +52,8 @@ type DSARExport struct {
 // test; do not weaken it without updating that test.
 var DSARControlPlaneDisclosure = []string{
 	"Control Plane export: profile + org memberships + API key metadata.",
-	"Audit events for this subject are retained by audit-core (velion.audit.v2.control.user-core.*).",
-	"Model Plane run history / conversations and Data Plane documents are purged/exported via the velion.gdpr.erasure.requested fan-out (follow-up subscribers).",
+	"Audit events for this subject are retained by audit-core (verevon.audit.v2.control.user-core.*).",
+	"Model Plane run history / conversations and Data Plane documents are purged/exported via the verevon.gdpr.erasure.requested fan-out (follow-up subscribers).",
 }
 
 // BuildDSARExport gathers the data Control Plane owns for a subject. It never

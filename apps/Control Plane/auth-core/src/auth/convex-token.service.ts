@@ -84,7 +84,7 @@ type ModelPlaneTokenBundle = {
  *   PLANE_TOKEN_TTL_SANDBOX_MANAGER_SECONDS    (default 300s)
  *   PLANE_TOKEN_TTL_BRIDGE_CORE_SECONDS        (default 300s)
  *
- * Audience names match the path slug (and the velion `PlaneAudience`
+ * Audience names match the path slug (and the verevon `PlaneAudience`
  * union) for symmetry with the per-audience endpoints.
  */
 export type PlaneAudience =
@@ -735,6 +735,7 @@ export class ConvexTokenService {
 
   getJwks() {
     return {
+      planeTokenIssuer: this.planeIssuer,
       keys: [this.publicJwk],
     };
   }

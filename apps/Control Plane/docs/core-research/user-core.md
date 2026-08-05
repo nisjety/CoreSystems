@@ -39,9 +39,9 @@ shared stream/credential remains operational evidence rather than live proof.
 
 The verified-claim-only privilege and normalized-email fixes remain unchanged. User's release path uses a dedicated Control-bus principal and a dedicated shared-broker principal, sets token fallback to `0`, and has no runtime stream/consumer administration. A one-shot deployment provisioner owns topology; contract and scoped-ACL tests reject missing, placeholder, embedded, ambiguous, and over-privileged credentials. Full `go test ./...`, `go vet ./...`, and the earlier race pass remain green. No User container was recreated and no real profile was mutated in this final continuation; coordinated credential deployment is still an operational gate, not a production claim.
 
-## 2026-07-14 Velion gateway addendum (historical deployment evidence)
+## 2026-07-14 Verevon gateway addendum (historical deployment evidence)
 
-The Velion gateway ingress strips caller-supplied user ID, organization ID, role, profile, and internal-key headers before any upstream call. User Core self-service continues to require the audience-, request-, body-, subject-, organization-, and verified-profile-bound HMAC delegation described below; browser `X-User-Role` is not an authority input. The User Core container is healthy. This continuation changed no User Core source and performed no profile mutation; it preserves the existing regression evidence while confirming the repaired SPA/gateway path does not reintroduce raw identity headers.
+The Verevon gateway ingress strips caller-supplied user ID, organization ID, role, profile, and internal-key headers before any upstream call. User Core self-service continues to require the audience-, request-, body-, subject-, organization-, and verified-profile-bound HMAC delegation described below; browser `X-User-Role` is not an authority input. The User Core container is healthy. This continuation changed no User Core source and performed no profile mutation; it preserves the existing regression evidence while confirming the repaired SPA/gateway path does not reintroduce raw identity headers.
 
 ## 2026-07-11 production-readiness addendum (historical)
 
@@ -161,7 +161,7 @@ Current relationships:
 
 **Assessment against the audit gaps this WIP was suspected to address:**
 
-- **Case-insensitive User Core email lookup (prior audit gap): NOT closed.** The general-purpose `Repository.GetByEmail` — used by `Service.GetUserByEmail`, `Service.UpdateUser`'s email-uniqueness check, `Service.CreateUser`'s dedup path, and all of `event_handler.go`'s email-keyed event handlers — is untouched by this diff and remains `WHERE email = $1` (exact match, no `LOWER()`/`BTRIM()`). Confirmed both by reading `repository.go:144-149` and by a live curl reproduction (see Live Checks below): the same seeded user resolves on `local@velion.dev` but 404s on `Local@Velion.Dev` and `LOCAL@VELION.DEV`. The diff only added case-insensitivity to the narrow `MarkOnboardingComplete` match, which creates an inconsistency: onboarding completion now tolerates case drift but every other email-keyed lookup (dedup, uniqueness, event correlation) does not. A user whose auth-core session carries a differently-cased email than the row stored in `user_service.users` will still fail `GetUserByEmail`/`UpdateUser` dedup checks and can end up with duplicate rows.
+- **Case-insensitive User Core email lookup (prior audit gap): NOT closed.** The general-purpose `Repository.GetByEmail` — used by `Service.GetUserByEmail`, `Service.UpdateUser`'s email-uniqueness check, `Service.CreateUser`'s dedup path, and all of `event_handler.go`'s email-keyed event handlers — is untouched by this diff and remains `WHERE email = $1` (exact match, no `LOWER()`/`BTRIM()`). Confirmed both by reading `repository.go:144-149` and by a live curl reproduction (see Live Checks below): the same seeded user resolves on `local@verevon.dev` but 404s on `Local@Verevon.Dev` and `LOCAL@VEREVON.DEV`. The diff only added case-insensitivity to the narrow `MarkOnboardingComplete` match, which creates an inconsistency: onboarding completion now tolerates case drift but every other email-keyed lookup (dedup, uniqueness, event correlation) does not. A user whose auth-core session carries a differently-cased email than the row stored in `user_service.users` will still fail `GetUserByEmail`/`UpdateUser` dedup checks and can end up with duplicate rows.
 - **Revision/tombstone protection across delayed events (prior audit gap): NOT touched at all.** `event_handler.go` is not part of this diff. `HandleOrganizationMemberAdded`/`HandleOrganizationMemberRemoved` (and every other handler) apply whatever NATS message arrives with no sequence number, timestamp comparison, or tombstone check — an out-of-order `member_added` arriving after a `member_removed` for the same (user, org) pair will silently resurrect a membership that org-core already revoked. This is unchanged from the 2026-06-07 baseline and is still open.
 - **What it does close:** a real, previously-undocumented gap — onboarding drafts had no TTL/retention path at all (abandoned partial signups would sit in `onboarding_state` forever). This diff is a legitimate, self-contained feature addition, not a mock/stub, and the migration + Go code are mutually consistent.
 
@@ -173,9 +173,9 @@ Current relationships:
 - `GET http://localhost:3012/health` → `200 {"service":"user-service","status":"healthy",...}`.
 - `GET /api/v1/users/by-email/...` and `/api/v1/users/:id` with no credentials → `401 {"error":"unauthorized"}` (auth middleware correctly rejects unauthenticated calls).
 - Using the container's own `X-Internal-Api-Key` (fleet-shared internal key, read from the running container's env):
-  - `GET /api/v1/users/by-email/local@velion.dev` → `200`, returns the seeded dev user (`iivCjw2n4ZNjvBtShmz4Bugo0qF3eWod`).
-  - `GET /api/v1/users/by-email/Local@Velion.Dev` → `404 {"error":"User not found"}`.
-  - `GET /api/v1/users/by-email/LOCAL@VELION.DEV` → `404 {"error":"User not found"}`.
+  - `GET /api/v1/users/by-email/local@verevon.dev` → `200`, returns the seeded dev user (`iivCjw2n4ZNjvBtShmz4Bugo0qF3eWod`).
+  - `GET /api/v1/users/by-email/Local@Verevon.Dev` → `404 {"error":"User not found"}`.
+  - `GET /api/v1/users/by-email/LOCAL@VEREVON.DEV` → `404 {"error":"User not found"}`.
   - This directly reproduces the still-open case-insensitive-lookup gap for the same live email/user, live, today.
   - `GET /api/v1/users/<id>` with no `X-User-Role` header → `403 {"error":"admin role required"}`.
   - `GET /api/v1/users/<id>` with `X-User-Role: member` → `403` (correctly rejected).

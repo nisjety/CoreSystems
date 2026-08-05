@@ -1,10 +1,10 @@
-# ADR 0004 — Docker network topology: `velion-net` is the cross-plane shared bus; plane-specific nets are intra-plane only
+# ADR 0004 — Docker network topology: `verevon-net` is the cross-plane shared bus; plane-specific nets are intra-plane only
 
 - **Status**: proposed (ratify when team reviews)
 - **Date**: 2026-05-11
-- **Closes**: velion-gap.md G27 (decision); follow-up cleanup tracked separately
+- **Closes**: verevon-gap.md G27 (decision); follow-up cleanup tracked separately
 - **Supersedes**: none
-- **Owners**: Frontend Plane (velion), Control Plane (auth/user/org/billing/session-core), Application Plane (convex, notification, integration), Data Plane v2, Model Plane, Ingestion Plane
+- **Owners**: Frontend Plane (verevon), Control Plane (auth/user/org/billing/session-core), Application Plane (convex, notification, integration), Data Plane v2, Model Plane, Ingestion Plane
 
 ---
 
@@ -14,32 +14,32 @@
 
 | Network | Member count | Drivers / purpose (today) |
 |---|---|---|
-| `velion-net` | **48** | De-facto cross-cutting shared bus. Every running service in CoreSystem is attached (Control / Application / Data v2 / Model / Ingestion planes + velion + velion-nats). |
+| `verevon-net` | **48** | De-facto cross-cutting shared bus. Every running service in CoreSystem is attached (Control / Application / Data v2 / Model / Ingestion planes + verevon + verevon-nats). |
 | `model-plane-network` | 18 | Intra-Model-Plane traffic. |
 | `controlplane-net` | 15 | Intra-Control-Plane traffic. |
 | `ingestion-net` | 15 | Intra-Ingestion-Plane traffic. |
 | `dpv2-net` | 12 | Intra-Data-Plane-v2 traffic. |
 | `app-net` | 8 | Intra-Application-Plane traffic. |
 
-Only **two** containers are velion-net-only: `frontend-plane-velion-frontend-1` and `velion-nats`. Every other container is also on a plane-specific net — i.e. each container attaches to *two* networks: its plane network + velion-net.
+Only **two** containers are verevon-net-only: `frontend-plane-verevon-frontend-1` and `verevon-nats`. Every other container is also on a plane-specific net — i.e. each container attaches to *two* networks: its plane network + verevon-net.
 
 The five empty-or-decommissioned networks (`aquatiq-backend`, `data-net`, `internal`, `visma_service_v2_default`, `xero_service_v2_default`) are zero-container artifacts of previous topologies that compose left behind.
 
-`velion-net` is on subnet `172.20.0.0/16` — 65 534 host capacity, ~10× current population.
+`verevon-net` is on subnet `172.20.0.0/16` — 65 534 host capacity, ~10× current population.
 
-### Why `velion-net` looks misnamed today
+### Why `verevon-net` looks misnamed today
 
-The name suggests "the velion-frontend's own network." Two contradictions:
+The name suggests "the verevon-frontend's own network." Two contradictions:
 
-1. **Membership** — 48 containers attached, 46 of which are not velion (Control/App/Data/Model/Ingestion planes' Postgres / Redis / NATS / cores).
-2. **Traffic** — velion talks to ~25 hostnames from its `.env` (auth-core, user-core, org-core, billing-core, session-core, notification-core, convex-backend, convex-gateway, documents-service, retrieval-service, ai-core, quarry-control, …). Every one of those is intra-plane to *its* plane, not to velion's. velion happens to be the busiest cross-plane caller because it's the L5 ingress (per [ADR 0003](./0003-l5-boundary-policy.md)).
+1. **Membership** — 48 containers attached, 46 of which are not verevon (Control/App/Data/Model/Ingestion planes' Postgres / Redis / NATS / cores).
+2. **Traffic** — verevon talks to ~25 hostnames from its `.env` (auth-core, user-core, org-core, billing-core, session-core, notification-core, convex-backend, convex-gateway, documents-service, retrieval-service, ai-core, quarry-control, …). Every one of those is intra-plane to *its* plane, not to verevon's. verevon happens to be the busiest cross-plane caller because it's the L5 ingress (per [ADR 0003](./0003-l5-boundary-policy.md)).
 
 ### What the gap actually is
 
 Two distinct concerns hide behind G27's "the network is misnamed":
 
-1. **Naming.** A new contributor reads `velion-net` and assumes it scopes velion's traffic. The name is wrong — it scopes nothing.
-2. **Least-privilege.** Today every container on velion-net can reach every other container on velion-net. `model-plane-postgres` can resolve `controlplane-postgres`. There's no reason it would, but the path exists. A future supply-chain compromise of any single container has visibility into every plane's NATS/Postgres/Redis cluster.
+1. **Naming.** A new contributor reads `verevon-net` and assumes it scopes verevon's traffic. The name is wrong — it scopes nothing.
+2. **Least-privilege.** Today every container on verevon-net can reach every other container on verevon-net. `model-plane-postgres` can resolve `controlplane-postgres`. There's no reason it would, but the path exists. A future supply-chain compromise of any single container has visibility into every plane's NATS/Postgres/Redis cluster.
 
 These can be tackled together or separately. This ADR picks one approach and notes the other as a future tightening pass.
 
@@ -47,10 +47,10 @@ These can be tackled together or separately. This ADR picks one approach and not
 
 ### Option A — Rename, document, keep the shared bus
 
-Acknowledge that `velion-net` IS the cross-plane shared bus and rename it accordingly (e.g. `coresystem-shared-net` or `inter-plane-bus`). Document the contract:
+Acknowledge that `verevon-net` IS the cross-plane shared bus and rename it accordingly (e.g. `coresystem-shared-net` or `inter-plane-bus`). Document the contract:
 
 - **Intra-plane traffic** (e.g. `org-core` ↔ `controlplane-postgres`, `convex-backend` ↔ `app-nats`) must use the plane-specific network. Containers are physically attached to the shared bus too, but that bus is reserved for **cross-plane** edges.
-- **Cross-plane traffic** (e.g. velion ↔ user-core, notification-core ↔ velion-nats, model-plane → control-plane auth-core) goes over the shared bus by design.
+- **Cross-plane traffic** (e.g. verevon ↔ user-core, notification-core ↔ verevon-nats, model-plane → control-plane auth-core) goes over the shared bus by design.
 - A future tightening pass (Option B materialized) would actually remove the multi-attach where no cross-plane edge exists.
 
 **Pros**:
@@ -62,23 +62,23 @@ Acknowledge that `velion-net` IS the cross-plane shared bus and rename it accord
 **Cons**:
 - Doesn't shrink the attack surface. A future compromise still gets cross-plane visibility.
 - The rename touches every compose file (Control / Application / Data v2 / Model / Ingestion / Frontend) — about 6 files × 1–2 hunks each. Coordinated but mechanical.
-- Existing operators who alias `docker exec velion-net` will need to update their scripts.
+- Existing operators who alias `docker exec verevon-net` will need to update their scripts.
 
-### Option B — Shrink `velion-net` to the actual frontend boundary
+### Option B — Shrink `verevon-net` to the actual frontend boundary
 
-Make `velion-net` contain only `velion`, `velion-nats`, and the **direct L1–L5 services velion proxies to** (auth-core, user-core, org-core, billing-core, session-core, notification-core, convex-backend, documents-service, retrieval-service, quarry-control). Remove everything else from velion-net; intra-plane networks remain for those services.
+Make `verevon-net` contain only `verevon`, `verevon-nats`, and the **direct L1–L5 services verevon proxies to** (auth-core, user-core, org-core, billing-core, session-core, notification-core, convex-backend, documents-service, retrieval-service, quarry-control). Remove everything else from verevon-net; intra-plane networks remain for those services.
 
-Cross-plane edges that today flow over velion-net but aren't velion → plane (e.g. model-plane → auth-core for JWT validation, ingestion → controlplane for some imports) would need a new dedicated network (`auth-public-net`? `control-readonly-net`?) or each cross-plane consumer joins the corresponding plane's network with a documented exception.
+Cross-plane edges that today flow over verevon-net but aren't verevon → plane (e.g. model-plane → auth-core for JWT validation, ingestion → controlplane for some imports) would need a new dedicated network (`auth-public-net`? `control-readonly-net`?) or each cross-plane consumer joins the corresponding plane's network with a documented exception.
 
 **Pros**:
 - True least-privilege. A compromised dpv2-postgres can no longer route packets to controlplane-postgres.
-- The name `velion-net` becomes literally correct.
-- Forces cross-plane edges to be explicit. New cross-plane callers can't "just attach to velion-net"; they have to declare the edge.
+- The name `verevon-net` becomes literally correct.
+- Forces cross-plane edges to be explicit. New cross-plane callers can't "just attach to verevon-net"; they have to declare the edge.
 
 **Cons**:
 - Discovers many hidden edges. Today's model-plane services that reach auth-core, the ingestion plane services that reach quarry-control across plane boundaries, etc. — each becomes a network-membership decision.
 - Touches every compose file and likely some env defaults (services that resolve other services' names will need different DNS targets or new aliases).
-- Risk of breaking running deployments during the cutover — a service that "happened to work" because both endpoints were on velion-net will silently fail.
+- Risk of breaking running deployments during the cutover — a service that "happened to work" because both endpoints were on verevon-net will silently fail.
 - 1–2 days of focused work + a careful per-edge audit. Premature given that no security incident has motivated it.
 
 ### Option C — Hybrid: rename now (Option A), shrink later under an explicit forcing function
@@ -117,8 +117,8 @@ This decision is also conditional on two guardrails landing alongside the rename
 - Future option-B work has a clean baseline to measure against (vs. today's "rename will conflate two changes").
 
 **Costs**:
-- One coordinated rename across six compose files: `Control Plane/`, `Application Plane/`, `Data Plane v2/`, `Model Plane/`, `Ingestion Plane/`, `Frontend Plane/velion/`. Each compose declares `velion-net` as `external: true` and points at the same `name:`; flipping all of them in lockstep + `docker network create` for the new name + `docker network rm velion-net` after the cutover.
-- Any operator script grepping for `velion-net` updates to the new name. Today's `docker network inspect velion-net` becomes `docker network inspect inter-plane-bus`.
+- One coordinated rename across six compose files: `Control Plane/`, `Application Plane/`, `Data Plane v2/`, `Model Plane/`, `Ingestion Plane/`, `Frontend Plane/verevon/`. Each compose declares `verevon-net` as `external: true` and points at the same `name:`; flipping all of them in lockstep + `docker network create` for the new name + `docker network rm verevon-net` after the cutover.
+- Any operator script grepping for `verevon-net` updates to the new name. Today's `docker network inspect verevon-net` becomes `docker network inspect inter-plane-bus`.
 - We accept the least-privilege gap until the forcing function in § below triggers Option B.
 
 **What we're giving up**:
@@ -150,13 +150,13 @@ The following block lands in [`docs/ARCHITECTURE_DIAGRAM.md`](../ARCHITECTURE_DI
 >   network even if `inter-plane-bus` is also attached.
 >
 > - **`inter-plane-bus`** — the cross-cutting bus where cross-plane edges
->   live. Velion (L5 ingress per ADR 0003) reaches every plane's public
+>   live. Verevon (L5 ingress per ADR 0003) reaches every plane's public
 >   surface over this bus. notification-core's subscriber to
 >   `app.session.*` events (G14) flows here. Auth-core JWKS reads from
 >   model-plane services flow here. **Not** for intra-plane traffic.
 >
-> Renamed from `velion-net` on 2026-05-11 (ADR 0004) — the old name
-> conflated "velion's network" with "the shared bus." A future ADR may
+> Renamed from `verevon-net` on 2026-05-11 (ADR 0004) — the old name
+> conflated "verevon's network" with "the shared bus." A future ADR may
 > shrink the bus to only the cross-plane edges; see ADR 0004 § "Forcing
 > function for Option B."
 
@@ -166,8 +166,8 @@ Mechanical, single-PR rename. Order matters because containers attached to the o
 
 1. **Author the new network name.** Recommended: `inter-plane-bus`. Alternatives the team can pick during PR review: `coresystem-shared-net`, `xplane-net`. The rename PR settles this.
 2. **Create the new network.** `docker network create --driver bridge --subnet 172.20.0.0/16 inter-plane-bus` on each docker host. (Subnet preserved so existing IP-pinned configs continue to work.)
-3. **Update each compose file** to replace `velion-net: external: true / name: velion-net` with the new name. Files to touch:
-   - `Frontend Plane/velion/docker-compose.yml`
+3. **Update each compose file** to replace `verevon-net: external: true / name: verevon-net` with the new name. Files to touch:
+   - `Frontend Plane/verevon/docker-compose.yml`
    - `Control Plane/docker-compose.yml`
    - `Application Plane/docker-compose.yml`
    - `Data Plane v2/docker-compose.yml`
@@ -177,23 +177,23 @@ Mechanical, single-PR rename. Order matters because containers attached to the o
    - `docker compose down` the plane,
    - apply the compose change,
    - `docker compose up -d` against the new network,
-   - smoke-check the plane's own healthchecks pass and the velion proxy still reaches that plane's services.
-5. **After all planes are up on the new network,** `docker network rm velion-net`.
-6. **Update operator runbooks** — any `docker network inspect velion-net` line in `scripts/`, READMEs, or shell history aliases.
+   - smoke-check the plane's own healthchecks pass and the verevon proxy still reaches that plane's services.
+5. **After all planes are up on the new network,** `docker network rm verevon-net`.
+6. **Update operator runbooks** — any `docker network inspect verevon-net` line in `scripts/`, READMEs, or shell history aliases.
 7. **Amend `docs/ARCHITECTURE_DIAGRAM.md`** with the "Network Topology" block above. Cite ADR 0004 inline.
-8. **Update `velion-gap.md`** §1 / §10 entries that mention velion-net (search-and-replace).
+8. **Update `verevon-gap.md`** §1 / §10 entries that mention verevon-net (search-and-replace).
 
 ## Implementation notes
 
 - **Why not just rename in-place?** Docker doesn't support renaming a network. Workflow is create-new → migrate-containers → delete-old, hence the coordinated cutover.
 - **Why preserve the `/16` subnet?** Any service that pinned an upstream by IP (we don't believe there are any, but auditing all envs is its own task) continues to work without surprise.
 - **What about the empty networks?** `data-net`, `internal`, `aquatiq-backend`, `visma_service_v2_default`, `xero_service_v2_default` — 0 containers each. They're stale compose artifacts. Add a follow-up cleanup gap to delete them post-rename so `docker network ls` is honest.
-- **Healthcheck during cutover.** Each plane's compose already declares healthchecks; the cutover verifies them. The velion ↔ session-core ↔ notification-core chain (Wave 3 §8.17) is the most useful end-to-end probe — a successful POST to `/api/v1/sessions/refresh` confirms cross-plane is alive.
+- **Healthcheck during cutover.** Each plane's compose already declares healthchecks; the cutover verifies them. The verevon ↔ session-core ↔ notification-core chain (Wave 3 §8.17) is the most useful end-to-end probe — a successful POST to `/api/v1/sessions/refresh` confirms cross-plane is alive.
 
 ## References
 
-- `velion-gap.md` G27 entry
+- `verevon-gap.md` G27 entry
 - `docs/ARCHITECTURE_DIAGRAM.md` (to be amended per § "Charter amendment")
 - [ADR 0002 — CP session-core repurpose](./0002-cp-session-core-repurpose.md) (Control Session aggregator's NATS topology relies on the shared bus)
-- [ADR 0003 — L5 boundary policy](./0003-l5-boundary-policy.md) (velion's role as L5 ingress is what makes velion the busiest cross-plane caller)
+- [ADR 0003 — L5 boundary policy](./0003-l5-boundary-policy.md) (verevon's role as L5 ingress is what makes verevon the busiest cross-plane caller)
 - Docker network reference: <https://docs.docker.com/network/network-tutorial-standalone/>

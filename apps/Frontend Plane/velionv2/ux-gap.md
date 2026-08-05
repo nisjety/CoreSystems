@@ -1,8 +1,8 @@
-# Velion v2 UX Gap and AI-First Product Research
+# Verevon v2 UX Gap and AI-First Product Research
 
 Last researched: 2026-06-01 (Europe/Oslo)
 
-This document summarizes competitor feature and UX patterns for Velion v2, then maps them into concrete gaps for an AI-first Velion product. The research uses official product/docs pages plus Mobbin screen references.
+This document summarizes competitor feature and UX patterns for Verevon v2, then maps them into concrete gaps for an AI-first Verevon product. The research uses official product/docs pages plus Mobbin screen references.
 
 ## Executive Summary
 
@@ -14,25 +14,25 @@ The market has moved from basic chatbots to AI agents that train, test, deploy, 
 - Chatbase is strongest for fast self-serve setup: add sources, test in a playground, deploy to channels, add actions, and route complex issues to humans.
 - Mimir is the most directly relevant Norwegian AI-first ecommerce competitor. It markets itself as a deeply integrated AI agent for Norwegian ecommerce, with email/chat/social coverage, approval drafts or autonomous replies, and deep custom stack integrations.
 
-Velion should not copy any one competitor. The winning position is:
+Verevon should not copy any one competitor. The winning position is:
 
-> Velion is an AI worker for customer experience. It understands the company, builds and runs support/sales workflows, answers customers, deploys chatbots, maintains knowledge, and hands control back to humans whenever risk or uncertainty requires it.
+> Verevon is an AI worker for customer experience. It understands the company, builds and runs support/sales workflows, answers customers, deploys chatbots, maintains knowledge, and hands control back to humans whenever risk or uncertainty requires it.
 
-The product must prove that during onboarding, then make the same Velion AI available everywhere in the app.
+The product must prove that during onboarding, then make the same Verevon AI available everywhere in the app.
 
 ## Competitive Baseline
 
-| Competitor     | Strongest Feature Pattern                                                                                                           | UX Pattern To Learn From                                                                                                  | Gap Velion Must Close                                                                                                           |
+| Competitor     | Strongest Feature Pattern                                                                                                           | UX Pattern To Learn From                                                                                                  | Gap Verevon Must Close                                                                                                           |
 | -------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Intercom / Fin | AI agent plus AI-native helpdesk, multi-channel deployment, answer inspection, performance optimization, procedures, copilot        | Polished product-led setup, AI agent lifecycle, inbox assistant, visible source inspection                                | Velion needs a unified lifecycle for train, test, deploy, analyze, plus proof of what sources shaped each AI decision           |
-| Zendesk        | Enterprise ticket workspace, omnichannel agent workspace, customer context panel, AI agents, copilot, intelligent triage, approvals | Dense three-pane workspace, right-side customer/app context, governance-first admin model                                 | Velion needs stronger operational surfaces: queues, ticket context, approvals, SLAs, audit, routing, and admin controls         |
-| Gorgias        | Ecommerce AI agent trained on Shopify, policies, website, help center, documents, and actions                                       | Ecommerce context is directly next to conversations; AI is judged by automation, CSAT, first response, and revenue impact | Velion needs ecommerce-grade actions, source reasoning, order/customer context, and revenue/proof metrics                       |
-| Chatbase       | Fast AI agent creation, sources, website crawling, playground, deploy channels, actions, analytics                                  | Simple left-nav builder where source setup, testing, deployment, and actions are obvious                                  | Velion needs a faster path from crawl/connect to working chatbot, plus a clearer playground and deploy checklist                |
-| Mimir          | Norwegian ecommerce AI support, email/chat/social, deep stack integrations, optional human approval                                 | Direct "AI does the support work" positioning, localized ecommerce language, proof by saved support work                  | Velion needs Norwegian market localization, ecommerce workflows, and a strong answer to "what can Velion do in my exact stack?" |
+| Intercom / Fin | AI agent plus AI-native helpdesk, multi-channel deployment, answer inspection, performance optimization, procedures, copilot        | Polished product-led setup, AI agent lifecycle, inbox assistant, visible source inspection                                | Verevon needs a unified lifecycle for train, test, deploy, analyze, plus proof of what sources shaped each AI decision           |
+| Zendesk        | Enterprise ticket workspace, omnichannel agent workspace, customer context panel, AI agents, copilot, intelligent triage, approvals | Dense three-pane workspace, right-side customer/app context, governance-first admin model                                 | Verevon needs stronger operational surfaces: queues, ticket context, approvals, SLAs, audit, routing, and admin controls         |
+| Gorgias        | Ecommerce AI agent trained on Shopify, policies, website, help center, documents, and actions                                       | Ecommerce context is directly next to conversations; AI is judged by automation, CSAT, first response, and revenue impact | Verevon needs ecommerce-grade actions, source reasoning, order/customer context, and revenue/proof metrics                       |
+| Chatbase       | Fast AI agent creation, sources, website crawling, playground, deploy channels, actions, analytics                                  | Simple left-nav builder where source setup, testing, deployment, and actions are obvious                                  | Verevon needs a faster path from crawl/connect to working chatbot, plus a clearer playground and deploy checklist                |
+| Mimir          | Norwegian ecommerce AI support, email/chat/social, deep stack integrations, optional human approval                                 | Direct "AI does the support work" positioning, localized ecommerce language, proof by saved support work                  | Verevon needs Norwegian market localization, ecommerce workflows, and a strong answer to "what can Verevon do in my exact stack?" |
 
 ## Feature Matrix
 
-| Capability                        |             Intercom |              Zendesk |                Gorgias |             Chatbase |                          Mimir | Velion Target                                |
+| Capability                        |             Intercom |              Zendesk |                Gorgias |             Chatbase |                          Mimir | Verevon Target                                |
 | --------------------------------- | -------------------: | -------------------: | ---------------------: | -------------------: | -----------------------------: | -------------------------------------------- |
 | AI answers from company knowledge |               Strong |               Strong |                 Strong |               Strong |                         Strong | Required baseline                            |
 | AI can take system actions        |               Strong |               Strong |                 Strong |               Strong |                         Strong | Required, with approval policy and audit     |
@@ -40,11 +40,11 @@ The product must prove that during onboarding, then make the same Velion AI avai
 | Shared inbox / tickets            |               Strong |          Very strong |                 Strong |             Emerging | Replaces or abstracts helpdesk | Required for serious support                 |
 | Website chatbot builder           |               Strong |               Strong |                 Strong |          Very strong |                         Strong | Required and should be prompt-driven         |
 | Knowledge/source management       |               Strong |               Strong |                 Strong |               Strong |          Less visible publicly | Required, with graph proof                   |
-| Graph or source relationship view |   Limited visible UX |   Limited visible UX | Reasoning/source views |         Source lists |           Not visible publicly | Differentiator for Velion                    |
+| Graph or source relationship view |   Limited visible UX |   Limited visible UX | Reasoning/source views |         Source lists |           Not visible publicly | Differentiator for Verevon                    |
 | Ecommerce order/customer context  |               Medium |               Medium |            Very strong |              Growing |                    Very strong | Required for ecommerce segment               |
 | Analytics and optimization        |               Strong |          Very strong |                 Strong |               Strong |           Claims outcome focus | Required, with AI and human metrics together |
 | Norwegian localization            | General multilingual | General multilingual |   General multilingual | General multilingual |                         Strong | Required for local wedge                     |
-| Prompt-to-build workflows         |              Partial |              Partial |                Partial |              Partial |    Marketed as service outcome | Differentiator for Velion                    |
+| Prompt-to-build workflows         |              Partial |              Partial |                Partial |              Partial |    Marketed as service outcome | Differentiator for Verevon                    |
 
 ## UX Patterns From Mobbin
 
@@ -63,7 +63,7 @@ Observed UX lessons:
 - Ecommerce tools make order/customer data immediately actionable in the support flow.
 - Good AI UX shows confidence, source usage, missing context, handoff reason, and next improvement rather than just a generated reply.
 
-## Current Velion v2 Stack Read
+## Current Verevon v2 Stack Read
 
 The frontend already has many of the right seams:
 
@@ -74,15 +74,15 @@ The frontend already has many of the right seams:
 - `src/app/api/onboarding/*` and `src/app/api/connections/*` give the BFF a place to normalize model, graph, crawl, and connection routes.
 - The backend planes implied by the app are directionally correct: auth/user/org/billing for control, Quarry for crawl, integration/Finspo/Nango for connectors, graph/retrieval for data, model-gateway for reasoning and recommendations.
 
-The main gap is not "does the backend have a route." The gap is product composition: Velion needs a visible, persistent AI operating layer that connects these surfaces into one understandable workflow.
+The main gap is not "does the backend have a route." The gap is product composition: Verevon needs a visible, persistent AI operating layer that connects these surfaces into one understandable workflow.
 
 ## P0 UX Gaps
 
-### 1. Velion Must Be Available Everywhere
+### 1. Verevon Must Be Available Everywhere
 
-Today the AI appears in specific contexts. The target is a persistent Velion command surface:
+Today the AI appears in specific contexts. The target is a persistent Verevon command surface:
 
-- Global prompt: "Ask Velion to do work."
+- Global prompt: "Ask Verevon to do work."
 - Context-aware prompts in onboarding, inbox, knowledge, agents, and settings.
 - Every prompt returns a plan, required data, risk, expected result, and approval need.
 - Every generated action can be inspected and either approved, edited, or rejected.
@@ -94,20 +94,20 @@ Example prompts the product should support:
 - "Answer these five open emails as drafts only."
 - "Find knowledge gaps causing handoffs this week."
 - "Turn our return policy into an approved workflow."
-- "Show me which connected sources Velion used for this reply."
+- "Show me which connected sources Verevon used for this reply."
 
 ### 2. Onboarding Must Prove Understanding Before Asking For Money
 
 The paywall should not show a generic recommendation. It should show a proof of concept:
 
 - Company identity: org name, logo, domain, business type, market, employee count when available.
-- What Velion learned: crawled pages, products/services detected, policies found, public contact channels, connected SaaS sources.
+- What Verevon learned: crawled pages, products/services detected, policies found, public contact channels, connected SaaS sources.
 - What customers likely ask: inferred top support intents, ecommerce/order intents, sales intents, gaps.
-- What Velion can do next: create chatbot, answer emails, draft macros, build workflows, connect Shopify/Zendesk/SharePoint, deploy widget.
+- What Verevon can do next: create chatbot, answer emails, draft macros, build workflows, connect Shopify/Zendesk/SharePoint, deploy widget.
 - Expected operational impact: estimated deflection range, setup completeness, missing sources, required human review categories.
 - Why the plan is recommended: tied to actual source count, channels, actions, workflow needs, team size, and risk.
 
-This is where Velion should feel smart. The user should think "it already understands our company," not "this is pricing copy."
+This is where Verevon should feel smart. The user should think "it already understands our company," not "this is pricing copy."
 
 ### 3. Right Panels Must Become Operational Inspectors(but just for visualization, not editing, user shoud see the source graph and inspect nodes, but not edit the graph structure or node details. Editing should be done in the Knowledge section, where changes can be tracked and audited.) that Build Trust and Guide Action. and this is true for all right panels, not only in the intergration step of the onboarding.
 
@@ -115,7 +115,7 @@ Onboarding and knowledge graph right panels should be interactive:
 
 - Zoom, pan, select nodes, and inspect connected items.
 - Show source type, origin, last crawl time, permissions, chunks, related conversations, and confidence.
-- Show what Velion can answer from each node.
+- Show what Verevon can answer from each node.
 - Show missing data and recommended next connection.
 - Let users open manual source management from the same panel.
 
@@ -123,7 +123,7 @@ This should also become a permanent Knowledge feature, not only an onboarding vi
 
 ### 4. Human-In-The-Loop Needs A First-Class Approval System
 
-Competitors converge on controlled automation. Velion needs a shared action model:
+Competitors converge on controlled automation. Verevon needs a shared action model:
 
 - Draft reply: low risk, human can edit/send.
 - Public chatbot answer: medium risk, must be grounded and logged.
@@ -134,7 +134,7 @@ Competitors converge on controlled automation. Velion needs a shared action mode
 
 Every action should store:
 
-- actor: user, Velion, workflow, customer trigger
+- actor: user, Verevon, workflow, customer trigger
 - intent
 - plan
 - sources
@@ -156,13 +156,13 @@ For every prompt action, provide the manual UI:
 - Route/assign manually in Inbox.
 - Approve/disconnect integrations manually in Settings.
 
-This protects trust. Users can let Velion work faster because they know they are not losing control.
+This protects trust. Users can let Verevon work faster because they know they are not losing control.
 
 ## P1 UX Gaps
 
 ### Inbox
 
-Velion must appear in the inbox as a copilot and as an autonomous worker:
+Verevon must appear in the inbox as a copilot and as an autonomous worker:
 
 - Conversation summary.
 - Suggested reply with cited sources.
@@ -175,10 +175,10 @@ Velion must appear in the inbox as a copilot and as an autonomous worker:
 
 ### Agents
 
-The agent builder should become a Velion-guided studio:
+The agent builder should become a Verevon-guided studio:
 
 - Role selection: support, sales, ecommerce, chatbot, workflow.
-- Prompt-driven setup: Velion proposes instructions, tone, handoff rules, sources, and tools.
+- Prompt-driven setup: Verevon proposes instructions, tone, handoff rules, sources, and tools.
 - Manual editor parity: every generated setting is editable.
 - Test playground with source inspection and model comparison.
 - Deployment checklist by channel.
@@ -193,12 +193,12 @@ Knowledge should become the trust center:
 - Answer coverage by topic.
 - Missing source recommendations.
 - Permission-aware retrieval preview.
-- "What Velion knows about X" inspector.
+- "What Verevon knows about X" inspector.
 - "What would break if this source is removed?" impact view.
 
 ### Analytics
 
-Velion needs AI and human metrics together:
+Verevon needs AI and human metrics together:
 
 - AI resolution rate.
 - Handoff rate and reason.
@@ -223,7 +223,7 @@ Velion needs AI and human metrics together:
 
 ## AI-First Architecture Target
 
-Velion should use a single action runtime across onboarding, inbox, agents, knowledge, and settings.
+Verevon should use a single action runtime across onboarding, inbox, agents, knowledge, and settings.
 
 ```mermaid
 flowchart TD
@@ -240,11 +240,11 @@ flowchart TD
 
 Needed layers:
 
-- Product brain: model prompts and tool schemas must know what Velion is, what it sells, what support outcomes matter, and how Velion compares to Intercom, Chatbase, Gorgias, Mimir, and Zendesk.
+- Product brain: model prompts and tool schemas must know what Verevon is, what it sells, what support outcomes matter, and how Verevon compares to Intercom, Chatbase, Gorgias, Mimir, and Zendesk.
 - Source registry: every source has owner, permissions, freshness, type, scope, and retrieval visibility.
 - Tool registry: every action has risk, reversibility, required permission, approval policy, timeout, retry, and post-condition check.
 - Approval queue: reusable across replies, integrations, plan changes, workflow changes, and customer-facing actions.
-- Audit trail: immutable record of Velion plans, sources, tool calls, approvals, and outcomes.
+- Audit trail: immutable record of Verevon plans, sources, tool calls, approvals, and outcomes.
 - Eval loop: regression tests for recommendations, answers, handoffs, citations, action planning, and refusal behavior.
 
 ## Security, Reliability, And Consistency Requirements
@@ -261,9 +261,9 @@ Needed layers:
 - Structured audit events for every AI-generated recommendation and action.
 - Human approval for financial, account, privacy, legal, or irreversible actions.
 
-## Recommended Velion Positioning
+## Recommended Verevon Positioning
 
-Velion should present itself as:
+Verevon should present itself as:
 
 - More AI-native than Zendesk: less enterprise setup, more prompt-to-outcome.
 - More operational than Chatbase: not only chatbot creation, but inbox, workflows, approvals, actions, and knowledge operations.
@@ -273,7 +273,7 @@ Velion should present itself as:
 
 ## Implementation Priority
 
-1. Global Velion command and action plan drawer.
+1. Global Verevon command and action plan drawer.
 2. Shared action/approval model used by onboarding, inbox, agents, and knowledge.
 3. Paywall proof-of-concept recommendation backed by real crawl/integration/graph data.
 4. Interactive graph/source inspector in onboarding and knowledge.

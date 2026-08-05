@@ -28,8 +28,8 @@ func loadConfig() (bridgeConfig, error) {
 		SourceURL:      strings.TrimSpace(os.Getenv("CONTROL_SHARED_NATS_URL")),
 		SourceUser:     strings.TrimSpace(os.Getenv("CONTROL_SHARED_BRIDGE_USER")),
 		SourcePassword: strings.TrimSpace(os.Getenv("CONTROL_SHARED_BRIDGE_PASSWORD")),
-		LegacyURL:      strings.TrimSpace(os.Getenv("VELION_LEGACY_NATS_URL")),
-		LegacyToken:    strings.TrimSpace(os.Getenv("VELION_LEGACY_NATS_TOKEN")),
+		LegacyURL:      strings.TrimSpace(os.Getenv("VEREVON_LEGACY_NATS_URL")),
+		LegacyToken:    strings.TrimSpace(os.Getenv("VEREVON_LEGACY_NATS_TOKEN")),
 	}
 	if config.SourceURL == "" || config.LegacyURL == "" || config.SourceUser == "" {
 		return bridgeConfig{}, errors.New("source URL/user and legacy URL are required")
@@ -109,7 +109,7 @@ func forwardToLegacy(
 	// GDPR subjects contain security/deletion evidence and have completed their
 	// scoped producer/consumer migration. They must never be copied onto the
 	// compatibility broker where a legacy shared token grants broader access.
-	if strings.HasPrefix(source.Subject, "velion.gdpr.") {
+	if strings.HasPrefix(source.Subject, "verevon.gdpr.") {
 		return nil
 	}
 	header := nats.Header{}

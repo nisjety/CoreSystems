@@ -1,15 +1,15 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
-import { VelionAgentsPage } from "@/features/agents-v2/components/VelionAgentsPage";
+import { VerevonAgentsPage } from "@/features/agents-v2/components/VerevonAgentsPage";
 
-describe("VelionAgentsPage", () => {
+describe("VerevonAgentsPage", () => {
   afterEach(() => {
     window.history.pushState(null, "", "/");
   });
 
   it("shows the five agent role entry points on the first screen", () => {
-    render(<VelionAgentsPage />);
+    render(<VerevonAgentsPage />);
 
     expect(screen.getByRole("heading", { name: /one agent system for the entire customer journey/i })).toBeVisible();
     expect(screen.getByRole("button", { name: /service agent/i })).toBeVisible();
@@ -21,7 +21,7 @@ describe("VelionAgentsPage", () => {
 
   it("opens activation-ready role pages for service, sales, and ecommerce", async () => {
     const user = userEvent.setup();
-    render(<VelionAgentsPage />);
+    render(<VerevonAgentsPage />);
 
     await user.click(screen.getByRole("button", { name: /service agent/i }));
 
@@ -69,12 +69,12 @@ describe("VelionAgentsPage", () => {
 
   it("opens the chatbot builder studio from the chatbot card", async () => {
     const user = userEvent.setup();
-    render(<VelionAgentsPage />);
+    render(<VerevonAgentsPage />);
 
     await user.click(screen.getByRole("button", { name: /build your own chatbot/i }));
 
     expect(screen.getByRole("heading", { name: /^playground$/i, level: 1 })).toBeVisible();
-    expect(screen.getByRole("heading", { name: /velion support agent/i })).toBeVisible();
+    expect(screen.getByRole("heading", { name: /verevon support agent/i })).toBeVisible();
     expect(screen.getByRole("button", { name: /select update subscription add-on/i })).toBeVisible();
     expect(screen.getByRole("textbox", { name: /instructions system prompt/i })).toBeVisible();
     expect(screen.getByRole("combobox", { name: /model/i })).toBeVisible();
@@ -82,7 +82,7 @@ describe("VelionAgentsPage", () => {
 
   it("opens the workflow builder and configures a selected workflow node", async () => {
     const user = userEvent.setup();
-    render(<VelionAgentsPage />);
+    render(<VerevonAgentsPage />);
 
     await user.click(screen.getByRole("button", { name: /workflow builder/i }));
 
@@ -102,6 +102,6 @@ describe("VelionAgentsPage", () => {
 async function setAgentRoute(path: string) {
   await act(async () => {
     window.history.pushState(null, "", path);
-    window.dispatchEvent(new Event("velion:agent-selection-change"));
+    window.dispatchEvent(new Event("verevon:agent-selection-change"));
   });
 }

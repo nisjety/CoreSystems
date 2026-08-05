@@ -26,7 +26,7 @@ import { X } from 'lucide-react'
 import { useKnowledgeIntegrations } from '@/components/knowledge/hooks/useKnowledgeData'
 import { useAuth } from '@/components/auth/hooks/use-auth'
 
-const DISMISS_KEY = 'velion.connector-consent-prompt.dismissed'
+const DISMISS_KEY = 'verevon.connector-consent-prompt.dismissed'
 const FIRST_VALUE_DELAY_MS = 90_000 // 90s on dashboard before the prompt shows
 const MICROSOFT_PROVIDERS = new Set(['microsoft', 'microsoft365', 'office365'])
 
@@ -138,7 +138,7 @@ export function ConnectorConsentPrompt(): React.JSX.Element | null {
           Koble til Microsoft 365 for bedre svar
         </h2>
         <p id="connector-consent-body" className="text-xs text-slate-600 dark:text-slate-400">
-          Velion kan finne dokumenter, samtaler og e-poster på tvers av SharePoint,
+          Verevon kan finne dokumenter, samtaler og e-poster på tvers av SharePoint,
           OneDrive, Teams og Outlook. Du kan koble til når som helst — vi
           spør bare hvis vi tror det vil hjelpe.
         </p>

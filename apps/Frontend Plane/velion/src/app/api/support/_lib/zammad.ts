@@ -1,4 +1,4 @@
-// U7-2 (ui-ux-velion-gap.md): shared Zammad client helpers. When the
+// U7-2 (ui-ux-verevon-gap.md): shared Zammad client helpers. When the
 // integration is not configured (no token) all consumer routes return a
 // uniform 503 instead of crashing on `getaddrinfo ENOTFOUND
 // zammad-railsserver`. /helpdesk is scaffolded but the Zammad service is

@@ -7,10 +7,10 @@ Two separated domains:
 1. **Company lead-builder (W1)** — filtered Enhetsregisteret (Brreg) company
    search, org-scoped saved lists (`lead_lists` / `lead_list_companies`), and
    metered CSV export with a per-export audit event
-   (`velion.audit.v1.application.lead_export`).
+   (`verevon.audit.v1.application.lead_export`).
 2. **Provider lead sync** — LinkedIn Lead Gen form responses pulled through
    integration-corev2's actions gateway into the `provider_leads` table, with a
-   per-sync-run audit event (`velion.audit.v1.application.provider_lead_sync`).
+   per-sync-run audit event (`verevon.audit.v1.application.provider_lead_sync`).
 
 ## PII posture
 

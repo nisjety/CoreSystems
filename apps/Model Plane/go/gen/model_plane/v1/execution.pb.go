@@ -34,7 +34,7 @@ type RunAgentRequest struct {
 	OrgId string `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
 	// Acting user identifier.
 	UserId string `protobuf:"bytes,5,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	// Requested model (empty / "velion-*" lets inference-core's intent layer
+	// Requested model (empty / "verevon-*" lets inference-core's intent layer
 	// resolve a concrete model).
 	Model string `protobuf:"bytes,6,opt,name=model,proto3" json:"model,omitempty"`
 	// Run mode hint: "execute", etc.

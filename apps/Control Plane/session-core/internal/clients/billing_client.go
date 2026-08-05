@@ -9,7 +9,7 @@ import (
 )
 
 // BillingAccount mirrors billing-core's GET /api/v1/billing/orgs/{orgId}/account
-// response (the fields the Control Session aggregator surfaces to velion).
+// response (the fields the Control Session aggregator surfaces to verevon).
 type BillingAccount struct {
 	OrgID            string `json:"orgId"`
 	Plan             string `json:"plan,omitempty"`

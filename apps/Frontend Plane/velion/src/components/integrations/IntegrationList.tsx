@@ -85,7 +85,7 @@ export function IntegrationList({
           No workspace services connected yet
         </p>
         <p className="mt-2 text-[14px] leading-7 text-[#707480]">
-          Connect Microsoft 365, Google Workspace, or Slack to route operational context into Velion.
+          Connect Microsoft 365, Google Workspace, or Slack to route operational context into Verevon.
         </p>
         <Link
           href={actionHref}

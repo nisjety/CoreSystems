@@ -1,6 +1,6 @@
 // Package store wraps the Postgres pool with two simple insert helpers
 // and a paginated read query for each table. Read queries enforce
-// `org_id` filtering — never optional — so the velion-side caller
+// `org_id` filtering — never optional — so the verevon-side caller
 // cannot accidentally fan a query across tenants.
 package store
 
@@ -422,7 +422,7 @@ func (s *Store) ListUsage(ctx context.Context, f UsageFilter) ([]UsageRow, error
 	return out, rows.Err()
 }
 
-// UsageSummary is the rolled-up shape the velion `/settings/usage`
+// UsageSummary is the rolled-up shape the verevon `/settings/usage`
 // dashboard renders directly. One row per (plane, op) for the given
 // org + window, with totals across the window.
 type UsageSummary struct {

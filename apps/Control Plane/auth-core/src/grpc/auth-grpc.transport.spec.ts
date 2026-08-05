@@ -48,21 +48,21 @@ function registry(): string {
   return JSON.stringify([
     {
       credentialId: 'gateway-old',
-      principal: 'velion-gateway',
+      principal: 'verevon-gateway',
       audience: 'auth-core',
       token: oldToken,
       scopes: ['auth:token:validate'],
     },
     {
       credentialId: 'gateway-new',
-      principal: 'velion-gateway',
+      principal: 'verevon-gateway',
       audience: 'auth-core',
       token: newToken,
       scopes: ['auth:token:validate'],
     },
     {
       credentialId: 'gateway-readonly',
-      principal: 'velion-gateway',
+      principal: 'verevon-gateway',
       audience: 'auth-core',
       token: readonlyToken,
       scopes: ['auth:user:read'],
@@ -73,7 +73,7 @@ function registry(): string {
 function serviceMetadata(
   credentialId: string,
   token: string,
-  principal = 'velion-gateway',
+  principal = 'verevon-gateway',
 ): Metadata {
   const metadata = new Metadata();
   metadata.set('x-service-credential-id', credentialId);

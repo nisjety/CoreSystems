@@ -131,7 +131,7 @@ func main() {
 			// Same shared connection, second independent durable: the
 			// per-user ownership-transfer consumer above and this
 			// organization hard-purge consumer both filter on
-			// velion.gdpr.erasure.requested but own disjoint subject_type
+			// verevon.gdpr.erasure.requested but own disjoint subject_type
 			// values, so one binding failing never blocks the other.
 			orgPurgeConsumer, sharedErr = gdpr.StartOrgPurgeSubscriber(sharedNc, docRepo)
 			if sharedErr != nil {
@@ -244,8 +244,8 @@ func main() {
 		write.Delete("/{documentID}", docHandler.Delete)
 	})
 
-	// U1-2 (velion ui-ux-velion-gap.md §10): distinct sources facet for the
-	// velion dashboard's "Sources" stat. Quarry-v2 writes scrapes into
+	// U1-2 (verevon ui-ux-verevon-gap.md §10): distinct sources facet for the
+	// verevon dashboard's "Sources" stat. Quarry-v2 writes scrapes into
 	// `documents` with their source URL; the answer to "how many sources
 	// do I have" is COUNT(DISTINCT source) here, not anywhere in Quarry.
 	r.Route("/v1/sources", func(r chi.Router) {

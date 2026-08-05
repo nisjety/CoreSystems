@@ -167,7 +167,7 @@ func (s *Server) resumeSession(c *gin.Context) {
 // G36-cutover Step D (2026-05-12): the Plans / Todos / Lineage handler
 // functions were removed. Rust session-core's `orchestration_http.rs`
 // (port 28083:8083) owns those concerns now — see §8.24 + §8.26 of
-// `apps/Frontend Plane/velion/velion-gap.md`.
+// `apps/Frontend Plane/verevon/verevon-gap.md`.
 
 // --- SSE (Server-Sent Events) ---
 

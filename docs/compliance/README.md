@@ -1,12 +1,12 @@
-# Velion Compliance Documentation Pack
+# Verevon Compliance Documentation Pack
 
 > **DRAFT — INTERNAL TEMPLATES, NOT LEGAL ADVICE.**
 > Every document in this directory is an internal working draft prepared by the
-> Velion team. **None of these documents has been reviewed by Norwegian privacy
+> Verevon team. **None of these documents has been reviewed by Norwegian privacy
 > counsel and none may be used in any customer-facing, contractual, or regulator-
 > facing context until that review is complete and recorded in the status table
 > below.** These templates are a starting point for counsel, not a substitute for
-> counsel. They describe Velion's intended and (where stated) implemented data
+> counsel. They describe Verevon's intended and (where stated) implemented data
 > handling; where a control is planned but not yet verified in production it is
 > marked accordingly. Do not represent any control as "in place" externally
 > without engineering confirmation.
@@ -16,8 +16,8 @@
 ## Purpose
 
 This pack collects the GDPR / Norwegian-market privacy and security artefacts
-Velion needs as a data processor offering an autonomous AI agent platform to
-B2B customers (controllers). It is grounded in Velion's real architecture
+Verevon needs as a data processor offering an autonomous AI agent platform to
+B2B customers (controllers). It is grounded in Verevon's real architecture
 (Azure OpenAI Sweden Central, Zero Data Retention at the model layer,
 multi-tenant org isolation, durable agent run-history with a human Approve/Reject
 gate, and the `audit-core` event log). It is **not** aspirational marketing — any
@@ -40,7 +40,7 @@ capability not yet built is flagged as planned or TBC.
 | 2 | [`dpia-template.md`](./dpia-template.md) | Data Protection Impact Assessment template (Datatilsynet's 4 elements) + a filled instance for the autonomous-agent use case. | Internal / counsel / Datatilsynet |
 | 3 | [`transfer-assessment.md`](./transfer-assessment.md) | Schrems II Transfer Impact Assessment, incl. CLOUD Act residual and supplementary measures. | Internal / counsel |
 | 4 | [`subprocessor-list.md`](./subprocessor-list.md) | Register of subprocessors: purpose, data categories, region, transfer basis. | Customer-facing |
-| 5 | [`dpa-template.md`](./dpa-template.md) | Data Processing Agreement template (Velion as processor), GDPR Art. 28 structure. | Contractual |
+| 5 | [`dpa-template.md`](./dpa-template.md) | Data Processing Agreement template (Verevon as processor), GDPR Art. 28 structure. | Contractual |
 | 6 | [`ropa.md`](./ropa.md) | Records of Processing Activities (Art. 30) register. | Internal / Datatilsynet |
 | 7 | [`retention-schedule.md`](./retention-schedule.md) | Per-data-type retention TTLs + erasure / right-to-be-forgotten procedure. | Internal / counsel |
 
@@ -56,7 +56,7 @@ everywhere:
   approval**.
 - **Zero Data Retention (ZDR):** Microsoft / Azure OpenAI does **not** use customer
   prompts or completions to train or improve its models, and does not retain them
-  beyond the request, under Velion's ZDR-enrolled configuration.
+  beyond the request, under Verevon's ZDR-enrolled configuration.
 - **Known exception (disclosed):** Text-to-speech (TTS) currently runs in
   **East US 2** (United States). This is a known gap under active remediation;
   TTS must not be used for `sensitive_personal` or `customer_private` content
@@ -66,8 +66,8 @@ everywhere:
   under the US CLOUD Act regardless of where data is physically stored. This is
   treated as a **disclosed residual risk** in the transfer assessment, never as
   "we are immune."
-- **ZDR does not discharge Velion's own obligations.** ZDR at the model layer means
-  the *model vendor* does not retain content; Velion still retains agent
+- **ZDR does not discharge Verevon's own obligations.** ZDR at the model layer means
+  the *model vendor* does not retain content; Verevon still retains agent
   run-history, conversation records, and audit events under its own retention
   schedule, and remains responsible for their lawful processing and deletion.
 - **First Design Partner:** Aquatiq (food-safety / hygiene B2B).
@@ -100,6 +100,6 @@ external use:
 
 ---
 
-*Maintainer: Velion engineering. Source of truth for architecture facts:*
+*Maintainer: Verevon engineering. Source of truth for architecture facts:*
 *`apps/GDPR_SUMMARY.md`, `apps/Control Plane/auth-core/migrations/gdpr_hard_delete.sql`,*
 *and the per-plane responsibility notes in the CoreSystem monorepo.*

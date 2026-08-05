@@ -1,5 +1,5 @@
 import { useReducer } from "react";
-import type { ComposerSubmitPayload, ComposerToolId } from "@/features/chat-v2/components/VelionComposer";
+import type { ComposerSubmitPayload, ComposerToolId } from "@/features/chat-v2/components/VerevonComposer";
 import {
   defaultComposerSettings,
   type ComposerFile,
@@ -142,7 +142,7 @@ export function useChatDashboardComposer({
     }
 
     const now = new Date();
-    const submittedText = body || "Vedlegg sendt til Velion.";
+    const submittedText = body || "Vedlegg sendt til Verevon.";
     const nextTurn: ComposerTurn = {
       id: `chat-turn-${now.getTime()}`,
       body: submittedText,
@@ -249,7 +249,7 @@ export function getGatewayModelForComposerModel(model: DashboardComposerModel) {
     case "Claude Sonnet":
       return "claude-sonnet-4-20250514";
     case "GPT-4.1":
-    case "Velion Reasoner":
+    case "Verevon Reasoner":
       return undefined;
   }
 }

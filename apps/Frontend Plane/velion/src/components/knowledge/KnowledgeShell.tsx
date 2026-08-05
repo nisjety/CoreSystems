@@ -45,7 +45,7 @@ function formatBytes(bytes: number): string {
 }
 
 /**
- * Wave 11 §2 (ui-ux-velion-gap.md wave11-knowledge):
+ * Wave 11 §2 (ui-ux-verevon-gap.md wave11-knowledge):
  *
  * Chatbase IA shell. Three columns:
  *   Left   — sub-nav of ingestion modes (each is its own page).

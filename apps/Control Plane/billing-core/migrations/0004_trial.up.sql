@@ -1,4 +1,4 @@
--- Velion 14-day Pro trial: billing-core owns the trial window.
+-- Verevon 14-day Pro trial: billing-core owns the trial window.
 -- On organization.created the account is provisioned as `trialing` with a
 -- trial_ends_at = now + TRIAL_DURATION_DAYS; while trialing the account's
 -- effective plan + entitlements are elevated to Pro. A periodic sweep reverts

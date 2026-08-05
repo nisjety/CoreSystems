@@ -40,7 +40,7 @@ must never hold a real secret:
 
 - `apps/Ingestion Plane/finspo-core/.env.example` — verify line 5 is a placeholder.
 
-Others (review before first push): `velion-gap.md`, `EXTERNAL_SERVICES_*.md`,
+Others (review before first push): `verevon-gap.md`, `EXTERNAL_SERVICES_*.md`,
 `docs/FRONTEND_BACKEND_INTEGRATION_SUMMARY.md`, `docs/EXTERNAL_SERVICES_ARCHITECTURE.md`,
 `docs/INTEGRATION_TEST_REPORT.md`, `SEAMLESS_AUTH_DEPLOYMENT.md`,
 `apps/Control Plane/auth-core/scripts/add-password-to-user.js`,

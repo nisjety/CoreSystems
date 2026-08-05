@@ -13,7 +13,7 @@
   for the purpose, then delete or anonymise.
 - **ZDR ≠ no retention.** Zero Data Retention applies at the **model layer** (Azure
   OpenAI does not retain or train on prompts/completions). It does **not** relieve
-  Velion of retaining and then deleting its **own** run-history, conversations, and
+  Verevon of retaining and then deleting its **own** run-history, conversations, and
   audit records on schedule.
 - **Retention exceptions** are allowed only for documented legal, security,
   billing, or audit obligations, retaining the minimum necessary and using

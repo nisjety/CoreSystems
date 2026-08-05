@@ -11,7 +11,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/notification-core/internal/subscribers"
 )
 
-// U5-2 (ui-ux-velion-gap.md §10):
+// U5-2 (ui-ux-verevon-gap.md §10):
 //
 // IdentitySyncSubscriber consumes auth-service and user-service NATS events
 // off the shared bus and keeps notification-core's local subscriber identity
@@ -20,7 +20,7 @@ import (
 // identity out to Novu so workflow templates can address the user by name,
 // locale, etc.
 //
-// Subjects (all on velion-nats / SHARED_NATS_URL):
+// Subjects (all on verevon-nats / SHARED_NATS_URL):
 //   - auth.user.registered    — first sign-up
 //   - auth.user.profile_updated — profile/avatar change
 //   - auth.user.provider_linked — OAuth connect with profile hints

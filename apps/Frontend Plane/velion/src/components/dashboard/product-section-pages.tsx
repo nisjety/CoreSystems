@@ -433,7 +433,7 @@ export function ReportsWorkspacePage() {
       />
 
       <div className="grid gap-4 xl:grid-cols-[1fr_1fr]">
-        <SurfaceCard eyebrow="Breakdowns" title="Team and channel view" description="Zendesk-style structure with Velion’s softer visual system.">
+        <SurfaceCard eyebrow="Breakdowns" title="Team and channel view" description="Zendesk-style structure with Verevon’s softer visual system.">
           <ListTable
             items={[
               { id: 'report-1', title: 'Nordic support', subtitle: '84% of tickets within SLA', meta: 'Best closure velocity', tone: 'success' },
@@ -557,7 +557,7 @@ export function BuilderWorkspacePage({
             <div className="mt-4 rounded-[22px] border border-[#EEE8DC] bg-white/92 p-5">
               <div className="text-[16px] font-semibold text-[#1F2229]">Production configuration</div>
               <p className="mt-2 text-[13px] leading-6 text-[#666A73]">
-                This builder surface should separate live configuration from review and testing, borrowing Chatbase ergonomics but keeping the calmer Velion shell.
+                This builder surface should separate live configuration from review and testing, borrowing Chatbase ergonomics but keeping the calmer Verevon shell.
               </p>
               <div className="mt-5 space-y-3">
                 {[
@@ -658,7 +658,7 @@ export function PlaceholderAdminSurface({
     <ProductPageShell eyebrow={eyebrow} title={title} description={description}>
       <SurfaceCard eyebrow="Planned surface" title={title} description={description} action={ctaHref && ctaLabel ? { href: ctaHref, label: ctaLabel } : undefined}>
         <p className="text-[14px] leading-7 text-[#666A73]">
-          This area now inherits the shared Velion admin shell and is ready for the next connected implementation slice.
+          This area now inherits the shared Verevon admin shell and is ready for the next connected implementation slice.
         </p>
       </SurfaceCard>
     </ProductPageShell>

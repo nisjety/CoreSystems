@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { getModelPlaneTokenFromSession } from '@/lib/model-plane/auth-token'
 
-// U2-11 (ui-ux-velion-gap.md §10 + Option A consolidation):
+// U2-11 (ui-ux-verevon-gap.md §10 + Option A consolidation):
 //
 // Text-to-speech proxy now hits the Model Plane v1 Rust gateway at
 // `/v1/ai/speech` (Azure Speech via speech_routes::synthesize_azure).

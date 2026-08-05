@@ -5,7 +5,7 @@ info:
   description: |
     Knowledge surface served by the Data Plane v2 stack. Routes are split
     across four upstreams; the table below tracks which service owns each
-    path. Velion and other consumers should bind against this OpenAPI rather
+    path. Verevon and other consumers should bind against this OpenAPI rather
     than the underlying protobuf — the protos are the wire contract for the
     Model Plane (gRPC); this YAML is the contract for HTTP clients.
 

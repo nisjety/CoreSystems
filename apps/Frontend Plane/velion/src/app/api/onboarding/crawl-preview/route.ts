@@ -498,8 +498,8 @@ function fallbackSnippets(seedUrl: string): SnippetEvent[] {
 /**
  * SSRF guard. The wizard takes any URL the user types; without this
  * check we'd happily POST `http://10.0.0.5:8080/admin` to Quarry and
- * use the velion server's network position to reach internal hosts.
- * Quarry-edge has its own security engine but the velion route is the
+ * use the verevon server's network position to reach internal hosts.
+ * Quarry-edge has its own security engine but the verevon route is the
  * outermost trust boundary — we must validate before the request ever
  * leaves the process.
  *
@@ -644,7 +644,7 @@ async function buildIdempotencyKey(
   cap: number,
 ): Promise<string> {
   const nonce = crypto.randomUUID()
-  const input = `velion-onboarding-crawl|${seedUrl}|cap=${cap}|nonce=${nonce}`
+  const input = `verevon-onboarding-crawl|${seedUrl}|cap=${cap}|nonce=${nonce}`
   // Node's WebCrypto is available in Next.js node runtime.
   const data = new TextEncoder().encode(input)
   const digest = await crypto.subtle.digest('SHA-256', data)
@@ -653,7 +653,7 @@ async function buildIdempotencyKey(
   const hex = Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
-  return `velion-crawl-${hex.slice(0, 32)}`
+  return `verevon-crawl-${hex.slice(0, 32)}`
 }
 
 async function fetchWithTimeout(
@@ -827,7 +827,7 @@ export async function POST(request: NextRequest): Promise<Response> {
 
       // SSRF guard: refuse to forward private/loopback/link-local hosts to
       // Quarry. The wizard's URL input is user-controlled — without this
-      // check the velion server's network position could be used to probe
+      // check the verevon server's network position could be used to probe
       // internal services. On block we emit a structured warning and fall
       // through to synthetic snippets so the wizard still completes.
       const validation = await validatePublicURL(seedUrl)

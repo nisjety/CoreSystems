@@ -69,7 +69,7 @@ func TestScopedAuditPrincipalCanConsumeAndDeadLetterButCannotAdministerBroker(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adminJS.Publish("velion.audit.v2.model.session-core.allowed", payload); err != nil {
+	if _, err := adminJS.Publish("verevon.audit.v2.model.session-core.allowed", payload); err != nil {
 		t.Fatalf("publish allowed event: %v", err)
 	}
 	select {
@@ -81,7 +81,7 @@ func TestScopedAuditPrincipalCanConsumeAndDeadLetterButCannotAdministerBroker(t 
 		t.Fatal("scoped audit principal did not ACK an allowed event")
 	}
 
-	if _, err := adminJS.Publish("velion.audit.v2.model.session-core.malformed", []byte("not-json")); err != nil {
+	if _, err := adminJS.Publish("verevon.audit.v2.model.session-core.malformed", []byte("not-json")); err != nil {
 		t.Fatalf("publish malformed event: %v", err)
 	}
 	waitForDeadLetter(t, adminJS, "audit", "malformed", "not-json")
@@ -100,7 +100,7 @@ func TestScopedAuditPrincipalCanConsumeAndDeadLetterButCannotAdministerBroker(t 
 		return audit.Publish("$JS.API.STREAM.UPDATE.UNRELATED", []byte(`{}`))
 	})
 	assertPermissionDenied(t, audit, permissionErrors, "consumer administration", func() error {
-		return audit.Publish("$JS.API.CONSUMER.CREATE.VELION_CONTROL_OBSERVABILITY.forged.velion.audit.v2.model.>", []byte(`{}`))
+		return audit.Publish("$JS.API.CONSUMER.CREATE.VEREVON_CONTROL_OBSERVABILITY.forged.verevon.audit.v2.model.>", []byte(`{}`))
 	})
 }
 
@@ -116,17 +116,17 @@ authorization {
       password: %q
       permissions: {
         publish: {allow: [
-          "$JS.API.CONSUMER.INFO.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-audit"
-          "$JS.API.CONSUMER.INFO.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-usage"
-          "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.>"
-          "$JS.ACK.VELION_CONTROL_OBSERVABILITY.audit-core-model-v3-usage.>"
-          "velion.dlq.audit-core.audit"
-          "velion.dlq.audit-core.usage"
+          "$JS.API.CONSUMER.INFO.VEREVON_CONTROL_OBSERVABILITY.audit-core-model-v3-audit"
+          "$JS.API.CONSUMER.INFO.VEREVON_CONTROL_OBSERVABILITY.audit-core-model-v3-usage"
+          "$JS.ACK.VEREVON_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.>"
+          "$JS.ACK.VEREVON_CONTROL_OBSERVABILITY.audit-core-model-v3-usage.>"
+          "verevon.dlq.audit-core.audit"
+          "verevon.dlq.audit-core.usage"
         ]}
         subscribe: {allow: [
           "%s.>"
-          "_VELION.AUDIT.DELIVER.model.audit-v2 audit-core-model-v3-audit"
-          "_VELION.AUDIT.DELIVER.model.usage-v2 audit-core-model-v3-usage"
+          "_VEREVON.AUDIT.DELIVER.model.audit-v2 audit-core-model-v3-audit"
+          "_VEREVON.AUDIT.DELIVER.model.usage-v2 audit-core-model-v3-usage"
         ]}
       }
     }
@@ -189,7 +189,7 @@ func provisionScopedObservability(t *testing.T, connection *nats.Conn, bus, plan
 		consumer := fmt.Sprintf("audit-core-%s-v3-%s", bus, kind)
 		if _, err := js.AddConsumer(streamName, &nats.ConsumerConfig{
 			Durable:        consumer,
-			DeliverSubject: fmt.Sprintf("_VELION.AUDIT.DELIVER.%s.%s-v2", plane, kind),
+			DeliverSubject: fmt.Sprintf("_VEREVON.AUDIT.DELIVER.%s.%s-v2", plane, kind),
 			DeliverGroup:   consumer,
 			FilterSubject:  planeSubject(kind, plane),
 			DeliverPolicy:  nats.DeliverAllPolicy,

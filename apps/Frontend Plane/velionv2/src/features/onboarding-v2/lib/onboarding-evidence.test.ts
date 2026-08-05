@@ -98,7 +98,7 @@ describe("onboarding brand evidence", () => {
 
   it("normalizes loud organization names for paywall headings", () => {
     expect(displayOrganizationName("AQUATIQ AS")).toBe("Aquatiq AS");
-    expect(displayOrganizationName("VELION")).toBe("Velion");
+    expect(displayOrganizationName("VEREVON")).toBe("Verevon");
     expect(displayOrganizationName("acme crm asa")).toBe("Acme CRM ASA");
   });
 });

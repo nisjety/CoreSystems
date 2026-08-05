@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
+import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -161,6 +161,44 @@ export const OrchestrationCoreService = {
       kind: MethodKind.Unary,
     },
     /**
+     * Fetch the exact immutable action descriptor for an active delivery lease.
+     * This is service-only and lease-bound; normal approval readers never
+     * receive descriptor content.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.GetApprovalContinuation
+     */
+    getApprovalContinuation: {
+      name: "GetApprovalContinuation",
+      I: GetApprovalContinuationRequest,
+      O: GetApprovalContinuationResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Record the immutable receipt that a verified worker has begun the exact
+     * descriptor-backed continuation. The worker supplies only its active lease;
+     * Session Core derives fingerprint/version from retained descriptor data.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationStarted
+     */
+    recordApprovalContinuationStarted: {
+      name: "RecordApprovalContinuationStarted",
+      I: RecordApprovalContinuationStartedRequest,
+      O: RecordApprovalContinuationStartedResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Append the terminal outcome for a started continuation. Completion requires
+     * an authoritative provider receipt; this alone does not settle the outbox.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.RecordApprovalContinuationOutcome
+     */
+    recordApprovalContinuationOutcome: {
+      name: "RecordApprovalContinuationOutcome",
+      I: RecordApprovalContinuationOutcomeRequest,
+      O: RecordApprovalContinuationOutcomeResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Acknowledge a claimed delivery as retryable or terminal. There is no
      * delivered outcome until Execution Core can present a durable, authenticated
      * continuation receipt proving that the paused work actually restarted.
@@ -222,6 +260,48 @@ export const OrchestrationCoreService = {
       name: "RecordOrchestrationEvent",
       I: RecordOrchestrationEventRequest,
       O: RecordOrchestrationEventResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * OrchestratorWorkflowService — the production entry point into the durable
+ * Temporal orchestration tier, served by orchestrator-core on the same gRPC
+ * listener as its OrchestrationCoreService proxy.
+ *
+ * It is a separate service, not another method on OrchestrationCoreService,
+ * because that service's authority lives in session-core (Rust) which
+ * implements every one of its methods; adding a Temporal-start method there
+ * would force an unrelated service to implement work it does not own. Durable
+ * workflow starts belong to orchestrator-core alone.
+ *
+ * @generated from service model_plane.v1.OrchestratorWorkflowService
+ */
+export const OrchestratorWorkflowService = {
+  typeName: "model_plane.v1.OrchestratorWorkflowService",
+  methods: {
+    /**
+     * Start one durable Temporal workflow on the orchestrator task queue.
+     *
+     * Before this RPC existed, every workflow the worker registers had zero
+     * production callers. It is deliberately narrow:
+     *   * `workflow_type` is matched against a server-side ALLOWLIST of the
+     *     names the worker actually registers. An unknown name is rejected by
+     *     name; a caller string is never handed to Temporal as a workflow type.
+     *   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+     *     verified caller and overwrite whatever `input` carries, so a caller
+     *     cannot start work in another organization.
+     *   * the workflow id is derived deterministically from
+     *     (workflow_type, org_id, run_id | idempotency_key), so a retried call
+     *     attaches to the existing execution instead of double-starting a run.
+     *
+     * @generated from rpc model_plane.v1.OrchestratorWorkflowService.StartWorkflow
+     */
+    startWorkflow: {
+      name: "StartWorkflow",
+      I: StartWorkflowRequest,
+      O: StartWorkflowResponse,
       kind: MethodKind.Unary,
     },
   }

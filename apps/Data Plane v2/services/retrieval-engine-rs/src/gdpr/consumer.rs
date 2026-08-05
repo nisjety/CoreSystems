@@ -1,5 +1,5 @@
 //! NATS `JetStream` consumer for the cross-plane GDPR organization-erasure
-//! fan-out (`velion.gdpr.erasure.requested`).
+//! fan-out (`verevon.gdpr.erasure.requested`).
 //!
 //! Mirrors Model Plane's `session-core` `gdpr_nats.rs` pattern: the stream
 //! and this consumer's durable name/filter are deployment-provisioned;
@@ -53,7 +53,7 @@ use tracing::{error, info, warn};
 use super::{parse_erasure_event, purge_organization_data};
 
 pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
-pub const SUBJECT: &str = "velion.gdpr.erasure.requested";
+pub const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 pub const DURABLE_NAME: &str = "retrieval-engine-gdpr-erasure-v1";
 
 const INBOX_PREFIX: &str = "_INBOX.RETRIEVAL_ENGINE_GDPR";

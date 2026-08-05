@@ -19,7 +19,7 @@ export function getAuthDatabasePool() {
   const connectionString = readOptionalEnv("DATABASE_URL");
 
   if (!connectionString) {
-    throw new Error("DATABASE_URL must be configured before Velion can load signed-in user data.");
+    throw new Error("DATABASE_URL must be configured before Verevon can load signed-in user data.");
   }
 
   authDatabasePool ??= new Pool({

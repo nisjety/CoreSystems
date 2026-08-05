@@ -21,7 +21,7 @@ import (
 const (
 	serviceCredentialAudience = "billing-core"
 	serviceCredentialEnv      = "BILLING_CORE_SERVICE_CREDENTIALS"
-	gatewayServicePrincipal   = "velion-gateway"
+	gatewayServicePrincipal   = "verevon-gateway"
 	serviceDelegationMaxAge   = 30 * time.Second
 	serviceDelegationSkew     = 5 * time.Second
 	serviceDelegationMaxBody  = 1 << 20
@@ -169,7 +169,7 @@ func validPrincipal(value string) bool {
 	return true
 }
 
-// ValidateRequiredServiceCredentialRegistry verifies the minimum Velion v3
+// ValidateRequiredServiceCredentialRegistry verifies the minimum Verevon v3
 // billing policy before the process opens a database connection or listener.
 func ValidateRequiredServiceCredentialRegistry(raw string) error {
 	credentials, err := parseServiceCredentials(raw)

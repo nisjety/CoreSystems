@@ -146,7 +146,7 @@ func resolveLegacyConnectionID(ctx context.Context, cfg ServerConfig, c *fiber.C
 	if connectionID := firstNonEmpty(
 		c.Query("connectionId"),
 		c.Get("X-Connection-ID"),
-		c.Get("X-Velion-Connection-ID"),
+		c.Get("X-Verevon-Connection-ID"),
 		stringFromAny(body["connectionId"]),
 	); connectionID != "" {
 		return connectionID, nil

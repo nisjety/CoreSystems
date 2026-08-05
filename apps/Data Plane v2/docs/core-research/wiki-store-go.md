@@ -239,7 +239,7 @@ Confirms and pins the plane-audit addendum's "Go formatting drift spans durable 
 
 ### gRPC surface note
 
-The gRPC `WikiService` (`proto/wiki/v1/*.proto`) has no `ListPages` RPC at all — `ListPageVersions`, `GetPageSources`, `ListMaintenanceIssues`, `GetBacklinks`, `CreatePage`, `UpdatePageVersion`, `SubmitProposal`, `ReviewProposal`, `GetPage`, `GetPageByPath` are the full set. The paginated page-list surface (the one with the `deleted_at` bug) only exists over HTTP, added later per the code comment ("Wave 3.1 / Wave 11.C-b close: paginated wiki page enumeration for the velion sidebar, which previously had to fall back to localStorage bookmarks"). The velionv3 gateway proxies it directly: `apps/Frontend Plane/velionv3/apps/gateway/src/domains/knowledge/wiki.rs:22` builds `{wiki_store_url}/v1/wiki/pages{query}` and forwards it verbatim from `GET /api/v1/wiki/pages` (`domains/knowledge.rs:112`) — so this 500 is reachable end-to-end from the real product surface, not just the raw service port.
+The gRPC `WikiService` (`proto/wiki/v1/*.proto`) has no `ListPages` RPC at all — `ListPageVersions`, `GetPageSources`, `ListMaintenanceIssues`, `GetBacklinks`, `CreatePage`, `UpdatePageVersion`, `SubmitProposal`, `ReviewProposal`, `GetPage`, `GetPageByPath` are the full set. The paginated page-list surface (the one with the `deleted_at` bug) only exists over HTTP, added later per the code comment ("Wave 3.1 / Wave 11.C-b close: paginated wiki page enumeration for the verevon sidebar, which previously had to fall back to localStorage bookmarks"). The verevonv3 gateway proxies it directly: `apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/wiki.rs:22` builds `{wiki_store_url}/v1/wiki/pages{query}` and forwards it verbatim from `GET /api/v1/wiki/pages` (`domains/knowledge.rs:112`) — so this 500 is reachable end-to-end from the real product surface, not just the raw service port.
 
 ## Runtime Shape
 
@@ -270,7 +270,7 @@ Primary HTTP surfaces (`cmd/main.go:86-110`):
 
 Current relationships:
 
-- Frontend/Application Plane (velionv3 gateway `domains/knowledge/wiki.rs`) -> `wiki-store-go`
+- Frontend/Application Plane (verevonv3 gateway `domains/knowledge/wiki.rs`) -> `wiki-store-go`
   - page and version product surfaces, proxied same-shape over `/api/v1/wiki/*`
 - `wiki-store-go` -> Postgres
   - canonical wiki truth (confirmed live: `dataplane` DB on `dpv2-postgres:5432`, internal port; host-mapped `5442`)

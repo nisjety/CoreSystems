@@ -5,7 +5,7 @@ import type {
   ComposerAttachment,
   ComposerSubmitPayload,
   ComposerToolId,
-} from "@/features/chat-v2/components/VelionComposer";
+} from "@/features/chat-v2/components/VerevonComposer";
 import { toolLabels } from "@/features/chat-v2/lib/chat-format";
 import {
   cancelChat,
@@ -16,11 +16,11 @@ import {
 } from "@/features/chat-v2/lib/chat-stream";
 import type { ChatKnowledgeGrounding } from "@/features/chat-v2/lib/chat-grounding";
 
-const STORAGE_KEY = "velion:v2:chat:sessions";
-const LAUNCH_MOTION_KEY = "velion:v2:chat:launch-motion";
+const STORAGE_KEY = "verevon:v2:chat:sessions";
+const LAUNCH_MOTION_KEY = "verevon:v2:chat:launch-motion";
 const LAUNCH_MOTION_TTL_MS = 4_000;
 const SESSION_LIMIT = 30;
-const WAITING_ASSISTANT_CONTENT = "Awaiting the live Velion agent stream.";
+const WAITING_ASSISTANT_CONTENT = "Awaiting the live Verevon agent stream.";
 const EMPTY_MODEL_RESPONSE_CONTENT = "Model Plane completed without returning text.";
 const MODEL_STREAM_ERROR_CONTENT = "I couldn't connect to the Model Plane stream. Try again in a moment.";
 
@@ -140,7 +140,7 @@ let chatStoreHydrated = false;
 const chatStoreListeners = new Set<() => void>();
 const assistantStreamControllers = new Map<string, AbortController>();
 
-export function VelionChatWorkspaceProvider({ children }: { children: ReactNode }) {
+export function VerevonChatWorkspaceProvider({ children }: { children: ReactNode }) {
   const chatState = useSyncExternalStore(
     subscribeChatStore,
     getChatStoreSnapshot,
@@ -252,7 +252,7 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
     const assistantStatus: ChatMessage = {
       id: createId(),
       role: "assistant",
-      content: "Regeneration queued for the live Velion agent stream.",
+      content: "Regeneration queued for the live Verevon agent stream.",
       createdAt: regeneratedAt,
       model: payload.model,
       tools: lastUserMessage.tools,
@@ -404,17 +404,17 @@ export function VelionChatWorkspaceProvider({ children }: { children: ReactNode 
   );
 }
 
-export function useVelionChatWorkspace() {
+export function useVerevonChatWorkspace() {
   const context = use(ChatWorkspaceContext);
 
   if (!context) {
-    throw new Error("useVelionChatWorkspace must be used within VelionChatWorkspaceProvider.");
+    throw new Error("useVerevonChatWorkspace must be used within VerevonChatWorkspaceProvider.");
   }
 
   return context;
 }
 
-export function useVelionChatWorkspaceSafe() {
+export function useVerevonChatWorkspaceSafe() {
   return use(ChatWorkspaceContext);
 }
 
@@ -771,7 +771,7 @@ function applyStreamChunk({
       if (chunk.timing) {
         // Latency breakdown for the just-finished turn — see where slow chats
         // spend time. ttftMs ≈ totalMs means the gateway didn't stream tokens.
-        console.info("[velion-chat timing]", {
+        console.info("[verevon-chat timing]", {
           sessionId,
           modelUsed: chunk.modelUsed,
           ...chunk.timing,
@@ -1254,7 +1254,7 @@ function isAbortError(error: unknown) {
 
 export function isAssistantPlaceholder(content: string) {
   return content === WAITING_ASSISTANT_CONTENT ||
-    content === "Regeneration queued for the live Velion agent stream.";
+    content === "Regeneration queued for the live Verevon agent stream.";
 }
 
 function emitChatStoreChange() {

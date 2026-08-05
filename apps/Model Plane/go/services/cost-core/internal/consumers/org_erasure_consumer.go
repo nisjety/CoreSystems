@@ -23,7 +23,7 @@ const orgErasureDurable = "cost-core-org-erasure"
 // and from its 30-day auto-purge cron, so this consumer must be
 // pre-provisioned on controlSharedStream (see audit-core's provisioner)
 // before Start can bind.
-const orgErasureSubject = "velion.gdpr.erasure.requested"
+const orgErasureSubject = "verevon.gdpr.erasure.requested"
 
 // orgErasureEvent decodes org-core's GDPR erasure fan-out envelope:
 // {"subject_type":"organization","subject_id":"<org_id>","org_id":"<org_id>",
@@ -49,7 +49,7 @@ type OrgPurger interface {
 }
 
 // OrgErasureConsumer bridges the Control Plane → Model Plane: when org-core
-// publishes velion.gdpr.erasure.requested for an organization, this
+// publishes verevon.gdpr.erasure.requested for an organization, this
 // permanently deletes every cost_entries row cost-core holds for that org —
 // the org's entire token/cost ledger.
 type OrgErasureConsumer struct {

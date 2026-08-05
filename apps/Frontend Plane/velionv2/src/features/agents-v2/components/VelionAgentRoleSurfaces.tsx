@@ -18,19 +18,19 @@ import {
   TicketCheck,
   Zap,
 } from "lucide-react";
-import { VelionButton } from "@/components/ui/velion-ui";
+import { VerevonButton } from "@/components/ui/verevon-ui";
 import {
   AgentFeatureBoard,
   CounterpartPanel,
   FeatureRow,
   RoleConversationPreview,
   StatusRow,
-} from "@/features/agents-v2/components/VelionAgentsWorkspacePrimitives";
+} from "@/features/agents-v2/components/VerevonAgentsWorkspacePrimitives";
 import type { AgentFeatureId } from "@/features/agents-v2/lib/agent-roles";
 import type {
   AgentBlueprint,
   RoleOperatingModel,
-} from "@/features/agents-v2/lib/velion-agent-page-types";
+} from "@/features/agents-v2/lib/verevon-agent-page-types";
 import {
   ecommerceAssistantModules,
   ecommerceCartRecoveryCards,
@@ -60,13 +60,13 @@ import {
   serviceResolutionQueue,
   serviceUnansweredTopics,
   serviceVerifiedQaRows,
-} from "@/features/agents-v2/lib/velion-agent-surface-data";
+} from "@/features/agents-v2/lib/verevon-agent-surface-data";
 import {
   controlFocusClass,
   roleEyebrowClass,
   roleInsetClass,
   rolePanelClass,
-} from "@/features/agents-v2/lib/velion-agent-page-styles";
+} from "@/features/agents-v2/lib/verevon-agent-page-styles";
 import { cn } from "@/lib/utils";
 
 // RoleCounterpartSurface swaps the generic configuration grid for a role-native product surface.
@@ -378,7 +378,7 @@ function SalesSdrSurface({
           {feature === "sales-booking" ? (
             <div className="grid grid-cols-2 gap-2">
               {salesMeetingSlots.map((slot, index) => (
-                <VelionButton
+                <VerevonButton
                   key={slot}
                   variant={index === 1 ? "primary" : "secondary"}
                   radius="sm"
@@ -386,7 +386,7 @@ function SalesSdrSurface({
                   className={cn("px-3 text-[12px] font-semibold", controlFocusClass)}
                 >
                   {slot}
-                </VelionButton>
+                </VerevonButton>
               ))}
               <div className={cn("col-span-2 rounded-[8px] border px-3 py-2 text-[11px] font-medium text-[#4B515C] dark:text-[#D8DEE8]", roleInsetClass(role))}>
                 Uses the record owner calendar first; sends a meeting link if no live slot is available.
@@ -496,7 +496,7 @@ function SalesSdrSurface({
       >
         <div className="grid grid-cols-2 gap-2">
           {salesMeetingSlots.map((slot, index) => (
-            <VelionButton
+            <VerevonButton
               key={slot}
               variant={index === 1 ? "primary" : "secondary"}
               size="sm"
@@ -505,7 +505,7 @@ function SalesSdrSurface({
               className={cn("px-3 text-[12px] font-semibold", controlFocusClass)}
             >
               {slot}
-            </VelionButton>
+            </VerevonButton>
           ))}
         </div>
         <div className="mt-3 space-y-2">
@@ -689,8 +689,8 @@ function EcommerceCommerceSurface({
               </div>
             </div>
             <div className="mt-3 flex gap-2">
-              <VelionButton variant="primary" size="xs" radius="pill" className={cn("flex-1 px-3 font-semibold", controlFocusClass)}>Review</VelionButton>
-              <VelionButton variant="secondary" size="xs" radius="pill" className={cn("flex-1 px-3 font-semibold", controlFocusClass)}>Apply</VelionButton>
+              <VerevonButton variant="primary" size="xs" radius="pill" className={cn("flex-1 px-3 font-semibold", controlFocusClass)}>Review</VerevonButton>
+              <VerevonButton variant="secondary" size="xs" radius="pill" className={cn("flex-1 px-3 font-semibold", controlFocusClass)}>Apply</VerevonButton>
             </div>
           </div>
         </CounterpartPanel>

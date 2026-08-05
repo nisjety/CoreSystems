@@ -1,13 +1,13 @@
 /**
  * NATS Integration Module
  * 
- * Subscribes to velion cross-plane NATS events from Control Plane and
+ * Subscribes to verevon cross-plane NATS events from Control Plane and
  * Ingestion Plane to keep Convex database synchronized.
  * 
  * Events subscribed to:
- * - velion.controlplane.org.{created,updated,deleted}
- * - velion.controlplane.org.member.{added,removed}
- * - velion.ingestion.import.completed
+ * - verevon.controlplane.org.{created,updated,deleted}
+ * - verevon.controlplane.org.member.{added,removed}
+ * - verevon.ingestion.import.completed
  */
 
 import { v } from "convex/values";
@@ -729,7 +729,7 @@ export const onOrganizationDeleted = internalAction(async (ctx, args: { orgId: s
 
 /**
  * INTERNAL: Handle import completed event
- * Called via NATS when Ingestion Plane publishes velion.ingestion.import.completed
+ * Called via NATS when Ingestion Plane publishes verevon.ingestion.import.completed
  *
  * Payload: { importId: string, orgId: string, sourceType: string, totalDocuments: number, completedAt: number }
  */
@@ -780,14 +780,14 @@ export const onImportCompleted = internalAction(
 // ---------------------------------------------------------------------------
 // Quarry Crawl Job Handlers
 // Called via HTTP actions from nats-subscriber.js when quarry publishes
-// velion.ingestion.crawl.{started,progress,completed,failed} events.
+// verevon.ingestion.crawl.{started,progress,completed,failed} events.
 // These use internalMutation for direct DB writes with full Convex reactivity.
 // ---------------------------------------------------------------------------
 
 const now = () => Date.now();
 
 /**
- * Handle velion.ingestion.crawl.started
+ * Handle verevon.ingestion.crawl.started
  * Upserts an ingestJob record with status=running.
  */
 export const onCrawlStarted = internalMutation(
@@ -823,7 +823,7 @@ export const onCrawlStarted = internalMutation(
 );
 
 /**
- * Handle velion.ingestion.crawl.progress
+ * Handle verevon.ingestion.crawl.progress
  */
 export const onCrawlProgress = internalMutation(
   async (
@@ -854,7 +854,7 @@ export const onCrawlProgress = internalMutation(
 );
 
 /**
- * Handle velion.ingestion.crawl.completed
+ * Handle verevon.ingestion.crawl.completed
  * Crawl scraping is done — pages collected. Transitions to "indexing" while
  * Quarry pushes documents to the data plane. "completed" is set by onCrawlIndexed.
  */
@@ -900,7 +900,7 @@ export const onCrawlCompleted = internalMutation(
 );
 
 /**
- * Handle velion.ingestion.crawl.indexed
+ * Handle verevon.ingestion.crawl.indexed
  * Data-plane ingestion is complete — all pages submitted for embedding.
  * Transitions job to "completed".
  */
@@ -931,7 +931,7 @@ export const onCrawlIndexed = internalMutation(
 );
 
 /**
- * Handle velion.ingestion.crawl.failed
+ * Handle verevon.ingestion.crawl.failed
  */
 export const onCrawlFailed = internalMutation(
   async (
@@ -974,7 +974,7 @@ export const onCrawlFailed = internalMutation(
 );
 
 /**
- * U3-3 (ui-ux-velion-gap.md §10) — Agent run lifecycle handler.
+ * U3-3 (ui-ux-verevon-gap.md §10) — Agent run lifecycle handler.
  *
  * Receives the inner payload from a `mp.v1.run.{runId}.event` envelope
  * after `nats-subscriber.js` has unwrapped it. Maps the orchestrator's

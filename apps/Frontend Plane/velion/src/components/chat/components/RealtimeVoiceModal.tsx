@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * U2-15 follow-up (velion ui-ux-velion-gap.md §10): Realtime voice modal.
+ * U2-15 follow-up (verevon ui-ux-verevon-gap.md §10): Realtime voice modal.
  *
  * Wires the chat composer's "voice mode" button to the model-gateway's
  * `/v1/ai/realtime` WebSocket. The browser opens the WebSocket directly

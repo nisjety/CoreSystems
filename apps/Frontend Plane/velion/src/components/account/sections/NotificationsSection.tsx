@@ -1,6 +1,6 @@
 'use client'
 
-// U5-2 (ui-ux-velion-gap.md §10): real notification preferences UI.
+// U5-2 (ui-ux-verevon-gap.md §10): real notification preferences UI.
 //
 // Replaces the previous 5-boolean mock with a Novu-backed preference matrix.
 // Each row is one (event_type) with per-channel toggles (in_app, email, sms,

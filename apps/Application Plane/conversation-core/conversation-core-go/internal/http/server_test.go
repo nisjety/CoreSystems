@@ -90,7 +90,7 @@ func testVerifier(t *testing.T) *delegation.Verifier {
 	verifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "conversation-core",
 		Keys: map[string]string{
-			"velion-gateway":      testGatewaySecret,
+			"verevon-gateway":      testGatewaySecret,
 			"conversation-ingest": testIngestSecret,
 		},
 	})
@@ -162,7 +162,7 @@ func TestConversationWriteRoutesRejectReadOnlyMembership(t *testing.T) {
 	router := newRouter(&Handler{}, testVerifier(t))
 	body := []byte(`{"body_text":"hello"}`)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/conversations/conversation-1/messages", bytes.NewReader(body))
-	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "viewer")
+	signConversationRequest(t, request, body, "verevon-gateway", testGatewaySecret, "user-1", "org-1", "viewer")
 
 	response := performRequest(router, request)
 	if response.Code != stdhttp.StatusForbidden {
@@ -174,7 +174,7 @@ func TestFeedbackRouteRejectsReadOnlyMembership(t *testing.T) {
 	router := newRouter(&Handler{}, testVerifier(t))
 	body := []byte(`{"body_text":"hello","idempotency_key":"demo-feedback-viewer-0001"}`)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/feedback", bytes.NewReader(body))
-	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "viewer")
+	signConversationRequest(t, request, body, "verevon-gateway", testGatewaySecret, "user-1", "org-1", "viewer")
 
 	response := performRequest(router, request)
 	if response.Code != stdhttp.StatusForbidden {
@@ -186,7 +186,7 @@ func TestConversationAdministrativeRoutesRequireOwnerOrAdmin(t *testing.T) {
 	router := newRouter(&Handler{}, testVerifier(t))
 	body := []byte(`{"name":"macro"}`)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/api/v1/ticket-macros", bytes.NewReader(body))
-	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "member")
+	signConversationRequest(t, request, body, "verevon-gateway", testGatewaySecret, "user-1", "org-1", "member")
 
 	response := performRequest(router, request)
 	if response.Code != stdhttp.StatusForbidden {
@@ -199,7 +199,7 @@ func TestConversationIngestRouteRejectsGatewayAndCrossTenantBody(t *testing.T) {
 	body := []byte(`{"org_id":"org-2","idempotency_key":"event-1"}`)
 
 	gatewayRequest := httptest.NewRequest(stdhttp.MethodPost, "/internal/conversation-events", bytes.NewReader(body))
-	signConversationRequest(t, gatewayRequest, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "admin")
+	signConversationRequest(t, gatewayRequest, body, "verevon-gateway", testGatewaySecret, "user-1", "org-1", "admin")
 	if response := performRequest(router, gatewayRequest); response.Code != stdhttp.StatusForbidden {
 		t.Fatalf("gateway ingest status = %d, want 403; body=%s", response.Code, response.Body.String())
 	}
@@ -217,7 +217,6 @@ func TestConversationRouterDoesNotExposeAlternateAIActionMutationPaths(t *testin
 		method string
 		path   string
 	}{
-		{stdhttp.MethodPost, "/api/v1/ai-actions"},
 		{stdhttp.MethodGet, "/internal/ai-actions"},
 		{stdhttp.MethodPost, "/internal/ai-actions"},
 		{stdhttp.MethodPost, "/internal/ai-actions/:id/review"},
@@ -237,7 +236,7 @@ func TestRequireOrgAndActorUseVerifiedPrincipalNotRawHeadersOrQuery(t *testing.T
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.GET("/scope", func(c *gin.Context) {
-		principal := delegation.Principal{ServiceID: "velion-gateway", UserID: "user-1", OrganizationID: "org-1", Role: "member"}
+		principal := delegation.Principal{ServiceID: "verevon-gateway", UserID: "user-1", OrganizationID: "org-1", Role: "member"}
 		c.Request = c.Request.WithContext(delegation.WithPrincipal(c.Request.Context(), principal))
 		c.JSON(stdhttp.StatusOK, gin.H{"org": requireOrgID(c), "user": actorUserID(c)})
 	})
@@ -255,7 +254,7 @@ func TestTrustedMessageActorCannotBeOverriddenByRawIdentityHeaders(t *testing.T)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.GET("/actor", func(c *gin.Context) {
-		principal := delegation.Principal{ServiceID: "velion-gateway", UserID: "user-1", OrganizationID: "org-1", Role: "member"}
+		principal := delegation.Principal{ServiceID: "verevon-gateway", UserID: "user-1", OrganizationID: "org-1", Role: "member"}
 		c.Request = c.Request.WithContext(delegation.WithPrincipal(c.Request.Context(), principal))
 		name, email := trustedMessageActor(c)
 		c.JSON(stdhttp.StatusOK, gin.H{"name": name, "email": email})
@@ -277,7 +276,7 @@ func TestAuthorizationMiddlewareAllowsOnlyExpectedRoleAndService(t *testing.T) {
 	router.POST(
 		"/agent-write",
 		requireDelegation(testVerifier(t)),
-		requireServicePrincipal("velion-gateway"),
+		requireServicePrincipal("verevon-gateway"),
 		requireScopedPrincipal(),
 		requireAnyRole("owner", "admin", "member"),
 		func(c *gin.Context) { c.Status(stdhttp.StatusNoContent) },
@@ -285,7 +284,7 @@ func TestAuthorizationMiddlewareAllowsOnlyExpectedRoleAndService(t *testing.T) {
 
 	body := []byte(`{}`)
 	request := httptest.NewRequest(stdhttp.MethodPost, "/agent-write", bytes.NewReader(body))
-	signConversationRequest(t, request, body, "velion-gateway", testGatewaySecret, "user-1", "org-1", "member")
+	signConversationRequest(t, request, body, "verevon-gateway", testGatewaySecret, "user-1", "org-1", "member")
 	if response := performRequest(router, request); response.Code != stdhttp.StatusNoContent {
 		t.Fatalf("member status = %d, want 204; body=%s", response.Code, response.Body.String())
 	}

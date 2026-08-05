@@ -239,6 +239,15 @@ func (s *Server) setupRoutes() {
 			calendar.POST("/notes", s.createNavbarCalendarNote)
 		}
 
+		// Private Inbox presentation preferences. Ticket and conversation state
+		// remain owned by their respective Application/Control contracts.
+		inboxWorkspace := v1.Group("/inbox-workspace")
+		{
+			inboxWorkspace.GET("", s.inboxWorkspaceState)
+			inboxWorkspace.POST("/pins", s.updateInboxWorkspacePreference("pin"))
+			inboxWorkspace.POST("/read", s.updateInboxWorkspacePreference("read"))
+		}
+
 		support := v1.Group("/support")
 		{
 			support.POST("/requests", s.createNavbarSupportRequest)
@@ -273,7 +282,7 @@ func (s *Server) setupRoutes() {
 			{
 				authz.GET("/visible", s.authzVisible)
 				authz.GET("/check", s.authzCheck)
-				// Grant write surface backing the velionv3 ShareDialog (PR-6).
+				// Grant write surface backing the verevonv3 ShareDialog (PR-6).
 				// Disabled until verified delegation exists; resource_grants remains
 				// the single authority retrieval + documents-api enforce against.
 				authz.POST("/grant", s.authzGrant)
@@ -348,8 +357,8 @@ func (s *Server) healthCheck(c *gin.Context) {
 
 // correlationMiddleware honours an inbound X-Correlation-Id, mints one if
 // absent, exposes it as `correlation_id` on the gin context, and echoes it
-// back in the response so velion/operator can correlate logs cross-plane.
-// G15 in velion-gap.md.
+// back in the response so verevon/operator can correlate logs cross-plane.
+// G15 in verevon-gap.md.
 func correlationMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		cid := strings.TrimSpace(c.GetHeader("X-Correlation-Id"))

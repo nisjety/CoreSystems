@@ -385,9 +385,9 @@ Then check Convex dashboard for synced organization.
 
 ---
 
-## 2026-05-20 — Velion Build Runtime Audit
+## 2026-05-20 — Verevon Build Runtime Audit
 
-Source: `apps/Application Plane/docker-compose.yml` + `build-velion-services.sh`.
+Source: `apps/Application Plane/docker-compose.yml` + `build-verevon-services.sh`.
 
 ### Observed services & ports
 
@@ -396,7 +396,7 @@ Source: `apps/Application Plane/docker-compose.yml` + `build-velion-services.sh`
 | `convex-backend` | 3210 → 3210 (API), 3211 → 3211 (HTTP actions) | Rust + SQLite; real-time sync |
 | `convex-dashboard` | 6791 → 6791 | UI (app-net only — **NOT on inter-plane-bus**) |
 | `convex-gateway` | 3005 → 3000 | Node.js gateway, runs `npx convex dev` (app-net only) |
-| `convex-subscriber` | — | NATS subscriber — dual-connects `velion-nats:4222` (shared) + `model-plane-nats-1:4222` (model isolated) |
+| `convex-subscriber` | — | NATS subscriber — dual-connects `verevon-nats:4222` (shared) + `model-plane-nats-1:4222` (model isolated) |
 | `affine-runtime` | 47810 → 3010 | self-hosted AFFiNE |
 | `affine-runtime-migration` | one-shot | DB migration, gated `service_completed_successfully` |
 | `notification-core` | 3140 → 3140 | first-party Novu-compatible boundary |
@@ -422,7 +422,7 @@ Source: `apps/Application Plane/docker-compose.yml` + `build-velion-services.sh`
 
 ### Remediation
 1. Fix the env defaults inside `convex-backend` in `apps/Application Plane/docker-compose.yml` (rename `auth-service` → `auth-core`, `org-core-service` → `org-core`).
-2. Add `convex-dashboard` and `convex-gateway` to `inter-plane-bus` if velion server-side routes need to talk to them.
+2. Add `convex-dashboard` and `convex-gateway` to `inter-plane-bus` if verevon server-side routes need to talk to them.
 3. Address Model Plane network isolation so `AI_CORE_URL` resolves.
 
 ---

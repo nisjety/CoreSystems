@@ -1,7 +1,7 @@
 import { AgentCreateForm } from '@/components/agents/AgentCreateForm';
 
 /**
- * Wave 9 (ui-ux-velion-gap.md §19) follow-up: real create-agent flow.
+ * Wave 9 (ui-ux-verevon-gap.md §19) follow-up: real create-agent flow.
  *
  * The earlier placeholder ("This route is reserved for the creation flow
  * while the builder is being integrated") meant operators could see

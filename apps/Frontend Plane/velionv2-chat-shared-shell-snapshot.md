@@ -41,8 +41,8 @@
           - article [ref=e257] [box=620,258,880,120]
           - region "Agent activity" [ref=e277] [box=620,406,720,265]
         - generic [ref=e317] [box=680,814,760,127]:
-          - generic [ref=e318] [box=691,827,1,1]: Message Velion
-          - textbox "Message Velion" [ref=e319] [box=692,828,736,58]:
+          - generic [ref=e318] [box=691,827,1,1]: Message Verevon
+          - textbox "Message Verevon" [ref=e319] [box=692,828,736,58]:
             - /placeholder: How can I help you today?
           - generic [ref=e320] [box=692,892,736,36]
   - region "Notifications alt+T" [box=0,956,1800,0]

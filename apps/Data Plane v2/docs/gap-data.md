@@ -377,7 +377,7 @@ Delivered:
 - [x] Project scaffolded at `/apps/Data Plane v2/` with Cargo workspace (4 Rust members) and 4 Go modules.
 - [x] Offset ports (5442, 6389, 6345, 4232, 8010-8014, 9201-9203) so v1 and v2 run simultaneously.
 - [x] docker-compose.yml with all 8 services + 4 infrastructure deps.
-- [x] Shared Postgres init schema, dual-network topology (dpv2-net + velion-net).
+- [x] Shared Postgres init schema, dual-network topology (dpv2-net + verevon-net).
 - [x] Health/readyz endpoints on every service.
 
 ### Phase D1 — Rust retrieval engine
@@ -502,7 +502,7 @@ Delivered:
 - [x] Retrieval strategy A/B comparison endpoint (`POST /v1/evals/compare`).
 - [x] ZDR ephemeral mode — skip trace persistence for zero-data-retention retrieval.
 - [x] App Shell read-only knowledge API (`/v1/knowledge/*`) behind INTERNAL_API_KEY auth.
-- [x] Shared NATS (velion-nats) subscription for Quarry crawl events in documents-api-go.
+- [x] Shared NATS (verevon-nats) subscription for Quarry crawl events in documents-api-go.
 - [x] INTERNAL_API_KEY auth middleware on retrieval-engine-rs and documents-api-go.
 
 Not yet delivered:
@@ -611,7 +611,7 @@ A Data Plane release cannot claim target parity until:
 
 **Data Plane knows.** It stores knowledge, indexes knowledge, retrieves knowledge, and proves where knowledge came from. It does not reason, browse, or render product UX.
 
-**Data Plane v2 implements this rule** across 8 services in Rust and Go, with 62 API endpoints, hybrid retrieval (dense + sparse + graph + wiki), ACL enforcement (org + workspace + collection + acl_tags), ZDR enforcement (reject + ephemeral modes), durable retrieval traces, chunk lineage tracking, graph text_unit mappings, cost ledger events, source trust scoring, release gates, wiki source/maintenance logs, extraction trace on documents, dead-letter queues on all NATS consumers, A/B eval comparison, App Shell read-only knowledge API, shared NATS (velion-nats) Control Plane integration, INTERNAL_API_KEY auth middleware, and all 14 agent-facing typed tools — all compiling clean and ready for integration testing. **29 of 29 gaps CLOSED.**
+**Data Plane v2 implements this rule** across 8 services in Rust and Go, with 62 API endpoints, hybrid retrieval (dense + sparse + graph + wiki), ACL enforcement (org + workspace + collection + acl_tags), ZDR enforcement (reject + ephemeral modes), durable retrieval traces, chunk lineage tracking, graph text_unit mappings, cost ledger events, source trust scoring, release gates, wiki source/maintenance logs, extraction trace on documents, dead-letter queues on all NATS consumers, A/B eval comparison, App Shell read-only knowledge API, shared NATS (verevon-nats) Control Plane integration, INTERNAL_API_KEY auth middleware, and all 14 agent-facing typed tools — all compiling clean and ready for integration testing. **29 of 29 gaps CLOSED.**
 
 ## 13. v2.1 Roadmap — Remaining Items
 
@@ -723,7 +723,7 @@ No items currently rated `high` priority remain open. Wave-3 candidates: `wiki_b
 
 ### 13.7 Cumulative v2 score
 
-- **Closed**: 29 numbered + 21 v2.1 + 16 v2.2 + 6 v2.3-w1 + 11 v2.3-w2 + 4 accepted divergences + 8 wave-3 partial (OpenAPI spec, Velion d4d5 TS, `/v1/graphs/{org_id}` aggregator, port-mapping reference §13.8, §15-A AuthContext, §15-B MembershipCache + cache, §15-C PermissionResolver foundation, §15-E access_audit_log) + 8 wave-3.1 (§15.6: wiki list-pages, §15-C apply_to_request, §16.1.2 gRPC JWT, §16.2.5 body limit, §16.2.8 model-version cache key, §15-F user_id on cost ledger, §15-G rerank cost event, §15.5 velion wiring) + 9 wave-3.2 (§15.7: rerank NaN sanit., pool warmup, pool gauges, HTTP/2 keepalive, JSONB GIN indexes, JS consumer drain, PII redaction, zdr_actions_applied column, admin_audit_log) + 5 wave-3.3 (§15.8: NATS env std, BM25 tsvector, zdr_actions_applied writer, parallel rerank, clippy --all-targets gate) + 5 wave-3.4 (§15.9: BPE tokenizer, per-org rate limit, wiki sanitization, JWKS fetch, DLQ replay tool) + 9 wave-3.5 (§15.10: mode_mix_applied, agent_retrieval_configs, graph_exports endpoint, org_versions, documents_outbox, wiki publisher, e2e scaffold, chaos scaffold, production runbook) + 6 wave-3.6 (§15.11: retrieval cache key versioning, agent_id wire-through, org_version bump on mutation, outbox publisher loop, wiki repo emit, embedding-engine wiki subscriber) + 5 wave-3.7 (§15.12: outbox publisher boot, BulkIngest outbox writer, wiki publisher boot, retrieval proto agent_id, make go-tidy) + 2 wave-3.8 (§15.13: go mod tidy applied, cross-language schema lock w/ Rust+Go round-trip tests) + 4 wave-4 (§15.14: NATS subject contract + CI lint, gRPC backpressure trailers, server-streaming retrieval, gRPC DocumentService deprecation) = **148 items**
+- **Closed**: 29 numbered + 21 v2.1 + 16 v2.2 + 6 v2.3-w1 + 11 v2.3-w2 + 4 accepted divergences + 8 wave-3 partial (OpenAPI spec, Verevon d4d5 TS, `/v1/graphs/{org_id}` aggregator, port-mapping reference §13.8, §15-A AuthContext, §15-B MembershipCache + cache, §15-C PermissionResolver foundation, §15-E access_audit_log) + 8 wave-3.1 (§15.6: wiki list-pages, §15-C apply_to_request, §16.1.2 gRPC JWT, §16.2.5 body limit, §16.2.8 model-version cache key, §15-F user_id on cost ledger, §15-G rerank cost event, §15.5 verevon wiring) + 9 wave-3.2 (§15.7: rerank NaN sanit., pool warmup, pool gauges, HTTP/2 keepalive, JSONB GIN indexes, JS consumer drain, PII redaction, zdr_actions_applied column, admin_audit_log) + 5 wave-3.3 (§15.8: NATS env std, BM25 tsvector, zdr_actions_applied writer, parallel rerank, clippy --all-targets gate) + 5 wave-3.4 (§15.9: BPE tokenizer, per-org rate limit, wiki sanitization, JWKS fetch, DLQ replay tool) + 9 wave-3.5 (§15.10: mode_mix_applied, agent_retrieval_configs, graph_exports endpoint, org_versions, documents_outbox, wiki publisher, e2e scaffold, chaos scaffold, production runbook) + 6 wave-3.6 (§15.11: retrieval cache key versioning, agent_id wire-through, org_version bump on mutation, outbox publisher loop, wiki repo emit, embedding-engine wiki subscriber) + 5 wave-3.7 (§15.12: outbox publisher boot, BulkIngest outbox writer, wiki publisher boot, retrieval proto agent_id, make go-tidy) + 2 wave-3.8 (§15.13: go mod tidy applied, cross-language schema lock w/ Rust+Go round-trip tests) + 4 wave-4 (§15.14: NATS subject contract + CI lint, gRPC backpressure trailers, server-streaming retrieval, gRPC DocumentService deprecation) = **148 items**
 
 ### 13.8 Port-mapping reference (D4+D5 spec → v2 reality)
 
@@ -875,20 +875,20 @@ Status: **need one-page contract proposal sent to org-core / user-core owners**.
 - `INTERNAL_API_KEY` shared-secret path is retained as a fallback (admin/backfill), but every regular request requires a JWT that passes membership + permission resolution.
 - `access_audit_log` rows visible in Grafana within 30s of admin action.
 
-### 15.5 Velion frontend wiring (2026-05-08)
+### 15.5 Verevon frontend wiring (2026-05-08)
 
-The frontend (`apps/Frontend Plane/velion`) now binds against the real D4/D5
+The frontend (`apps/Frontend Plane/verevon`) now binds against the real D4/D5
 services rather than v1 mocks. Feature-flagged so a partial v2 deploy doesn't
-break velion in environments where the Data Plane stack hasn't been brought up.
+break verevon in environments where the Data Plane stack hasn't been brought up.
 
 **Service routes wired**:
 
-| Service | Routes used by velion |
+| Service | Routes used by verevon |
 |---|---|
 | `graph-index-rs` (admin port `9203`) | `GET /v1/graph/entities`, `GET /v1/graph/entities/{id}`, `GET /v1/graph/relationships/{id}`, `GET /v1/graph/claims`, `POST /v1/graph/expand`, `GET /v1/graphs/{org_id}` (aggregate, wave-3) |
 | `wiki-store-go` (`8011`) | `POST /v1/wiki/pages`, `GET /v1/wiki/pages/{id}`, `GET /v1/wiki/pages/by-path`, `POST /v1/wiki/pages/{id}/versions`, `GET /v1/wiki/pages/{id}/backlinks`, `GET /v1/wiki/pages/{id}/source-logs`, `GET /v1/wiki/pages/{id}/diff` (wave-1) |
 
-**Feature flags** (velion env):
+**Feature flags** (verevon env):
 
 ```env
 KNOWLEDGE_GRAPH_ENABLED=1
@@ -899,7 +899,7 @@ WIKI_SERVICE_URL=http://localhost:8011    # or container DNS http://wiki-store:8
 
 When flags are off, `/knowledge/graph` + `/knowledge/wiki` return 404 and the
 sub-nav hides them. The TS types these consume are now in
-[`apps/Frontend Plane/velion/src/types/data-plane/d4d5.ts`](../../Frontend%20Plane/velion/src/types/data-plane/d4d5.ts),
+[`apps/Frontend Plane/verevon/src/types/data-plane/d4d5.ts`](../../Frontend%20Plane/verevon/src/types/data-plane/d4d5.ts),
 generated against `apps/Data Plane v2/openapi/d4d5.yaml`.
 
 **Known gap → Wave 11.C-b (closed in wave-3.1, 2026-05-08)**:
@@ -907,7 +907,7 @@ generated against `apps/Data Plane v2/openapi/d4d5.yaml`.
 | Gap | Status |
 |---|---|
 | `wiki-store-go` had no "list all pages" endpoint; the wiki sidebar used browser-localStorage bookmarks + path-lookup as a workaround. UI surfaced the limitation honestly with a warning banner. | **CLOSED** — `GET /v1/wiki/pages` paginated list endpoint added in wave-3.1 (see §15.6 below). |
-| Version-history side panel showed current version only; "list versions" wiring stubs out the timeline component. | **DONE earlier** — `GET /v1/wiki/pages/{pageID}/versions` was already implemented; velion just needed to bind it. |
+| Version-history side panel showed current version only; "list versions" wiring stubs out the timeline component. | **DONE earlier** — `GET /v1/wiki/pages/{pageID}/versions` was already implemented; verevon just needed to bind it. |
 
 ### 15.6 Wave 3.1 batch — eight closures (2026-05-08 → 2026-05-19)
 
@@ -924,7 +924,7 @@ verified by `cargo check --workspace`.
 | 5 | **§16.2.8 Embed cache poisoning on model rotation** — cache key didn't include model version | `cache::get_embedding` / `set_embedding` now take `model_version: &str`; cache key format `embed:{model_version}:{blake3(text)}`. Orchestrator passes `cfg.azure_openai_embedding_deployment` as the version. Stale entries from prior model rotate out naturally; no cross-version collisions. | `src/cache/mod.rs`, `src/pipeline/orchestrator.rs` |
 | 6 | **§15-F cost ledger had no `user_id`** — per-user attribution impossible | Migration `20260508180000_add_user_id_to_cost_events.sql` adds `user_id UUID NULL` + composite index `(user_id, created_at)`. Down migration drops index then column. `data-orchestrator-go` `cost.Event` struct + INSERT updated. | `infra/postgres/migrations/20260508180000_*.sql`, `infra/postgres/init.sql`, `services/data-orchestrator-go/internal/cost/consumer.go` |
 | 7 | **§15-G no rerank cost event published** — embedding cost was tracked but rerank wasn't, blind spot in Cohere spend | Pipeline now captures `rerank_used_count` and publishes a `dataplane.cost.ledger` event with `{event_type: "rerank", model, count, estimated_tokens, org_ids, user_id, idempotency_key}` when rerank actually ran. Best-effort: NATS publish failure does not fail the retrieval. | `src/pipeline/orchestrator.rs` (rerank step + NATS publish), `src/main.rs` (single shared `async_nats::Client` plumbed into pipeline + cache invalidator) |
-| 8 | **Velion frontend wires to real D4/D5 services** (Wave 11.C-a closure recorded) | Documented in §15.5 — the d4d5 OpenAPI + TS types are now consumed by `/knowledge/graph` + `/knowledge/wiki` against `graph-index-rs:9201` and `wiki-store-go:8011`. Stub-only mode is gone. | `apps/Frontend Plane/velion/src/types/data-plane/d4d5.ts`, `apps/Data Plane v2/openapi/d4d5.yaml` |
+| 8 | **Verevon frontend wires to real D4/D5 services** (Wave 11.C-a closure recorded) | Documented in §15.5 — the d4d5 OpenAPI + TS types are now consumed by `/knowledge/graph` + `/knowledge/wiki` against `graph-index-rs:9201` and `wiki-store-go:8011`. Stub-only mode is gone. | `apps/Frontend Plane/verevon/src/types/data-plane/d4d5.ts`, `apps/Data Plane v2/openapi/d4d5.yaml` |
 
 **NATS client lifecycle.** `main.rs` now connects once to NATS and shares the
 single `async_nats::Client` across (a) `cache::invalidator::spawn_invalidator`
@@ -965,7 +965,7 @@ green; `cargo test -p retrieval-engine-rs --lib redact::` 5/5 still pass.
 
 | # | Gap | Closure | Where it landed |
 |---|---|---|---|
-| 1 | **§16.1.6 NATS env naming inconsistent** (`NATS_URL` vs `NATS_SHARED_URL` vs `velion-nats`) | `main.rs` now resolves in order `DPV2_NATS_URL` → `SHARED_NATS_URL` → `NATS_URL` → `NATS_LOCAL_URL`. New deployments standardize on the first two; legacy stays compatible. | `src/main.rs` |
+| 1 | **§16.1.6 NATS env naming inconsistent** (`NATS_URL` vs `NATS_SHARED_URL` vs `verevon-nats`) | `main.rs` now resolves in order `DPV2_NATS_URL` → `SHARED_NATS_URL` → `NATS_URL` → `NATS_LOCAL_URL`. New deployments standardize on the first two; legacy stays compatible. | `src/main.rs` |
 | 2 | **§16.3.3 BM25 re-tokenizes per query** — no precomputed `tsvector` | Migration `20260519190000_bm25_tsvector.sql` adds `knowledge_units.content_tsv` generated column + `idx_ku_content_tsv_gin`. `sparse.rs` rewrites the query to `content_tsv @@ plainto_tsquery(...)` and `ts_rank_cd(content_tsv, ...)`. Old expression index stays for one release as fallback. | migration, `src/search/sparse.rs`, `infra/postgres/init.sql` |
 | 3 | **§16.1.3 zdr_actions_applied** (column added in 3.2) — writer was still TODO | Orchestrator now collects an action list during ZDR enforcement (`reject_mode_filtered_restricted`, `reject_mode_no_restricted_found`, `ephemeral_no_trace_persist`). `persist_trace` takes a new `zdr_actions_applied: &[&str]` parameter and binds it to the column; empty slice → SQL NULL. Test caller in `tests/zdr_behavior.rs` updated. | `src/trace/mod.rs`, `src/pipeline/orchestrator.rs`, `tests/zdr_behavior.rs` |
 | 4 | **§16.3.5 Rerank is sequential** — Cohere RTT dominates latency at >50 candidates | `rerank()` now branches: ≤50 candidates → original single-call path; >50 → `rerank_parallel()` shards into 32-candidate chunks, calls Cohere concurrently via `futures::join_all`, merges by `final_score` desc, truncates to `top_n`. NaN-safe sort because shard path also coerces non-finite to 0.0. | `src/search/rerank.rs` |
@@ -1097,7 +1097,7 @@ Items derived from the systematic v2.3 audit. None rated `high` for production b
 | 16.1.3 | **`zdr_mode` captures requested, not applied** — a `restricted` doc is filtered even in `zdr_mode=disabled`. | Add `zdr_actions_applied JSONB` column to `retrieval_runs`. | S |
 | 16.1.4 | **No per-org `retrievalConfig` table** — Data Plane has request-side hook, Model Plane has no `agent_id → weights` mapping. | Either add `agent_retrieval_configs` table here OR formalize an `X-Agent-Retrieval-Config` header from Model Plane. | M |
 | 16.1.5 | **`graph_exports` table without export endpoint** — schema exists, nothing populates it. | Add `POST /v1/graph/exports` (formats: json, graphml, html, markdown). | M |
-| 16.1.6 | **NATS env naming inconsistent** — `NATS_URL` vs `NATS_SHARED_URL` vs `velion-nats`. | Standardize on `DPV2_NATS_URL` / `SHARED_NATS_URL`. | S |
+| 16.1.6 | **NATS env naming inconsistent** — `NATS_URL` vs `NATS_SHARED_URL` vs `verevon-nats`. | Standardize on `DPV2_NATS_URL` / `SHARED_NATS_URL`. | S |
 
 ### 16.2 Stability
 
@@ -1134,7 +1134,7 @@ Items derived from the systematic v2.3 audit. None rated `high` for production b
 | 16.4.3 | **No chaos tests** — NATS down, Qdrant slow, Postgres degraded paths untested. | Production reality. | Add toxiproxy-based suite running quarterly (or pre-release). | L |
 | 16.4.4 | **testcontainers-go covers only documents-api** — wiki-store-go, data-orchestrator-go, data-quality-go lack integration tests. | Coverage gap. | Replicate the integration_test.go pattern. | M |
 | 16.4.5 | **`clippy --workspace -- -D warnings` not in CI required** | 12+ warnings accumulating (`dead_code`, unused imports). | Add to `.github/workflows/ci.yml` required job. | S |
-| 16.4.6 | **No OpenAPI spec** — only protos for gRPC + hand-written endpoint table | Velion TS types built ad-hoc. | Generate OpenAPI from Axum routes (or hand-write + lint with `spectral`). | M |
+| 16.4.6 | **No OpenAPI spec** — only protos for gRPC + hand-written endpoint table | Verevon TS types built ad-hoc. | Generate OpenAPI from Axum routes (or hand-write + lint with `spectral`). | M |
 | 16.4.7 | **PII in logs/traces** — `tracing::info!(query = …)` leaks user queries to OTLP. | GDPR / SOC2 audit finding. | Add `redact_query()` for queries longer than N chars or containing email/phone patterns. | S |
 | 16.4.8 | **No production deployment runbook** — only local docker docs. | Operators have no Kubernetes / cloud-deploy reference. | Write `docs/production-deploy.md` covering replicas, secrets, network policies, autoscaling. | M |
 
@@ -1159,7 +1159,7 @@ These are larger architectural changes, not wave-tickets. They address the dupli
 
 | Surface | Protocol | Caller | Rationale |
 |---|---|---|---|
-| Frontend → Retrieval `:8004` | HTTP/JSON | velion (Next.js) | Browser-friendly; no proxy. |
+| Frontend → Retrieval `:8004` | HTTP/JSON | verevon (Next.js) | Browser-friendly; no proxy. |
 | Model Plane → Retrieval `:50052` | gRPC | mp-session-core, mp-inference-core | Protobuf compact; tight contract; internal. |
 | Admin/control `:8010-:8013` | HTTP/JSON | ops, orchestrator | `curl + jq` debuggability. |
 | documents-api → index → embed → graph | NATS JetStream | each stage | Decoupled, durable, backpressured. |
@@ -1179,7 +1179,7 @@ These are larger architectural changes, not wave-tickets. They address the dupli
 | # | Change | Rationale | Effort |
 |---|---|---|---|
 | 17.3.1 | **Adopt Connect-RPC** for retrieval-engine (replace Tonic, keep same protos) | Single handler set serves both HTTP/JSON and gRPC — kills the duplicate handler problem (17.2.1 + 17.2.4). | L |
-| 17.3.2 | **Server-streaming retrieval** | Better TTFB; enables Velion progressive results UI. | M |
+| 17.3.2 | **Server-streaming retrieval** | Better TTFB; enables Verevon progressive results UI. | M |
 | 17.3.3 | **NATS subject contract file** `infra/nats/SUBJECTS.md` + CI lint that scans `STREAM_NAME` / subject constants | Prevents collisions like the one we just fixed. | S |
 | 17.3.4 | **Make gRPC `DocumentService` forward to documents-api-go HTTP** (or remove it entirely) | One write path, one set of validators. | M |
 | 17.3.5 | **GraphQL `/v1/admin/graph` endpoint** for ops graph-explorer UI | Only when that UI is real — the data is naturally graph-shaped (entities/edges/claims). | L |
@@ -1210,9 +1210,9 @@ The five-wave plan from here to a fully Control-Plane-integrated v2.4:
 
 ---
 
-## 19. 2026-05-20 — Velion Build Runtime Audit (verified green)
+## 19. 2026-05-20 — Verevon Build Runtime Audit (verified green)
 
-Source: `apps/Frontend Plane/velion/build-velion-services.sh` end-to-end run. Data Plane v2 is index 0 (first stack) and the only stack confirmed all-green this run.
+Source: `apps/Frontend Plane/verevon/build-verevon-services.sh` end-to-end run. Data Plane v2 is index 0 (first stack) and the only stack confirmed all-green this run.
 
 ### Containers running healthy (12 / 12)
 | Service | Container | Host port → Container | Health |
@@ -1233,11 +1233,11 @@ Source: `apps/Frontend Plane/velion/build-velion-services.sh` end-to-end run. Da
 ### Networks
 - `dpv2-net` (private) + `inter-plane-bus` (shared) — wiring matches design.
 
-### Bootstrap one-shots tracked by `build-velion-services.sh`
+### Bootstrap one-shots tracked by `build-verevon-services.sh`
 - None for this stack (BOOTSTRAP_SERVICES[0]="" in the script).
 
-### Velion server-side wiring — verified correct
-The following `apps/Frontend Plane/velion/.env` entries resolve correctly because the corresponding containers are joined to `inter-plane-bus`:
+### Verevon server-side wiring — verified correct
+The following `apps/Frontend Plane/verevon/.env` entries resolve correctly because the corresponding containers are joined to `inter-plane-bus`:
 
 ```
 DOCUMENTS_SERVICE_URL=http://dpv2-documents-api:8010      ✅

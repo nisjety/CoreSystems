@@ -6,7 +6,7 @@
  * then opens an SSE stream to Model Plane /v1/invoke/stream and re-streams
  * the deltas to the browser verbatim.
  *
- * Ported from velion/src/app/api/chat/stream/route.ts (Wave 11 / v1 ref).
+ * Ported from verevon/src/app/api/chat/stream/route.ts (Wave 11 / v1 ref).
  * Deliberately minimal: no Convex persistence. Model Plane owns the tool-loop;
  * this BFF only chooses which tools to expose per request.
  */
@@ -118,7 +118,7 @@ function normalizeToolIds(value: unknown): string[] {
 
 // Nudge the model to emit GitHub-flavoured Markdown tables for tabular data so
 // the chat renderer (ChatMarkdown) can display them. Mirrors the existing
-// `[Web context]` content-framing convention. Scoped to velionv2 chat only —
+// `[Web context]` content-framing convention. Scoped to verevonv2 chat only —
 // no shared Model Plane prompt change required.
 const RESPONSE_FORMAT_DIRECTIVE = [
   "[Response formatting]",

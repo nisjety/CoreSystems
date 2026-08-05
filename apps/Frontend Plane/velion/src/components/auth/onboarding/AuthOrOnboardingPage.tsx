@@ -8,7 +8,7 @@
  *
  * Detection rules (cheap, no extra round-trip):
  *
- *   1. If we have a fresh `__velion_session_loaded` cookie OR the
+ *   1. If we have a fresh `__verevon_session_loaded` cookie OR the
  *      `useAuth()` provider reports a user, the user is signed in.
  *   2. If localStorage carries a wizard state, resume there.
  *   3. If nothing is stored, start from `post-signin`.

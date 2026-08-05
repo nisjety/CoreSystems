@@ -1,5 +1,5 @@
 //! NATS `JetStream` consumer for the cross-plane GDPR organization-erasure
-//! fan-out (`velion.gdpr.erasure.requested`).
+//! fan-out (`verevon.gdpr.erasure.requested`).
 //!
 //! Mirrors Model Plane session-core's `gdpr_nats.rs` pattern (same fan-out
 //! contract, same shared-broker isolation rules): the stream and this
@@ -41,7 +41,7 @@ use tracing::{error, info, warn};
 use crate::gdpr::{parse_erasure_event, purge_organization_data};
 
 const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
-const SUBJECT: &str = "velion.gdpr.erasure.requested";
+const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 const DURABLE_NAME: &str = "quickwit-adapter-gdpr-erasure-v1";
 
 /// Inbox prefix for the dedicated shared-broker connection used by the GDPR

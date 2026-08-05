@@ -28,7 +28,7 @@ function playwrightAuthUser(headerList: Awaited<ReturnType<typeof headers>>): Au
 
   return {
     id,
-    email: headerList.get("x-playwright-auth-email")?.trim() || "playwright@velion.local",
+    email: headerList.get("x-playwright-auth-email")?.trim() || "playwright@verevon.local",
     image: null,
     name: headerList.get("x-playwright-auth-name")?.trim() || "Playwright User",
     cookieHeader: headerList.get("cookie") ?? undefined,

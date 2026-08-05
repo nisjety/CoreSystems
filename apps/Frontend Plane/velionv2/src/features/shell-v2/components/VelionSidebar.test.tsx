@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VelionSidebar } from "@/features/shell-v2/components/VelionSidebar";
+import { VerevonSidebar } from "@/features/shell-v2/components/VerevonSidebar";
 
 const navigationMocks = vi.hoisted(() => ({
   pathname: "/inbox",
@@ -24,7 +24,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 vi.mock("@/features/chat-v2/lib/chat-workspace", () => ({
-  useVelionChatWorkspaceSafe: () => null,
+  useVerevonChatWorkspaceSafe: () => null,
 }));
 
 vi.mock("@/features/chat-v2/lib/chat-format", () => ({
@@ -132,8 +132,8 @@ const knowledgePayload = {
     webSources: [
       {
         id: "web-docs",
-        name: "Velion docs",
-        url: "https://docs.velion.ai",
+        name: "Verevon docs",
+        url: "https://docs.verevon.ai",
         kind: "crawl",
         status: "active",
         providerKey: "web",
@@ -154,7 +154,7 @@ const knowledgePayload = {
 
 function renderInboxSidebar() {
   return render(
-    <VelionSidebar
+    <VerevonSidebar
       activeRoute="/inbox"
       expanded
       onExpandedChange={vi.fn()}
@@ -165,7 +165,7 @@ function renderInboxSidebar() {
 
 function renderSettingsSidebar() {
   return render(
-    <VelionSidebar
+    <VerevonSidebar
       activeRoute="/settings"
       expanded
       onExpandedChange={vi.fn()}
@@ -176,7 +176,7 @@ function renderSettingsSidebar() {
 
 function renderAccountSidebar() {
   return render(
-    <VelionSidebar
+    <VerevonSidebar
       activeRoute="/account"
       expanded
       onExpandedChange={vi.fn()}
@@ -187,7 +187,7 @@ function renderAccountSidebar() {
 
 function renderAgentsSidebar() {
   return render(
-    <VelionSidebar
+    <VerevonSidebar
       activeRoute="/agents"
       expanded
       onExpandedChange={vi.fn()}
@@ -198,7 +198,7 @@ function renderAgentsSidebar() {
 
 function renderKnowledgeSidebar() {
   return render(
-    <VelionSidebar
+    <VerevonSidebar
       activeRoute="/knowledge"
       expanded
       onExpandedChange={vi.fn()}
@@ -207,7 +207,7 @@ function renderKnowledgeSidebar() {
   );
 }
 
-describe("VelionSidebar inbox navigation", () => {
+describe("VerevonSidebar inbox navigation", () => {
   beforeEach(() => {
     navigationMocks.pathname = "/inbox";
     navigationMocks.searchParams = new URLSearchParams("view=mine");
@@ -257,7 +257,7 @@ describe("VelionSidebar inbox navigation", () => {
   });
 });
 
-describe("VelionSidebar knowledge navigation", () => {
+describe("VerevonSidebar knowledge navigation", () => {
   beforeEach(() => {
     navigationMocks.pathname = "/knowledge";
     navigationMocks.searchParams = new URLSearchParams();
@@ -303,7 +303,7 @@ describe("VelionSidebar knowledge navigation", () => {
   });
 });
 
-describe("VelionSidebar agents navigation", () => {
+describe("VerevonSidebar agents navigation", () => {
   beforeEach(() => {
     navigationMocks.pathname = "/agents";
     navigationMocks.searchParams = new URLSearchParams();
@@ -337,7 +337,7 @@ describe("VelionSidebar agents navigation", () => {
   });
 });
 
-describe("VelionSidebar settings navigation", () => {
+describe("VerevonSidebar settings navigation", () => {
   beforeEach(() => {
     navigationMocks.pathname = "/settings";
     navigationMocks.searchParams = new URLSearchParams();
@@ -372,7 +372,7 @@ describe("VelionSidebar settings navigation", () => {
   });
 });
 
-describe("VelionSidebar account navigation", () => {
+describe("VerevonSidebar account navigation", () => {
   beforeEach(() => {
     navigationMocks.pathname = "/account";
     navigationMocks.searchParams = new URLSearchParams();

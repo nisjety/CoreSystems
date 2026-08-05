@@ -1,4 +1,4 @@
-# Velion V1 → V2 Port Inventory
+# Verevon V1 → V2 Port Inventory
 > Read-only audit. Evidence-based (file:line). Generated 2026-05-30.
 
 ---
@@ -204,7 +204,7 @@ export const ONBOARDING_STEPS = [
   'assembly',       // AssemblyStep — completion animation
 ] as const
 ```
-`STORAGE_KEY = 'velion.onboarding.v1'` (localStorage)
+`STORAGE_KEY = 'verevon.onboarding.v1'` (localStorage)
 
 **Step files** (`src/components/auth/onboarding/steps/`): `PostSignInStep`, `OrganizationStep`, `WebsiteStep`, `ConnectStep`, `PaywallStep`, `SocialProofStep`, `AssemblyStep`, `_shared.tsx`
 
@@ -319,7 +319,7 @@ Also exposes `serverRuntimeConfig` with `CONTRACT_MANAGEMENT_URL`, `XERO_SERVICE
 | `BrregSearch.tsx` | `src/components/onboarding/ui/BrregSearch.tsx` | **Reuse as-is** — self-contained, uses `brregService` + TanStack Query + `useLanguageSwitch`. |
 | `OrganizationStep.tsx` (auth version) | `src/components/auth/onboarding/steps/OrganizationStep.tsx` | **Adapt** — wire `createOrganization` function (lines ~70-100) into v2's useReducer wizard. The `sizeFromEmployeeCount`, `slugify`, and `handleBrregSelect` helpers are direct copy-paste. |
 | `/api/org/[...path]/route.ts` | `src/app/api/org/[...path]/route.ts` | **Port with adaptation** — v2 does not have this yet. Copy the full file. Change `requireSession` import path if needed. The billing fan-out logic (plan/checkout/quota paths) is complex but self-contained. |
-| `useOnboardingMachine` + `types.ts` | `src/components/auth/onboarding/state/` | **Adapt** — v2 uses `useReducer` already; merge the step list and payload shapes. `ONBOARDING_STEPS` and `OrganizationPayload` (with `brregOrgNumber`, `employeeCount`) should be imported or replicated. `STORAGE_KEY = 'velion.onboarding.v1'` must match for resume compatibility. |
+| `useOnboardingMachine` + `types.ts` | `src/components/auth/onboarding/state/` | **Adapt** — v2 uses `useReducer` already; merge the step list and payload shapes. `ONBOARDING_STEPS` and `OrganizationPayload` (with `brregOrgNumber`, `employeeCount`) should be imported or replicated. `STORAGE_KEY = 'verevon.onboarding.v1'` must match for resume compatibility. |
 | `onboarding-service.ts` | `src/components/onboarding/services/onboarding-service.ts` | **Selectively port** — extract `setupOrganization` (org-core call), `completeProfile` (user-core call), `needsOnboarding` (G18 session-context check), and `completeOnboarding` (marks complete in user-core). v2 currently only hits `/api/v1/onboarding/status` — these are the missing wires. |
 | `OnboardingGuard` | `src/components/onboarding/guards.tsx` | **Port** — v2 needs a client-side guard in its dashboard layout. Can simplify to just `authClient.useSession()` + `requireCompletedOnboarding` pattern. |
 | `middleware.ts` | Not present in v1 | **Skip** — v1 does not use Next.js middleware for auth. Use server component guards + client `OnboardingGuard` pattern instead. |

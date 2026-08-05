@@ -45,6 +45,26 @@ pub enum OrchestrationEventKind {
     BrowserActionApprovalRequired,
     /// A pending browser-action approval was decided (Phase 5).
     BrowserActionDecided,
+    /// A resumed continuation's independent verification was recorded
+    /// (Verified Outcome Foundation, verevon-roadmap.md §3b).
+    ApprovalContinuationVerified,
+}
+
+/// Independent judgment on whether a claimed outcome actually happened
+/// (Verified Outcome Foundation). Mirrors `model_plane.v1.VerificationStatus`
+/// minus `Unspecified` — an event never carries an unjudged verification (the
+/// recording handler only fires this event when one was actually produced).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    /// No verification could be performed or its result was inconclusive.
+    Unknown,
+    /// Independently judged to have actually happened.
+    VerifiedSuccess,
+    /// Independently judged to have NOT happened, or to have failed.
+    VerifiedFailure,
+    /// Some but not all of the effect's expected consequences were confirmed.
+    PartiallyVerified,
 }
 
 /// Typed orchestration event payload. Each variant carries the minimum fields
@@ -221,6 +241,26 @@ pub enum OrchestrationEvent {
         /// Timestamp.
         at: DateTime<Utc>,
     },
+    /// A resumed continuation's independent verification was recorded
+    /// (Verified Outcome Foundation, verevon-roadmap.md §3b).
+    ApprovalContinuationVerified {
+        /// Run this continuation belongs to.
+        run_id: String,
+        /// Delivery this continuation resumed.
+        delivery_id: String,
+        /// Durable approval id that authorized the continuation.
+        approval_id: String,
+        /// The immutable execution receipt this verification judges.
+        receipt_id: String,
+        /// The independent judgment.
+        verification_status: VerificationStatus,
+        /// How the judgment was reached, e.g. `"structural"`.
+        verification_method: String,
+        /// Short, human-readable justification.
+        verification_reason: String,
+        /// Timestamp.
+        at: DateTime<Utc>,
+    },
 }
 
 impl OrchestrationEvent {
@@ -245,6 +285,9 @@ impl OrchestrationEvent {
                 OrchestrationEventKind::BrowserActionApprovalRequired
             }
             Self::BrowserActionDecided { .. } => OrchestrationEventKind::BrowserActionDecided,
+            Self::ApprovalContinuationVerified { .. } => {
+                OrchestrationEventKind::ApprovalContinuationVerified
+            }
         }
     }
 }
@@ -317,7 +360,8 @@ mod tests {
             OrchestrationEventKind::BrowserRunResumed,
             OrchestrationEventKind::BrowserActionApprovalRequired,
             OrchestrationEventKind::BrowserActionDecided,
+            OrchestrationEventKind::ApprovalContinuationVerified,
         ];
-        assert_eq!(kinds.len(), 13);
+        assert_eq!(kinds.len(), 14);
     }
 }

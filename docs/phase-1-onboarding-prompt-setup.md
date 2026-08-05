@@ -14,7 +14,7 @@ top of every visual prompt so style stays consistent across slots.
 
 ## 0 · Brand prefix (paste at the top of every visual prompt)
 
-> **Velion onboarding · house style.** Aesthetic: Intercom-cream
+> **Verevon onboarding · house style.** Aesthetic: Intercom-cream
 > minimalism × Chatbase simplicity. Background `#EDEBE7`
 > (cream). Right-pane card `#F4EFE5`. Text `#1F1B17`. Single accent
 > `#FF2E63` (coral). Editorial serif (Cormorant Garamond) on
@@ -34,7 +34,7 @@ top of every visual prompt so style stays consistent across slots.
 - **Step**: `PostSignInStep`
 - **Format**: webm, 432×640, 4 s, seamless loop
 
-> Cinematic 4-second loop showing the Velion dashboard coming alive.
+> Cinematic 4-second loop showing the Verevon dashboard coming alive.
 > Camera glides across a clean cream surface; cards slide into place
 > — a chat thread reveals an AI agent reply, a knowledge graph blooms
 > behind it, a small token-cost meter ticks up, a CSAT chart fills.
@@ -139,7 +139,7 @@ top of every visual prompt so style stays consistent across slots.
 > chrome assembles around it: sidebar slides in from the left, top
 > navbar drops in from above, knowledge graph card fades in on the
 > right, usage stats card slides up from the bottom. Final frame is
-> the empty Velion dashboard with the user's org name appearing in
+> the empty Verevon dashboard with the user's org name appearing in
 > the top-left workspace switcher. Caption fades in over the final
 > frame: "Workspace klar." (Norwegian for "Workspace ready.")
 
@@ -155,7 +155,7 @@ fields. Plane: model-plane via `mintPlaneToken({audience: 'model-plane'})`.
 
 System prompt (verbatim):
 
-> Du er en intern rådgiver i Velion. Du svarer KUN med JSON som
+> Du er en intern rådgiver i Verevon. Du svarer KUN med JSON som
 > matcher response_format. Bruk norsk i feltet "reason".
 
 User-prompt template (assembled by `buildPrompt` in the route — keep
@@ -194,11 +194,11 @@ The floor only ever *upgrades* the LLM pick — it never downgrades.
 |------|-------------------------------|----------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------|-----------------|
 | 1    | —                             | Du er inne.                            | Vi forbereder arbeidsplassen din. Det tar et øyeblikk.                                                          | — (auto)     | —               |
 | 2    | Step 2 of 6 · Organisasjon    | Hva heter organisasjonen din?          | Søk i Enhetsregisteret eller skriv inn navnet manuelt. Du kan endre alt senere.                                 | Fortsett     | Skip verification (→ free-text mode) |
-| 3    | Step 3 of 6 · Website         | Show Velion where to learn.            | Paste your company URL. We'll skim the public pages and turn them into the agent's first knowledge base.        | Continue     | Skip for now    |
-| 4    | Step 4 of 6 · Sources         | Connect your knowledge.                | Pick the systems Velion should learn from. Each one becomes a cluster of nodes in the graph on the right.       | Continue     | Skip            |
-| 5    | Step 5 of 6 · Sosial proof    | Selskap som bygger med Velion.         | Vi gir samme infrastruktur som store team — uten oppsettet.                                                     | Se planene   | —               |
+| 3    | Step 3 of 6 · Website         | Show Verevon where to learn.            | Paste your company URL. We'll skim the public pages and turn them into the agent's first knowledge base.        | Continue     | Skip for now    |
+| 4    | Step 4 of 6 · Sources         | Connect your knowledge.                | Pick the systems Verevon should learn from. Each one becomes a cluster of nodes in the graph on the right.       | Continue     | Skip            |
+| 5    | Step 5 of 6 · Sosial proof    | Selskap som bygger med Verevon.         | Vi gir samme infrastruktur som store team — uten oppsettet.                                                     | Se planene   | —               |
 | 6    | Step 6 of 6 · Plan            | Velg plan.                             | LLM-generated reason from `recommendation.reason` (Norwegian).                                                  | Velg {name}  | —               |
-| 7    | Ferdig                        | Setter sammen Velion til deg.          | Vi flytter inn alt vi har samlet — kunnskap, integrasjoner og agenten din — og åpner dashboardet om noen sek.   | — (auto)     | —               |
+| 7    | Ferdig                        | Setter sammen Verevon til deg.          | Vi flytter inn alt vi har samlet — kunnskap, integrasjoner og agenten din — og åpner dashboardet om noen sek.   | — (auto)     | —               |
 
 Progress dots: 6 dots, current step pill-wide, completed pills dark,
 upcoming pills cream-grey. Sits above the eyebrow on every input step.

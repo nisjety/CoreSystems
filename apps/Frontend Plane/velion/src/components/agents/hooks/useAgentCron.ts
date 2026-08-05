@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { PersistedAgent } from '../types';
 
 /**
- * U3-12 (ui-ux-velion-gap.md §14): per-agent cron schedules.
+ * U3-12 (ui-ux-verevon-gap.md §14): per-agent cron schedules.
  *
  * Wraps `/api/cron` (which proxies to model-gateway `/v1/cron`, which
  * proxies to capability-core's cron table). Each cron row owns an

@@ -16,35 +16,35 @@
 >    `data-orchestrator-go`/`data-quality-go`/`wiki-store-go`/`graph-index-rs`.
 >
 > Not re-verified in this pass, so left as-is: the Model Plane deploy-landmine
-> item, the velionv3 `graph-preview` IDOR, `cost-core` auth, and every other row.
+> item, the verevonv3 `graph-preview` IDOR, `cost-core` auth, and every other row.
 
 Updated: 2026-07-12 (six-plane audit)
 
 ## 2026-07-11/12 — Six-plane audit: consolidated open items
 
-A full pyramid audit (Control → Data → Ingestion → Model → Application → Frontend/velionv3) completed with per-plane `docs/core-research/plane-audit-2026-07-11.md` (Data Plane: `-07-10`) + `<Plane>_STATUS.md` + `<Plane>_ROADMAP.md`. Detail and fix specs live in those; this is the cross-plane rollup.
+A full pyramid audit (Control → Data → Ingestion → Model → Application → Frontend/verevonv3) completed with per-plane `docs/core-research/plane-audit-2026-07-11.md` (Data Plane: `-07-10`) + `<Plane>_STATUS.md` + `<Plane>_ROADMAP.md`. Detail and fix specs live in those; this is the cross-plane rollup.
 
 **#0 — INFRASTRUCTURE, now blocking everything (operator/host):** Docker's containerd content store is corrupted (blob I/O errors) and the `application-postgres` data volume is corrupted (SQLSTATE 58030). The approved restart was **attempted and failed** — the 278 GiB Docker data image would not mount on a **99%-full host disk**; Docker Desktop is stopped. Until host disk space is freed and Docker recovers, `docker exec`/build/logs are unavailable, DB-backed services are down, and **no source fix from Phases 2–6 can be deployed or live-verified**. This is the single gating item; it needs an operator decision on freeing host space (non-destructive) vs a destructive Docker reset/restore.
 
 **Fixed in source this audit** (build/test-verified; only session-core is deployed — the rest await #0):
 - Control Plane `session-core`: forged-bearer auth-bypass → validates via auth-core round-trip (DEPLOYED + live-verified).
 - Ingestion `shipping-core`: Bring delivery-time parsing (top-level `expectedDelivery`) + 2 production-shaped tests.
-- velionv3 `McpServersSection.tsx`: MCP-add transport/URL-scheme validation (typecheck green; hot-reloads).
+- verevonv3 `McpServersSection.tsx`: MCP-add transport/URL-scheme validation (typecheck green; hot-reloads).
 - Data Plane v2: the parallel "Secure-MVP" remediation across graph-index/data-quality/data-orchestrator/quickwit/documents-api (see `apps/Data Plane v2/DATA_PLANE_ROADMAP.md`).
 
 **P0 / HIGH open items (by plane):**
 - **Model Plane — deploy landmine:** an uncommitted secure-MVP WIP removes the gRPC surfaces of `model-gateway`/`inference-core`/`execution-core` (`#[cfg(test)]`); rebuilding as-is breaks the whole chat/inference/tool loop. Split the change before any rebuild. (`MODEL_PLANE_ROADMAP.md` Phase A.)
-- **velionv3 — new cross-tenant IDOR:** `GET /api/v1/onboarding/graph-preview` trusts a client `org_id` query param → reads any org's knowledge graph. Fix: derive org from session. (`FRONTEND_PLANE_ROADMAP.md` Phase A.)
-- **velionv3 — chat tool-surfacing + HITL bypass:** plain chat sends no tools (the "features don't work" cause); composer-selected writes run un-gated without Plan mode. Ship both fixes together. (`FRONTEND_PLANE_ROADMAP.md` Phase B.)
+- **verevonv3 — new cross-tenant IDOR:** `GET /api/v1/onboarding/graph-preview` trusts a client `org_id` query param → reads any org's knowledge graph. Fix: derive org from session. (`FRONTEND_PLANE_ROADMAP.md` Phase A.)
+- **verevonv3 — chat tool-surfacing + HITL bypass:** plain chat sends no tools (the "features don't work" cause); composer-selected writes run un-gated without Plan mode. Ship both fixes together. (`FRONTEND_PLANE_ROADMAP.md` Phase B.)
 - **Model Plane — `cost-core`:** no inbound auth (IDOR read + write); DB-DSN leak in 500s; budget fails open.
 - **Application — `convex-core`:** `onOrganizationMemberRemoved` called-but-undefined → org member removals never mirror (Phase-1 finding still open).
 - **Control Plane — org/membership sync:** auth-core→org-core/user-core org sync still broken (org creates don't propagate); the in-flight outbox fix has its own GUC-name + billing-port bugs to fix before deploy. (`CONTROL_PLANE_ROADMAP.md`.)
 - **Data Plane v2 — do NOT flip enforce prematurely:** strict mode denies all real users until Control Plane org-sync lands.
-- **Application — `information-core`:** relays FNV-hash-fabricated traffic volume/speed as real measurements (honesty bug); velionv3 settings has 2 residual fabricated rows.
+- **Application — `information-core`:** relays FNV-hash-fabricated traffic volume/speed as real measurements (honesty bug); verevonv3 settings has 2 residual fabricated rows.
 
 **MCP-in-chat (user headline):** the add-MCP-via-UI pipe is real; needs (a) the transport-trap fix (done), (b) discovery/health feedback surfaced in Settings, (c) an OAuth remote-MCP client in model-gateway for connector-style servers like Visma Net. Visma is not wired in the runtime anywhere today.
 
-**Doc hygiene:** `apps/STALE_DOC_DELETION_REGISTER.md` gained ~15 new candidates this audit (Control Plane README/TEST_FLOW/DEPLOYMENT/QUICK_REFERENCE/CONVEX_INTEGRATION_SUMMARY; Ingestion QUICKSTART + 7 Feb-cluster test docs; Data migration-v1-to-v2; velionv3 mock-backed-surfaces.md → delete). The `docs/` directory has 150+ files with heavy completion-report sprawl — a dedicated consolidation pass is warranted but out of scope here.
+**Doc hygiene:** `apps/STALE_DOC_DELETION_REGISTER.md` gained ~15 new candidates this audit (Control Plane README/TEST_FLOW/DEPLOYMENT/QUICK_REFERENCE/CONVEX_INTEGRATION_SUMMARY; Ingestion QUICKSTART + 7 Feb-cluster test docs; Data migration-v1-to-v2; verevonv3 mock-backed-surfaces.md → delete). The `docs/` directory has 150+ files with heavy completion-report sprawl — a dedicated consolidation pass is warranted but out of scope here.
 
 ---
 
@@ -55,7 +55,7 @@ Updated: 2026-07-02
 Scope: documentation refresh, validation evidence, and low-risk smoke-script maintenance.
 
 Focused planes:
-- Frontend Plane: `apps/Frontend Plane/velionv3`
+- Frontend Plane: `apps/Frontend Plane/verevonv3`
 - Data Plane v2: `apps/Data Plane v2`
 - Ingestion Plane: `apps/Ingestion Plane`
 - Model Plane: `apps/Model Plane`
@@ -76,10 +76,10 @@ Status key:
 
 | Area | Command | Result | Notes |
 |---|---|---|---|
-| Cross-plane runtime map | `docs/CORESYSTEM_CROSS_PLANE_ARCHITECTURE_MAP.md` | Added | Single consolidated map now records authority boundaries, Velion v3 gateway wiring, live proof, and remaining integration gaps. |
-| Compose config | `docker compose config --quiet` for Frontend Velion v3, Control, Data v2, Ingestion, Application, and Model | Pass | All six main compose files parse with required variables supplied. |
+| Cross-plane runtime map | `docs/CORESYSTEM_CROSS_PLANE_ARCHITECTURE_MAP.md` | Added | Single consolidated map now records authority boundaries, Verevon v3 gateway wiring, live proof, and remaining integration gaps. |
+| Compose config | `docker compose config --quiet` for Frontend Verevon v3, Control, Data v2, Ingestion, Application, and Model | Pass | All six main compose files parse with required variables supplied. |
 | Runtime network | `docker network inspect inter-plane-bus` | Pass | Network exists with 50 observed containers. |
-| Gateway cross-plane reachability | `docker exec velion-gateway-rs ... curl downstream health/session endpoints` | Pass | Gateway container reached Control, Data, Ingestion, Model, and Application service names over `inter-plane-bus`. |
+| Gateway cross-plane reachability | `docker exec verevon-gateway-rs ... curl downstream health/session endpoints` | Pass | Gateway container reached Control, Data, Ingestion, Model, and Application service names over `inter-plane-bus`. |
 | Model cross-plane reachability | `docker exec model-plane-model-gateway-1 ... curl downstream health/session endpoints` | Pass | Model gateway reached Control auth session, Data services, Quarry edge, and internal Model services. |
 | Data Plane v2 HTTP smoke | `set -a; . ./.env; set +a; bash scripts/smoke-test.sh --http-only` | Pass | 13 passed, 0 failed: health, readiness, document create/get/delete. |
 | Data Plane v2 Quickwit smoke | `bash scripts/smoke-quickwit-retrieval.sh` | Pass | Rust fallback test passed; retrieval reports Quickwit-with-Postgres fallback; source object indexed after 30 attempts. |
@@ -87,13 +87,13 @@ Status key:
 | Ingestion integration-api smoke | `bash smoke-test-integration-api.sh` | Fail on real boundary | Script now matches current routes and portable parsing; it fails because GitHub webhooks accept missing/invalid signatures with 200. |
 | Control integration smoke | `bash test-control-plane-integration.sh` | Pass | Updated script checks current auth session endpoint, service health ports, audit-core 8187, and `controlplane-postgres`; 9 passed, 0 failed. |
 | Model durable-layer script | `bash scripts/verify-durable-layer.sh` | Pass | Updated script waits for SQL readiness before migrations; durable-layer assertions pass against throwaway Postgres. |
-| Velion auth gateway probe | throwaway signup/signin curl flow | Partial | Signup succeeds through gateway; signin returns `EMAIL_NOT_VERIFIED`; protected `/api/v1/me` and session-context remain 401. |
-| Quarry edge onboarding probe | source/runtime curl inspection | Open | Velion onboarding still calls `quarry-control`; edge `/v1/jobs` returns 401 from host while control lists jobs under rollout mode. |
+| Verevon auth gateway probe | throwaway signup/signin curl flow | Partial | Signup succeeds through gateway; signin returns `EMAIL_NOT_VERIFIED`; protected `/api/v1/me` and session-context remain 401. |
+| Quarry edge onboarding probe | source/runtime curl inspection | Open | Verevon onboarding still calls `quarry-control`; edge `/v1/jobs` returns 401 from host while control lists jobs under rollout mode. |
 | Data Control consultation probe | source/runtime inspection | Open/partial | retrieval-engine is strict; documents-api `authctx` enforce path still returns 503 because signature verification is not implemented. |
-| Velion v3 frontend | `pnpm lint` in `apps/Frontend Plane/velionv3` | Pass | ESLint completed. |
-| Velion v3 frontend | `pnpm typecheck` in `apps/Frontend Plane/velionv3` | Pass | `tsc -b` completed. |
-| Velion v3 frontend | `pnpm test` in `apps/Frontend Plane/velionv3` | Fail | 46 test files and 202 tests passed, but Vitest failed on 2 unhandled rejections from `loadStudioWorkspace`; also emitted a `--localstorage-file` warning. |
-| Velion v3 gateway | `cargo test --manifest-path apps/gateway/Cargo.toml --all-targets` | Pass | 146 Rust gateway tests passed. |
+| Verevon v3 frontend | `pnpm lint` in `apps/Frontend Plane/verevonv3` | Pass | ESLint completed. |
+| Verevon v3 frontend | `pnpm typecheck` in `apps/Frontend Plane/verevonv3` | Pass | `tsc -b` completed. |
+| Verevon v3 frontend | `pnpm test` in `apps/Frontend Plane/verevonv3` | Fail | 46 test files and 202 tests passed, but Vitest failed on 2 unhandled rejections from `loadStudioWorkspace`; also emitted a `--localstorage-file` warning. |
+| Verevon v3 gateway | `cargo test --manifest-path apps/gateway/Cargo.toml --all-targets` | Pass | 146 Rust gateway tests passed. |
 | Data Plane v2 Rust | `make check-rs` in `apps/Data Plane v2` | Pass with warning | `retrieval-engine-rs` reports unused `RerankClient::new`. |
 | Data Plane v2 Go | `make build-go` in `apps/Data Plane v2` | Pass | `documents-api-go`, `wiki-store-go`, `data-orchestrator-go`, and `data-quality-go` built. |
 | Ingestion Quarry-v2 | `cargo test --workspace` in `apps/Ingestion Plane/Quarry-v2` | Fail | Compile failure: `DataPlaneIngestRequest` constructors missing `initiator_user_id` and `visibility`. |
@@ -112,28 +112,28 @@ Status key:
 | Priority | Status | Plane | Finding | Evidence | Recommended next action |
 |---|---|---|---|---|---|
 | P0 | Confirmed | Data/Control | Data Plane v2 Control consultation is only partially closed: retrieval-engine is strict, but documents-api still has observe-mode `authctx` with unimplemented signature verification. | `documents-api-go/pkg/authctx/authctx.go` returns 503 for `AUTHCTX_ENFORCE=1`; live documents API is reachable but not proven with verified JWT consultation. | Implement documents-api JWT/JWKS verification and add tenant-isolation integration tests. |
-| P0 | Confirmed | Ingestion/Frontend/Control | Quarry-v2/Velion onboarding still posts directly to `quarry-control` `/v1/jobs/`, bypassing `quarry-edge` as the cross-plane entrypoint. | Velion gateway source uses `state.quarry_control_url`; host probe showed edge `/v1/jobs` returns 401 while control `/v1/jobs` lists jobs under rollout mode. | Migrate onboarding crawl handlers to `quarry-edge`; block direct control calls from gateway/frontend domains. |
+| P0 | Confirmed | Ingestion/Frontend/Control | Quarry-v2/Verevon onboarding still posts directly to `quarry-control` `/v1/jobs/`, bypassing `quarry-edge` as the cross-plane entrypoint. | Verevon gateway source uses `state.quarry_control_url`; host probe showed edge `/v1/jobs` returns 401 while control `/v1/jobs` lists jobs under rollout mode. | Migrate onboarding crawl handlers to `quarry-edge`; block direct control calls from gateway/frontend domains. |
 | P0 | Confirmed | Ingestion | Integration API accepts GitHub webhooks with missing or invalid signatures in the live environment. | Updated `smoke-test-integration-api.sh` fails because `/api/v1/webhooks/github` returns 200 accepted for missing and invalid signature headers. | Fail closed when provider webhook secrets are absent and keep the smoke script as regression coverage. |
-| P1 | Confirmed | Frontend | `pnpm test` fails because `loadStudioWorkspace` reads `ctx?.orgs[0]?.id`; optional chaining protects `ctx` but not missing `orgs`. | `apps/Frontend Plane/velionv3/src/features/studio/lib/studio-canvas-model.ts:43`; Vitest reports two unhandled rejections from `StudioPage.test.tsx`. | Change to a safe `ctx?.orgs?.[0]?.id` shape, add a regression test for session context without `orgs`, rerun `pnpm test`. |
+| P1 | Confirmed | Frontend | `pnpm test` fails because `loadStudioWorkspace` reads `ctx?.orgs[0]?.id`; optional chaining protects `ctx` but not missing `orgs`. | `apps/Frontend Plane/verevonv3/src/features/studio/lib/studio-canvas-model.ts:43`; Vitest reports two unhandled rejections from `StudioPage.test.tsx`. | Change to a safe `ctx?.orgs?.[0]?.id` shape, add a regression test for session context without `orgs`, rerun `pnpm test`. |
 | P1 | Confirmed | Ingestion/Data | Quarry-v2 test compilation is behind the Data Plane ingest contract. | `crates/quarry-core/tests/contracts.rs:231` and `crates/quarry-runtime/src/ingest_client.rs:380` construct `DataPlaneIngestRequest` without `initiator_user_id` and `visibility`. | Update constructors and contract tests; decide the correct default visibility and initiator semantics before patching. |
 | P1 | Confirmed | Model | Model Plane Go `orchestrator-core` tests no longer compile against the generated orchestration client interface. | `internal/orchestration/handlers_test.go` stubs are missing `ListPendingApprovals`. | Update the test stub or generate/use a compliant fake client, then rerun `go test ./...` in `services/orchestrator-core`. |
 | P1 | Confirmed | Model | Model Plane Go `letta-bridge` memstore time-range filtering test fails. | `letta-bridge/internal/memstore` `TestTimeRangeFiltering/cutoff_excludes_old_record` got 2 hits and wanted 1. | Inspect cutoff inclusivity/time source behavior; add a regression test around old-record exclusion. |
 | P1 | Confirmed | All | Repository discovery and CodeGraph/static inventories can be polluted by nested `.claude/worktrees`, package caches, and build outputs. | Naive manifest scans surfaced duplicated plane manifests from `.claude/worktrees`; CodeGraph status includes 11,635 indexed files and should be treated as possibly including generated/local artifacts until excludes are audited. | Add explicit index/tooling excludes for `.claude/worktrees`, `node_modules`, `.next`, `target`, `.fallow`, `.playwright-mcp`; regenerate CodeGraph after cleanup. |
 | P1 | Confirmed | Ingestion | Top-level Ingestion Makefile still points some commands at legacy `Quarry`, not active `Quarry-v2`. | `apps/Ingestion Plane/Makefile` targets `setup`, `dev-quarry`, `test-quarry`, and docs output reference `Quarry`. | Update Makefile targets/docs to make Quarry-v2 the active path and keep legacy commands clearly marked. |
-| P1 | Confirmed | Frontend/All | No authenticated Velion v3 browser journey proves all active planes end to end. | No Playwright dependency/config exists; throwaway gateway signup succeeds but signin is blocked by `EMAIL_NOT_VERIFIED`, leaving protected routes 401. | Add a verified test account/session fixture and authenticated Playwright smoke that touches Control, Data, Ingestion, Model, and Application through the gateway. |
+| P1 | Confirmed | Frontend/All | No authenticated Verevon v3 browser journey proves all active planes end to end. | No Playwright dependency/config exists; throwaway gateway signup succeeds but signin is blocked by `EMAIL_NOT_VERIFIED`, leaving protected routes 401. | Add a verified test account/session fixture and authenticated Playwright smoke that touches Control, Data, Ingestion, Model, and Application through the gateway. |
 
-## Frontend Plane: Velion v3
+## Frontend Plane: Verevon v3
 
 | Priority | Status | Finding | Evidence | Recommended next action |
 |---|---|---|---|---|
 | P1 | Confirmed | Vitest fails on unhandled `loadStudioWorkspace` rejection despite all tests passing. | `pnpm test`; `src/features/studio/lib/studio-canvas-model.ts:43`. | Fix missing optional chaining and add regression coverage. |
-| P1 | Confirmed | Velion v3 has three frontend/runtime surfaces that need explicit ownership: Solid/Vite root, Rust gateway, nested Next `apps/velion-web`. | `apps/Frontend Plane/velionv3/README.md`, root `package.json`, `apps/gateway/Cargo.toml`, `apps/velion-web/package.json`. | Add a short frontend-plane ownership doc or expand README with deploy/runtime boundaries. |
-| P2 | Confirmed | `apps/velion-web` README is the generated Next template, not CoreSystem documentation. | `apps/Frontend Plane/velionv3/apps/velion-web/README.md`. | Replace with project-specific purpose, commands, routes, data boundaries, and deployment notes. |
-| P2 | Confirmed | Global CSS is very large and likely hard to maintain. | `apps/Frontend Plane/velionv3/src/styles/global.css` has 30,700 lines. | Split by tokens/layout/features, or document the current generated/manual ownership before further UI work. |
+| P1 | Confirmed | Verevon v3 has three frontend/runtime surfaces that need explicit ownership: Solid/Vite root, Rust gateway, nested Next `apps/verevon-web`. | `apps/Frontend Plane/verevonv3/README.md`, root `package.json`, `apps/gateway/Cargo.toml`, `apps/verevon-web/package.json`. | Add a short frontend-plane ownership doc or expand README with deploy/runtime boundaries. |
+| P2 | Confirmed | `apps/verevon-web` README is the generated Next template, not CoreSystem documentation. | `apps/Frontend Plane/verevonv3/apps/verevon-web/README.md`. | Replace with project-specific purpose, commands, routes, data boundaries, and deployment notes. |
+| P2 | Confirmed | Global CSS is very large and likely hard to maintain. | `apps/Frontend Plane/verevonv3/src/styles/global.css` has 30,700 lines. | Split by tokens/layout/features, or document the current generated/manual ownership before further UI work. |
 | P2 | Confirmed | Several frontend surfaces intentionally expose fallback/planned/preview data paths. | `src/features/social/lib/social-workspace.ts`, `src/shared/read-data/index.ts`, agent/studio comments and tests. | Inventory fallback views and classify each as acceptable honest empty state, planned state, or needs live owner-plane wiring. |
-| P2 | Confirmed | Root docs previously described Velion v2 Server Components/BFF while active target is Velion v3 Solid/Vite plus Rust gateway. | Old `AGENTS.md`, `CLAUDE.md`, and `apps/CODEBASE_INFORMATION_SYSTEM.md` referenced `velionv2`. | Done in this pass; keep future Velion v2 references explicitly historical. |
+| P2 | Confirmed | Root docs previously described Verevon v2 Server Components/BFF while active target is Verevon v3 Solid/Vite plus Rust gateway. | Old `AGENTS.md`, `CLAUDE.md`, and `apps/CODEBASE_INFORMATION_SYSTEM.md` referenced `verevonv2`. | Done in this pass; keep future Verevon v2 references explicitly historical. |
 | P2 | Needs verification | Dev-auth bypass flags need environment hardening review. | `apps/gateway/src/middleware.rs` and config comments mention dev-only fallback and bypass behavior. | Add a focused config/security review to ensure bypass cannot activate in production profiles. |
-| P3 | Confirmed | Velion v3 action registry currently has 25 action IDs across knowledge, operating map, security, inbox, tickets, social, agents, and workflows. | `src/shared/actions/action-registry.ts`. | Add a generated action inventory doc or test that action ownerPlane/risk/approval metadata remains complete. |
+| P3 | Confirmed | Verevon v3 action registry currently has 25 action IDs across knowledge, operating map, security, inbox, tickets, social, agents, and workflows. | `src/shared/actions/action-registry.ts`. | Add a generated action inventory doc or test that action ownerPlane/risk/approval metadata remains complete. |
 
 ## Data Plane v2
 
@@ -148,7 +148,7 @@ Status key:
 
 | Priority | Status | Finding | Evidence | Recommended next action |
 |---|---|---|---|---|
-| P0 | Confirmed | Direct `quarry-control` onboarding path violates the documented "edge is the only public/cross-plane entrypoint" rule. | `Quarry-v2/docs/ARCHITECTURE.md`. | Migrate Velion v3 onboarding crawl handlers to edge. |
+| P0 | Confirmed | Direct `quarry-control` onboarding path violates the documented "edge is the only public/cross-plane entrypoint" rule. | `Quarry-v2/docs/ARCHITECTURE.md`. | Migrate Verevon v3 onboarding crawl handlers to edge. |
 | P0 | Confirmed | Integration API webhook signature enforcement fails open when the GitHub webhook secret is absent or invalid. | Updated live smoke returns 200 for `/api/v1/webhooks/github` with no signature and with `sha256=invalid`. | Require configured secrets for enabled webhook providers or reject unsigned provider webhooks. |
 | P1 | Confirmed | Quarry-v2 workspace tests fail to compile after ingest contract expansion. | `cargo test --workspace` in `Quarry-v2`. | Update constructors in `quarry-core` tests and `quarry-runtime` tests; rerun workspace tests. |
 | P1 | Confirmed | Top-level Makefile still targets legacy `Quarry`. | `apps/Ingestion Plane/Makefile`. | Update commands to Quarry-v2 or explicitly prefix legacy commands. |
@@ -172,7 +172,7 @@ Status key:
 | Priority | Status | Finding | Evidence | Recommended next action |
 |---|---|---|---|---|
 | P0 | Confirmed | Data Plane production readiness depends on Control Plane consultation and trust decisions. | Data Plane `docs/gap-data.md`. | Publish a small contract for org/user/session/quota checks consumed by Data Plane and gateway clients. |
-| P1 | Needs verification | Gateway and plane services need a single source of truth for active org/user scoping headers. | Velion gateway strips forged headers; Data Plane still documents `X-Org-ID` trust risk. | Audit header names and trust boundaries across Control, gateway, Data, and Ingestion. |
+| P1 | Needs verification | Gateway and plane services need a single source of truth for active org/user scoping headers. | Verevon gateway strips forged headers; Data Plane still documents `X-Org-ID` trust risk. | Audit header names and trust boundaries across Control, gateway, Data, and Ingestion. |
 | P2 | Confirmed | Checked Control Plane Go services and auth-core Jest suite pass in this worktree. | `go test ./...` in audit/billing/org/session/user; `pnpm exec jest --runInBand` in `auth-core`. | Keep these as baseline gates for the first remediation batch. |
 | P2 | Needs verification | Control Plane has broad pre-existing local changes in this worktree. | `git status` showed modified auth/org/user/billing/session/audit adjacent files before docs work. | Stabilize or review local changes before using this worktree for release evidence. |
 
@@ -192,14 +192,14 @@ Status key:
 | P1 | Confirmed | Static inventory can double-count nested agent worktrees. | Naive `find` surfaced many manifests under `.claude/worktrees/...`. | Exclude `.claude/worktrees` from CodeGraph and local inventory scripts. |
 | P1 | Confirmed | Large pre-existing dirty worktree reduces audit certainty. | `git status` before this docs work showed many modified/deleted/untracked files across planes. | Before remediation, split user changes from audit fixes or work in a clean branch/worktree. |
 | P2 | Confirmed | Generated/build/dependency directories are present inside plane trees. | Scans had to prune `node_modules`, `target`, `.next`, `.fallow`, `.playwright-mcp`. | Review `.gitignore`, CodeGraph excludes, and artifact cleanup policy. |
-| P2 | Confirmed | Root docs and system map were stale to Velion v2. | `rg velionv2 AGENTS.md CLAUDE.md apps/CODEBASE_INFORMATION_SYSTEM.md` before this pass. | Done in this pass; keep stale references from reappearing by linking new docs in future PRs. |
+| P2 | Confirmed | Root docs and system map were stale to Verevon v2. | `rg verevonv2 AGENTS.md CLAUDE.md apps/CODEBASE_INFORMATION_SYSTEM.md` before this pass. | Done in this pass; keep stale references from reappearing by linking new docs in future PRs. |
 | P3 | Needs verification | CodeGraph counts may include local generated/duplicated content until excludes are audited. | CodeGraph status reports 11,635 indexed files; discovery pollution was separately confirmed. | Regenerate index after exclude cleanup and record fresh counts. |
 
 ## Suggested Remediation Order
 
-1. Fix the failing gates: Velion v3 `loadStudioWorkspace`, Quarry-v2 `DataPlaneIngestRequest`, Model Go `orchestrator-core`, Model Go `letta-bridge`, and Convex pnpm ignored-build approval.
+1. Fix the failing gates: Verevon v3 `loadStudioWorkspace`, Quarry-v2 `DataPlaneIngestRequest`, Model Go `orchestrator-core`, Model Go `letta-bridge`, and Convex pnpm ignored-build approval.
 2. Close the cross-plane trust blockers: Data Plane Control consultation and Quarry-v2 onboarding edge migration.
 3. Clean repository/index hygiene so future onboarding facts are not polluted by nested worktrees or generated artifacts.
-4. Replace stale/default docs: `apps/velion-web` README and top-level Ingestion Makefile/help output.
-5. Inventory preview/fallback surfaces in Velion v3 and promote live owner-plane wiring where the product claims are no longer preview-only.
+4. Replace stale/default docs: `apps/verevon-web` README and top-level Ingestion Makefile/help output.
+5. Inventory preview/fallback surfaces in Verevon v3 and promote live owner-plane wiring where the product claims are no longer preview-only.
 6. Run broader live-stack verification: Ingestion endpoint tests, Model Plane cross-service verification, Control coverage gates, Convex runtime tests, and Application realtime integration checks.

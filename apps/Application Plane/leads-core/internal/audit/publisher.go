@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	SubjectLeadExport       = "velion.audit.v2.application.leads-core.lead_export"
-	SubjectProviderLeadSync = "velion.audit.v2.application.leads-core.provider_lead_sync"
+	SubjectLeadExport       = "verevon.audit.v2.application.leads-core.lead_export"
+	SubjectProviderLeadSync = "verevon.audit.v2.application.leads-core.provider_lead_sync"
 	maxDispatchAttempts     = 20
 )
 

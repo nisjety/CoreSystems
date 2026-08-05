@@ -107,7 +107,7 @@ func main() {
 	}
 
 	// GDPR cross-plane org-erasure purge consumer — subscribes to
-	// velion.gdpr.erasure.requested (org-core, fanned out over the shared
+	// verevon.gdpr.erasure.requested (org-core, fanned out over the shared
 	// control-shared-nats broker) and hard-purges this org's wiki +
 	// Operating Map data. Uses a SECOND, narrowly-scoped "wiki-store-gdpr"
 	// shared-broker connection (WIKISTORE_GDPR_SHARED_NATS_URL/_USER/

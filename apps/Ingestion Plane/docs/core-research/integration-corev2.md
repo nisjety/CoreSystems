@@ -102,7 +102,7 @@ Per `docs/INTERNAL_API_KEY_SPLIT_DRYRUN.md` §0.1 and row 9, and confirmed in so
 
 ## Shipping provider boundary (user headline)
 
-`internal/providers/catalog.go:1150–1199` documents `shipping` as "Velion's OWN freight aggregator (shipping-core)… no per-user OAuth: carrier credentials are org/admin-level configured on shipping-core itself, so this provider is catalog-visible with an admin-setup status rather than a connect popup." It exposes capabilities `shipping.quotes.read / carriers.read / tracking.read` for the connect UI. **[source-only]**
+`internal/providers/catalog.go:1150–1199` documents `shipping` as "Verevon's OWN freight aggregator (shipping-core)… no per-user OAuth: carrier credentials are org/admin-level configured on shipping-core itself, so this provider is catalog-visible with an admin-setup status rather than a connect popup." It exposes capabilities `shipping.quotes.read / carriers.read / tracking.read` for the connect UI. **[source-only]**
 
 Crucially, `shipping` has **no action dispatch case** in `internal/actions/service.go` — integration-corev2 does **not** proxy shipping quotes/tracking. So:
 - The Bring "delivery-time parsing" defect (transit_days:0 / 0001-01-01) is a **shipping-core** concern (`internal/carrier/bring/wire.go`+`bring.go`), out of scope for this doc; see the shipping-core dive.

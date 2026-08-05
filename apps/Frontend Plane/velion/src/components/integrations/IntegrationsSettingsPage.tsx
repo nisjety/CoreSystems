@@ -74,7 +74,7 @@ function normalizeProviderKey(value: string | null) {
 function formatExecutionLabel(value?: string | null) {
   switch (value) {
     case 'first_party':
-      return 'Velion-native'
+      return 'Verevon-native'
     case 'connector_runtime':
       return 'Runtime bridge'
     case 'unavailable':
@@ -242,7 +242,7 @@ function IntegrationCard({
             <p className="mt-3 text-[12px] leading-5 text-[#7D879C]">
               {provider.dataAccessReady
                 ? 'This provider is already linked through sign-in and can be activated for this workspace.'
-                : 'This provider is linked for sign-in only. Velion still needs data-access consent before sync can start.'}
+                : 'This provider is linked for sign-in only. Verevon still needs data-access consent before sync can start.'}
             </p>
           ) : null}
           {!compact ? (
@@ -415,7 +415,7 @@ export function IntegrationsSettingsPage() {
                 Integration catalog is unavailable
               </p>
               <p className="mt-3 max-w-[56ch] text-[15px] leading-7 text-[#7D7D76]">
-                The Velion integration engine did not respond. Check the ingestion-plane service and reload the page.
+                The Verevon integration engine did not respond. Check the ingestion-plane service and reload the page.
               </p>
             </div>
           ) : filteredProviders.length === 0 ? (
@@ -519,7 +519,7 @@ export function IntegrationsSettingsPage() {
                 {
                   title: 'Authorization',
                   value: formatExecutionLabel(selectedProvider.authExecution),
-                  copy: 'How Velion currently executes the account authorization boundary.',
+                  copy: 'How Verevon currently executes the account authorization boundary.',
                 },
                 {
                   title: 'Sync orchestration',

@@ -16,7 +16,7 @@ func TestUserAuditOutboxMigrationContract(t *testing.T) {
 		"create table if not exists user_audit_outbox",
 		"event_id text primary key",
 		"for update skip locked",
-		"velion.audit.v2.control.user-core.%",
+		"verevon.audit.v2.control.user-core.%",
 		"terminal_at",
 		"published_at",
 	} {

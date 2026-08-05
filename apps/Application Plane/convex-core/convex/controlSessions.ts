@@ -6,7 +6,7 @@
  * org-core + billing-core. The snapshot is stored opaquely so we don't have
  * to track every upstream shape change.
  *
- * Readers: velion's `(dashboard)/*` pages subscribe via
+ * Readers: verevon's `(dashboard)/*` pages subscribe via
  * `useQuery(api.controlSessions.byUser, { externalUserId })` for reactive
  * plan / entitlement / billing UI — no more poll loops against the
  * `/api/v1/sessions/current` REST endpoint.
@@ -150,10 +150,10 @@ export async function upsertControlSessionHandler(ctx: any, request: Request) {
 export const upsertControlSession = httpAction(upsertControlSessionHandler);
 
 /**
- * byUser — velion's reactive subscription target. Returns the most recent
+ * byUser — verevon's reactive subscription target. Returns the most recent
  * Control Session snapshot for the given external user id (across orgs).
  *
- * Useful when velion wants to show "you're on Pro" without caring which
+ * Useful when verevon wants to show "you're on Pro" without caring which
  * org the user is currently scoped to. For org-aware views, prefer
  * `byUserAndOrg`.
  */

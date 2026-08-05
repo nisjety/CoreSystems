@@ -1,10 +1,10 @@
 "use client";
 
 /**
- * Shared NO/EN locale provider for Velion v2.
+ * Shared NO/EN locale provider for Verevon v2.
  *
  * Replaces the cosmetic language switcher that previously only fired a
- * toast. The selected locale is persisted to the `velion_locale` cookie
+ * toast. The selected locale is persisted to the `verevon_locale` cookie
  * (1-year max-age) so it survives reloads and is readable server-side if
  * we later want to pre-render localized copy.
  *
@@ -24,7 +24,7 @@ import {
 
 export type Locale = "nb" | "en";
 
-export const LOCALE_COOKIE = "velion_locale";
+export const LOCALE_COOKIE = "verevon_locale";
 const DEFAULT_LOCALE: Locale = "nb";
 
 interface LocaleContextValue {

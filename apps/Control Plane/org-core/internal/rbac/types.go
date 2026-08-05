@@ -1,6 +1,6 @@
 // Package rbac owns the role-based access control surface for org-core.
 //
-// U6-3 (ui-ux-velion-gap.md §10): exposes CRUD on `org_role_mappings`
+// U6-3 (ui-ux-verevon-gap.md §10): exposes CRUD on `org_role_mappings`
 // (per-org named roles + JSONB permission list + is_custom flag) plus
 // a capability catalog endpoint that returns the valid permission strings
 // the UI can present in its role editor.

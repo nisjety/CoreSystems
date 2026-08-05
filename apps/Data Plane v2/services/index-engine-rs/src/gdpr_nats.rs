@@ -1,5 +1,5 @@
 //! NATS `JetStream` consumer for the cross-plane GDPR organization-erasure
-//! fan-out (`velion.gdpr.erasure.requested`) on the shared cross-plane
+//! fan-out (`verevon.gdpr.erasure.requested`) on the shared cross-plane
 //! broker (`control-shared-nats`, stream `AQENCIA_CONTROLPLANE`).
 //!
 //! Decoding, subject-type gating (organization-only — see `gdpr.rs`'s
@@ -50,7 +50,7 @@ use tracing::{error, info, warn};
 use crate::gdpr::{parse_erasure_event, purge_organization_data};
 
 const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
-const SUBJECT: &str = "velion.gdpr.erasure.requested";
+const SUBJECT: &str = "verevon.gdpr.erasure.requested";
 const DURABLE_NAME: &str = "index-engine-org-erasure";
 const INBOX_PREFIX: &str = "_INBOX.INDEX_ENGINE_GDPR";
 

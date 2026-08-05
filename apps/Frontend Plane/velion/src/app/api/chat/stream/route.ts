@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
 
     const stream = new ReadableStream({
       async start(controller) {
-        // U2-4 (ui-ux-velion-gap.md §10): session lifetime is bound to AI
+        // U2-4 (ui-ux-verevon-gap.md §10): session lifetime is bound to AI
         // work completion, not to the browser connection. If the user
         // closes the tab / switches pane mid-stream, we keep writing chunks
         // to Convex so the conversation finishes correctly — a refreshed
@@ -218,7 +218,7 @@ export async function POST(request: NextRequest) {
             // we intentionally do NOT forward `request.signal` so a browser
             // disconnect does not abort the gateway call.
             cookieHeader: request.headers.get('cookie') ?? '',
-            // §15 (ui-ux-velion-gap.md): when the call is on behalf of a
+            // §15 (ui-ux-verevon-gap.md): when the call is on behalf of a
             // configured agent, forward its enabled tool ids so the
             // gateway runs the multi-round tool-use loop
             // (`tool_loop::run_tool_loop`). Non-agent chat (no

@@ -28,7 +28,7 @@ func TestV2AuditPayloadsCarryStableProducerIdentity(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if !strings.HasPrefix(fixture.subject, "velion.audit.v2.application.leads-core.") {
+			if !strings.HasPrefix(fixture.subject, "verevon.audit.v2.application.leads-core.") {
 				t.Fatalf("subject = %q", fixture.subject)
 			}
 			if fixture.payload["producer"] != "leads-core" || fixture.payload["event_id"] == "" {

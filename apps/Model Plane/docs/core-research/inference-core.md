@@ -82,14 +82,14 @@ Deployed provider posture (from `deploy/.env`, values redacted): `INFERENCE_PROV
 
 `provider/intent.rs` (721 lines) implements the "complexity × budget → model" router the memory notes describe, and it is genuine, pure, and well unit-tested. `[source-only]`
 
-- Three Velion auto modes parsed from the model id: `velion-budget|-balance|-genius` (plus `velion`/`velion-auto`/`auto` → Balance). Pinned ids and `""`/`default` bypass the layer.
+- Three Verevon auto modes parsed from the model id: `verevon-budget|-balance|-genius` (plus `verevon`/`verevon-auto`/`auto` → Balance). Pinned ids and `""`/`default` bypass the layer.
 - `classify()` — deterministic heuristic scoring (total chars, last-user-turn length, code fences, whole-word reasoning keywords with boundary checks, tool use, conversation depth) → Simple/Moderate/Complex. Char-counted (not byte) so Norwegian text isn't over-classified.
 - Budget posture via a **real** cost-core call: `BudgetClient` POSTs `COST_CORE_URL + /api/v1/budget/check` with a 400ms timeout, best-effort → `Healthy|Constrained|Exhausted|Unknown`. Any failure/absent org → `Unknown` (never blocks inference).
 - `choose()` maps `(mode, complexity, posture)` through a `RoutingPolicy` table; `Exhausted` forces the `model-router` cheap fallback, `Constrained` downgrades one tier. The policy is hot-swappable (see below).
 
 ## Fallback chain — real
 
-`provider/fallback.rs` (1111 lines): config-driven provider registration; per-provider bounded retries; provider-hint matching (hyphen/underscore-normalized after a Phase-3 regression); **model-family gating** (claude ids only hit Anthropic-shaped providers, everything else the OpenAI-shaped ones — avoids 404-ing the wrong deployment); unspecified-model → per-provider default resolution ("Velion Auto"); prompt cache on the unary path; intent layer invoked at the top of both `infer` and `infer_stream`. Extensive unit tests. `[source-only]`
+`provider/fallback.rs` (1111 lines): config-driven provider registration; per-provider bounded retries; provider-hint matching (hyphen/underscore-normalized after a Phase-3 regression); **model-family gating** (claude ids only hit Anthropic-shaped providers, everything else the OpenAI-shaped ones — avoids 404-ing the wrong deployment); unspecified-model → per-provider default resolution ("Verevon Auto"); prompt cache on the unary path; intent layer invoked at the top of both `infer` and `infer_stream`. Extensive unit tests. `[source-only]`
 
 Routing policy is durable + hot-swappable: seeded from `RoutingPolicy::default` (overridden by env knobs), then a background loop polls session-core's `RoutingPolicy` gRPC every `ROUTER_POLICY_REFRESH_SECS` (default 60) and hot-swaps the live copy via `arc-swap`; the HTTP `PUT /internal/v1/router-policy` write-through persists to session-core and swaps immediately (503 when `SESSION_CORE_URL` unset). `[source-only]`
 

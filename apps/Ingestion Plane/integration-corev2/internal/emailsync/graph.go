@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/triodelab/integration-corev2/internal/store"
 )
 
 // GraphFetcher syncs an Outlook inbox with Microsoft Graph delta queries:
@@ -42,6 +44,10 @@ func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 	if nextURL == "" {
 		query := url.Values{}
 		query.Set("changeType", "created")
+		// Graph returns internetMessageHeaders only when explicitly selected.
+		// The selection is encoded into the delta token for later pages, so this
+		// one initial request preserves the evidence contract for the full cycle.
+		query.Set("$select", "id,conversationId,internetMessageId,internetMessageHeaders,receivedDateTime,subject,bodyPreview,body,from,toRecipients,isDraft")
 		if !f.FullBackfill {
 			since := time.Now().UTC().Add(-backfill).Format(time.RFC3339)
 			query.Set("$filter", fmt.Sprintf("receivedDateTime ge %s", since))
@@ -103,6 +109,36 @@ func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 	return FetchResult{Messages: messages, NextCursor: nextURL}, nil
 }
 
+// FetchConnection records the mailbox identity returned by Graph when the
+// durable connection does not have one yet. It is intentionally best effort:
+// a missing User.Read grant must not turn a successful Mail.Read sync into a
+// failed one.
+func (f *GraphFetcher) FetchConnection(ctx context.Context, conn store.Connection, accessToken, cursor string, backfill time.Duration, maxMessages int) (FetchResult, error) {
+	result, err := f.Fetch(ctx, accessToken, cursor, backfill, maxMessages)
+	if err != nil || !connectionNeedsMailboxAddress(conn) {
+		return result, err
+	}
+	address, profileErr := f.mailboxAddress(ctx, accessToken)
+	if profileErr == nil && address != "" {
+		result.ProviderContextPatch = map[string]string{"mailbox_address": address}
+	}
+	return result, nil
+}
+
+func (f *GraphFetcher) mailboxAddress(ctx context.Context, accessToken string) (string, error) {
+	var profile struct {
+		Mail              string `json:"mail"`
+		UserPrincipalName string `json:"userPrincipalName"`
+	}
+	if err := providerGetJSON(ctx, f.HTTP, accessToken, f.baseURL()+"/me?$select=mail,userPrincipalName", &profile); err != nil {
+		return "", err
+	}
+	if address := normalizeMailboxAddress(profile.Mail); address != "" {
+		return address, nil
+	}
+	return normalizeMailboxAddress(profile.UserPrincipalName), nil
+}
+
 func (f *GraphFetcher) baseURL() string {
 	if f.BaseURL == "" {
 		return graphDefaultBaseURL
@@ -111,15 +147,16 @@ func (f *GraphFetcher) baseURL() string {
 }
 
 type graphMessage struct {
-	ID                string    `json:"id"`
-	Removed           *struct{} `json:"@removed"`
-	IsDraft           bool      `json:"isDraft"`
-	Subject           string    `json:"subject"`
-	ConversationID    string    `json:"conversationId"`
-	InternetMessageID string    `json:"internetMessageId"`
-	ReceivedDateTime  string    `json:"receivedDateTime"`
-	BodyPreview       string    `json:"bodyPreview"`
-	Body              struct {
+	ID                     string                       `json:"id"`
+	Removed                *struct{}                    `json:"@removed"`
+	IsDraft                bool                         `json:"isDraft"`
+	Subject                string                       `json:"subject"`
+	ConversationID         string                       `json:"conversationId"`
+	InternetMessageID      string                       `json:"internetMessageId"`
+	InternetMessageHeaders []graphInternetMessageHeader `json:"internetMessageHeaders"`
+	ReceivedDateTime       string                       `json:"receivedDateTime"`
+	BodyPreview            string                       `json:"bodyPreview"`
+	Body                   struct {
 		ContentType string `json:"contentType"`
 		Content     string `json:"content"`
 	} `json:"body"`
@@ -129,6 +166,11 @@ type graphMessage struct {
 	ToRecipients []struct {
 		EmailAddress graphEmailAddress `json:"emailAddress"`
 	} `json:"toRecipients"`
+}
+
+type graphInternetMessageHeader struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type graphEmailAddress struct {
@@ -151,6 +193,12 @@ func (m graphMessage) normalize() (EmailMessage, bool) {
 		From:              Participant{Name: m.From.EmailAddress.Name, Email: m.From.EmailAddress.Address},
 		OccurredAt:        graphReceivedAt(m.ReceivedDateTime),
 	}
+	headers := graphHeaderMap(m.InternetMessageHeaders)
+	msg.ReferencesHeader = headers["references"]
+	msg.InReplyToHeader = headers["in-reply-to"]
+	msg.AutoSubmitted = headers["auto-submitted"]
+	msg.ContentType = headers["content-type"]
+	msg.OutboundCorrelationID = headers["x-verevon-outbound-intent"]
 	for _, r := range m.ToRecipients {
 		if r.EmailAddress.Name == "" && r.EmailAddress.Address == "" {
 			continue
@@ -173,6 +221,20 @@ func (m graphMessage) normalize() (EmailMessage, bool) {
 		msg.BodyText = "(No message body)"
 	}
 	return msg, true
+}
+
+func graphHeaderMap(headers []graphInternetMessageHeader) map[string]string {
+	values := make(map[string]string, len(headers))
+	for _, header := range headers {
+		name := strings.ToLower(strings.TrimSpace(header.Name))
+		if name == "" {
+			continue
+		}
+		if _, exists := values[name]; !exists {
+			values[name] = strings.TrimSpace(header.Value)
+		}
+	}
+	return values
 }
 
 func graphReceivedAt(value string) time.Time {

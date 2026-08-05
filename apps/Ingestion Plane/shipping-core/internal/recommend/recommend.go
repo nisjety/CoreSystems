@@ -69,7 +69,7 @@ func Recommend(ctx context.Context, client ModelClient, req carrier.QuoteRequest
 
 	resp, err := client.Invoke(ctx, modelplane.InvokeRequest{
 		Content:                buildPrompt(req, quotes),
-		Model:                  "velion-balance",
+		Model:                  "verevon-balance",
 		StructuredOutputSchema: schema,
 	})
 	if err != nil {

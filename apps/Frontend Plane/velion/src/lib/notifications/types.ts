@@ -8,7 +8,7 @@ export type NotificationEventType =
   | 'user_mentioned'
   | 'crawl_completed'
   | 'document_indexed'
-  // G44 (velion-gap.md §8.30): notification-core's control-session subscriber
+  // G44 (verevon-gap.md §8.30): notification-core's control-session subscriber
   // dispatches this type when CP session-core publishes
   // `app.session.entitlements_changed` (plan upgrade, org switch, billing
   // webhook ack). The Go constant for the same value is

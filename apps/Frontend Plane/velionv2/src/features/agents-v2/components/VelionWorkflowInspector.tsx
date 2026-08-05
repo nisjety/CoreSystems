@@ -9,9 +9,9 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import { VelionButton, VelionIconButton } from "@/components/ui/velion-ui";
-import type { InspectorField, ToolInspector } from "@/features/agents-v2/lib/velion-workflow-builder-data";
-import { BrandMark } from "@/features/agents-v2/components/VelionWorkflowBrandMark";
+import { VerevonButton, VerevonIconButton } from "@/components/ui/verevon-ui";
+import type { InspectorField, ToolInspector } from "@/features/agents-v2/lib/verevon-workflow-builder-data";
+import { BrandMark } from "@/features/agents-v2/components/VerevonWorkflowBrandMark";
 
 export function WorkflowInspector({ inspector }: { inspector: ToolInspector }) {
   const Icon = inspector.Icon;
@@ -29,12 +29,12 @@ export function WorkflowInspector({ inspector }: { inspector: ToolInspector }) {
         <h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[#282B31] dark:text-white">
           {inspector.title}
         </h2>
-        <VelionIconButton type="button" size="xs" radius="pill" aria-label="More tool options">
+        <VerevonIconButton type="button" size="xs" radius="pill" aria-label="More tool options">
           <MoreHorizontal className="size-3.5" strokeWidth={2} />
-        </VelionIconButton>
-        <VelionIconButton type="button" size="xs" radius="pill" aria-label="Close tool settings">
+        </VerevonIconButton>
+        <VerevonIconButton type="button" size="xs" radius="pill" aria-label="Close tool settings">
           <X className="size-3.5" strokeWidth={2} />
-        </VelionIconButton>
+        </VerevonIconButton>
       </div>
 
       <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr] items-center border-b border-[#E8E9EC] px-4 py-3 text-[11px] font-semibold dark:border-[#2A2C31]">
@@ -62,10 +62,10 @@ export function WorkflowInspector({ inspector }: { inspector: ToolInspector }) {
             </div>
           </div>
 
-          <VelionButton variant="secondary" size="xs" radius="pill" className="px-3 font-semibold">
+          <VerevonButton variant="secondary" size="xs" radius="pill" className="px-3 font-semibold">
             <Pencil className="size-3.5" strokeWidth={2} />
             Improve prompt
-          </VelionButton>
+          </VerevonButton>
 
           <div>
             <InspectorLabel label="Output" />
@@ -78,18 +78,18 @@ export function WorkflowInspector({ inspector }: { inspector: ToolInspector }) {
                 </div>
               ))}
             </div>
-            <VelionButton variant="secondary" size="xs" radius="pill" className="mt-2 px-3 font-semibold">
+            <VerevonButton variant="secondary" size="xs" radius="pill" className="mt-2 px-3 font-semibold">
               <Plus className="size-3.5" strokeWidth={2} />
               Add output
-            </VelionButton>
+            </VerevonButton>
           </div>
         </div>
       </div>
 
       <div className="shrink-0 px-4 pb-4 pt-2">
-        <VelionButton variant="secondary" size="sm" radius="pill" className="w-full px-3 font-semibold">
+        <VerevonButton variant="secondary" size="sm" radius="pill" className="w-full px-3 font-semibold">
           {inspector.nextLabel}
-        </VelionButton>
+        </VerevonButton>
       </div>
     </aside>
   );

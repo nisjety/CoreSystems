@@ -22,7 +22,7 @@ type migrationQuerier interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-const migrationAdvisoryLockSQL = `SELECT pg_advisory_xact_lock(hashtext('velion'), hashtext('integration-corev2:migrations'))`
+const migrationAdvisoryLockSQL = `SELECT pg_advisory_xact_lock(hashtext('verevon'), hashtext('integration-corev2:migrations'))`
 
 func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	return applyMigrations(ctx, pool)

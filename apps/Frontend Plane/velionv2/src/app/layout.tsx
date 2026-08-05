@@ -22,11 +22,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Velion v2",
+  title: "Verevon v2",
   description:
     "AI helpdesk, knowledge, and agent operations cockpit for enterprise teams.",
-  applicationName: "Velion v2",
-  metadataBase: new URL("https://velion.local"),
+  applicationName: "Verevon v2",
+  metadataBase: new URL("https://verevon.local"),
 };
 
 export default function RootLayout({
@@ -41,8 +41,8 @@ export default function RootLayout({
       className={`${inter.variable} ${geistSans.variable} ${geistMono.variable} h-full bg-background antialiased`}
     >
       <body className="min-h-full bg-background text-foreground">
-        <div className="velion-global-background" aria-hidden="true" />
-        <div className="velion-app-root">
+        <div className="verevon-global-background" aria-hidden="true" />
+        <div className="verevon-app-root">
           <Providers>
             {children}
             <Toaster richColors closeButton position="top-right" />

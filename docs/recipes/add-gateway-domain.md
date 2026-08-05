@@ -1,7 +1,7 @@
-# Recipe: add a gateway domain (velion-gateway-rs)
+# Recipe: add a gateway domain (verevon-gateway-rs)
 
 > How to add a new `/api/v1/*` surface to the Rust BFF at
-> `apps/Frontend Plane/velionv3/apps/gateway`. The canonical reference is
+> `apps/Frontend Plane/verevonv3/apps/gateway`. The canonical reference is
 > `src/domains/audit.rs` (read-only proxy) and `src/domains/inbox.rs`
 > (read + mutate). Phase-1 domains added this way: `insights.rs`, `monitoring.rs`,
 > `privacy.rs`, plus the `inbox.rs` AI-action routes.
@@ -14,7 +14,7 @@ explicitly labelled. Before merging, confirm:
 
 - [ ] **Org/identity comes from the session, never the client.** Use
       `upstream::authorized_org_id(&state, &user)` (or the validated
-      `AuthenticatedUser.user_id`). Never read `x-velion-org-id` / a client query /
+      `AuthenticatedUser.user_id`). Never read `x-verevon-org-id` / a client query /
       a client body for scope. Add a test proving a spoofed scope is ignored.
 - [ ] **Empty/unavailable is explicit, not zero-as-data.** An empty org, a 404, or
       an unreachable upstream returns an explicit empty/`unavailable` envelope —
@@ -60,7 +60,7 @@ explicitly labelled. Before merging, confirm:
 ## Quality gates (gateway-crate-scoped — never `--workspace`)
 
 ```bash
-cd "apps/Frontend Plane/velionv3/apps/gateway"
+cd "apps/Frontend Plane/verevonv3/apps/gateway"
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
@@ -69,7 +69,7 @@ cargo test
 ## Deploy (local)
 
 `docker compose build gateway` then `docker compose up -d --force-recreate --no-build gateway`
-(from `apps/Frontend Plane/velionv3`). Note: `up --build` alone does **not** always
+(from `apps/Frontend Plane/verevonv3`). Note: `up --build` alone does **not** always
 recreate the container onto the freshly-built image — force-recreate explicitly.
 Then smoke the route live through `http://localhost:3185` with a real session
 (`POST /api/v1/auth/sign-in`), asserting a real 2xx **and** a negative case

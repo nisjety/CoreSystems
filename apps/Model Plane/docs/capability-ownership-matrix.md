@@ -66,7 +66,7 @@ Legend — **Owner** = single system of record. **Relay** = ingress/enforcement 
 | Real OS isolation (bwrap/Landlock/seccomp/egress) | **execution-core** (NEW) + sandbox-manager (provisioning) | — | — | — | ❌ **GENUINE GAP** — nothing exists |
 | Subagent spawn / message / coordinate | **orchestrator-core** (Temporal) | session-core lineage | execution-core `subagent/` = **exec**; gateway `coordinator.rs` TeamWorkerStore = **cache** | NATS | ⚠️ **CONSOLIDATE**: 3 locations → orchestrator owns lifecycle (see §4.1) |
 | Channels (Slack/Discord/…) / voice | **bridge-core** (Go) | session-core | gateway ingress | NATS | ✅ (`channel/`,`voice/` exist) |
-| IDE bridge / remote sessions | **bridge-core** (`session/`) | — | gateway WS | — | 🟡 partial; reuse Velion JWT |
+| IDE bridge / remote sessions | **bridge-core** (`session/`) | — | gateway WS | — | 🟡 partial; reuse Verevon JWT |
 | Browser grants | **browser-broker** (Go) | in-mem + Redis target | — | — | ✅ |
 | Cost / usage ledger | **cost-core** (Go) | Postgres | gateway emits `usage.*` | NATS | ✅ |
 | Fine-tuning jobs | **session-core** (persist) + **model-gateway** (Azure) | Postgres | poller | NATS finetune | ✅ (Wave 7) |
@@ -175,7 +175,7 @@ Same stale-docs pattern caught at session start. `ROADMAP.md` claims "zero opera
 
 | Job | Protocol | Rationale |
 |---|---|---|
-| Public client ↔ gateway | HTTP/JSON + SSE (+WS for realtime/bridge) | Browser-native, Velion proxy-friendly |
+| Public client ↔ gateway | HTTP/JSON + SSE (+WS for realtime/bridge) | Browser-native, Verevon proxy-friendly |
 | gateway ↔ core services | **gRPC (Tonic/Go)** | Typed, low-latency, internal trust |
 | Async fan-out (events, reconcile, usage, finetune) | **NATS JetStream** `mp.v1.*` | Decouple slow workers from request path; replay |
 | Durable multi-step coordination + retries + cron(durable) | **Temporal** (orchestrator-core) | Crash-safe, deterministic replay |

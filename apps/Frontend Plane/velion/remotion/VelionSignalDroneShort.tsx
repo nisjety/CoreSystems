@@ -29,7 +29,7 @@ const scenes = [
     start: 5.3,
     end: 8.8,
     kicker: '03 / Utkast',
-    title: 'Velion bygger et kildebelagt svarutkast.',
+    title: 'Verevon bygger et kildebelagt svarutkast.',
     side: -1,
   },
   {
@@ -149,7 +149,7 @@ const signalDepthSegments = [
   },
 ] as const
 
-export function VelionSignalDroneShort() {
+export function VerevonSignalDroneShort() {
   return (
     <AbsoluteFill
       style={{
@@ -186,7 +186,7 @@ function SignalTunnel() {
   return (
     <>
       <OffthreadVideo
-        src={staticFile('videos/velion-hero-premiere-light.mp4')}
+        src={staticFile('videos/verevon-hero-premiere-light.mp4')}
         style={{
           position: 'absolute',
           inset: 0,
@@ -822,7 +822,7 @@ function FinalLockup() {
           textShadow: '0 0 34px rgba(255,255,255,0.28)',
         }}
       >
-        Velion
+        Verevon
       </div>
 
       <div

@@ -25,7 +25,7 @@ done
 
 rg -Fq 'documents-api-gdpr' "$broker_config"
 rg -Fq '_INBOX.DOCUMENTS_GDPR.>' "$broker_config"
-rg -Fq '_VELION.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure' "$broker_config"
+rg -Fq '_VEREVON.CONTROL.SHARED.DELIVER.data.documents-api.gdpr-erasure' "$broker_config"
 rg -Fq '$JS.ACK.AQENCIA_CONTROLPLANE.documents-api-gdpr-erasure-v1.>' "$broker_config"
 ! rg -Fq '$JS.ACK.AQENCIA_CONTROLPLANE.>' "$broker_config"
 rg -Fq '$JS.API.CONSUMER.INFO.AQENCIA_CONTROLPLANE.documents-api-gdpr-erasure-v1' "$broker_config"
@@ -37,7 +37,7 @@ rg -Fq -- '--deny-delete' "$setup"
 rg -Fq -- '--deny-purge' "$setup"
 
 rg -Fq '/internal/gdpr/health' "$matrix"
-rg -Fq 'velion.gdpr.erasure.requested' "$matrix"
+rg -Fq 'verevon.gdpr.erasure.requested' "$matrix"
 rg -Fq 'docker compose' "$matrix"
 rg -Fq 'stop -t' "$matrix"
 rg -Fq 'num_redelivered' "$matrix"

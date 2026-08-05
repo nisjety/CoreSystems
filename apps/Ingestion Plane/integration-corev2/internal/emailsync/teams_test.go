@@ -330,7 +330,7 @@ func newTeamsServer(t *testing.T) *httptest.Server {
 				teamsMessageJSON("t-msg-1", "2026-07-18T10:15:00Z", "text", "ren tekst", "Ola Hansen"),
 				`{"id": "t-event", "messageType": "systemEventMessage", "createdDateTime": "2026-07-18T10:16:00Z", "from": {"user": {"id": "u2", "displayName": "Ola"}}, "body": {"contentType": "text", "content": "ble med"}}`)
 		case strings.HasSuffix(r.URL.Path, "/me/joinedTeams"):
-			fmt.Fprint(w, `{"value": [{"id": "team1", "displayName": "Velion"}]}`)
+			fmt.Fprint(w, `{"value": [{"id": "team1", "displayName": "Verevon"}]}`)
 		case strings.HasSuffix(r.URL.Path, "/teams/team1/channels"):
 			fmt.Fprint(w, `{"value": [{"id": "ch1", "displayName": "general"}]}`)
 		case strings.HasSuffix(r.URL.Path, "/teams/team1/channels/ch1/messages"):

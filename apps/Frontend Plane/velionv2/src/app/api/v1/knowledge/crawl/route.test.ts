@@ -40,7 +40,7 @@ describe("POST /api/v1/knowledge/crawl", () => {
     startKnowledgeWebsiteCrawl.mockResolvedValue({
       id: "crawl-1",
       status: "queued",
-      target: "https://docs.velion.ai",
+      target: "https://docs.verevon.ai",
       createdAt: "2026-06-06T12:05:00.000Z",
     });
 
@@ -49,7 +49,7 @@ describe("POST /api/v1/knowledge/crawl", () => {
     const request = new NextRequest("http://localhost/api/v1/knowledge/crawl", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ url: "https://docs.velion.ai", maxPages: 16 }),
+      body: JSON.stringify({ url: "https://docs.verevon.ai", maxPages: 16 }),
     });
 
     const response = await POST(request);
@@ -59,12 +59,12 @@ describe("POST /api/v1/knowledge/crawl", () => {
     expect(payload.data).toEqual({
       id: "crawl-1",
       status: "queued",
-      target: "https://docs.velion.ai",
+      target: "https://docs.verevon.ai",
       createdAt: "2026-06-06T12:05:00.000Z",
     });
     expect(startKnowledgeWebsiteCrawl).toHaveBeenCalledWith(
       expect.any(NextRequest),
-      { url: "https://docs.velion.ai", maxPages: 16 },
+      { url: "https://docs.verevon.ai", maxPages: 16 },
     );
   });
 });

@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 // SearXNG is the org's metasearch aggregator; it has a first-class `videos`
 // category whose JSON results carry an embeddable `iframe_src` — exactly what
-// the inline player needs. velionv2 shares the `inter-plane-bus` network with
+// the inline player needs. verevonv2 shares the `inter-plane-bus` network with
 // SearXNG, so the in-cluster URL resolves without extra config; override with
 // SEARXNG_URL if the topology changes.
 function getSearxngUrl(): string {

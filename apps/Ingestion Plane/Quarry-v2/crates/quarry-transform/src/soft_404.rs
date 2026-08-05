@@ -4,7 +4,7 @@
 //! whose visible content is "Page not found" or equivalent — usually
 //! because the upstream router rewrote a missing path to a CMS error
 //! template instead of issuing a proper 404 status. Downstream
-//! consumers (indexers, RAG ingestion, the velion onboarding wizard)
+//! consumers (indexers, RAG ingestion, the verevon onboarding wizard)
 //! that trust `status == 200` end up storing "Not Found" as the
 //! authoritative snippet for what was supposed to be a product or
 //! blog page.

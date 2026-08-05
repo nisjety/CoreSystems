@@ -1,6 +1,6 @@
-# Velion service map — ground truth + drift audit
+# Verevon service map — ground truth + drift audit
 
-> Generated: 2026-05-19. Reflects live `docker ps` output against velion's
+> Generated: 2026-05-19. Reflects live `docker ps` output against verevon's
 > `.env` and `.env.local`. The drift table below was the root cause of
 > "X-Org-ID required", "No crawls yet", and Graph/Wiki 404s observed
 > during Wave 11.A/B/C bring-up.
@@ -15,7 +15,7 @@
 | **Control** | billing-core | `billing-core-service` | 3014 | 3014 | gRPC :50013 |
 | **Application** | Convex backend | `convex-backend` | 3210/3211 | 3210/3211 | |
 | **Application** | Convex dashboard | `convex-dashboard` | 6791 | 6791 | |
-| **Application** | Convex gateway | `convex-gateway` | 3005 | 3000 | velion-proxied auth |
+| **Application** | Convex gateway | `convex-gateway` | 3005 | 3000 | verevon-proxied auth |
 | **Application** | Convex subscriber | `convex-subscriber` | — | 3000 | NATS mirror; internal-only |
 | **Model** | model-gateway (v1) | `model-plane-model-gateway-1` | 18080 | 8080 | gRPC :19090 |
 | **Model** | inference-core | `model-plane-inference-core-1` | 18082 | 8082 | gRPC :19092 |
@@ -38,7 +38,7 @@
 | **Data v2** | graph-index | `dpv2-graph-index` | 9201 | 9201 (verify) | admin port |
 | **Data v2** | index-engine | `dpv2-index-engine` | 9202 (admin) | 9202 | |
 | **Data v2** | embedding-engine | `dpv2-embedding-engine` | 9203 (admin) | 9203 | |
-| **Frontend** | velion (prod build) | `frontend-plane-velion-frontend-1` | 3000 | 3000 | ⚠️ stale image; use `pnpm dev` instead |
+| **Frontend** | verevon (prod build) | `frontend-plane-verevon-frontend-1` | 3000 | 3000 | ⚠️ stale image; use `pnpm dev` instead |
 
 ## 2 · Drift caught in audit (and fixed below)
 
@@ -54,7 +54,7 @@
 
 ## 3 · `quarry-control` host-port gap — action required
 
-The container exposes `8081/tcp` inside the network but does **not** publish a host port. Velion's dev server (running on the host) can't reach it. Two fixes:
+The container exposes `8081/tcp` inside the network but does **not** publish a host port. Verevon's dev server (running on the host) can't reach it. Two fixes:
 
 ### A) Add host mapping in compose
 
@@ -65,9 +65,9 @@ ports:
   - "8081:8081"
 ```
 
-### B) Run velion inside the same docker network
+### B) Run verevon inside the same docker network
 
-Drop `pnpm dev` on the host and use the `frontend-plane-velion-frontend-1` container, which is on `velion-net` and can reach `quarry-control:8081` via container DNS.
+Drop `pnpm dev` on the host and use the `frontend-plane-verevon-frontend-1` container, which is on `verevon-net` and can reach `quarry-control:8081` via container DNS.
 
 **Recommendation**: A (host mapping). The frontend container is currently a stale build; using `pnpm dev` against properly-exposed services gives both HMR and live Quarry access.
 
@@ -75,25 +75,25 @@ Drop `pnpm dev` on the host and use the `frontend-plane-velion-frontend-1` conta
 
 ```bash
 # 1. Prune EVERYTHING (the new --prune flag)
-cd "/Volumes/Lagring/Triodelab/CoreSystem/apps/Frontend Plane/velion"
-./build-velion-services.sh --prune
+cd "/Volumes/Lagring/Triodelab/CoreSystem/apps/Frontend Plane/verevon"
+./build-verevon-services.sh --prune
 
 # 2. Validate compose files compile (dry-run)
-./build-velion-services.sh --dry-run
+./build-verevon-services.sh --dry-run
 
 # 3. Full rebuild — Data Plane v2 first, then Ingestion, Model, Control, Application, Frontend
-./build-velion-services.sh
+./build-verevon-services.sh
 
 # 4. Verify per-plane health
-./build-velion-services.sh --status
+./build-verevon-services.sh --status
 
-# 5. Run velion against the live stack
-pnpm dev                  # OR `docker logs frontend-plane-velion-frontend-1` if you trust the image
+# 5. Run verevon against the live stack
+pnpm dev                  # OR `docker logs frontend-plane-verevon-frontend-1` if you trust the image
 ```
 
 ## 5 · Snake-case / hostname convention
 
 - **Container DNS**: kebab-case service name (`auth-service`, `dpv2-documents-api`). Hyphens, **never** underscores. Compose project prefix may be present on some (`model-plane-*-1`).
 - **Compose service id ≠ container name**: the container is named with `container_name:` directive when set. Always grep `docker ps` for truth — never assume.
-- **Host-mapped ports**: explicit `:host->container` in `docker ps`. Velion's `.env.local` must use the **host port**.
-- **Container-network ports**: implicit single `:container/tcp` (no `host->` arrow). Velion's `.env` (inside the container) must use the **container port**.
+- **Host-mapped ports**: explicit `:host->container` in `docker ps`. Verevon's `.env.local` must use the **host port**.
+- **Container-network ports**: implicit single `:container/tcp` (no `host->` arrow). Verevon's `.env` (inside the container) must use the **container port**.

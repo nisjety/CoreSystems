@@ -47,7 +47,7 @@ use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
 
 /// Directory-name prefix for per-call workspaces. Also the marker cleanup and
 /// tests match on.
-const WORKSPACE_PREFIX: &str = "velion-code";
+const WORKSPACE_PREFIX: &str = "verevon-code";
 
 /// How many names to try before giving up on allocating a workspace. A
 /// collision needs a *fresh* name (see [`Workspace::create`]), and the
@@ -122,8 +122,8 @@ impl Language {
     /// Name of the generated program file staged in the workspace.
     const fn program_file(self) -> &'static str {
         match self {
-            Self::Python => "_velion_main.py",
-            Self::Sh => "_velion_main.sh",
+            Self::Python => "_verevon_main.py",
+            Self::Sh => "_verevon_main.sh",
         }
     }
 }
@@ -743,7 +743,7 @@ mod tests {
 
         let reserved = serde_json::json!({
             "code": "print(1)",
-            "files_in": [{ "name": "_velion_main.py", "content_b64": "" }],
+            "files_in": [{ "name": "_verevon_main.py", "content_b64": "" }],
         })
         .to_string();
         let error = parse_request(&reserved).expect_err("the program name is reserved");
@@ -1015,7 +1015,7 @@ mod tests {
         let stderr = result["stderr"].as_str().expect("stderr");
         assert!(stderr.contains("ValueError: boom"), "stderr: {stderr}");
         // The traceback names the staged program file, i.e. real line numbers.
-        assert!(stderr.contains("_velion_main.py"), "stderr: {stderr}");
+        assert!(stderr.contains("_verevon_main.py"), "stderr: {stderr}");
         let files = result["files"].as_array().expect("files array");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0]["name"], "partial.txt");
@@ -1075,7 +1075,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .contains("velion-code-hungrun-hungstep")
+                    .contains("verevon-code-hungrun-hungstep")
             })
             .map(|entry| entry.path())
             .collect();
