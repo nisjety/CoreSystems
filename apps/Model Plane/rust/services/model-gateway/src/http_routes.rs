@@ -1104,19 +1104,37 @@ async fn decide_approval(
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
 
-    // A grant is durable authority, but not a restartable continuation. Keep
-    // this HTTP path away from generic `ResumeRun` until the descriptor-backed,
-    // service-only dispatcher can return a durable execution receipt.
+    // A grant is durable authority, but not a restartable continuation: this
+    // path never invokes a generic `ResumeRun`, since the outbox is
+    // identifier-only and there is no descriptor-backed, service-only
+    // dispatcher yet to prove the paused work actually restarted.
+    //
+    // `quarantine_granted_approval_continuation` reports exactly that
+    // boundary and — for a granted approval — is DESIGNED to always return
+    // `unavailable`. That is a statement about continuation delivery, not a
+    // failure of the decision itself: `DecideApproval` above already durably
+    // recorded the grant (session-core's CAS write) before this ever runs.
+    // So its result becomes an informational field on the success response
+    // rather than clobbering it into a 502.
+    let mut continuation_delivery: Option<&'static str> = None;
     if matches!(target_state, ApprovalState::Granted)
         && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
     {
-        approvals::quarantine_granted_approval_continuation(
-            &approvals::gateway_approval_from_proto(&approval),
-        )
-        .map_err(|error| grpc_status_to_http(&error))?;
+        continuation_delivery = Some(
+            match approvals::quarantine_granted_approval_continuation(
+                &approvals::gateway_approval_from_proto(&approval),
+            ) {
+                Ok(()) => "not_applicable",
+                Err(_) => "pending",
+            },
+        );
     }
 
-    Ok(Json(json!({ "approval": approval_value(&approval) })))
+    let mut body = json!({ "approval": approval_value(&approval) });
+    if let Some(status) = continuation_delivery {
+        body["continuation_delivery"] = json!(status);
+    }
+    Ok(Json(body))
 }
 
 /// Cancel a run — recorded as an event; no gRPC method exists yet.

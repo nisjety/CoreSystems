@@ -776,6 +776,111 @@ async fn orchestration_run_events_route_relays_sse() {
 }
 
 // ---------------------------------------------------------------------------
+// A first-time "approve" must not 502. `quarantine_granted_approval_continuation`
+// is a deliberate placeholder that always reports the continuation as
+// unavailable for a granted approval (there is no descriptor-backed dispatcher
+// yet) — but the decision itself was already durably recorded by the
+// `DecideApproval` call that precedes it, so that placeholder result must
+// surface as an informational field on a 200, never as a gateway failure.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decide_approval_grant_succeeds_without_a_continuation_dispatcher() {
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/approvals/appr-42/decide")
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", tokens.execution),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"decision":"approve"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+        panic!(
+            "decide response must be valid JSON: {error}, body={}",
+            String::from_utf8_lossy(&body)
+        )
+    });
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a granted decision must not surface as a gateway failure, body={json}"
+    );
+    assert_eq!(json["approval"]["state"], "APPROVAL_STATE_GRANTED");
+    assert_eq!(
+        json["continuation_delivery"], "pending",
+        "no descriptor-backed dispatcher exists yet, so delivery is reported pending, not resumed, body={json}"
+    );
+    assert_eq!(
+        *capture.decide_approval.lock().unwrap(),
+        Some((
+            "appr-42".to_owned(),
+            ApprovalState::Granted as i32,
+            "user-1".to_owned(),
+            String::new()
+        )),
+        "the grant must still reach the durable store despite the placeholder"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decide_approval_reject_has_no_continuation_delivery_field() {
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, _capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/approvals/appr-43/decide")
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", tokens.execution),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"decision":"reject"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+        panic!(
+            "decide response must be valid JSON: {error}, body={}",
+            String::from_utf8_lossy(&body)
+        )
+    });
+
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    assert_eq!(json["approval"]["state"], "APPROVAL_STATE_DENIED");
+    assert!(
+        json.get("continuation_delivery").is_none(),
+        "a denial never queues a continuation, body={json}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Phase 6 — cross-org approval IDOR fix.
 //
 // A dedicated, org-aware mock (distinct from `MockOrchestration` above, whose
