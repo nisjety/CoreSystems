@@ -189,13 +189,12 @@ async fn count_org_rows(pool: &PgPool, org: &str) -> i64 {
         "agent_retrieval_configs",
         "context_pins",
     ] {
-        let count: (i64,) = sqlx::query_as(&format!(
-            "SELECT COUNT(*) FROM {table} WHERE org_id = $1"
-        ))
-        .bind(org)
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
+        let count: (i64,) =
+            sqlx::query_as(&format!("SELECT COUNT(*) FROM {table} WHERE org_id = $1"))
+                .bind(org)
+                .fetch_one(pool)
+                .await
+                .unwrap_or((0,));
         total += count.0;
     }
     total

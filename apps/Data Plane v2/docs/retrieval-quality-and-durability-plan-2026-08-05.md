@@ -1147,6 +1147,163 @@ queries.
 
 ---
 
+### 2026-08-05 — P2-1 node-postprocessor chain
+
+Extracted the post-fusion steps of `retrieval-engine-rs`
+`RetrievalPipeline::retrieve` into an ordered chain of `NodePostprocessor`
+stages in the new `src/pipeline/postprocess.rs`.
+
+**The chain, in order** (the order *is* the policy):
+
+| # | Stage | Kind | Notes |
+|---|---|---|---|
+| 1 | `visual_rerank` | refinement | ColQwen MaxSim; ZDR / missing client / <2 visual candidates / any error → input unchanged |
+| 2 | `truncate:overfetch` | — | to `fetch_k` |
+| 3 | `text_rerank` | refinement | cross-encoder; any failure → fused order, `rerank_used_count = 0` |
+| 4 | `visibility_gate` | **enforcement** | liveness + per-user ownership; errors propagate |
+| 5 | `truncate:top_n` | — | must come AFTER the gate |
+| 6 | `zdr_filter` | **enforcement** | `Reject` drops `restricted`; records `zdr_actions_applied` |
+
+**Why the order is not cosmetic.** The visibility gate must precede the
+`top_n` truncation: truncating first would let a non-visible candidate consume
+one of the caller's slots, so the response would undershoot *and* the slot
+would be spent on a document the viewer may not read. ZDR must follow the
+gate, so a document already dropped for visibility is not also counted as a
+ZDR rejection. Both properties are now stated in the module docs, next to the
+code that depends on them, rather than being implied by statement order in a
+570-line function.
+
+**Two motions, both deliberate and behaviour-neutral:**
+- The viewer's grant lookup (`visible_documents`) moved *before* the chain. It
+  depends only on the request, never on the candidate list, so it is an
+  independent read.
+- The cost-ledger publish moved *after* the chain, because
+  `rerank_used_count` is now a chain output. The payload is unchanged: the
+  later stages only drop candidates and cannot change how many the reranker
+  scored.
+
+**Trace fidelity was the real risk, and it is handled.** `sparse_ms` used to
+mean "fusion + visual rerank" and `rerank_ms` "trim + cross-encoder call".
+A single chain would have silently redefined both. `run_chain` therefore
+returns a `StageTiming` per stage and the orchestrator re-sums them by name
+(`elapsed_of`), so both fields keep their original meaning and stay comparable
+with rows written before this refactor. Stage names are consts, so a typo is a
+compile error rather than a silently-zeroed trace field.
+
+`candidate_count_fused` is now computed *before* the visual stage instead of
+after. Verified equivalent: `apply_colqwen_scores` preserves length on all
+three of its paths (early return on empty/mismatched input, joint-mode
+re-sort, band-mode write-back).
+
+**Honest accounting of what improved.** `retrieve()` went 569 → 560 lines —
+essentially unchanged, because ~165 lines of logic were replaced by ~120 lines
+of chain construction. The win is not size:
+- 6 stages that can each be constructed and driven against a hand-built
+  candidate list. Previously every one of them required a live Postgres, a
+  rerank provider, and a ColQwen endpoint to reach at all.
+- 7 new unit tests, including the two that pin the confidence-gate contract
+  (`rerank_used_count == 0` on both the absent-client and opted-out paths —
+  reporting non-zero there is what previously made every query read as
+  low-confidence).
+- `orchestrator.rs` 1774 → 1603 lines; `postprocess.rs` +690 (roughly a third
+  docs and tests).
+
+**Verification:** `cargo fmt` clean; `cargo clippy --all-targets -- -D warnings`
+clean; `cargo test` green — **149 lib tests pass, 0 failed**, including the 7
+new stage tests. Integration tests pass, with the DB-gated ones
+(`ownership_filter`, `zdr_behavior`, `pipeline_e2e`, `gdpr_erasure`) skipping
+without `TEST_DATABASE_URL`, as designed.
+
+Stale doc references to the two removed methods were repointed:
+`tests/ownership_filter.rs` (×2) and the `apply_colqwen_scores` doc comment.
+
+#### ⛔ Found while deploying P2-1: the Velion→Verevon rename breaks the GDPR erasure fan-out
+
+Redeploying retrieval-engine surfaced a **cross-plane, compliance-critical**
+regression that has nothing to do with P2-1. Reporting it here because this is
+where it was found.
+
+**The drift.** Every one of the 49 source files across all planes now says
+`verevon.gdpr.erasure.requested`; **zero** still say `velion.*`. The *live*
+broker is still provisioned for the old name:
+
+| | Value |
+|---|---|
+| Stream `AQENCIA_CONTROLPLANE` subjects | `velion.gdpr.erasure.requested`, `velion.session.>`, `velion.agent.>`, `velion.org.deletion.>`, `velion.application.dlq.*`, `velion.gdpr.ownership.transferred` — **no `verevon.*` at all** |
+| All 14 org-erasure consumers | `filter_subject = velion.gdpr.erasure.requested` |
+| Source constant (e.g. `retrieval-engine-rs/src/gdpr/consumer.rs:56`) | `verevon.gdpr.erasure.requested` |
+
+The stream subjects and consumer filters are deployment-provisioned by
+`Control Plane/audit-core/internal/provisioner/provisioner.go`
+(`ProvisionControlSharedRuntime`). Its **source** was renamed to `verevon.*`,
+but the running `audit-core-service` image dates from 2026-07-21, so the live
+broker still reflects the pre-rename provisioning.
+
+**This is latent, and it activates per-service on rebuild.** Confirmed by
+inspecting the running binaries and image timestamps: `org-core-service`
+(image 2026-08-04) still has `velion.gdpr.erasure.requested` compiled in, so
+today's fan-out still works for the 13 services running pre-rename images.
+The renamed subject only takes effect in a service once that service is
+rebuilt.
+
+**Correction to my first read of this.** I initially assumed the failure was
+pre-existing. It is not. `consumer.rs` was rewritten by the rename at 15:57
+local; the previous retrieval-engine image was built at 14:51 local, so it
+still carried `velion.*` and matched the broker. **My 17:36 rebuild is what
+shipped the renamed subject**, and retrieval-engine is now the first — and
+currently only — casualty:
+
+```
+ERROR retrieval-engine GDPR erasure consumer stopped; retrying
+      error="pre-provisioned GDPR erasure consumer filter mismatch"
+```
+
+It retry-loops every 5s and consumes **no erasure events**. Verified that no
+other DPv2 service was rebuilt after 13:57 UTC, so the blast radius today is
+exactly one service.
+
+**Why it matters.** Once Control Plane is rebuilt, `org-core`/`user-core`
+publish to `verevon.gdpr.erasure.requested`, which the live stream does not
+capture — so the event is not even stored, and the 14 consumers filtering
+`velion.*` would never see it regardless. An org deletion would then purge
+nothing in Data Plane, Model Plane, Ingestion, or Application. That breaks
+constraint 4 (ZDR/GDPR propagation) and constraint 5 (policy metadata travels
+with data).
+
+**Not fixed here — deliberately.** The fix is to re-run the Control Plane
+provisioner so the stream gains the `verevon.*` subjects and the consumer
+filters are updated. That is a **Control Plane** change to **running state**,
+which this workstream is scoped out of. It needs an explicit decision, and it
+should be sequenced so the provisioner runs *before* any publisher is rebuilt.
+Note the same drift applies to `velion.session.>`, `velion.agent.>`,
+`velion.org.deletion.>`, `velion.application.dlq.*`, and
+`velion.gdpr.ownership.transferred` — this is not only the erasure subject.
+
+**Also fixed in passing:** my first redeploy used a bare
+`docker compose up -d --no-deps retrieval-engine`, which resolved
+`inter-plane-bus` through its base-file default name
+(`${DPV2_CROSS_PLANE_NETWORK:-dpv2-cross-plane}`) and silently attached the
+container to a fresh, empty, single-member network — cutting it off from
+`control-shared-nats` entirely. **Recreating any single DPv2 service must use
+the overlay**: `docker compose -f docker-compose.yml -f
+docker-compose.cross-plane.yml up -d --no-deps <svc>`. Restored and verified
+back on `dpv2-net` + `inter-plane-bus`.
+
+**Not changed:** the confidence gate stays inline. It is a *verdict* computed
+from the final list, not a transformation of it, so modelling it as a
+postprocessor would have misrepresented what it does.
+
+**P2-1's original scope listed `cutoff / decay / dedup / reorder` as stages
+too.** Those are not in this chain, for concrete reasons: the similarity cutoff
+landed in P1-7 as a Qdrant-native `score_threshold` (pre-fusion, in the dense
+arm — moving it into a post-fusion stage would make it fire against
+uncalibrated RRF scores); long-context reordering landed in P1-8 inside
+`context_pack` (it reorders the *packed* context, not the candidate list);
+recency decay does not exist yet and is blocked on P2-3's `document_date`
+column; and there is no dedup step in the pipeline today.
+
+---
+
 ## 7. Architecture constraints this plan honours
 
 1. No direct database crossing between planes.

@@ -9,6 +9,7 @@ use crate::cache::CacheLayer;
 use crate::config::Config;
 use crate::context_pack::pack_context_with_pins;
 use crate::embed::EmbeddingClient;
+use crate::pipeline::postprocess;
 use crate::pipeline::types::*;
 use crate::search::dense::vector_search;
 use crate::search::filters::RetrievalFilters;
@@ -115,7 +116,7 @@ pub struct RetrievalPipeline {
 
 /// A page-image candidate's fetchable `image_url`, read from its raw Qdrant
 /// payload metadata — or `None` if it isn't a page-image candidate / has no URL.
-fn page_image_url(c: &ScoredCandidate) -> Option<String> {
+pub(super) fn page_image_url(c: &ScoredCandidate) -> Option<String> {
     use qdrant_client::qdrant::value::Kind;
     let kind = |k: &str| c.metadata.get(k).and_then(|v| v.kind.as_ref());
     match kind("source_type") {
@@ -129,8 +130,8 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
 }
 
 /// Pure placement of ColQwen (late-interaction MaxSim) scores into the fused
-/// candidate list — extracted from `visual_rerank` so both modes are
-/// unit-testable without a live ColQwen server.
+/// candidate list — kept separate from the `postprocess::VisualRerank` stage
+/// that calls it, so both modes are unit-testable without a live ColQwen server.
 ///
 /// - **Band mode** (`joint = false`, the historical behavior): the visual
 ///   candidates are reordered *among themselves* by ColQwen relevance but keep
@@ -144,7 +145,7 @@ fn page_image_url(c: &ScoredCandidate) -> Option<String> {
 ///   fall back to band mode rather than fabricate an ordering.
 ///
 /// `idxs[k]` is the fused-list slot of the visual candidate scored `scores[k]`.
-fn apply_colqwen_scores(
+pub(super) fn apply_colqwen_scores(
     mut fused: Vec<ScoredCandidate>,
     idxs: &[usize],
     scores: &[f32],
@@ -278,59 +279,6 @@ fn fuse_arms(
 }
 
 impl RetrievalPipeline {
-    /// ColQwen visual reranker: reorder the page-image candidates in `fused` by
-    /// ColQwen late-interaction (MaxSim) relevance to `query`. Only the order
-    /// *among the visual candidates* changes — they keep the score band they
-    /// already occupy, so they don't leapfrog text candidates. Non-fatal: a ZDR
-    /// query or any client error returns `fused` unchanged (Embed-v4 order).
-    async fn visual_rerank(
-        &self,
-        query: &str,
-        fused: Vec<ScoredCandidate>,
-        embed_zdr: bool,
-    ) -> Vec<ScoredCandidate> {
-        let Some(ref client) = self.colqwen else {
-            return fused;
-        };
-        if embed_zdr {
-            // A ZDR query must not egress page images to the visual reranker.
-            return fused;
-        }
-        // Select page-image candidates (current order) with a fetchable image_url,
-        // capped at visual_rerank_top_k.
-        let cap = self.config.visual_rerank_top_k.max(1);
-        let mut idxs: Vec<usize> = Vec::new();
-        let mut urls: Vec<String> = Vec::new();
-        for (i, c) in fused.iter().enumerate() {
-            if let Some(u) = page_image_url(c) {
-                idxs.push(i);
-                urls.push(u);
-                if idxs.len() >= cap {
-                    break;
-                }
-            }
-        }
-        if urls.len() < 2 {
-            // 0 or 1 visual candidate — nothing to reorder.
-            return fused;
-        }
-        let scores = match client.rerank(query, &urls).await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "visual reranker failed; keeping Embed-v4 order");
-                return fused;
-            }
-        };
-        let joint = self.config.joint_multimodal_rerank;
-        let fused = apply_colqwen_scores(fused, &idxs, &scores, joint);
-        tracing::info!(
-            reranked = urls.len(),
-            joint,
-            "visual reranker (ColQwen) applied"
-        );
-        fused
-    }
-
     /// Dense arm — main-collection ANN over the query embedding. Gated on the
     /// dense route (a present `query_vector`); returns an empty list when dense
     /// wasn't routed (embed skipped). FATAL: a Qdrant error propagates via `?`.
@@ -794,18 +742,13 @@ impl RetrievalPipeline {
             route.dense,
         );
 
-        // Visual rerank (ColQwen late-interaction / MaxSim). Reorders the
-        // page-image candidates among themselves by ColQwen relevance, on top of
-        // Embed-v4's first-stage order. Gated by VISUAL_RERANK_ENABLED; entirely
-        // non-fatal (any failure or ZDR leaves the Embed-v4 order intact).
-        let fused_candidates = if self.config.visual_rerank_enabled && self.colqwen.is_some() {
-            self.visual_rerank(&req.query, fused_candidates, embed_zdr)
-                .await
-        } else {
-            fused_candidates
-        };
-        // `sparse_ms` now measures the sequential fusion + visual-rerank phase.
-        let sparse_ms = fusion_start.elapsed().as_millis() as u64;
+        // Fusion time on its own. The visual-rerank stage's elapsed time is added
+        // back into `sparse_ms` once the postprocessor chain has run, so that
+        // trace field keeps meaning exactly what it meant before the chain
+        // existed (fusion + visual rerank).
+        let fuse_only_ms = fusion_start.elapsed().as_millis() as u64;
+        // Visual rerank reorders and rescores candidates but never adds or drops
+        // one, so the fused count is already final here.
         let candidate_count_fused = fused_candidates.len();
 
         // Over-fetch when a viewer is present so the step-6 ownership gate has
@@ -824,74 +767,21 @@ impl RetrievalPipeline {
             top_n
         };
 
-        // Trim to the (possibly over-fetched) candidate pool before rerank
-        let pre_rerank: Vec<ScoredCandidate> = fused_candidates.into_iter().take(fetch_k).collect();
-
-        // 5. Rerank. Honor an explicit `mode_mix.rerank = false` (caller opts
-        // out of the cross-encoder), and treat ANY reranker failure as
-        // NON-FATAL: degrade to the fused RRF order rather than 500-ing the
-        // whole retrieve when the rerank provider is unavailable or
-        // misconfigured. Reranking refines ordering; it must never be able to
-        // sink an otherwise-successful retrieval.
+        // Chain input: may the cross-encoder run at all? Honors an explicit
+        // `mode_mix.rerank = false` (caller opts out) and any restrictive ZDR
+        // posture (which forbids retaining egress of the query text). Reranker
+        // *failure* is handled inside the stage and is non-fatal by design —
+        // reranking refines ordering and must never sink a successful retrieval.
         let rerank_requested = text_rerank_allowed(
             zdr_mode,
             req.mode_mix.as_ref().and_then(|m| m.rerank).unwrap_or(true),
         );
-        let rerank_start = Instant::now();
-        let (reranked, rerank_used_count) = match self.reranker {
-            Some(ref reranker) if rerank_requested => {
-                let input_count = pre_rerank.len();
-                match reranker.rerank(&req.query, &pre_rerank, rerank_out_n).await {
-                    Ok(out) => (out, input_count),
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "reranker failed; degrading to fused order"
-                        );
-                        (pre_rerank.into_iter().take(rerank_out_n).collect(), 0usize)
-                    }
-                }
-            }
-            _ => (pre_rerank.into_iter().take(rerank_out_n).collect(), 0usize),
-        };
-        let rerank_ms = rerank_start.elapsed().as_millis() as u64;
-
-        // Wave 3.1 §15-G — publish per-query rerank cost event. Best-effort;
-        // NATS unavailable does not fail the request.
-        if rerank_used_count > 0 {
-            if let (Some(nats), Some(reranker), Some(signer)) = (
-                self.nats.as_ref(),
-                self.reranker.as_ref(),
-                self.event_signer.as_deref(),
-            ) {
-                let model = reranker.model_name().to_string();
-                if let Ok(Some(payload)) = encode_cost_event(
-                    signer,
-                    &req.org_id,
-                    req.user_id.as_deref(),
-                    zdr_mode,
-                    &model,
-                    rerank_used_count,
-                ) {
-                    // §17.3.3 — named subject, lint-checked.
-                    const SUBJECT_COST_LEDGER: &str = "dataplane.cost.ledger";
-                    let _ = nats.publish(SUBJECT_COST_LEDGER, payload.into()).await;
-                }
-                crate::metrics::record_rerank_request();
-            }
-        }
-
-        // 6. Canonical visibility gate (liveness + per-user ownership). Quickwit
-        // and Qdrant are rebuildable read models, so stale hits can exist briefly
-        // after a Postgres tombstone. Filter through canonical Postgres — and,
-        // when a viewer is present, through the ownership predicate — before
-        // applying ZDR and joining sources.
+        // Chain input: resolve the viewer's explicit grants for the visibility
+        // gate (always-on when a user_id is present, decoupled from
+        // CONTROL_PLANE_ENFORCEMENT; fail-open to empty so owner + org/shared
+        // visibility still apply). An independent read — it depends on the
+        // request, not on the candidate list.
         //
-        // Resolve the viewer's explicit grants first (always-on when a user_id is
-        // present, decoupled from CONTROL_PLANE_ENFORCEMENT; fail-open to empty so
-        // owner + org/shared visibility still apply). Then truncate the
-        // over-fetched pool to top_n — counts/scores derive from this post-filter
-        // set only, never from a pre-filter total or a non-visible backfill.
         // Org-admin super-visibility: when the verified `org:data:read_all` scope
         // is present, bypass the ownership predicate org-wide (still org-scoped,
         // never cross-org) and audit it. This is reached only on the human HTTP
@@ -916,50 +806,99 @@ impl RetrievalPipeline {
             };
             (req.user_id.as_deref(), granted)
         };
-        let reranked = self
-            .filter_live_candidates(reranked, effective_viewer, &granted_docs)
-            .await?;
-        let reranked: Vec<ScoredCandidate> = reranked.into_iter().take(top_n).collect();
-
-        // 7. ZDR enforcement — filter out restricted documents.
-        // §16.1.3 — also record what we actually did, so the audit trail can
-        // distinguish "mode=reject but nothing to reject" from "mode=disabled"
-        // from "mode=reject and 4 docs filtered".
-        let mut zdr_actions_applied: Vec<&'static str> = Vec::new();
-        let reranked = if zdr_mode == ZdrMode::Reject {
-            let candidate_doc_ids: Vec<String> =
-                reranked.iter().map(|c| c.document_id.clone()).collect();
-            if !candidate_doc_ids.is_empty() {
-                let restricted: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
-                    "SELECT document_id FROM documents WHERE document_id = ANY($1) AND zdr_classification = 'restricted'"
-                )
-                .bind(&candidate_doc_ids)
-                .fetch_all(&self.pool)
-                .await?
-                .into_iter()
-                .map(|(id,)| id)
-                .collect();
-
-                if restricted.is_empty() {
-                    zdr_actions_applied.push("reject_mode_no_restricted_found");
-                    reranked
-                } else {
-                    zdr_actions_applied.push("reject_mode_filtered_restricted");
-                    reranked
-                        .into_iter()
-                        .filter(|c| !restricted.contains(&c.document_id))
-                        .collect()
-                }
-            } else {
-                reranked
-            }
-        } else if zdr_mode == ZdrMode::Ephemeral {
-            zdr_actions_applied.push("ephemeral_no_trace_persist");
-            reranked
-        } else {
-            reranked
+        // 5-7. The post-fusion postprocessor chain. The ORDER below is the
+        // policy, not a convenience: see `pipeline::postprocess` for why the
+        // visibility gate must precede the truncation to `top_n`, and why ZDR
+        // must follow it.
+        //
+        // Everything reported downstream — candidate counts, scores, the packed
+        // context, the persisted trace — derives from this chain's OUTPUT only,
+        // never from a pre-filter total and never backfilled with a candidate a
+        // gate removed.
+        let visual_stage = postprocess::VisualRerank {
+            client: self.colqwen.as_ref(),
+            enabled: self.config.visual_rerank_enabled,
+            top_k: self.config.visual_rerank_top_k,
+            joint: self.config.joint_multimodal_rerank,
         };
+        let overfetch_trim = postprocess::Truncate {
+            limit: fetch_k,
+            label: postprocess::STAGE_TRUNCATE_OVERFETCH,
+        };
+        let text_stage = postprocess::TextRerank {
+            reranker: self.reranker.as_ref(),
+            requested: rerank_requested,
+            out_n: rerank_out_n,
+        };
+        let visibility_stage = postprocess::VisibilityGate {
+            pool: &self.pool,
+            viewer: effective_viewer,
+            granted: &granted_docs,
+        };
+        let top_n_trim = postprocess::Truncate {
+            limit: top_n,
+            label: postprocess::STAGE_TRUNCATE_TOP_N,
+        };
+        let zdr_stage = postprocess::ZdrFilter { pool: &self.pool };
+        let chain: [&dyn postprocess::NodePostprocessor; 6] = [
+            &visual_stage,
+            &overfetch_trim,
+            &text_stage,
+            &visibility_stage,
+            &top_n_trim,
+            &zdr_stage,
+        ];
+
+        let mut pp_ctx = postprocess::PostprocessCtx::new(&req.query, zdr_mode, embed_zdr);
+        let (reranked, stage_timings) =
+            postprocess::run_chain(&chain, fused_candidates, &mut pp_ctx).await?;
+        let rerank_used_count = pp_ctx.rerank_used_count;
+        let zdr_actions_applied = std::mem::take(&mut pp_ctx.zdr_actions_applied);
         let candidate_count_reranked = reranked.len();
+
+        // Rebuild the pre-chain timing buckets from the named stages, so these
+        // trace fields stay comparable with rows written before the refactor:
+        // `sparse_ms` was fusion + visual rerank, `rerank_ms` was the trim +
+        // cross-encoder call.
+        let sparse_ms = fuse_only_ms
+            + postprocess::elapsed_of(&stage_timings, &[postprocess::STAGE_VISUAL_RERANK]);
+        let rerank_ms = postprocess::elapsed_of(
+            &stage_timings,
+            &[
+                postprocess::STAGE_TRUNCATE_OVERFETCH,
+                postprocess::STAGE_TEXT_RERANK,
+            ],
+        );
+
+        // Wave 3.1 §15-G — publish per-query rerank cost event. Best-effort;
+        // NATS unavailable does not fail the request.
+        //
+        // Emitted after the chain rather than immediately after reranking,
+        // because `rerank_used_count` is now a chain output. The payload is
+        // unchanged: the later stages only drop candidates, and cannot change how
+        // many the reranker scored.
+        if rerank_used_count > 0 {
+            if let (Some(nats), Some(reranker), Some(signer)) = (
+                self.nats.as_ref(),
+                self.reranker.as_ref(),
+                self.event_signer.as_deref(),
+            ) {
+                let model = reranker.model_name().to_string();
+                if let Ok(Some(payload)) = encode_cost_event(
+                    signer,
+                    &req.org_id,
+                    req.user_id.as_deref(),
+                    zdr_mode,
+                    &model,
+                    rerank_used_count,
+                ) {
+                    // §17.3.3 — named subject, lint-checked.
+                    const SUBJECT_COST_LEDGER: &str = "dataplane.cost.ledger";
+                    let _ = nats.publish(SUBJECT_COST_LEDGER, payload.into()).await;
+                }
+                crate::metrics::record_rerank_request();
+            }
+        }
 
         // 8. Confidence gate.
         //
@@ -1196,120 +1135,6 @@ impl RetrievalPipeline {
                 r#type: r.r#type,
             })
             .collect())
-    }
-
-    /// Step-6 canonical visibility gate. Runs POST-fusion + POST-rerank over the
-    /// unified dense+sparse+wiki candidate list, so it gates every retrieval arm
-    /// uniformly (closing the sparse leak for free). Two passes:
-    ///
-    ///   1. Liveness — drop candidates absent from canonical `documents`
-    ///      (Qdrant/Quickwit are rebuildable read models that can lag a delete).
-    ///   2. Per-user OWNERSHIP — when `viewer` is present, keep a document only
-    ///      if `owner_id = viewer OR visibility = 'org' OR it is in
-    ///      `granted_ids` (explicit resource_grants). 'shared' docs are NOT
-    ///      org-readable — they reach recipients ONLY via a grant. Always-on when a viewer is
-    ///      present, decoupled from `CONTROL_PLANE_ENFORCEMENT`. When `viewer` is
-    ///      `None` the ownership predicate is a no-op (legacy org-scoped path).
-    ///
-    /// Published wiki pages stay via their own branch — wiki is org-shared
-    /// knowledge, not an ownable resource type. This NEVER backfills with
-    /// non-visible docs; it only removes, so a low-visibility user honestly
-    /// undershoots rather than seeing someone else's data.
-    async fn filter_live_candidates(
-        &self,
-        candidates: Vec<ScoredCandidate>,
-        viewer: Option<&str>,
-        granted_ids: &[String],
-    ) -> anyhow::Result<Vec<ScoredCandidate>> {
-        let doc_ids: Vec<String> = candidates
-            .iter()
-            .map(|c| c.document_id.clone())
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        if doc_ids.is_empty() {
-            return Ok(candidates);
-        }
-
-        // Pass 1 + 2 fused into one query: liveness AND (when a viewer is
-        // present) per-user ownership. The `$2::text IS NULL` branch makes the
-        // ownership predicate a no-op for the no-viewer legacy path.
-        let mut live: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
-            r#"
-            SELECT document_id
-            FROM documents
-            WHERE document_id = ANY($1)
-              AND deleted_at IS NULL
-              AND ($2::text IS NULL
-                   OR owner_id = $2
-                   OR visibility = 'org'
-                   OR document_id = ANY($3))
-            "#,
-        )
-        .bind(&doc_ids)
-        .bind(viewer)
-        .bind(granted_ids)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(|(id,)| id)
-        .collect();
-
-        // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
-        // page_id, which is canonical in wiki_pages, not documents. Treat a
-        // published wiki page as live so this visibility gate doesn't drop
-        // every wiki hit as "missing from canonical documents". Best-effort:
-        // a failure here just means wiki candidates fall back to being gated
-        // by the documents table alone (i.e. filtered out).
-        match sqlx::query_as::<_, (String,)>(
-            r#"
-            SELECT page_id
-            FROM wiki_pages
-            WHERE page_id = ANY($1)
-              AND page_status = 'published'
-            "#,
-        )
-        .bind(&doc_ids)
-        .fetch_all(&self.pool)
-        .await
-        {
-            Ok(rows) => live.extend(rows.into_iter().map(|(id,)| id)),
-            Err(e) => {
-                tracing::warn!(error = %e, "wiki live-gate lookup failed; wiki candidates may be dropped")
-            }
-        }
-
-        if live.len() == doc_ids.len() {
-            return Ok(candidates);
-        }
-
-        let before = candidates.len();
-        let filtered: Vec<ScoredCandidate> = candidates
-            .into_iter()
-            .filter(|c| live.contains(&c.document_id))
-            .collect();
-        // Raw-vs-survivor on the trace. When a viewer is present and a large
-        // fraction was dropped, flag potential top-k starvation (the response
-        // will honestly undershoot rather than backfill non-visible docs).
-        let after = filtered.len();
-        let viewer_present = viewer.is_some();
-        if viewer_present && after * 2 < before {
-            tracing::warn!(
-                before,
-                after,
-                viewer_present,
-                "ownership/liveness gate dropped >50% of candidates — possible top-k starvation; result honestly undershoots"
-            );
-        } else {
-            tracing::debug!(
-                before,
-                after,
-                viewer_present,
-                "step-6 visibility gate applied"
-            );
-        }
-        Ok(filtered)
     }
 }
 
@@ -1589,7 +1414,8 @@ mod tests {
         // Contrast: sparse = Some(empty) (route on, zero hits) STILL runs RRF,
         // re-weighting dense — proving the Option distinction is load-bearing.
         let m2 = mix(0.7, 0.3, 0.0, 0.0);
-        let expected_empty_rrf = reciprocal_rank_fusion(&dense, &[], DEFAULT_RRF_K, bm25_share(&m2));
+        let expected_empty_rrf =
+            reciprocal_rank_fusion(&dense, &[], DEFAULT_RRF_K, bm25_share(&m2));
         let (got_empty, count_empty) = fuse_arms(
             dense.clone(),
             Some(vec![]),
@@ -1609,7 +1435,8 @@ mod tests {
         let dense = dense_fixture();
         let sparse = sparse_fixture();
         let base_mix = mix(0.7, 0.3, 0.0, 0.0);
-        let expected = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
+        let expected =
+            reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
 
         // w_wiki = 0 but a wiki list IS supplied → wiki must be ignored.
         let (got_weight_off, _) = fuse_arms(
@@ -1625,7 +1452,8 @@ mod tests {
 
         // w_wiki/w_visual > 0 but the arms returned nothing → both skipped.
         let m = mix(0.6, 0.2, 0.5, 0.3);
-        let expected_empty_arms = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
+        let expected_empty_arms =
+            reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
         let (got_empty_arms, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
@@ -1685,7 +1513,8 @@ mod tests {
 
         // w_graph = 0 but a graph list IS supplied → graph must be ignored.
         let base_mix = mix(0.7, 0.3, 0.0, 0.0);
-        let expected = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
+        let expected =
+            reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
         let (got_weight_off, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),

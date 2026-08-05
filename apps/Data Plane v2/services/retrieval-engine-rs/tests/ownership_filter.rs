@@ -1,7 +1,7 @@
 //! Per-User Data Ownership — step-6 retrieval post-filter test (PR-3).
 //!
-//! Exercises the EXACT SQL predicate `filter_live_candidates` runs at
-//! orchestrator step-6 (post-fusion + post-rerank), so it proves the gate that
+//! Exercises the EXACT SQL predicate the `postprocess::VisibilityGate` stage
+//! runs at orchestrator step-6 (post-fusion + post-rerank), so it proves the gate that
 //! backs BOTH the dense and the sparse retrieval arms uniformly (they share this
 //! one post-fusion seam — that is how the sparse leak is closed). A document
 //! marked private by user A must be absent from user B's candidate set unless B
@@ -17,7 +17,7 @@ fn test_db_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL").ok()
 }
 
-/// The exact predicate from `RetrievalPipeline::filter_live_candidates`.
+/// The exact predicate from `pipeline::postprocess::VisibilityGate`.
 const OWNERSHIP_GATE_SQL: &str = r#"
     SELECT document_id
     FROM documents

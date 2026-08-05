@@ -40,7 +40,9 @@ async fn cache_layer_supports_dragonfly_command_surface() {
         .set_retrieval(&org_id, 7, &scope, &retrieval_key, &payload)
         .await;
     assert_eq!(
-        cache.get_retrieval(&org_id, 7, &scope, &retrieval_key).await,
+        cache
+            .get_retrieval(&org_id, 7, &scope, &retrieval_key)
+            .await,
         Some(payload.clone())
     );
 
@@ -48,7 +50,9 @@ async fn cache_layer_supports_dragonfly_command_surface() {
     // query. This is the leak the scope exists to prevent.
     let other = viewer_scope_token(Some("user-b"), &[]);
     assert_eq!(
-        cache.get_retrieval(&org_id, 7, &other, &retrieval_key).await,
+        cache
+            .get_retrieval(&org_id, 7, &other, &retrieval_key)
+            .await,
         None,
         "a different viewer must never read another viewer's cached results"
     );
@@ -63,7 +67,9 @@ async fn cache_layer_supports_dragonfly_command_surface() {
     let deleted = cache.invalidate_org_retrieval(&org_id).await;
     assert_eq!(deleted, 1, "expected one retrieval cache key to be deleted");
     assert_eq!(
-        cache.get_retrieval(&org_id, 7, &scope, &retrieval_key).await,
+        cache
+            .get_retrieval(&org_id, 7, &scope, &retrieval_key)
+            .await,
         None
     );
 

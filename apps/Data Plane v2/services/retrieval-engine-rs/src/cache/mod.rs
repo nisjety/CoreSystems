@@ -241,7 +241,10 @@ mod tests {
         assert_ne!(a, viewer_scope_token(Some("u"), &["d1".to_string()]));
         assert_ne!(
             a,
-            viewer_scope_token(Some("u"), &["d1".to_string(), "d2".to_string(), "d3".to_string()])
+            viewer_scope_token(
+                Some("u"),
+                &["d1".to_string(), "d2".to_string(), "d3".to_string()]
+            )
         );
     }
 

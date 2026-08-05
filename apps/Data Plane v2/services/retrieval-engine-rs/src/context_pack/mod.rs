@@ -246,8 +246,10 @@ mod tests {
         let input: Vec<ContextFact> = (1..=7)
             .map(|i| fact(&i.to_string(), 1.0 - (i as f32) * 0.1))
             .collect();
-        let before: std::collections::HashMap<String, f32> =
-            input.iter().map(|f| (f.knowledge_id.clone(), f.score)).collect();
+        let before: std::collections::HashMap<String, f32> = input
+            .iter()
+            .map(|f| (f.knowledge_id.clone(), f.score))
+            .collect();
         let out = reorder_for_long_context(input);
         assert_eq!(out.len(), before.len(), "no facts added or dropped");
         let mut seen = ids(&out);
@@ -266,8 +268,7 @@ mod tests {
         // Under four facts there is no middle worth protecting; shuffling would
         // only obscure the ranking.
         for n in 0..4usize {
-            let input: Vec<ContextFact> =
-                (1..=n).map(|i| fact(&i.to_string(), 0.5)).collect();
+            let input: Vec<ContextFact> = (1..=n).map(|i| fact(&i.to_string(), 0.5)).collect();
             let expected = ids(&input);
             assert_eq!(ids(&reorder_for_long_context(input)), expected, "n={n}");
         }
@@ -277,9 +278,8 @@ mod tests {
     fn reorder_is_off_by_default_so_pack_order_is_unchanged() {
         // Guards the opt-in contract: without LONG_CONTEXT_REORDER the packer
         // must emit strict relevance order.
-        let cands: Vec<ScoredCandidate> = (1..=6)
-            .map(|i| cand(&i.to_string(), "some text"))
-            .collect();
+        let cands: Vec<ScoredCandidate> =
+            (1..=6).map(|i| cand(&i.to_string(), "some text")).collect();
         let pack = pack_context(&cands, &[], 500, "json");
         assert_eq!(ids(&pack.facts), vec!["1", "2", "3", "4", "5", "6"]);
     }
