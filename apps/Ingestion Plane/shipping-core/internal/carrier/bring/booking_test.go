@@ -129,6 +129,66 @@ func TestBookOmitsContactWhenAddressHasNeitherPhoneNorEmail(t *testing.T) {
 	}
 }
 
+func TestBookingAllowedRequiresLiveBookingAndCustomerNumber(t *testing.T) {
+	cases := []struct {
+		name           string
+		liveBooking    bool
+		customerNumber string
+		want           bool
+	}{
+		{"neither set", false, "", false},
+		{"customer number only", false, "12345", false},
+		{"live booking only — misconfigured, must stay in test mode", true, "", false},
+		{"both set", true, "12345", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := New(Config{LiveBooking: tc.liveBooking, CustomerNumber: tc.customerNumber})
+			if got := a.bookingAllowed(); got != tc.want {
+				t.Fatalf("bookingAllowed() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBookStaysInTestModeWhenLiveBookingSetButCustomerNumberMissing(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		_, _ = w.Write([]byte(`{"consignments":[{"confirmation":{"consignmentNumber":"1","links":{},"packages":[{"packageNumber":"1"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	// LiveBooking is set, but CustomerNumber is not — this must not be
+	// enough to place a live freight order.
+	a := New(Config{APIUID: "u", APIKey: "k", LiveBooking: true, BookingBaseURL: srv.URL})
+	if _, err := a.Book(context.Background(), bookingRequestFixture()); err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+	if gotBody["testIndicator"] != true {
+		t.Fatalf("testIndicator = %v, want true when CustomerNumber is missing even with LiveBooking set", gotBody["testIndicator"])
+	}
+}
+
+func TestBookGoesLiveOnlyWhenLiveBookingAndCustomerNumberAreBothSet(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		_, _ = w.Write([]byte(`{"consignments":[{"confirmation":{"consignmentNumber":"1","links":{},"packages":[{"packageNumber":"1"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	a := New(Config{APIUID: "u", APIKey: "k", LiveBooking: true, CustomerNumber: "12345", BookingBaseURL: srv.URL})
+	if _, err := a.Book(context.Background(), bookingRequestFixture()); err != nil {
+		t.Fatalf("Book: %v", err)
+	}
+	if gotBody["testIndicator"] != false {
+		t.Fatalf("testIndicator = %v, want false once LiveBooking and CustomerNumber are both set", gotBody["testIndicator"])
+	}
+}
+
 func TestBookSurfacesConsignmentErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"consignments":[{"errors":[{"code":"BOOK-INPUT-014","messages":[{"message":"Invalid postal code"}]}]}]}`))

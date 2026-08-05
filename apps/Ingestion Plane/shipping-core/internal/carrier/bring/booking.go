@@ -6,8 +6,8 @@
 // based on Bring's published examples; the exact optional-field spelling of
 // the customs block is a documented best-effort reconstruction and MUST be
 // validated against a live Mybring test account before production use —
-// which is also why testIndicator is hard-true unless Config.LiveBooking is
-// explicitly set.
+// which is also why testIndicator is hard-true unless bookingAllowed()
+// (Config.LiveBooking AND a configured CustomerNumber) says otherwise.
 //
 // Pickup ordering is deliberately NOT implemented for Bring yet: Bring's
 // pickup API surface is the least-documented of the set, and a wrong
@@ -60,13 +60,26 @@ type bookingParties struct {
 }
 
 type bookingParty struct {
-	Name                string `json:"name"`
-	AddressLine         string `json:"addressLine"`
-	PostalCode          string `json:"postalCode"`
-	City                string `json:"city"`
-	CountryCode         string `json:"countryCode"`
-	Reference           string `json:"reference,omitempty"`
-	AdditionalAddresses string `json:"additionalAddressInfo,omitempty"`
+	Name                string          `json:"name"`
+	AddressLine         string          `json:"addressLine"`
+	PostalCode          string          `json:"postalCode"`
+	City                string          `json:"city"`
+	CountryCode         string          `json:"countryCode"`
+	Reference           string          `json:"reference,omitempty"`
+	AdditionalAddresses string          `json:"additionalAddressInfo,omitempty"`
+	Contact             *bookingContact `json:"contact,omitempty"`
+}
+
+// bookingContact carries delivery-notification details. Bring rejects a
+// booking outright without at least an email or phoneNumber on the
+// recipient (confirmed live: BOOK_VALIDATION-011, "A valid recipient
+// mobile number or email address is required for notification") — schema
+// and field names (nested contact.{name,email,phoneNumber}) confirmed
+// against developer.bring.com's own published request examples.
+type bookingContact struct {
+	Name        string `json:"name,omitempty"`
+	Email       string `json:"email,omitempty"`
+	PhoneNumber string `json:"phoneNumber,omitempty"`
 }
 
 type bookingProduct struct {
@@ -124,6 +137,20 @@ type bookingAPIResponse struct {
 	} `json:"consignments"`
 }
 
+// bookingAllowed enforces the same hard-safe-by-default property DHL/FedEx/
+// UPS get from a sandbox-vs-production BaseURL split (see their
+// bookingAllowed). Bring's Booking API has no separate sandbox host — its
+// only live/test signal is the per-request testIndicator this method
+// decides — so this is the one place that decision is made, named and
+// documented the same way as the other three carriers, rather than an
+// inline boolean flip at the request-building call site. LiveBooking alone
+// is not enough: a "live" booking with no CustomerNumber configured is a
+// misconfiguration, not a real intent to book, so it is held to test mode
+// too.
+func (a *Adapter) bookingAllowed() bool {
+	return a.config.LiveBooking && a.config.CustomerNumber != ""
+}
+
 // Book places the consignment via Bring's Booking API (this call IS the EDI
 // pre-advice — Bring's booking API transmits the electronic notification to
 // the terminal as part of accepting the order).
@@ -138,7 +165,7 @@ func (a *Adapter) Book(ctx context.Context, req carrier.BookingRequest) (carrier
 	}
 
 	payload := bookingAPIRequest{
-		TestIndicator: !a.config.LiveBooking,
+		TestIndicator: !a.bookingAllowed(),
 		SchemaVersion: 1,
 		Consignments: []bookingConsignmentReq{{
 			ShippingDateTime: time.Now().Add(2 * time.Hour).UTC().Format("2006-01-02T15:04:05"),
@@ -319,13 +346,17 @@ func (a *Adapter) Track(ctx context.Context, trackingNo string) (carrier.Trackin
 // setAuthHeaders lives in bring.go — shared by Quote, Book, Label, and Track.
 
 func toBookingParty(addr carrier.Address) bookingParty {
-	return bookingParty{
+	party := bookingParty{
 		Name:        addr.Name,
 		AddressLine: addr.Street,
 		PostalCode:  addr.PostalCode,
 		City:        addr.City,
 		CountryCode: addr.Country,
 	}
+	if addr.Phone != "" || addr.Email != "" {
+		party.Contact = &bookingContact{Name: addr.Name, Email: addr.Email, PhoneNumber: addr.Phone}
+	}
+	return party
 }
 
 func toBookingCustoms(customs *carrier.CustomsInfo) *bookingCustoms {
