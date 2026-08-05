@@ -55,6 +55,11 @@ type CreateDocumentInput struct {
 	Metadata          map[string]any `json:"metadata,omitempty"`
 	IdempotencyKey    string         `json:"idempotency_key,omitempty"`
 	CreatedBy         string         `json:"created_by,omitempty"`
+	// ModifiedAt is the source item's own last-modified time (SharePoint's
+	// lastModifiedDateTime), forwarded as document_date. Distinct from
+	// Data Plane's own created_at/updated_at bookkeeping. Nil is a valid,
+	// common value -- most non-SharePoint content has no such field.
+	ModifiedAt *time.Time `json:"document_date,omitempty"`
 }
 
 // Configured reports whether the client can talk to Data Plane. Mirrors the
@@ -99,6 +104,9 @@ func (c *DocumentsClient) CreateDocument(ctx context.Context, orgID string, inpu
 	}
 	if input.CreatedBy != "" {
 		payload["created_by"] = input.CreatedBy
+	}
+	if input.ModifiedAt != nil {
+		payload["document_date"] = input.ModifiedAt
 	}
 
 	body, err := json.Marshal(payload)

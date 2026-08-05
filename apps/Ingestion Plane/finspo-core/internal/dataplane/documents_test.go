@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestDocumentsClient_Configured(t *testing.T) {
@@ -95,6 +96,47 @@ func TestDocumentsClient_CreateDocumentPostsExpectedRequest(t *testing.T) {
 	}
 	if gotPayload["idempotency_key"] != "finspo-sp:drive:item" {
 		t.Errorf("idempotency_key not forwarded: %+v", gotPayload)
+	}
+	if _, present := gotPayload["document_date"]; present {
+		t.Errorf("document_date must be absent from the payload when ModifiedAt is nil, got %+v", gotPayload)
+	}
+}
+
+// TestDocumentsClient_ForwardsModifiedAtAsDocumentDate covers P2-3: the
+// connector's own last-modified time must reach Data Plane as document_date,
+// under a DIFFERENT wire name than the source-tracking modified_at field
+// SourceObjectClient already sends -- documents-api's schema and
+// source_objects' are separate tables with separate meanings (this row's
+// content freshness vs. a file's own change-detection bookkeeping).
+func TestDocumentsClient_ForwardsModifiedAtAsDocumentDate(t *testing.T) {
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotPayload)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"document_id":"doc-1","status":"pending"}`))
+	}))
+	defer srv.Close()
+
+	modified := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	c := NewDocumentsClient(srv.URL, &fakeOrgTokenProvider{configured: true, tokens: []string{"tok"}})
+	err := c.CreateDocument(context.Background(), "org-42", CreateDocumentInput{
+		Source:     "sharepoint",
+		Type:       "sharepoint_file",
+		Title:      "Q3 Plan",
+		Content:    "the body",
+		ModifiedAt: &modified,
+	})
+	if err != nil {
+		t.Fatalf("CreateDocument: %v", err)
+	}
+	got, ok := gotPayload["document_date"].(string)
+	if !ok {
+		t.Fatalf("document_date missing or not a string: %+v", gotPayload)
+	}
+	parsed, err := time.Parse(time.RFC3339, got)
+	if err != nil || !parsed.Equal(modified) {
+		t.Errorf("document_date = %q, want an RFC3339 encoding of %v", got, modified)
 	}
 }
 

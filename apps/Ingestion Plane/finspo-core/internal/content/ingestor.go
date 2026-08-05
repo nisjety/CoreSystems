@@ -132,6 +132,9 @@ func (i *Ingestor) IngestItemContent(ctx context.Context, source store.Source, i
 		// [alphanumerics - _ . :] and raw Graph drive ids violate that (they
 		// start with "b!"), which 400'd every single content forward.
 		IdempotencyKey: itemIdempotencyKey(source.DriveID, item.ItemID),
+		// P2-3: the file's own SharePoint lastModifiedDateTime, so Data Plane
+		// can rank on content freshness instead of ingestion time.
+		ModifiedAt: item.ModifiedAt,
 	}
 	return i.docs.CreateDocument(ctx, source.OrganizationID, input)
 }

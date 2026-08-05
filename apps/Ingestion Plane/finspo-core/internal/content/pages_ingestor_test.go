@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -73,6 +74,49 @@ func TestPagesIngestor_HappyPathForwardsDocument(t *testing.T) {
 	}
 	if s.orgs[0] != "org-1" {
 		t.Errorf("org = %q, want org-1", s.orgs[0])
+	}
+}
+
+// TestPagesIngestor_PrefersPageModifiedAtOverItem covers P2-3: the page's own
+// lastModifiedDateTime must win when both it and the wrapping drive item's
+// carry a value.
+func TestPagesIngestor_PrefersPageModifiedAtOverItem(t *testing.T) {
+	f := &fakePageText{text: "body"}
+	s := &fakeSink{configured: true}
+	ing := newPagesIngestor(f, s, "internal")
+
+	src, item, page := pageFixture()
+	pageModified := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	itemModified := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	page.LastModifiedDateTime = &pageModified
+	item.ModifiedAt = &itemModified
+
+	if err := ing.IngestSitePage(context.Background(), src, item, page); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if got := s.created[0].ModifiedAt; got == nil || !got.Equal(pageModified) {
+		t.Errorf("ModifiedAt = %v, want the page's own %v", got, pageModified)
+	}
+}
+
+// TestPagesIngestor_FallsBackToItemModifiedAt covers the other half: when the
+// Pages API returns no lastModifiedDateTime for the page itself, the wrapping
+// drive item's still reaches the forwarded document rather than being dropped.
+func TestPagesIngestor_FallsBackToItemModifiedAt(t *testing.T) {
+	f := &fakePageText{text: "body"}
+	s := &fakeSink{configured: true}
+	ing := newPagesIngestor(f, s, "internal")
+
+	src, item, page := pageFixture()
+	itemModified := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	item.ModifiedAt = &itemModified
+	// page.LastModifiedDateTime deliberately left nil.
+
+	if err := ing.IngestSitePage(context.Background(), src, item, page); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if got := s.created[0].ModifiedAt; got == nil || !got.Equal(itemModified) {
+		t.Errorf("ModifiedAt = %v, want the fallback item time %v", got, itemModified)
 	}
 }
 

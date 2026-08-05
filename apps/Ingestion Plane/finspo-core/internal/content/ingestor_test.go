@@ -5,6 +5,7 @@ import (
 	"errors"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -94,6 +95,29 @@ func TestIngestor_HappyPathForwardsDocument(t *testing.T) {
 	}
 	if s.orgs[0] != "org-1" {
 		t.Errorf("org = %q", s.orgs[0])
+	}
+}
+
+// TestIngestor_ForwardsModifiedAt covers P2-3: the drive item's own
+// lastModifiedDateTime must reach the forwarded document as ModifiedAt, so
+// Data Plane can persist document_date instead of only its own ingest-time
+// bookkeeping.
+func TestIngestor_ForwardsModifiedAt(t *testing.T) {
+	f := &fakeFetcher{data: []byte("real document text"), maxBytes: 1000}
+	s := &fakeSink{configured: true}
+	ing := newIngestor(f, s, "internal")
+
+	src, item := srcItem("plan.txt", "text/plain", 18, false)
+	modified := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	item.ModifiedAt = &modified
+	if err := ing.IngestItemContent(context.Background(), src, item); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if len(s.created) != 1 {
+		t.Fatalf("expected 1 forwarded doc, got %d", len(s.created))
+	}
+	if got := s.created[0].ModifiedAt; got == nil || !got.Equal(modified) {
+		t.Errorf("ModifiedAt = %v, want %v", got, modified)
 	}
 }
 

@@ -73,6 +73,13 @@ func (i *PagesIngestor) IngestSitePage(ctx context.Context, source store.Source,
 		return nil
 	}
 
+	// P2-3: prefer the page's own lastModifiedDateTime; fall back to the
+	// wrapping drive item's, in case the Pages API omitted it.
+	modifiedAt := page.LastModifiedDateTime
+	if modifiedAt == nil {
+		modifiedAt = item.ModifiedAt
+	}
+
 	input := dataplane.CreateDocumentInput{
 		Source:            "sharepoint",
 		Type:              "sharepoint_page",
@@ -97,6 +104,7 @@ func (i *PagesIngestor) IngestSitePage(ctx context.Context, source store.Source,
 		// Hashed for the same reason as file items: raw Graph site ids contain
 		// characters ("," etc.) outside documents-api's idempotency-key charset.
 		IdempotencyKey: pageIdempotencyKey(source.SiteID, page.ID),
+		ModifiedAt:     modifiedAt,
 	}
 	return i.docs.CreateDocument(ctx, source.OrganizationID, input)
 }
