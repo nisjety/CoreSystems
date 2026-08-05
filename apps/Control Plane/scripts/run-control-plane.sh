@@ -143,7 +143,7 @@ persist_if_missing BETTER_AUTH_SECRET "$(random_value)"
 persist_if_missing TOKEN_ENCRYPTION_KEY "$(random_value)"
 persist_if_missing RESEND_API_KEY "$(random_value)"
 set_if_missing RESEND_FROM_EMAIL dev@example.test
-set_if_missing VELION_PUBLIC_ORIGIN http://localhost:5173
+set_if_missing VEREVON_PUBLIC_ORIGIN http://localhost:5173
 # Plane-token issuer. Some service definitions require it (${..:?}) while others
 # document the same default (${..:-...}); supply that default so a bring-up or a
 # single-service recreate resolves without an operator-exported value.

@@ -45,7 +45,7 @@ func Load() (*Config, error) {
 		DatabaseURL:                  getEnv("DATABASE_URL", ""),
 		NATSURL:                      getEnv("NATS_URL", "nats://controlplane-nats:4222"),
 		NATSToken:                    getEnv("NATS_TOKEN", getEnv("NATS_AUTH_TOKEN", "")),
-		NATSSharedURL:                getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
+		NATSSharedURL:                getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", "")),
 		NATSSharedUser:               getEnv("NATS_SHARED_USER", ""),
 		NATSSharedPass:               getEnv("NATS_SHARED_PASSWORD", ""),
 		NATSSharedToken:              getEnv("NATS_SHARED_TOKEN", ""),

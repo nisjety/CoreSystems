@@ -111,7 +111,7 @@ test('subscriber uses pre-provisioned Control consumers and has no token/admin p
     require('node:path').join(__dirname, '..', 'nats-subscriber.js'),
     'utf8',
   );
-  assert.doesNotMatch(source, /NATS_TOKEN|VELION_NATS_TOKEN/);
+  assert.doesNotMatch(source, /NATS_TOKEN|VEREVON_NATS_TOKEN/);
   assert.doesNotMatch(source, /CONVEX_API_KEY|INTERNAL_API_KEY/);
   assert.match(source, /CONVEX_CONTROL_PROJECTION_KEY/);
   assert.doesNotMatch(source, /jetstreamManager|streams\.add|consumers\.add/);

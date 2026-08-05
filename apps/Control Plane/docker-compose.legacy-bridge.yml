@@ -22,8 +22,8 @@ services:
       CONTROL_SHARED_NATS_URL: nats://control-shared-nats:4222
       CONTROL_SHARED_BRIDGE_USER: control-shared-legacy-bridge
       CONTROL_SHARED_BRIDGE_PASSWORD: ${CONTROL_SHARED_BRIDGE_PASSWORD:?CONTROL_SHARED_BRIDGE_PASSWORD is required}
-      VELION_LEGACY_NATS_URL: ${VELION_NATS_URL:?VELION_NATS_URL is required during bridge migration}
-      VELION_LEGACY_NATS_TOKEN: ${VELION_NATS_TOKEN:?VELION_NATS_TOKEN is required during bridge migration}
+      VEREVON_LEGACY_NATS_URL: ${VEREVON_NATS_URL:?VEREVON_NATS_URL is required during bridge migration}
+      VEREVON_LEGACY_NATS_TOKEN: ${VEREVON_NATS_TOKEN:?VEREVON_NATS_TOKEN is required during bridge migration}
     networks:
       - controlplane-net
       - inter-plane-bus

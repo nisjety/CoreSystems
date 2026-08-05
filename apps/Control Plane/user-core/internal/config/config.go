@@ -115,7 +115,7 @@ func Load() (*Config, error) {
 		NATS: NATSConfig{
 			URL:         getEnv("NATS_URL", "nats://localhost:4222"),
 			Token:       getEnv("NATS_TOKEN", ""),
-			SharedURL:   getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", "")),
+			SharedURL:   getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", "")),
 			SharedUser:  getEnv("NATS_SHARED_USER", ""),
 			SharedPass:  getEnv("NATS_SHARED_PASSWORD", ""),
 			SharedToken: getEnv("NATS_SHARED_TOKEN", ""),

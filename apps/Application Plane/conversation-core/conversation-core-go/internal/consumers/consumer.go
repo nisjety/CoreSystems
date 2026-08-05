@@ -26,9 +26,9 @@ type DurableConsumer struct {
 }
 
 const (
-	applicationEventsStream    = "VELION_APPLICATION"
-	applicationModelStream     = "VELION_MODEL"
-	applicationIngestionStream = "VELION_INGESTION"
+	applicationEventsStream    = "VEREVON_APPLICATION"
+	applicationModelStream     = "VEREVON_MODEL"
+	applicationIngestionStream = "VEREVON_INGESTION"
 	// controlSharedStream carries platform-wide, cross-plane events published
 	// by Control-Plane services (e.g. org-core's GDPR erasure fan-out) that
 	// are not scoped to the application/model/ingestion namespaces. Mirrors

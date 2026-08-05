@@ -21,7 +21,7 @@ func TestLoadRequiresScopedGDPRConsumerCredentialsInReleaseMode(t *testing.T) {
 	t.Setenv("NATS_SHARED_URL", "nats://control-shared-nats:4222")
 	t.Setenv("NATS_SHARED_USER", "documents-api-gdpr")
 	t.Setenv("NATS_SHARED_PASSWORD", "")
-	t.Setenv("VELION_NATS_TOKEN", "legacy-token-must-not-be-used")
+	t.Setenv("VEREVON_NATS_TOKEN", "legacy-token-must-not-be-used")
 	if _, err := Load(); err == nil {
 		t.Fatal("release config accepted missing scoped GDPR password")
 	}

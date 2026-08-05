@@ -10,7 +10,7 @@ Commits: `b8aea9bd` (gateway producer), `f1ab0e6b` (SPA reload merge),
 `a8a82665` (version navigation + the bug it uncovered).
 
 These are parity-backlog items #1 (resume) and #8 (edit-versions). See
-`VELION_CHAT_PARITY_BACKLOG.md`.
+`VEREVON_CHAT_PARITY_BACKLOG.md`.
 
 This document is kept as the design record — the "corrected design" sections
 below are exactly what shipped.

@@ -29,10 +29,10 @@ const (
 
 	// OrgErasureDeliverySubject is the push-consumer deliver subject
 	// audit-core's provisioner must configure on OrgErasureDurableName,
-	// mirroring the "_VELION.CONTROL.SHARED.DELIVER.<plane>.<service>.<name>"
+	// mirroring the "_VEREVON.CONTROL.SHARED.DELIVER.<plane>.<service>.<name>"
 	// convention already used by documents-api-go/conversation-core-go/
 	// quarry-control's own org-erasure consumers.
-	OrgErasureDeliverySubject = "_VELION.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
+	OrgErasureDeliverySubject = "_VEREVON.CONTROL.SHARED.DELIVER.data.data-quality.org-erasure"
 )
 
 // Consumer binds the pre-provisioned durable consumer and purges

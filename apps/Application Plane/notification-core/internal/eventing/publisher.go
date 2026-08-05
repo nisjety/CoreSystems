@@ -7,7 +7,7 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-const StreamName = "VELION_APPLICATION"
+const StreamName = "VEREVON_APPLICATION"
 
 type Publisher struct {
 	js nats.JetStreamContext

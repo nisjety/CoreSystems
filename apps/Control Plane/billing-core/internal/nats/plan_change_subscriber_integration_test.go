@@ -59,7 +59,7 @@ func TestPlanChangeConsumerIsDurableRetriesBeforeAckAndDeadLettersMalformed(t *t
 	}
 	if _, err := legacyJS.AddConsumer("CONTROL_PLANE_EVENTS", &natsgo.ConsumerConfig{
 		Durable:        planChangeConsumer,
-		DeliverSubject: "_VELION.CONTROL.DELIVER.billing.organization-plan-changed",
+		DeliverSubject: "_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed",
 		DeliverGroup:   planChangeConsumer,
 		FilterSubject:  planChangeSubject,
 		DeliverPolicy:  natsgo.DeliverAllPolicy,

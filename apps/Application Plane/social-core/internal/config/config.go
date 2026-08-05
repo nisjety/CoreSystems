@@ -54,7 +54,7 @@ func Load() (*Config, error) {
 		ServiceName:                strings.TrimSpace(getEnv("SERVICE_NAME", "social-core")),
 		InternalAPIKey:             strings.TrimSpace(getEnv("INTERNAL_API_KEY", "")),
 		IntegrationCoreURL:         strings.TrimRight(strings.TrimSpace(getEnv("INTEGRATION_CORE_URL", "http://integration-api:3026")), "/"),
-		NATSURL:                    strings.TrimSpace(getEnv("VELION_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
+		NATSURL:                    strings.TrimSpace(getEnv("VEREVON_NATS_URL", getEnv("NATS_SHARED_URL", getEnv("NATS_URL", "nats://nats:4222")))),
 		NATSUser:                   strings.TrimSpace(getEnv("NATS_USER", "")),
 		NATSPassword:               strings.TrimSpace(getEnv("NATS_PASSWORD", "")),
 		PublishWorkerEnabled:       getEnvBool("SOCIAL_PUBLISH_WORKER_ENABLED", true),
