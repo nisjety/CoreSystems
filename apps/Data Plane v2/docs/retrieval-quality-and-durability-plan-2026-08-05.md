@@ -1872,6 +1872,66 @@ decided unilaterally here.
   happens) waits on either a repopulated corpus or a deliberate decision to
   seed one.
 
+### 2026-08-06 — P0-1c: the scope blocker was already solved, by a path the original analysis didn't check
+
+Asked directly to address P0-1c. Its stated blocker (§"⛔ Legacy cleanup +
+reindex still blocked", under P1-2) was: `POST /v1/orchestrator/reindex`
+needs `data:orchestrate` or `data:admin`, and granting either means adding
+an entry to Control Plane's `PLANE_SERVICE_PRINCIPALS_JSON` — a new
+privileged **service** credential, on a registry where one malformed entry
+503s token issuance platform-wide. Correctly flagged as an operator
+decision, not something to do unsupervised.
+
+**That registry change turns out to be unnecessary.** The original analysis
+only considered automating the reindex via a service principal; it didn't
+check whether an interactive (human) operator token already carries the
+scope. It does. Verified end to end, not assumed:
+
+- `auth-core/src/auth/plane-token-scopes.ts`: `planeScopesForRole(role,
+  audience)` returns `[...MEMBER_SCOPES, ...ADMIN_SCOPES]` for role `owner`
+  or `admin`, and `ADMIN_SCOPES` includes both `data:admin` and
+  `data:orchestrate` (confirmed by the existing, passing test
+  `'adds audited tenant-wide and administrative capabilities for
+  owners/admins'` in `plane-token-scopes.spec.ts`). The *only* scope this
+  path explicitly withholds from interactive users is the unrelated
+  `data:search:rebuild` (a different, still-disabled-by-design Quickwit
+  endpoint — route 2 in the P0-1c writeup, not route 3).
+- That function is live-wired, not dead code: `plane-token.controller.ts:200`
+  calls it with the caller's real session role to build the scopes on every
+  interactive plane-token issuance.
+- Checked the live `PLANE_SERVICE_PRINCIPALS_JSON` directly (all 16
+  entries) — confirmed no *service* principal holds either scope, so the
+  original analysis's narrower claim was accurate; it just wasn't the
+  complete picture.
+- Checked the account that asked for this: `ima.dacosta@aquatiq.com` is
+  `owner` of organization `AQUATIQ AS` in the live `auth_service.member`
+  table, right now. So the scope is not hypothetically available to some
+  role — it is already on this specific operator's own token today.
+- Checked for a production automated caller of `/v1/orchestrator/reindex`
+  that would need a service credential regardless (a cron, a webhook, a
+  peer service) — none exists; the only reference outside the handler
+  itself is the auth-regression test script. This is genuinely an
+  operator-triggered-only endpoint, which is exactly what the interactive
+  path is for.
+
+**Consequence: no registry change made, none needed.** Any Control Plane
+user with `owner` or `admin` role can call `POST /v1/orchestrator/reindex`
+today with their own normal session — no new credential, no edit to a
+registry that can 503 token issuance platform-wide for one malformed
+entry. This is a strictly safer resolution than the one the original
+analysis was weighing, and it required zero infrastructure change.
+
+**What's still actually blocking the backfill is unrelated to scope: the
+corpus is empty (0 documents, 0 knowledge_units, 0 graph_entities, 0
+source_objects — confirmed live), not the 50-document corpus this section
+was written against.** A reindex right now has nothing to act on regardless
+of who calls it. That is the same repopulate-the-corpus decision already
+surfaced earlier this session (`AskUserQuestion`, answered "continue with
+P2 code") — still open, still requires deciding how/whether to re-trigger
+real source connectors, and still not something to do unprompted. P0-1c's
+*authorization* question is closed; the *data* question is a separate,
+already-known, still-standing decision.
+
 ---
 
 ## 7. Architecture constraints this plan honours
