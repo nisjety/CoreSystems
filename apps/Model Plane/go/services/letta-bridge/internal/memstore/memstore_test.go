@@ -82,7 +82,7 @@ func TestPutAndSearchRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewStore()
-			_, err := s.Put(tt.orgID, tt.threadID, tt.topic, tt.memoryID, tt.content)
+			_, err := s.Put(tt.orgID, tt.threadID, tt.topic, tt.memoryID, "user-1", tt.content)
 			if tt.wantError {
 				if err == nil {
 					t.Fatal("expected Put to return an error, got nil")
@@ -161,7 +161,7 @@ func TestTopicFiltering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := NewStore()
 			for _, rec := range tt.records {
-				if _, err := s.Put("org-1", "thread-1", rec.topic, rec.memID, rec.content); err != nil {
+				if _, err := s.Put("org-1", "thread-1", rec.topic, rec.memID, "user-1", rec.content); err != nil {
 					t.Fatalf("Put: %v", err)
 				}
 			}
@@ -191,7 +191,7 @@ func TestTimeRangeFiltering(t *testing.T) {
 	s := NewStore()
 
 	// Insert records with controlled timing.
-	if _, err := s.Put("org-1", "thread-1", "MEMORY", "old-1", "old record"); err != nil {
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "old-1", "user-1", "old record"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -201,7 +201,7 @@ func TestTimeRangeFiltering(t *testing.T) {
 	// Small delay to ensure the second record has a strictly later timestamp.
 	time.Sleep(2 * time.Millisecond)
 
-	if _, err := s.Put("org-1", "thread-1", "MEMORY", "new-1", "new record"); err != nil {
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "new-1", "user-1", "new record"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -252,7 +252,7 @@ func TestConcurrentAccess(t *testing.T) {
 				memID := fmt.Sprintf("mem-%d-%d", gIdx, i)
 				content := fmt.Sprintf("content from goroutine %d item %d", gIdx, i)
 
-				_, err := s.Put("org-concurrent", "thread-concurrent", "MEMORY", memID, content)
+				_, err := s.Put("org-concurrent", "thread-concurrent", "MEMORY", memID, "user-1", content)
 				if err != nil {
 					t.Errorf("Put(%s): %v", memID, err)
 					return
@@ -280,11 +280,11 @@ func TestSearchResultOrder(t *testing.T) {
 	s := NewStore()
 
 	// Record whose content starts with the query gets score 1.0.
-	if _, err := s.Put("org-1", "thread-1", "MEMORY", "prefix", "hello world greeting"); err != nil {
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "prefix", "user-1", "hello world greeting"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	// Record whose content contains but does not start with the query gets score 0.5.
-	if _, err := s.Put("org-1", "thread-1", "MEMORY", "contains", "say hello to the world"); err != nil {
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "contains", "user-1", "say hello to the world"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -310,10 +310,10 @@ func TestSearchResultOrder(t *testing.T) {
 func TestThreadIDScoping(t *testing.T) {
 	s := NewStore()
 
-	if _, err := s.Put("org-1", "thread-A", "MEMORY", "m1", "shared content"); err != nil {
+	if _, err := s.Put("org-1", "thread-A", "MEMORY", "m1", "user-1", "shared content"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := s.Put("org-1", "thread-B", "MEMORY", "m2", "shared content"); err != nil {
+	if _, err := s.Put("org-1", "thread-B", "MEMORY", "m2", "user-1", "shared content"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -336,10 +336,10 @@ func TestThreadIDScoping(t *testing.T) {
 func TestPutOverwritesExistingRecord(t *testing.T) {
 	s := NewStore()
 
-	if _, err := s.Put("org-1", "thread-1", "MEMORY", "m1", "original"); err != nil {
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "m1", "user-1", "original"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if _, err := s.Put("org-1", "thread-1", "MEMORY", "m1", "updated"); err != nil {
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "m1", "user-1", "updated"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -356,7 +356,7 @@ func TestTopKLimit(t *testing.T) {
 	s := NewStore()
 	for i := range 10 {
 		memID := fmt.Sprintf("m-%d", i)
-		if _, err := s.Put("org-1", "thread-1", "MEMORY", memID, "common content"); err != nil {
+		if _, err := s.Put("org-1", "thread-1", "MEMORY", memID, "user-1", "common content"); err != nil {
 			t.Fatalf("Put: %v", err)
 		}
 	}
@@ -370,5 +370,43 @@ func TestTopKLimit(t *testing.T) {
 	allHits := s.Search("org-1", "", "", nil, time.Time{}, 0)
 	if len(allHits) != 10 {
 		t.Errorf("expected topK=0 to return all 10, got %d", len(allHits))
+	}
+}
+
+func TestDeleteScopedByOwner(t *testing.T) {
+	s := NewStore()
+	if _, err := s.Put("org-1", "thread-1", "MEMORY", "m1", "user-a", "user a's memory"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	// Wrong user cannot delete another user's record, and the record survives.
+	if deleted := s.Delete("org-1", "user-b", "m1"); deleted {
+		t.Fatal("Delete with the wrong userID reported success")
+	}
+	if hits := s.Search("org-1", "", "", nil, time.Time{}, 100); len(hits) != 1 {
+		t.Fatalf("record should survive a wrong-owner delete attempt, got %d hits", len(hits))
+	}
+
+	// Wrong org, correct user: still not found (org isolation).
+	if deleted := s.Delete("org-2", "user-a", "m1"); deleted {
+		t.Fatal("Delete with the wrong orgID reported success")
+	}
+
+	// Nonexistent memoryID: false, no error, no panic.
+	if deleted := s.Delete("org-1", "user-a", "does-not-exist"); deleted {
+		t.Fatal("Delete of a nonexistent memoryID reported success")
+	}
+
+	// Correct owner can delete, and the record is actually gone afterward.
+	if deleted := s.Delete("org-1", "user-a", "m1"); !deleted {
+		t.Fatal("Delete with the correct owner reported failure")
+	}
+	if hits := s.Search("org-1", "", "", nil, time.Time{}, 100); len(hits) != 0 {
+		t.Fatalf("record should be gone after owner delete, got %d hits", len(hits))
+	}
+
+	// Deleting again is a clean, non-erroring false -- not a repeat success.
+	if deleted := s.Delete("org-1", "user-a", "m1"); deleted {
+		t.Fatal("second Delete of an already-removed record reported success")
 	}
 }

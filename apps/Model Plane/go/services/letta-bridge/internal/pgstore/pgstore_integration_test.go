@@ -58,10 +58,10 @@ func newTestStore(t *testing.T) (*Store, *pgxpool.Pool, string) {
 func TestPgStorePutValidation(t *testing.T) {
 	store, _, org := newTestStore(t)
 	ctx := context.Background()
-	if _, err := store.Put(ctx, org, "", "MEMORY", "m1", "x"); err == nil {
+	if _, err := store.Put(ctx, org, "", "MEMORY", "m1", "", "x"); err == nil {
 		t.Fatal("expected error for empty threadID")
 	}
-	if _, err := store.Put(ctx, "", "t1", "MEMORY", "m1", "x"); err == nil {
+	if _, err := store.Put(ctx, "", "t1", "MEMORY", "m1", "", "x"); err == nil {
 		t.Fatal("expected error for empty orgID")
 	}
 }
@@ -70,10 +70,10 @@ func TestPgStorePutSearchRoundTrip(t *testing.T) {
 	store, _, org := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := store.Put(ctx, org, "thread-1", "MEMORY", "m1", "user prefers dark mode"); err != nil {
+	if _, err := store.Put(ctx, org, "thread-1", "MEMORY", "m1", "", "user prefers dark mode"); err != nil {
 		t.Fatalf("put m1: %v", err)
 	}
-	if _, err := store.Put(ctx, org, "thread-1", "MEMORY", "m2", "deadline is friday"); err != nil {
+	if _, err := store.Put(ctx, org, "thread-1", "MEMORY", "m2", "", "deadline is friday"); err != nil {
 		t.Fatalf("put m2: %v", err)
 	}
 
@@ -102,10 +102,10 @@ func TestPgStoreUpsertOverwrites(t *testing.T) {
 	store, _, org := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := store.Put(ctx, org, "t1", "MEMORY", "dup", "v1"); err != nil {
+	if _, err := store.Put(ctx, org, "t1", "MEMORY", "dup", "", "v1"); err != nil {
 		t.Fatalf("put v1: %v", err)
 	}
-	if _, err := store.Put(ctx, org, "t1", "MEMORY", "dup", "v2"); err != nil {
+	if _, err := store.Put(ctx, org, "t1", "MEMORY", "dup", "", "v2"); err != nil {
 		t.Fatalf("put v2: %v", err)
 	}
 	hits, err := store.Search(ctx, org, "", "", nil, time.Time{}, 10)
@@ -125,7 +125,7 @@ func TestPgStoreScopingAndFilters(t *testing.T) {
 	ctx := context.Background()
 
 	mustPut := func(thread, topic, id, content string) {
-		if _, err := store.Put(ctx, org, thread, topic, id, content); err != nil {
+		if _, err := store.Put(ctx, org, thread, topic, id, "", content); err != nil {
 			t.Fatalf("put %s: %v", id, err)
 		}
 	}
@@ -171,14 +171,76 @@ func TestPgStoreScopingAndFilters(t *testing.T) {
 	}
 }
 
+func TestPgStoreDeleteScopedByOwner(t *testing.T) {
+	store, pool, org := newTestStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Put(ctx, org, "thread-1", "MEMORY", "m1", "user-a", "user a's memory"); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// Wrong user cannot delete another user's record; it survives.
+	deleted, err := store.Delete(ctx, org, "user-b", "m1")
+	if err != nil {
+		t.Fatalf("delete (wrong user): %v", err)
+	}
+	if deleted {
+		t.Fatal("delete with the wrong userID reported success")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM letta_memory_blocks WHERE org_id = $1 AND memory_id = $2", org, "m1").Scan(&count); err != nil {
+		t.Fatalf("count after wrong-owner delete: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("record should survive a wrong-owner delete attempt, row count = %d", count)
+	}
+
+	// Nonexistent memoryID: false, no error.
+	deleted, err = store.Delete(ctx, org, "user-a", "does-not-exist")
+	if err != nil {
+		t.Fatalf("delete (nonexistent): %v", err)
+	}
+	if deleted {
+		t.Fatal("delete of a nonexistent memoryID reported success")
+	}
+
+	// Correct owner can delete, and the row is actually gone afterward --
+	// this is the exact DSAR/erasure gap this migration + fix closes: before
+	// the user_id column existed, Delete unconditionally returned
+	// (false, nil) here too, leaving the row in place while the caller was
+	// told nothing was wrong.
+	deleted, err = store.Delete(ctx, org, "user-a", "m1")
+	if err != nil {
+		t.Fatalf("delete (correct owner): %v", err)
+	}
+	if !deleted {
+		t.Fatal("delete with the correct owner reported failure")
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM letta_memory_blocks WHERE org_id = $1 AND memory_id = $2", org, "m1").Scan(&count); err != nil {
+		t.Fatalf("count after owner delete: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("record should be gone after owner delete, row count = %d", count)
+	}
+
+	// Deleting again is a clean, non-erroring false, not a repeat success.
+	deleted, err = store.Delete(ctx, org, "user-a", "m1")
+	if err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	if deleted {
+		t.Fatal("second delete of an already-removed record reported success")
+	}
+}
+
 func TestPgStoreLiteralWildcards(t *testing.T) {
 	store, _, org := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := store.Put(ctx, org, "t1", "MEMORY", "pct", "battery at 50% now"); err != nil {
+	if _, err := store.Put(ctx, org, "t1", "MEMORY", "pct", "", "battery at 50% now"); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if _, err := store.Put(ctx, org, "t1", "MEMORY", "plain", "battery low"); err != nil {
+	if _, err := store.Put(ctx, org, "t1", "MEMORY", "plain", "", "battery low"); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	// "%" must be matched literally, not as an ILIKE wildcard.

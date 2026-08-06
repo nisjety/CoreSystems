@@ -16,6 +16,7 @@ type Record struct {
 	ThreadID  string
 	Topic     string
 	MemoryID  string
+	UserID    string
 	Content   string
 	UpdatedAt time.Time
 }
@@ -48,7 +49,7 @@ func key(orgID, threadID, memoryID string) string {
 
 // Put inserts or replaces a record. Returns an error if required
 // identifiers are empty.
-func (s *Store) Put(orgID, threadID, topic, memoryID, content string) (*Record, error) {
+func (s *Store) Put(orgID, threadID, topic, memoryID, userID, content string) (*Record, error) {
 	if orgID == "" || threadID == "" || topic == "" || memoryID == "" {
 		return nil, errors.New("orgID, threadID, topic, and memoryID are required")
 	}
@@ -59,11 +60,38 @@ func (s *Store) Put(orgID, threadID, topic, memoryID, content string) (*Record, 
 		ThreadID:  threadID,
 		Topic:     topic,
 		MemoryID:  memoryID,
+		UserID:    userID,
 		Content:   content,
 		UpdatedAt: time.Now().UTC(),
 	}
 	s.records[key(orgID, threadID, memoryID)] = rec
 	return rec, nil
+}
+
+// Delete removes the record matching orgID + memoryID whose UserID equals
+// userID, returning whether a record was found and removed. Scoping by
+// userID is what makes this safe for DSAR erasure -- without it, a delete
+// request for one user's memory_id could remove another user's record it
+// happens to collide with (memory_id is caller-supplied, not guaranteed
+// globally unique across users within an org). Callers with the wrong
+// userID or a nonexistent memoryID both get (false, nil): "not found" and
+// "found but not yours" are indistinguishable from the outside by design --
+// a delete for someone else's memory must not leak whether it exists.
+//
+// There is no threadID parameter (the Store interface's Delete doesn't take
+// one), so this scans every record for the org+memoryID pair regardless of
+// thread. O(n) is acceptable here: this backend is the in-process dev/test
+// tier, never the production durable store.
+func (s *Store) Delete(orgID, userID, memoryID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, r := range s.records {
+		if r.OrgID == orgID && r.MemoryID == memoryID && r.UserID == userID {
+			delete(s.records, k)
+			return true
+		}
+	}
+	return false
 }
 
 // Search returns up to topK hits whose content contains the query substring

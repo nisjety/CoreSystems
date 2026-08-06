@@ -41,8 +41,7 @@ type Store interface {
 type inMemoryStore struct{ s *memstore.Store }
 
 func (m *inMemoryStore) Put(_ context.Context, orgID, threadID, topic, memoryID, userID, content string) (*memstore.Record, error) {
-	_ = userID // memstore has no per-user ownership column; see List/Delete below.
-	return m.s.Put(orgID, threadID, topic, memoryID, content)
+	return m.s.Put(orgID, threadID, topic, memoryID, userID, content)
 }
 
 func (m *inMemoryStore) Search(_ context.Context, orgID, threadID, query string, topicFilter []string, updatedAfter time.Time, topK int32) ([]memstore.Hit, error) {
@@ -60,9 +59,10 @@ func (m *inMemoryStore) List(_ context.Context, _, _ string, _ int32) ([]memstor
 	return nil, nil
 }
 
-// Delete is a no-op for the same reason as List.
-func (m *inMemoryStore) Delete(_ context.Context, _, _, _ string) (bool, error) {
-	return false, nil
+// Delete removes a single memory owned by (orgID, userID). See
+// memstore.Store.Delete for the scoping rationale.
+func (m *inMemoryStore) Delete(_ context.Context, orgID, userID, memoryID string) (bool, error) {
+	return m.s.Delete(orgID, userID, memoryID), nil
 }
 
 // Server is the MemoryService implementation. It is backed by a Store, which

@@ -146,12 +146,10 @@ pub(crate) struct LettaListOutcome {
 
 #[derive(Debug)]
 pub(crate) struct LettaDeleteOutcome {
-    // Not read by the current caller (memory_grpc::delete_memory only cares
-    // whether the semantic-side delete is degraded, since the durable record
-    // is the source of truth for existence) but kept, and exercised by tests,
-    // so a future caller that needs to distinguish "deleted" from "was never
-    // there" does not have to change this outcome's shape.
-    #[allow(dead_code)]
+    // Read by memory_grpc::delete_memory to log when the semantic tier
+    // reports no matching record -- see that call site for why this
+    // matters for DSAR observability now that letta-bridge's own stores
+    // can actually report `false` meaningfully instead of unconditionally.
     pub(crate) deleted: bool,
     pub(crate) degradation_reason: Option<&'static str>,
 }

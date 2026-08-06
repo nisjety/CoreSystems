@@ -143,7 +143,10 @@ fn authorize_user_memory_preflight(
     Ok(MemoryRetention::of(caller).permits_durable_memory())
 }
 
-fn list_response(entries: Vec<MemoryEntry>, degradation_reason: Option<&str>) -> ListMemoryResponse {
+fn list_response(
+    entries: Vec<MemoryEntry>,
+    degradation_reason: Option<&str>,
+) -> ListMemoryResponse {
     ListMemoryResponse {
         entries,
         degraded: degradation_reason.is_some(),
@@ -480,10 +483,24 @@ impl MemoryService for MemoryGrpc {
         // of truth for existence, so a degraded semantic-side delete does not
         // fail the RPC -- it is only reported back for observability.
         let degradation_reason = if let Some(letta) = self.letta.as_ref() {
-            letta
-                .delete_detailed(org_id, user_id, memory_id)
-                .await
-                .degradation_reason
+            let outcome = letta.delete_detailed(org_id, user_id, memory_id).await;
+            // `outcome.deleted` used to be discarded entirely here, which is
+            // exactly how letta-bridge's own pgstore/memstore tiers being a
+            // silent no-op (see letta-bridge's pkg for the fix) went
+            // unnoticed for so long: nothing, not even a log line,
+            // distinguished "actually erased" from "declined silently".
+            // `false` with no degradation_reason is not itself an error --
+            // the semantic tier may legitimately never have held this
+            // memory_id -- but it must be observable for DSAR audit trails.
+            if !outcome.deleted && outcome.degradation_reason.is_none() {
+                tracing::info!(
+                    org_id,
+                    user_id,
+                    memory_id,
+                    "letta-bridge semantic delete reported no matching record"
+                );
+            }
+            outcome.degradation_reason
         } else {
             None
         };
@@ -500,16 +517,23 @@ impl MemoryService for MemoryGrpc {
     }
 }
 
-
 /// Map the store's provenance onto the wire enum.
 ///
 /// Explicit rather than `#[repr]`-coupled so a future variant cannot silently
 /// acquire a wrong tag.
-fn memory_provenance(provenance: crate::dreaming::MemoryProvenance) -> mp_contracts::model_plane::v1::MemoryProvenance {
+fn memory_provenance(
+    provenance: crate::dreaming::MemoryProvenance,
+) -> mp_contracts::model_plane::v1::MemoryProvenance {
     match provenance {
-        crate::dreaming::MemoryProvenance::Unknown => mp_contracts::model_plane::v1::MemoryProvenance::Unspecified,
-        crate::dreaming::MemoryProvenance::Stated => mp_contracts::model_plane::v1::MemoryProvenance::Stated,
-        crate::dreaming::MemoryProvenance::Inferred => mp_contracts::model_plane::v1::MemoryProvenance::Inferred,
+        crate::dreaming::MemoryProvenance::Unknown => {
+            mp_contracts::model_plane::v1::MemoryProvenance::Unspecified
+        }
+        crate::dreaming::MemoryProvenance::Stated => {
+            mp_contracts::model_plane::v1::MemoryProvenance::Stated
+        }
+        crate::dreaming::MemoryProvenance::Inferred => {
+            mp_contracts::model_plane::v1::MemoryProvenance::Inferred
+        }
     }
 }
 
@@ -767,7 +791,10 @@ mod tests {
             .into_inner();
         assert!(list.entries.is_empty());
         assert!(list.degraded);
-        assert_eq!(list.degradation_reason, "DEGRADED_LETTA_ZDR_READ_SUPPRESSED");
+        assert_eq!(
+            list.degradation_reason,
+            "DEGRADED_LETTA_ZDR_READ_SUPPRESSED"
+        );
 
         let delete = service
             .delete_memory(request(
@@ -792,7 +819,10 @@ mod tests {
     fn list_and_delete_memory_responses_are_machine_readable() {
         let list = list_response(Vec::new(), Some("DEGRADED_LETTA_ZDR_READ_SUPPRESSED"));
         assert!(list.degraded);
-        assert_eq!(list.degradation_reason, "DEGRADED_LETTA_ZDR_READ_SUPPRESSED");
+        assert_eq!(
+            list.degradation_reason,
+            "DEGRADED_LETTA_ZDR_READ_SUPPRESSED"
+        );
         assert!(list.entries.is_empty());
 
         let not_degraded = list_response(Vec::new(), None);
