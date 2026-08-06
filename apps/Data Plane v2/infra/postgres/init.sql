@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS knowledge_units (
     content_hash      TEXT,
     chunk_version     TEXT         NOT NULL DEFAULT '1',
     parent_chunk_id   TEXT,
+    -- P2-2: wider neighboring-chunk context for retrieval-time expansion.
+    -- Distinct from parent_chunk_id (re-crawl lineage) above.
+    parent_window_text TEXT,
     embedding_model   TEXT,
     metadata          JSONB        NOT NULL DEFAULT '{}',
     error_message     TEXT,

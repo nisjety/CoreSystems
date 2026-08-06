@@ -104,7 +104,11 @@ struct ChunkPlan {
 /// across the plane boundary, not here. Exact reuse already spares every
 /// unchanged chunk, which on a typical re-crawl is all but the one holding the
 /// churned line.
-fn plan_chunks(document_id: &str, chunks: &[Chunk], prior_done: &HashSet<String>) -> Vec<ChunkPlan> {
+fn plan_chunks(
+    document_id: &str,
+    chunks: &[Chunk],
+    prior_done: &HashSet<String>,
+) -> Vec<ChunkPlan> {
     chunks
         .iter()
         .map(|chunk| {
@@ -254,7 +258,18 @@ pub async fn process_document(
     for (chunk, plan) in chunks.iter().zip(plans.iter()) {
         if plan.reused {
             // Row already exists and is 'done'; its vector is live in Qdrant
-            // under this identical id. Nothing to write or embed.
+            // under this identical id. Nothing to (re-)embed. `parent_text`
+            // (P2-2) is NOT embedding-derived, though -- it is built from
+            // this chunk's *neighbors*, which can change even when this
+            // chunk's own content did not, so it is refreshed unconditionally
+            // here rather than left stale for the lifetime of the reuse.
+            sqlx::query(
+                "UPDATE knowledge_units SET parent_window_text = $1 WHERE knowledge_id = $2",
+            )
+            .bind(&chunk.parent_text)
+            .bind(&plan.kid)
+            .execute(&mut *tx)
+            .await?;
             tracing::debug!(
                 document_id = %event.document_id,
                 chunk_index = chunk.index,
@@ -275,9 +290,11 @@ pub async fn process_document(
             r#"
             INSERT INTO knowledge_units (
                 knowledge_id, document_id, org_id, chunk_index, text,
-                embedding_status, content_hash, chunk_version, metadata
-            ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, '1', $7)
-            ON CONFLICT (knowledge_id) DO NOTHING
+                embedding_status, content_hash, chunk_version, metadata,
+                parent_window_text
+            ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, '1', $7, $8)
+            ON CONFLICT (knowledge_id) DO UPDATE
+                SET parent_window_text = EXCLUDED.parent_window_text
             "#,
         )
         .bind(&plan.kid)
@@ -287,6 +304,7 @@ pub async fn process_document(
         .bind(&chunk.text)
         .bind(&plan.hash)
         .bind(&metadata)
+        .bind(&chunk.parent_text)
         .execute(&mut *tx)
         .await?;
 
@@ -389,6 +407,7 @@ mod tests {
             index,
             text: text.to_string(),
             estimated_tokens: text.len() / 4 + 1,
+            parent_text: None,
         }
     }
 
@@ -415,12 +434,14 @@ mod tests {
             .expect("disposable postgres");
         sqlx::raw_sql(
             r#"
+            DROP TABLE IF EXISTS chunk_lineage, index_deletion_outbox, knowledge_units, documents;
             CREATE TABLE documents (
               document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, content TEXT NOT NULL,
               deleted_at TIMESTAMPTZ, zdr_classification TEXT NOT NULL
             );
             CREATE TABLE knowledge_units (
-              knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL
+              knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL,
+              parent_window_text TEXT
             );
             CREATE TABLE index_deletion_outbox (outbox_id BIGSERIAL PRIMARY KEY);
             INSERT INTO documents VALUES
@@ -492,7 +513,7 @@ mod tests {
               chunk_index INTEGER NOT NULL, text TEXT NOT NULL,
               embedding_status TEXT NOT NULL DEFAULT 'pending', content_hash TEXT,
               chunk_version TEXT NOT NULL DEFAULT '1', metadata JSONB NOT NULL DEFAULT '{}',
-              embedding_model TEXT, embedded_at TIMESTAMPTZ,
+              embedding_model TEXT, embedded_at TIMESTAMPTZ, parent_window_text TEXT,
               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             CREATE TABLE index_deletion_outbox (
@@ -516,6 +537,7 @@ mod tests {
         let cfg = ChunkConfig {
             chunk_size: 2,
             chunk_overlap: 0,
+            parent_chunk_size: None,
         };
         let event = |key: &str| DocumentEvent {
             document_id: "doc-reuse".into(),
@@ -594,16 +616,21 @@ mod tests {
         );
 
         // ── Build 3: chunk 0 changes; chunk 1 ("beta") is unchanged. ──
-        sqlx::query("UPDATE documents SET content = E'ALPHA\n\nbeta' WHERE document_id = 'doc-reuse'")
-            .execute(&pool)
-            .await
-            .expect("edit content");
+        sqlx::query(
+            "UPDATE documents SET content = E'ALPHA\n\nbeta' WHERE document_id = 'doc-reuse'",
+        )
+        .execute(&pool)
+        .await
+        .expect("edit content");
         let r3 = process_document(&pool, &event("reuse-build-3"), &cfg)
             .await
             .expect("partial re-crawl");
         assert_eq!(r3.knowledge_ids.len(), 2);
         // "beta" keeps its id and is reused; the changed chunk gets a fresh id.
-        assert_eq!(r3.knowledge_ids[1], beta_kid, "unchanged neighbor is reused");
+        assert_eq!(
+            r3.knowledge_ids[1], beta_kid,
+            "unchanged neighbor is reused"
+        );
         let alpha2_kid = r3.knowledge_ids[0].clone();
         assert_ne!(alpha2_kid, alpha_kid, "changed chunk gets a new id");
         assert_eq!(
@@ -642,6 +669,157 @@ mod tests {
             doc_status_after.0.as_deref(),
             Some("processing"),
             "a doc with a pending chunk stays 'processing' until the embed lands"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
+    async fn parent_window_text_refreshes_on_reuse_even_though_the_embedding_does_not() {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL must point to disposable PostgreSQL");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("disposable postgres");
+        sqlx::raw_sql(
+            r#"
+            DROP TABLE IF EXISTS chunk_lineage, index_deletion_outbox, knowledge_units, documents;
+            CREATE TABLE documents (
+              document_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, content TEXT NOT NULL,
+              deleted_at TIMESTAMPTZ, zdr_classification TEXT NOT NULL, status TEXT
+            );
+            CREATE TABLE knowledge_units (
+              knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL,
+              chunk_index INTEGER NOT NULL, text TEXT NOT NULL,
+              embedding_status TEXT NOT NULL DEFAULT 'pending', content_hash TEXT,
+              chunk_version TEXT NOT NULL DEFAULT '1', metadata JSONB NOT NULL DEFAULT '{}',
+              embedding_model TEXT, embedded_at TIMESTAMPTZ, parent_window_text TEXT,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE TABLE index_deletion_outbox (
+              outbox_id BIGSERIAL PRIMARY KEY, org_id TEXT NOT NULL, document_id TEXT NOT NULL,
+              knowledge_ids JSONB NOT NULL, user_id TEXT, idempotency_key TEXT UNIQUE NOT NULL,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE TABLE chunk_lineage (
+              id BIGSERIAL PRIMARY KEY, document_id TEXT NOT NULL, old_knowledge_id TEXT NOT NULL,
+              new_knowledge_id TEXT NOT NULL, old_chunk_index INTEGER, old_content_hash TEXT, reason TEXT
+            );
+            INSERT INTO documents VALUES
+              ('doc-parent','org-parent',E'one.\n\ntwo.\n\nthree.',NULL,'internal','pending');
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("disposable parent-window schema");
+
+        // Tight chunk budget, huge parent budget: three one-sentence chunks,
+        // each one's parent window pulls in both neighbors.
+        let cfg = ChunkConfig {
+            chunk_size: 2,
+            chunk_overlap: 0,
+            parent_chunk_size: Some(100),
+        };
+        let event = |key: &str| DocumentEvent {
+            document_id: "doc-parent".into(),
+            org_id: "org-parent".into(),
+            title: "Parent window".into(),
+            source: "fixture".into(),
+            doc_type: "text".into(),
+            user_id: Some("fixture-user".into()),
+            idempotency_key: key.into(),
+            zdr: false,
+        };
+        let parent_text_of = |kid: String| {
+            let pool = pool.clone();
+            async move {
+                let row: (Option<String>,) = sqlx::query_as(
+                    "SELECT parent_window_text FROM knowledge_units WHERE knowledge_id = $1",
+                )
+                .bind(&kid)
+                .fetch_one(&pool)
+                .await
+                .expect("row present");
+                row.0
+            }
+        };
+
+        // ── Build 1: first ingest. ──
+        let r1 = process_document(&pool, &event("parent-build-1"), &cfg)
+            .await
+            .expect("first build");
+        assert_eq!(r1.knowledge_ids.len(), 3);
+        let (one_kid, two_kid, three_kid) = (
+            r1.knowledge_ids[0].clone(),
+            r1.knowledge_ids[1].clone(),
+            r1.knowledge_ids[2].clone(),
+        );
+        assert_eq!(
+            parent_text_of(two_kid.clone()).await,
+            Some("one. two. three.".to_string()),
+            "middle chunk's parent window pulls in both neighbors"
+        );
+
+        sqlx::query("UPDATE knowledge_units SET embedding_status = 'done', embedded_at = NOW()")
+            .execute(&pool)
+            .await
+            .expect("mark done");
+        let embedded_at_of = |kid: String| {
+            let pool = pool.clone();
+            async move {
+                let row: (String, Option<String>) = sqlx::query_as(
+                    "SELECT embedding_status, embedded_at::text FROM knowledge_units WHERE knowledge_id = $1",
+                )
+                .bind(&kid)
+                .fetch_one(&pool)
+                .await
+                .expect("row present");
+                row
+            }
+        };
+        let two_done_before = embedded_at_of(two_kid.clone()).await;
+        assert_eq!(two_done_before.0, "done");
+
+        // ── Build 2: only the FIRST chunk's content changes. The middle chunk
+        // ("two.") is byte-identical and must be reused (no re-embed) even
+        // though its neighbor — and therefore its parent window — changed. ──
+        sqlx::query("UPDATE documents SET content = E'ONE.\n\ntwo.\n\nthree.' WHERE document_id = 'doc-parent'")
+            .execute(&pool)
+            .await
+            .expect("edit content");
+        let r2 = process_document(&pool, &event("parent-build-2"), &cfg)
+            .await
+            .expect("partial re-crawl");
+        assert_eq!(
+            r2.knowledge_ids[1], two_kid,
+            "unchanged middle chunk keeps its id"
+        );
+        assert_ne!(
+            r2.knowledge_ids[0], one_kid,
+            "changed first chunk gets a new id"
+        );
+        assert_eq!(
+            r2.knowledge_ids[2], three_kid,
+            "unchanged last chunk keeps its id"
+        );
+        assert_eq!(
+            r2.pending_knowledge_ids,
+            vec![r2.knowledge_ids[0].clone()],
+            "only the changed chunk is (re)embedded"
+        );
+
+        // The embedding itself is untouched by the reuse path...
+        assert_eq!(
+            embedded_at_of(two_kid.clone()).await,
+            two_done_before,
+            "reused chunk's embedding state must not change"
+        );
+        // ...but its parent window text reflects the new neighbor.
+        assert_eq!(
+            parent_text_of(two_kid.clone()).await,
+            Some("ONE. two. three.".to_string()),
+            "reused chunk's parent window must still pick up a changed neighbor"
         );
     }
 
@@ -709,7 +887,10 @@ mod tests {
         assert!(plans[0].reused, "unchanged 'done' chunk must be reused");
         assert_eq!(plans[0].kid, kid0);
         // No prior vector for chunk 1 → must be (re)embedded.
-        assert!(!plans[1].reused, "chunk with no prior 'done' row must re-embed");
+        assert!(
+            !plans[1].reused,
+            "chunk with no prior 'done' row must re-embed"
+        );
     }
 
     #[test]

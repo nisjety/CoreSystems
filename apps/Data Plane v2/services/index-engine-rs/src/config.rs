@@ -12,6 +12,11 @@ pub struct Config {
     pub chunk_size: usize,
     #[serde(default = "default_chunk_overlap")]
     pub chunk_overlap: usize,
+    /// Token budget for each chunk's parent context window (P2-2). Unset
+    /// (the default) disables parent-window attachment entirely — nothing
+    /// downstream consumes it yet, so this stays opt-in.
+    #[serde(default)]
+    pub parent_chunk_size: Option<usize>,
 
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,

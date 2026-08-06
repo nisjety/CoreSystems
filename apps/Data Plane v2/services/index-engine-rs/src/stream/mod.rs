@@ -79,6 +79,7 @@ pub async fn run_consumer(
     let chunk_config = ChunkConfig {
         chunk_size: config.chunk_size,
         chunk_overlap: config.chunk_overlap,
+        parent_chunk_size: config.parent_chunk_size,
     };
 
     loop {
