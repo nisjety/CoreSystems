@@ -1795,6 +1795,83 @@ Doc comment even notes the three other queues that already had this shape
 `data_orchestrator_jobs` was the one left out, and now isn't. No code
 changed for this item either.
 
+### 2026-08-06 — P2-2 parent-child chunking (closes the chunking half of D13)
+
+Checked before implementing: D13's quantization half was already done —
+`embedding-engine-rs::qdrant_writer` has int8 scalar quantization
+(quantile=0.99, always_ram) with a doc comment citing P2-2/D13 directly,
+existing collections deliberately left `quantization_config: None` until
+recreated. The chunking half was genuinely missing — no parent-child or
+sentence-window logic anywhere in `index-engine-rs::chunker`.
+
+**What shipped.** `attach_parent_windows`, a second pass over the existing
+recursive structural chunker's output: each child chunk keeps its own
+(small, precise) text for embedding, and gains a `parent_text` window built
+by expanding outward to its neighbors, alternating sides, until a token
+budget (`parent_chunk_size`) is spent. Off by default — `ChunkConfig.
+parent_chunk_size: Option<usize>` is `None` unless
+`INDEX_ENGINE_PARENT_CHUNK_SIZE` (envy-mapped) is set, and with it unset
+`chunk_text`'s output is byte-for-byte what it always was. Persists into a
+new `knowledge_units.parent_window_text` column (migration
+`20260806220000`, additive/nullable) — deliberately a new column, not a
+repurposing of the pre-existing `parent_chunk_id`, which the generated
+protobuf documents as re-crawl *lineage* ("replaced this chunk"), an
+unrelated concept.
+
+**A real correctness fix along the way, not just new code.** The reuse
+fast-path in `process_document` (`plan.reused`) previously `continue`d
+before touching the database at all for an unchanged chunk — correct for
+the embedding (nothing changed, nothing to re-embed), wrong for
+`parent_text`, which is derived from a chunk's *neighbors* and can go stale
+even when the chunk itself didn't change. Added an explicit `UPDATE ...
+SET parent_window_text` on that path, and changed the main INSERT's `ON
+CONFLICT (knowledge_id) DO NOTHING` to `DO UPDATE SET parent_window_text =
+EXCLUDED.parent_window_text` (touching only that one column on conflict,
+so `embedding_status`/`content_hash`/every other reuse-relevant column is
+exactly as untouched as before).
+
+**Deliberately not done: retrieval-side consumption.** `retrieval-engine-rs`
+does not read `parent_window_text` — candidates are hydrated the same way
+they always were. This mirrors `query_expansion` (D14) sitting
+accepted-but-unconsumed until P2-7 closed the loop; wiring retrieval to
+actually use the parent window (append it to `candidate.text`? a separate
+field the caller opts into?) is a real product decision, not a mechanical
+plumbing fix, and is being left for a dedicated follow-up rather than
+decided unilaterally here.
+
+**Verification:**
+- `cargo test --bin index-engine` — 49 passed (6 new: disabled-by-default,
+  single-chunk-has-no-neighbors, parent-window-contains-its-own-child, and
+  three direct `expand_window` cases covering a generous budget, a tight
+  budget, and symmetric alternating expansion).
+- `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` both
+  clean.
+- **Live, against a real disposable Postgres** (a throwaway container, not
+  the shared dev instance — this dev corpus is already empty and staying
+  that way was a deliberate choice, not an oversight): a new integration
+  test proves the exact scenario the correctness fix targets — build a
+  3-chunk document, mark it embedded, change only the *first* chunk, rerun,
+  and confirm the untouched middle chunk's `embedding_status`/`embedded_at`
+  do not change while its `parent_window_text` updates from `"one. two.
+  three."` to `"ONE. two. three."`. Found and fixed a second, unrelated bug
+  while running this: one of the two pre-existing ignored tests in this
+  file had no `DROP TABLE IF EXISTS`, so it collided under
+  `--test-threads=1` once a sibling test's leftover tables were present —
+  fixed by adding the same `DROP` the other tests already use.
+- Migration applied live to the running Postgres (`ALTER TABLE ... ADD
+  COLUMN IF NOT EXISTS`, confirmed via `\d knowledge_units`); `index-engine`
+  rebuilt and redeployed with the cross-plane overlay; healthy; startup log
+  shows `chunk_size`/`chunk_overlap` only, confirming the new flag is unset
+  in this deployment.
+- **Gap, explicitly flagged, not silently skipped**: no real document was
+  pushed through the live pipeline end-to-end. This dev stack's corpus is
+  empty and no ingestion connector is currently running against it, so
+  there was nothing to feed through even with the flag enabled — the same
+  constraint that shaped every other verification this session. Real
+  end-to-end proof (and retrieval-side consumption, whenever that follow-up
+  happens) waits on either a repopulated corpus or a deliberate decision to
+  seed one.
+
 ---
 
 ## 7. Architecture constraints this plan honours
