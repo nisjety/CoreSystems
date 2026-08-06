@@ -256,17 +256,25 @@ func (s *Service) persistAccount(ctx context.Context, account Account) error {
 		_ = s.cache.Del(ctx, "billing:account:"+account.OrgID)
 	}
 
+	// Downstream consumers (org-core's plan mirror, cross-plane feature
+	// gates) need the plan actually in effect right now, not the raw stored
+	// value — during an active trial those differ (stored stays "free" until
+	// checkout, but EffectivePlan elevates to TrialPlan so pre-paywall
+	// connector setup works). Publishing account.Plan here was the root
+	// cause of org-core's organizations.plan never reflecting a trial start.
+	effectivePlan := EffectivePlan(account, time.Now())
+
 	if s.publisher != nil {
 		_ = s.publisher.Publish(ctx, "billing.account.updated", map[string]any{
 			"org_id":             account.OrgID,
-			"plan":               account.Plan,
+			"plan":               effectivePlan,
 			"subscription_state": account.SubscriptionState,
 			"timestamp":          time.Now().UTC().Format(time.RFC3339),
 		})
 	}
 
 	if s.sharedPublisher != nil {
-		s.sharedPublisher.PublishAccountUpdated(ctx, account.OrgID, account.Plan, 0)
+		s.sharedPublisher.PublishAccountUpdated(ctx, account.OrgID, effectivePlan, 0)
 	}
 
 	return nil

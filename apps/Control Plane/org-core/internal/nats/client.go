@@ -67,6 +67,10 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler) (*nats.Subsc
 	return c.conn.Subscribe(subject, handler)
 }
 
+func (c *Client) QueueSubscribe(subject, queue string, handler nats.MsgHandler) (*nats.Subscription, error) {
+	return c.conn.QueueSubscribe(subject, queue, handler)
+}
+
 func (c *Client) Publish(ctx context.Context, subject string, payload map[string]any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {

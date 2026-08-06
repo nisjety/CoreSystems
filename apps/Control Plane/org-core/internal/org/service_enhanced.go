@@ -500,6 +500,34 @@ func (s *Service) UpdatePlan(ctx context.Context, orgID, plan, changedBy, reason
 	return s.repo.GetOrganization(ctx, orgID)
 }
 
+// ApplyBillingPlanSync mirrors a plan value carried on billing-core's
+// billing.account.updated event into this org's plan column. This is the
+// org-core side of the sync bug fix: billing-core's EffectivePlan (which
+// elevates a plan during an active trial) previously never reached
+// organizations.plan, so plan-gated features kept reading the stale,
+// never-elevated stored value. Returns skippedOverride=true (not an error)
+// when the org has a manual metadata.plan_override pin in effect.
+func (s *Service) ApplyBillingPlanSync(ctx context.Context, orgID, plan string) (skippedOverride bool, err error) {
+	if strings.TrimSpace(orgID) == "" {
+		return false, fmt.Errorf("organization id is required")
+	}
+	plan = strings.ToLower(strings.TrimSpace(plan))
+	switch plan {
+	case "free", "trial", "hobby", "standard", "pro", "enterprise":
+	default:
+		return false, fmt.Errorf("invalid plan")
+	}
+
+	applied, skippedOverride, err := s.repo.UpdatePlanFromBillingSync(ctx, orgID, plan)
+	if err != nil {
+		return false, err
+	}
+	if applied && s.cache != nil {
+		_ = s.cache.Del(ctx, "org:id:"+orgID, "org:ent:"+orgID)
+	}
+	return skippedOverride, nil
+}
+
 // PlanAllowsZeroDataRetention reports whether an organization on the given plan
 // may enable interactive Zero Data Retention (a premium, plan-gated feature).
 func PlanAllowsZeroDataRetention(plan string) bool {

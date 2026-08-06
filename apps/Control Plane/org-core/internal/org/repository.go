@@ -270,6 +270,66 @@ INSERT INTO organization_plan_change_outbox (
 	return change, applied, err
 }
 
+// UpdatePlanFromBillingSync mirrors the plan billing-core just persisted for
+// an account (its billing.account.updated event) into organizations.plan.
+// Unlike UpdatePlanWithOutbox, it never enqueues an
+// organization_plan_change_outbox row: billing-core is the origin of this
+// change, so echoing "organization.plan.changed" back out would bounce the
+// same update in a circle between the two services. An org with
+// metadata.plan_override set (a manual pin, e.g. a permanently comped plan)
+// is left untouched — skippedOverride reports this so the caller can log it
+// distinctly from "already up to date".
+func (r *Repository) UpdatePlanFromBillingSync(
+	ctx context.Context,
+	orgID, plan string,
+) (applied bool, skippedOverride bool, err error) {
+	err = r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
+			return err
+		}
+		var previousPlan, planOverride string
+		if err := tx.QueryRow(ctx, `
+SELECT plan, COALESCE(metadata ->> 'plan_override', '')
+FROM organizations
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE`, orgID).Scan(&previousPlan, &planOverride); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock organization plan: %w", err)
+		}
+		if planOverride != "" {
+			skippedOverride = true
+			return nil
+		}
+		if previousPlan == plan {
+			return nil
+		}
+		var revision int64
+		if err := tx.QueryRow(ctx, `
+UPDATE organizations
+SET plan = $2,
+    plan_revision = plan_revision + 1,
+    updated_at = NOW()
+WHERE id = $1
+RETURNING plan_revision`, orgID, plan).Scan(&revision); err != nil {
+			return fmt.Errorf("update organization plan from billing sync: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+INSERT INTO org_plan_history (
+  id, org_id, previous_plan, new_plan, changed_by, change_reason, metadata
+) VALUES ($1, $2, $3, $4, 'billing-core-sync', 'billing_account_updated', jsonb_build_object('revision', $5::bigint))
+ON CONFLICT (id) DO NOTHING`,
+			fmt.Sprintf("%s:plan:billing-sync:%d", orgID, revision), orgID, previousPlan, plan, revision,
+		); err != nil {
+			return fmt.Errorf("record organization plan history: %w", err)
+		}
+		applied = true
+		return nil
+	})
+	return applied, skippedOverride, err
+}
+
 // SetInteractiveRetention persists an organization's interactive Zero-Data-
 // Retention posture into organizations.metadata.interactiveRetention. This
 // records the org's durable INTENT (zdr=true is the privacy-preserving

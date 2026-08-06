@@ -140,6 +140,17 @@ func main() {
 		}
 	}
 
+	// Mirrors billing-core's trial/checkout-driven plan changes into
+	// organizations.plan — see BillingSyncSubscriber's doc comment for why
+	// this direction had no consumer at all before.
+	var billingSyncSubscriber *nats.BillingSyncSubscriber
+	if natsClient != nil {
+		billingSyncSubscriber = nats.NewBillingSyncSubscriber(natsClient, orgService)
+		if err := billingSyncSubscriber.Start(ctx); err != nil {
+			log.Printf("warning: billing sync subscriber failed to start: %v", err)
+		}
+	}
+
 	// GDPR retention sweep: hard-delete organizations soft-deleted more than
 	// ORG_PURGE_DAYS days ago (default 30) by calling the
 	// purge_old_deleted_organizations stored procedure. Runs once at startup,

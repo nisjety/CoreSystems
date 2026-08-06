@@ -14,6 +14,10 @@ const (
 	// Organization plan events
 	SubjectOrganizationPlanChanged = "organization.plan.changed"
 
+	// Billing-originated events consumed (not published) by org-core to
+	// mirror billing-core's account state — see BillingSyncSubscriber.
+	SubjectBillingAccountUpdated = "billing.account.updated"
+
 	// Organization member events
 	SubjectOrganizationMemberAdded   = "organization.member.added"
 	SubjectOrganizationMemberRemoved = "organization.member.removed"
