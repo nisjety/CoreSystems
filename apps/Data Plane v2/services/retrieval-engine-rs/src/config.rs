@@ -201,6 +201,18 @@ pub struct Config {
     pub recency_decay_enabled: bool,
     #[serde(default = "default_recency_decay_half_life_days")]
     pub recency_decay_half_life_days: f32,
+
+    /// P2-7 — HyDE / query-expansion blend weight. `RetrievalRequest::
+    /// query_expansion` is dead plumbing until a caller actually populates
+    /// it (generating the hypothetical-document text is Model Plane's job,
+    /// per Rule 7 — DPv2 must not run its own independent reasoning call to
+    /// produce one); this only controls how much weight DPv2 gives it once
+    /// supplied. No separate enabled flag: a caller populating this field is
+    /// itself the opt-in, so gating it a second time server-side would just
+    /// be redundant config surface. 0.0 = ignore the expansion entirely,
+    /// 1.0 = embed only the expansion and ignore the literal query.
+    #[serde(default = "default_query_expansion_blend_weight")]
+    pub query_expansion_blend_weight: f32,
 }
 
 fn default_http_port() -> u16 {
@@ -306,6 +318,9 @@ fn default_visual_rerank_top_k() -> usize {
 }
 fn default_recency_decay_half_life_days() -> f32 {
     180.0
+}
+fn default_query_expansion_blend_weight() -> f32 {
+    0.5
 }
 fn default_embed_v4_deployment() -> String {
     "Cohere-embed-4".into()

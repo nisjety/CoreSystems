@@ -43,6 +43,14 @@ fn describe_metrics() {
         "gRPC request latency in seconds"
     );
     metrics::describe_gauge!("dpv2_active_connections", "Current active connections");
+    metrics::describe_counter!(
+        "dpv2_rate_limit_denied_total",
+        "Requests rejected (429) by the per-org rate limiter"
+    );
+    metrics::describe_counter!(
+        "dpv2_rate_limiter_backend_unavailable_total",
+        "Rate limiter checks that failed open because Dragonfly was unreachable or the script errored"
+    );
 }
 
 pub struct PrometheusHandle(metrics_exporter_prometheus::PrometheusHandle);
@@ -102,6 +110,14 @@ pub fn record_embed_retry() {
 
 pub fn record_rerank_request() {
     counter!("dpv2_rerank_requests_total").increment(1);
+}
+
+pub fn record_rate_limit_denied(org_id: &str) {
+    counter!("dpv2_rate_limit_denied_total", "org_id" => org_id.to_string()).increment(1);
+}
+
+pub fn record_rate_limit_backend_unavailable() {
+    counter!("dpv2_rate_limiter_backend_unavailable_total").increment(1);
 }
 
 #[allow(dead_code)] // gRPC client interceptor will call this; instrumentation in progress

@@ -237,8 +237,8 @@ impl RetrievalService for RetrievalSvc {
 
         // §17.3.6 — backpressure trailers. We attach RFC-style headers
         // so smart Model Plane clients can pre-throttle before they hit
-        // the per-org rate limit. Values come from the same governor
-        // limiter that gates HTTP (`PerOrgLimiter`). When the limiter
+        // the per-org rate limit. Values come from the same Dragonfly-backed
+        // limiter that gates HTTP (`PerOrgLimiter`, P2-6). When the limiter
         // is healthy we publish a rough remaining budget; on load-shed
         // we'd return Status::resource_exhausted instead of here.
         let mut response = Response::new(RetrieveResponse {

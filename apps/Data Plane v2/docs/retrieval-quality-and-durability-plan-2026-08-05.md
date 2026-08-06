@@ -1514,6 +1514,122 @@ other planes, a much larger action than "migrate the GDPR consumers" asked
 for. Each becomes safe to migrate the moment its own service is next rebuilt
 for its own reason — exactly how the 5 done so far each became safe.
 
+### 2026-08-06 — P2-6 Dragonfly-backed rate limiter (closed)
+
+Replaced the in-process `governor::RateLimiter` in `rate_limit/mod.rs` —
+correct for one replica, wrong the moment there's more than one, since each
+replica held an independent bucket and the *effective* per-org limit
+silently scaled with replica count. New `PerOrgLimiter` keeps bucket state
+in Dragonfly (already this service's cache backend) and evaluates it with a
+Lua `EVAL` script (`TOKEN_BUCKET_SCRIPT`) so concurrent replicas checking the
+same org cannot both observe the same pre-decrement token count. Refill is
+continuous (elapsed-time-proportional), not fixed-window, so there's no
+window-boundary double-burst. `governor` dropped from `Cargo.toml` — no
+longer used anywhere in the crate.
+
+New env vars: `DPV2_RATE_LIMIT_PER_ORG_RPS` (default 20),
+`DPV2_RATE_LIMIT_PER_ORG_BURST` (default 40); reuses the existing
+`DRAGONFLY_URL`/`CACHE_URL` lookup order. Fails open on any Dragonfly error
+(unreachable, connection refused, script failure) — a rate limiter is a
+fairness mechanism, not a security boundary, matching this crate's existing
+`CacheLayer` convention of degrading to a no-op rather than rejecting
+traffic.
+
+**Two real bugs found by testing, not shipped:**
+1. `redis::aio::ConnectionManager::new()` does not fail fast against an
+   unreachable address — measured empirically at **473s** to exhaust its own
+   internal reconnect attempts. Without an outer bound, "fail open" would
+   have meant an ~8-minute stall per request through a dead Dragonfly,
+   indistinguishable from a total outage. Fixed with a 250ms
+   `tokio::time::timeout` (`PerOrgLimiter::BACKEND_TIMEOUT`) around the whole
+   connect-and-check round trip, not just the script call.
+2. The original 3 unit tests drove config through `std::env::set_var`/
+   `remove_var`, which is process-global — Rust's default parallel test
+   runner raced two tests' env vars mid-read, occasionally computing a
+   nonsensical TTL. Fixed by extracting `PerOrgLimiter::with_config(rps,
+   burst, redis_url)` as a pure, explicitly-parameterized constructor and
+   rewriting all 3 tests to call it directly, with zero env-var mutation.
+
+**Verification:**
+- `cargo test --lib rate_limit::` — 3/3 pass in 0.38s (was hanging to 473s
+  before fix #1).
+- **Live, against the real deployed Dragonfly** (not a mock): ran the exact
+  `TOKEN_BUCKET_SCRIPT` via `redis-cli EVAL` inside
+  `data-plane-v2-dragonfly-1`, keyed on a throwaway
+  `dpv2:ratelimit:__p26_live_verify__` bucket, rps=5/burst=5 — 6 rapid calls
+  returned `1,1,1,1,1,0` exactly as the token-bucket math predicts, then a
+  7th call after a 1.2s sleep returned `1` (refill confirmed); test key
+  deleted afterward. Proves the atomic script logic is correct against
+  Dragonfly specifically (not just generic Redis), which is the actual novel
+  risk in this change.
+- Confirmed route ordering live: `/health` → 200 without auth (outside the
+  `authed` router, never touches the limiter); `/v1/knowledge/search` → 401
+  without a bearer token (`auth_middleware` rejects before the request can
+  reach `per_org_rate_limit`, matching the documented `route_layer`
+  ordering).
+- Redeployed `retrieval-engine` with the cross-plane overlay; container
+  healthy, no startup errors; GDPR consumer and every other subsystem came
+  up normally.
+- **Gap, explicitly flagged, not silently skipped**: did not observe a real
+  `429` through the HTTP middleware chain with a genuine org JWT — that
+  needs a real auth-core-issued bearer token, and this session has no live
+  user/org credentials to mint one. What that gap would additionally cover
+  (org_id extraction from `AuthContext`, HTTP status mapping) is simple,
+  pre-existing, unchanged-by-this-phase code; the part that is actually new
+  and risky — the distributed token-bucket algorithm itself — is the part
+  verified live above, against the real backend.
+
+### 2026-08-06 — P2-7 HyDE / query-expansion blend (D14 closed)
+
+`RetrievalRequest::query_expansion` (D14) was accepted on HTTP and gRPC but
+consumed by nothing. DPv2 must not generate this text itself — producing a
+hypothetical-document expansion is a reasoning call, and constraint 3/Rule 7
+reserve reasoning for Model Plane. So this phase only wires up
+*consumption*: if a caller supplies `query_expansion`, blend its embedding
+with the literal query's; if not, behavior is byte-for-byte unchanged.
+
+Rejected the alternative of adding a second fused arm to `fuse_arms` (RRF
+over a 4th ranked list) — much larger surface, more test-sensitive, and the
+embedding-blend approach gets the same "the expansion should steer
+retrieval" effect at lower risk. Implementation: extracted the existing
+query-embed block into `embed_text_cached` (cache lookup/store, ZDR-gated
+cache admission, `embed_query`, empty/dimension validation — unchanged
+behavior, just named and reusable), then call it twice when
+`query_expansion` is present (trimmed, non-empty) and blend with a new free
+function `blend_vectors(query, expansion, weight)` — `query * (1 - weight) +
+expansion * weight` per dimension. Safe without renormalization because all
+DPv2 Qdrant collections use `Distance::Cosine`, which is scale-invariant. New
+config `query_expansion_blend_weight` (default 0.5, `config.rs`) — no
+separate enabled flag, since a caller populating the field is itself the
+opt-in. Added a `MAX_QUERY_LEN` bound on `query_expansion`, matching the
+existing query-length guard.
+
+**Verification:**
+- `cargo test` (full lib suite) — 4 new unit tests: weight=0 returns the
+  query vector unchanged, weight=1 returns the expansion vector unchanged,
+  weight=0.5 is the exact per-dimension midpoint, and a mismatched-length
+  pair truncates to the shorter input rather than panicking. All pass.
+- Deployed in the same rebuild as P2-6; container healthy, started with no
+  errors.
+- **Gap, explicitly flagged, not silently skipped**: did not drive a real
+  `query_expansion` value through a live HTTP or gRPC request end-to-end.
+  Both `/v1/retrieve` (HTTP) and the gRPC `Retrieve` RPC require a bearer
+  token authorized through auth-core's real `AuthContext` flow — confirmed
+  by reading `grpc/retrieval_svc.rs`'s `authorize()`, and by a live 401
+  against `/v1/retrieve` with only an `X-Org-Id` header (the existing
+  `tests/pipeline_e2e.rs` scaffold's comment assumes an open dev mode that
+  does not match this stack's actual `control-plane enforcement: strict`
+  config — worth reconciling separately, not part of this phase). Minting a
+  genuine token needs a real Control-Plane user/org login; fabricating one,
+  or spinning up a throwaway signup, is a disproportionately large and
+  riskier action for verifying a vector blend, so it was not attempted. What
+  is covered instead: the blend math itself (unit-tested exhaustively
+  above), plus the service compiling, linking, and starting cleanly with it
+  wired in. The one path unit tests cannot reach — whether `embed_text_cached`
+  called twice against the real Model Plane embedding backend behaves as
+  expected under real network conditions — is unverified live, the same
+  class of gap as P2-3's connector→Qdrant wire proof.
+
 ---
 
 ## 7. Architecture constraints this plan honours

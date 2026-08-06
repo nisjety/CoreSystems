@@ -202,6 +202,27 @@ pub(super) fn apply_colqwen_scores(
     fused
 }
 
+/// Weighted average of two same-length embedding vectors (P2-7 HyDE blend).
+/// Cosine distance — the metric on every DPv2 Qdrant collection — is
+/// scale-invariant, so the blended vector needs no renormalization before
+/// the ANN search that follows.
+///
+/// `query`/`expansion` are always the same length in practice: both come
+/// from `embed_text_cached`, which validates every vector it returns against
+/// `config.embedding_dimension` before this function ever sees one. Zips
+/// rather than asserts, so a hypothetical future caller that violates that
+/// invariant gets a silently-truncated blend instead of a panic — a length
+/// mismatch here would be a bug elsewhere, not a condition worth crashing
+/// the request over.
+fn blend_vectors(query: &[f32], expansion: &[f32], weight_expansion: f32) -> Vec<f32> {
+    let weight_query = 1.0 - weight_expansion;
+    query
+        .iter()
+        .zip(expansion)
+        .map(|(q, e)| q * weight_query + e * weight_expansion)
+        .collect()
+}
+
 /// Pure fusion chain extracted from `retrieve()` so it is unit-testable and so
 /// the concurrently-gathered arms fuse in EXACTLY the original sequential order:
 ///
@@ -279,6 +300,59 @@ fn fuse_arms(
 }
 
 impl RetrievalPipeline {
+    /// Embeds `text` with cache + ZDR-admission handling, then validates the
+    /// response shape. Shared by the raw query embed and the P2-7 query
+    /// expansion embed in `retrieve()` — both need identical cache/ZDR/
+    /// dimension-validation behavior, just applied to different text, and
+    /// this is the single place that behavior lives.
+    async fn embed_text_cached(
+        &self,
+        org_id: &str,
+        text: &str,
+        embed_zdr: bool,
+    ) -> anyhow::Result<Vec<f32>> {
+        let text_hash = crate::cache::hash_text(text);
+        let model_ver = self.embedder.cache_namespace();
+        let vec = if embedding_cache_allowed(embed_zdr) {
+            if let Some(ref cache) = self.cache {
+                if let Some(cached) = cache.get_embedding(&model_ver, &text_hash).await {
+                    tracing::debug!("embed cache hit");
+                    crate::metrics::record_embed_cache_hit();
+                    cached
+                } else {
+                    crate::metrics::record_embed_request();
+                    let vec = self.embedder.embed_query(org_id, text, embed_zdr).await?;
+                    cache.set_embedding(&model_ver, &text_hash, &vec).await;
+                    vec
+                }
+            } else {
+                crate::metrics::record_embed_request();
+                self.embedder.embed_query(org_id, text, embed_zdr).await?
+            }
+        } else {
+            // ZDR is a cache-admission decision, not just an embedding-provider
+            // flag. Skip both reads and writes so an ephemeral request never
+            // touches durable Dragonfly state (including a pre-existing key).
+            crate::metrics::record_embed_request();
+            self.embedder.embed_query(org_id, text, embed_zdr).await?
+        };
+
+        // Validate embedding response: empty or wrong-dimension vectors
+        // would cause Qdrant to return InvalidArgument with a confusing
+        // message; catch them here with a clear error.
+        if vec.is_empty() {
+            anyhow::bail!("embedding provider returned empty vector");
+        }
+        if vec.len() != self.config.embedding_dimension {
+            anyhow::bail!(
+                "embedding dimension mismatch: got {}, expected {}",
+                vec.len(),
+                self.config.embedding_dimension
+            );
+        }
+        Ok(vec)
+    }
+
     /// Dense arm — main-collection ANN over the query embedding. Gated on the
     /// dense route (a present `query_vector`); returns an empty list when dense
     /// wasn't routed (embed skipped). FATAL: a Qdrant error propagates via `?`.
@@ -532,6 +606,13 @@ impl RetrievalPipeline {
         if req.query.len() > MAX_QUERY_LEN {
             anyhow::bail!("query exceeds max length of {MAX_QUERY_LEN} bytes");
         }
+        if req
+            .query_expansion
+            .as_ref()
+            .is_some_and(|e| e.len() > MAX_QUERY_LEN)
+        {
+            anyhow::bail!("query_expansion exceeds max length of {MAX_QUERY_LEN} bytes");
+        }
         if req.filters.document_ids.len() > MAX_FILTER_IDS {
             anyhow::bail!("filters.document_ids exceeds max of {MAX_FILTER_IDS}");
         }
@@ -619,52 +700,34 @@ impl RetrievalPipeline {
         // serve stale vectors for the remaining TTL (§16.2.8).
         let embed_start = Instant::now();
         let query_vector = if route.dense {
-            let query_hash = crate::cache::hash_text(&req.query);
-            let model_ver = self.embedder.cache_namespace();
-            let vec = if embedding_cache_allowed(embed_zdr) {
-                if let Some(ref cache) = self.cache {
-                    if let Some(cached) = cache.get_embedding(&model_ver, &query_hash).await {
-                        tracing::debug!("embed cache hit");
-                        crate::metrics::record_embed_cache_hit();
-                        cached
-                    } else {
-                        crate::metrics::record_embed_request();
-                        let vec = self
-                            .embedder
-                            .embed_query(&req.org_id, &req.query, embed_zdr)
-                            .await?;
-                        cache.set_embedding(&model_ver, &query_hash, &vec).await;
-                        vec
-                    }
-                } else {
-                    crate::metrics::record_embed_request();
-                    self.embedder
-                        .embed_query(&req.org_id, &req.query, embed_zdr)
-                        .await?
-                }
-            } else {
-                // ZDR is a cache-admission decision, not just an embedding-provider
-                // flag. Skip both reads and writes so an ephemeral request never
-                // touches durable Dragonfly state (including a pre-existing key).
-                crate::metrics::record_embed_request();
-                self.embedder
-                    .embed_query(&req.org_id, &req.query, embed_zdr)
-                    .await?
-            };
+            let vec = self
+                .embed_text_cached(&req.org_id, &req.query, embed_zdr)
+                .await?;
 
-            // Validate embedding response: empty or wrong-dimension vectors
-            // would cause Qdrant to return InvalidArgument with a confusing
-            // message; catch them here with a clear error.
-            if vec.is_empty() {
-                anyhow::bail!("embedding provider returned empty vector");
-            }
-            if vec.len() != self.config.embedding_dimension {
-                anyhow::bail!(
-                    "embedding dimension mismatch: got {}, expected {}",
-                    vec.len(),
-                    self.config.embedding_dimension
-                );
-            }
+            // P2-7 — HyDE / query-expansion blend. `query_expansion` is dead
+            // plumbing until a caller actually populates it (see the config
+            // field's doc comment for why DPv2 does not generate this text
+            // itself); a populated field is itself the opt-in, so this runs
+            // unconditionally on that presence check, no separate flag.
+            let vec = match req
+                .query_expansion
+                .as_deref()
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+            {
+                Some(expansion) => {
+                    let expansion_vec = self
+                        .embed_text_cached(&req.org_id, expansion, embed_zdr)
+                        .await?;
+                    let weight = self.config.query_expansion_blend_weight.clamp(0.0, 1.0);
+                    tracing::debug!(
+                        blend_weight = weight,
+                        "blending query embedding with caller-supplied expansion"
+                    );
+                    blend_vectors(&vec, &expansion_vec, weight)
+                }
+                None => vec,
+            };
             Some(vec)
         } else {
             tracing::debug!("dense retrieval disabled by mode_mix; skipping embed + vector search");
@@ -1611,5 +1674,37 @@ mod tests {
         assert_eq!(project(&got), project(&fused));
         let got_empty = apply_colqwen_scores(fused.clone(), &[], &[], true);
         assert_eq!(project(&got_empty), project(&fused));
+    }
+
+    // --- blend_vectors: P2-7 HyDE / query-expansion blend weight.
+
+    use super::blend_vectors;
+
+    #[test]
+    fn weight_zero_returns_the_query_vector_unchanged() {
+        let query = vec![1.0, 2.0, 3.0];
+        let expansion = vec![10.0, 20.0, 30.0];
+        assert_eq!(blend_vectors(&query, &expansion, 0.0), query);
+    }
+
+    #[test]
+    fn weight_one_returns_the_expansion_vector_unchanged() {
+        let query = vec![1.0, 2.0, 3.0];
+        let expansion = vec![10.0, 20.0, 30.0];
+        assert_eq!(blend_vectors(&query, &expansion, 1.0), expansion);
+    }
+
+    #[test]
+    fn weight_half_is_the_midpoint_of_each_dimension() {
+        let query = vec![0.0, 2.0, -4.0];
+        let expansion = vec![4.0, 6.0, 0.0];
+        assert_eq!(blend_vectors(&query, &expansion, 0.5), vec![2.0, 4.0, -2.0]);
+    }
+
+    #[test]
+    fn a_mismatched_length_truncates_to_the_shorter_input_rather_than_panicking() {
+        let query = vec![1.0, 1.0, 1.0];
+        let expansion = vec![5.0, 5.0];
+        assert_eq!(blend_vectors(&query, &expansion, 0.5), vec![3.0, 3.0]);
     }
 }
