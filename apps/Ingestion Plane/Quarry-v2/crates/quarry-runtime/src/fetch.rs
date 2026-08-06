@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -10,6 +11,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use serde_json::json;
 
+use crate::dns_guard::{resolve_public_url, PinnedDnsResolver};
 use crate::driver::{Driver, FetchHints};
 use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
@@ -24,11 +26,18 @@ pub struct FetchResponse {
 }
 
 pub struct StaticDriver {
-    /// Direct-egress client. Used when no proxy pool is configured,
-    /// when the pool is empty, or when the (org, host) hash misses
-    /// every pool entry (it currently can't, but we keep this as the
-    /// definitional fallback).
-    client: reqwest::Client,
+    /// The only direct-egress client. Its resolver has no DNS fallback --
+    /// every direct request is pinned to a preflighted address, either one
+    /// PageRunner already vetted (`hints.resolved_target`) or one this
+    /// driver preflights itself in `client_for_decision`. There is
+    /// deliberately no unpinned direct-egress client: that used to exist as
+    /// a fallback for callers that didn't supply `hints.resolved_target`,
+    /// which meant `Driver::fetch`/`fetch_conditional` calls without a
+    /// pre-populated hint got no SSRF/DNS-rebinding protection at the
+    /// connection level at all (EgressBroker::plan only selects a proxy; it
+    /// never validates the URL).
+    pinned_client: reqwest::Client,
+    pinned_resolver: Arc<PinnedDnsResolver>,
     /// Pool of proxies and pre-built clients. Empty when no
     /// `QUARRY_PROXY_POOL` is configured. Each entry is built once at
     /// driver construction; reqwest's connection pool inside the
@@ -63,10 +72,16 @@ impl StaticDriver {
         pool: ProxyPool,
         proxy_processor_id: Option<String>,
     ) -> QuarryResult<Self> {
-        let client = build_client(timeout, user_agent, None)?;
+        let pinned_resolver = Arc::new(PinnedDnsResolver::default());
+        let pinned_client = build_client(
+            timeout,
+            user_agent,
+            None,
+            Some(Arc::clone(&pinned_resolver)),
+        )?;
         let mut proxy_clients = HashMap::with_capacity(pool.len());
         for entry in pool.entries() {
-            let proxied = build_client(timeout, user_agent, Some(entry))?;
+            let proxied = build_client(timeout, user_agent, Some(entry), None)?;
             proxy_clients.insert(entry.uri.clone(), proxied);
         }
         if !pool.is_empty() {
@@ -76,15 +91,33 @@ impl StaticDriver {
             );
         }
         Ok(Self {
-            client,
+            pinned_client,
+            pinned_resolver,
             proxy_clients,
             egress: EgressBroker::new(pool, proxy_processor_id),
         })
     }
 
-    fn client_for_decision(&self, decision: &EgressDecision) -> QuarryResult<&reqwest::Client> {
+    /// Selects the client for this egress decision. Direct egress always
+    /// resolves to the pinned client: when `hints.resolved_target` is
+    /// missing (the caller didn't preflight), this preflights `url` itself
+    /// via `resolve_public_url` before pinning, so there is no code path
+    /// where a direct fetch reaches the network unpinned and unvalidated.
+    async fn client_for_decision(
+        &self,
+        decision: &EgressDecision,
+        hints: &FetchHints,
+        url: &Url,
+    ) -> QuarryResult<&reqwest::Client> {
         match &decision.identity {
-            EgressIdentity::Direct => Ok(&self.client),
+            EgressIdentity::Direct => {
+                let target = match hints.resolved_target.as_ref() {
+                    Some(target) => target.clone(),
+                    None => resolve_public_url(url).await?,
+                };
+                self.pinned_resolver.pin(target)?;
+                Ok(&self.pinned_client)
+            }
             EgressIdentity::Proxy { uri, .. } => self.proxy_clients.get(uri).ok_or_else(|| {
                 QuarryError::new(
                     ErrorCode::Internal,
@@ -105,7 +138,7 @@ impl StaticDriver {
         let plan = self.egress.plan(hints, url)?;
         let mut attempts = Vec::with_capacity(plan.len());
         for (idx, decision) in plan.iter().enumerate() {
-            let client = self.client_for_decision(decision)?;
+            let client = self.client_for_decision(decision, hints, url).await?;
             match self.send_once(client, url, hints).await {
                 Ok(resp) => {
                     self.egress
@@ -195,6 +228,17 @@ impl StaticDriver {
             QuarryError::new(code, format!("static fetch: {e}"))
         })?;
         let status = resp.status().as_u16();
+        // Redirect targets have not passed Quarry's URL preflight or DNS guard.
+        // Do not hand them to reqwest's implicit redirect engine: the target
+        // could resolve to a private or metadata address after an otherwise
+        // safe public URL was accepted. A caller can surface the original
+        // redirect and submit a separately reviewed target later.
+        if resp.status().is_redirection() {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "static fetch redirect blocked pending target validation",
+            ));
+        }
         let final_url = resp.url().clone();
         let headers = resp
             .headers()
@@ -297,12 +341,19 @@ fn build_client(
     timeout: Duration,
     user_agent: &str,
     proxy: Option<&ProxyEntry>,
+    pinned_resolver: Option<Arc<PinnedDnsResolver>>,
 ) -> QuarryResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(user_agent)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // Any redirect target is a fresh SSRF boundary. The pipeline only
+        // preflights the requested URL, so implicit following would bypass
+        // target validation and DNS policy.
+        .redirect(reqwest::redirect::Policy::none())
         .cookie_store(true);
+    if let Some(resolver) = pinned_resolver {
+        builder = builder.dns_resolver(resolver);
+    }
     if let Some(p) = proxy {
         // `Proxy::all` routes every scheme (http + https) through the
         // proxy. Reqwest parses socks5/socks5h/http/https from the URI
@@ -428,5 +479,93 @@ mod tests {
             .as_ref()
             .and_then(|v| v.get("egress_attempts"))
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn static_driver_rejects_redirects_before_contacting_the_target() {
+        let target = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("target reached"))
+            .mount(&target)
+            .await;
+
+        let redirector = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/metadata", target.uri())),
+            )
+            .mount(&redirector)
+            .await;
+
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let url: Url = format!("{}/redirect", redirector.uri()).parse().unwrap();
+
+        let err = driver.fetch(&url).await.unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        assert!(target.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn static_driver_selects_the_pinned_client_for_preflighted_dns() {
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let hints = FetchHints {
+            resolved_target: Some(crate::dns_guard::ResolvedTarget {
+                host: "rebind.example".to_string(),
+                addresses: vec!["203.0.113.17:443".parse().unwrap()],
+            }),
+            ..FetchHints::default()
+        };
+        let decision = EgressDecision {
+            identity: EgressIdentity::Direct,
+            attempt: 0,
+            reason: "direct egress".to_string(),
+        };
+        let url: Url = "https://rebind.example/".parse().unwrap();
+
+        let client = driver
+            .client_for_decision(&decision, &hints, &url)
+            .await
+            .unwrap();
+
+        assert!(std::ptr::eq(client, &driver.pinned_client));
+    }
+
+    #[tokio::test]
+    async fn direct_fetch_without_preflight_hints_still_blocks_private_targets() {
+        // Before this fix, a Direct decision with no `hints.resolved_target`
+        // fell back to an unpinned client with zero SSRF validation of its
+        // own -- EgressBroker::plan only selects a proxy, it never checks
+        // the URL. This proves client_for_decision now preflights itself
+        // instead of trusting an absent hint.
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let decision = EgressDecision {
+            identity: EgressIdentity::Direct,
+            attempt: 0,
+            reason: "direct egress".to_string(),
+        };
+        let url: Url = "http://127.0.0.1:9/".parse().unwrap();
+
+        let err = driver
+            .client_for_decision(&decision, &FetchHints::default(), &url)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn fetch_without_hints_blocks_private_targets_end_to_end() {
+        // Same gap, exercised through the public Driver::fetch entry point
+        // (FetchHints::default() -- exactly what a caller gets if it never
+        // pre-populates resolved_target) rather than calling
+        // client_for_decision directly.
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let url: Url = "http://169.254.169.254/latest/meta-data/".parse().unwrap();
+
+        let err = driver.fetch(&url).await.unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
     }
 }

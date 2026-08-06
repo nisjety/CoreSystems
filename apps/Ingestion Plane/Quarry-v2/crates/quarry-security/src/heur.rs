@@ -17,7 +17,12 @@ pub fn blocks_private_host(u: &Url) -> Option<String> {
         return Some("missing host".into());
     };
     if let url::Host::Ipv4(ip) = host {
-        if ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_broadcast() {
+        if ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_broadcast()
+            || ip.is_multicast()
+        {
             return Some(format!("private ipv4: {ip}"));
         }
     }
@@ -63,7 +68,12 @@ fn ipv6_blocked_reason(ip: &std::net::Ipv6Addr) -> Option<&'static str> {
     // IPv4-mapped IPv6: `::ffff:a.b.c.d`. Check the embedded IPv4
     // against the same set the v4 branch uses.
     if let Some(v4) = ip.to_ipv4_mapped() {
-        if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_broadcast() {
+        if v4.is_loopback()
+            || v4.is_private()
+            || v4.is_link_local()
+            || v4.is_broadcast()
+            || v4.is_multicast()
+        {
             return Some("v4-mapped ipv6 in private range");
         }
     }
@@ -86,7 +96,19 @@ pub fn check(u: &Url) -> Verdict {
 pub fn resolve_guard(addrs: &[IpAddr]) -> Option<String> {
     for a in addrs {
         match a {
-            IpAddr::V4(ip) if ip.is_loopback() || ip.is_private() || ip.is_link_local() => {
+            // Previously missing broadcast + multicast entirely, unlike
+            // blocks_private_host's IPv4 branch (which had broadcast but
+            // not multicast either) -- the two checks had silently drifted
+            // apart. A crawl target resolving to 255.255.255.255 or a
+            // 224.0.0.0/4 multicast address is never a legitimate public
+            // HTTP destination.
+            IpAddr::V4(ip)
+                if ip.is_loopback()
+                    || ip.is_private()
+                    || ip.is_link_local()
+                    || ip.is_broadcast()
+                    || ip.is_multicast() =>
+            {
                 return Some(format!("resolved to private: {ip}"))
             }
             IpAddr::V6(ip) => {
@@ -133,5 +155,21 @@ mod tests {
         // listed private/local ranges.
         let u: Url = "http://[2606:4700:4700::1111]/".parse().unwrap();
         assert!(blocks_private_host(&u).is_none());
+    }
+
+    #[test]
+    fn blocks_ipv4_multicast_and_broadcast() {
+        let broadcast: IpAddr = "255.255.255.255".parse().unwrap();
+        let multicast: IpAddr = "224.0.0.1".parse().unwrap();
+
+        let broadcast_url: Url = "http://255.255.255.255/".parse().unwrap();
+        let multicast_url: Url = "http://224.0.0.1/".parse().unwrap();
+        assert!(blocks_private_host(&broadcast_url).is_some());
+        assert!(blocks_private_host(&multicast_url).is_some());
+
+        // resolve_guard used to omit both entirely -- it drifted from
+        // blocks_private_host, which at least caught broadcast.
+        assert!(resolve_guard(&[broadcast]).is_some());
+        assert!(resolve_guard(&[multicast]).is_some());
     }
 }

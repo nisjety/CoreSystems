@@ -4,8 +4,8 @@
 //! each redirect hop against RFC 1918 private IP ranges and other security constraints
 //! before allowing the redirect to proceed.
 
-use ipnetwork::IpNetwork;
-use std::net::IpAddr;
+use quarry_security::heur::resolve_guard;
+use std::net::{IpAddr, ToSocketAddrs};
 use url::Url;
 use wreq::redirect::{Attempt, Policy};
 
@@ -81,16 +81,9 @@ impl QuarryRedirectPolicy {
                 None => return attempt.error("no host in redirect URL"),
             };
 
-            // Try to parse as IP, otherwise treat as FQDN
-            match host_str.parse::<IpAddr>() {
-                Ok(ip) => {
-                    if self.is_private_ip(ip) {
-                        return attempt.error("redirect to private IP range denied");
-                    }
-                }
-                Err(_) => {
-                    // FQDN - acceptable by default
-                }
+            let port = next_url.port_or_known_default().unwrap_or(80);
+            if let Err(reason) = self.check_host(host_str, port) {
+                return attempt.error(reason);
             }
 
             // If we got here, the redirect is safe
@@ -98,64 +91,54 @@ impl QuarryRedirectPolicy {
         })
     }
 
-    /// Check if an IP is in a private/reserved range.
-    fn is_private_ip(&self, ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(v4) => {
-                // 127.0.0.0/8 (loopback)
-                if v4.is_loopback() {
-                    return !self.allow_localhost_redirect;
+    /// Checks a redirect target's host for SSRF safety, returning `Err` with
+    /// a reason when it must be denied. An IP-literal host is checked
+    /// directly; an FQDN is resolved and *every* returned address is
+    /// checked -- a hostname that resolves to a private/internal address
+    /// must be denied exactly like an IP literal would be, which the
+    /// previous "FQDN - acceptable by default" behavior did not do.
+    ///
+    /// Resolution here is blocking OS-level `to_socket_addrs`, not the
+    /// async lookup used elsewhere in the crate: `wreq::redirect::Policy`'s
+    /// callback (see `into_policy`) is synchronous, and a redirect hop is
+    /// rare enough per crawl that a blocking resolve is an acceptable
+    /// trade-off against bridging into async from a sync callback.
+    fn check_host(&self, host_str: &str, port: u16) -> Result<(), &'static str> {
+        match host_str.parse::<IpAddr>() {
+            Ok(ip) => {
+                if self.is_private_ip(ip) {
+                    return Err("redirect to private IP range denied");
                 }
-                // 10.0.0.0/8
-                if IpNetwork::V4("10.0.0.0/8".parse().unwrap()).contains(std::net::IpAddr::V4(v4)) {
-                    return true;
-                }
-                // 172.16.0.0/12
-                if IpNetwork::V4("172.16.0.0/12".parse().unwrap())
-                    .contains(std::net::IpAddr::V4(v4))
-                {
-                    return true;
-                }
-                // 192.168.0.0/16
-                if IpNetwork::V4("192.168.0.0/16".parse().unwrap())
-                    .contains(std::net::IpAddr::V4(v4))
-                {
-                    return true;
-                }
-                // 169.254.0.0/16 (link-local)
-                if v4.is_link_local() {
-                    return true;
-                }
-                // 224.0.0.0/4 (multicast)
-                if v4.is_multicast() {
-                    return true;
-                }
-                // 255.255.255.255/32 (broadcast)
-                if v4.is_broadcast() {
-                    return true;
-                }
-                false
             }
-            IpAddr::V6(v6) => {
-                // ::1 (loopback)
-                if v6.is_loopback() {
-                    return !self.allow_localhost_redirect;
+            Err(_) => match (host_str, port).to_socket_addrs() {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        if self.is_private_ip(addr.ip()) {
+                            return Err("redirect to private IP range denied (via FQDN)");
+                        }
+                    }
                 }
-                // fc00::/7 (private)
-                if v6.is_unique_local() {
-                    return true;
-                }
-                // fe80::/10 (link-local)
-                if v6.is_unicast_link_local() {
-                    return true;
-                }
-                // ff00::/8 (multicast)
-                if v6.is_multicast() {
-                    return true;
-                }
-                false
-            }
+                Err(_) => return Err("redirect FQDN failed to resolve"),
+            },
         }
+        Ok(())
+    }
+
+    /// Check if an IP is in a private/reserved range. Delegates to
+    /// `quarry_security::heur::resolve_guard`, the same check
+    /// `dns_guard.rs`'s preflight uses -- this used to be a hand-rolled,
+    /// second copy of the same range list (and required an `ipnetwork`
+    /// dependency this crate didn't even have, which is part of why this
+    /// module was never wired into the crate's module tree at all).
+    /// `allow_localhost_redirect` is handled here as a narrow override:
+    /// it permits loopback specifically (useful for testing against a
+    /// local mock server) without weakening the check for every other
+    /// private/internal range.
+    fn is_private_ip(&self, ip: IpAddr) -> bool {
+        if ip.is_loopback() {
+            return !self.allow_localhost_redirect;
+        }
+        resolve_guard(&[ip]).is_some()
     }
 }
 
@@ -245,6 +228,36 @@ mod tests {
     fn test_ipv6_public_allowed() {
         let policy = QuarryRedirectPolicy::new();
         assert!(!policy.is_private_ip("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_fqdn_resolving_to_loopback_denied() {
+        // "localhost" resolves via the OS hosts file (no network needed) to
+        // 127.0.0.1/::1 -- the exact case the old "FQDN - acceptable by
+        // default" branch let through unchecked.
+        let policy = QuarryRedirectPolicy::new();
+        assert!(policy.check_host("localhost", 80).is_err());
+    }
+
+    #[test]
+    fn test_fqdn_resolving_to_loopback_allowed_when_localhost_permitted() {
+        let policy = QuarryRedirectPolicy::new().allow_localhost(true);
+        assert!(policy.check_host("localhost", 80).is_ok());
+    }
+
+    #[test]
+    fn test_fqdn_that_fails_to_resolve_denied() {
+        let policy = QuarryRedirectPolicy::new();
+        assert!(policy
+            .check_host("this-host-does-not-exist.invalid", 80)
+            .is_err());
+    }
+
+    #[test]
+    fn test_ip_literal_host_still_checked_directly() {
+        let policy = QuarryRedirectPolicy::new();
+        assert!(policy.check_host("10.0.0.5", 80).is_err());
+        assert!(policy.check_host("8.8.8.8", 80).is_ok());
     }
 
     #[test]

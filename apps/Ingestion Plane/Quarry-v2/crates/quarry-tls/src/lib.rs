@@ -7,6 +7,14 @@
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+// Not currently wired into this crate's own client (see `.redirect(redirect::Policy::none())`
+// below, which disables auto-follow and forces callers to re-validate each hop as a fresh
+// request -- already the safer pattern). Declared here purely so the module is compiled and
+// its tests run rather than sitting as an unreachable, unverified orphan; it was previously
+// not declared in any `mod` at all.
+mod redirect_policy;
+pub use redirect_policy::QuarryRedirectPolicy;
+
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use serde::{Deserialize, Serialize};
 use url::Url;
