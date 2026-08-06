@@ -1747,6 +1747,30 @@ either a lucky repeat during another concurrent rebuild or purpose-built
 load generation, neither of which is proportionate for a P2 investigate
 item that was already ruled out as a capacity concern.
 
+### 2026-08-06 — P2-5 rrf_k config: already done, closing the table row
+
+Checked before implementing anything, since "expose `rrf_k` via config"
+sounded like a plausible small task to just do. It was already done —
+`config.rs:87-88` (`pub rrf_k: f32`, `#[serde(default = "default_rrf_k")]`)
+was introduced in `30692909` ("P2 partial"), before this plan doc's
+execution record existed in its current form; the table row (line 505) was
+simply never annotated afterward.
+
+Traced the whole path to confirm it is genuinely wired, not just declared:
+`orchestrator.rs:671-677` passes `self.config.rrf_k` into
+`starting_mix.resolve(...)`, which becomes `mix.rrf_k`
+(`orchestrator.rs:255`), which is what every `reciprocal_rank_fusion` call
+in `retrieve()` actually uses (lines 271/286/291/296) — no hardcoded `60.0`
+left in the real request path. The only remaining references to the literal
+constant `DEFAULT_RRF_K` are the `config.rs` serde default (correct — that
+*is* the default) and test code that intentionally binds to the same
+constant the config defaults to, per an existing comment at
+`orchestrator.rs:1230-1231` ("P2-5: tests bind to the same constant the
+config defaults to, so a change to the default is caught here rather than
+silently reordering results") — which is itself evidence this was already
+understood as closed, just not marked as such anywhere central. No code
+changed for this item; nothing was broken or incomplete.
+
 ---
 
 ## 7. Architecture constraints this plan honours
