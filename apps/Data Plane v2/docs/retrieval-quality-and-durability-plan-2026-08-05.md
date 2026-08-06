@@ -1630,6 +1630,76 @@ existing query-length guard.
   expected under real network conditions — is unverified live, the same
   class of gap as P2-3's connector→Qdrant wire proof.
 
+### 2026-08-06 — P2-8 CRAG confidence score (verification-only; one gap found)
+
+This phase was scoped as verification, not new code: "tune [the]
+threshold and verify `execution-core` consumes it." Both `low_confidence`
+(`orchestrator.rs:997`) and `suggested_next_tools` (`orchestrator.rs:1116`)
+already existed going in. No DPv2 code changed in this section.
+
+**Threshold.** `confidence_threshold` defaults to 0.35 against Cohere rerank
+scores (`config.rs`), and is not referenced anywhere else in this plan doc or
+in any eval script — it was never empirically calibrated, just picked when
+the D4+D5 gate was built. Tuning it for real would mean running the golden
+set (P0.5) with reranking on and choosing a cutoff from the score
+distribution of known-good vs. known-bad top-1 results. **Not done**: the
+Postgres corpus is currently empty (0 rows, from the unrelated cold-rebuild
+volume wipe earlier this session — see `reference_cold_rebuild_defects_
+2026-08-06` memory), so there is no indexed golden set to run rerank scores
+against. Changing a magic number without data would be worse than leaving it
+documented as unvalidated, so 0.35 is left as-is. It is at least a
+defensible default: Cohere rerank scores are 0-1 relevance scores where
+genuinely strong matches usually score well above 0.5, so 0.35 errs toward
+under-flagging rather than over-flagging — a reasonable conservative
+starting point, not a validated one. Revisit once the corpus is repopulated
+and P0.5's golden set can run through reranking again.
+
+**Consumption — checked cross-plane, via `codegraph_search` then direct
+reads, not assumed:**
+
+- **`low_confidence` is genuinely consumed, in two independent places:**
+  - `apps/Model Plane/rust/services/execution-core/src/knowledge_tools.rs`
+    (`format_candidates`) reads `response.low_confidence` and turns it into a
+    machine-readable `status: "low_confidence"` plus an explicit `reason`
+    string handed back to the agent as the tool result: *"Results are low
+    confidence; reformulate or broaden the query before relying on them."*
+    This is the actual CRAG corrective loop the plan asked for — the model
+    sees the reason in its tool output and decides whether to reformulate,
+    which is the correct division of labor (DPv2 signals, Model Plane
+    reasons).
+  - `apps/Model Plane/rust/services/model-gateway/src/retrieval.rs`
+    (`build_grounding`, line ~533) independently ORs `resp.low_confidence`
+    with its own `facts.is_empty()` check to set a grounding-level
+    `low_confidence`, which (`is_weak_match`, line ~214) triggers
+    `LOW_CONFIDENCE_GROUNDING_NOTICE` — a user-facing caveat appended to the
+    final answer telling the end user the knowledge-base matches were weak.
+  - So DPv2's single signal already drives two distinct, real behaviors:
+    agent self-correction and end-user disclosure.
+- **`suggested_next_tools` is dead plumbing — computed, shipped, read by
+  nobody.** `codegraph_search` returned zero results for the symbol
+  anywhere in the indexed monorepo; confirmed by grepping
+  `knowledge_tools.rs` directly (the one place that would naturally forward
+  it) — its `KnowledgeSearchEnvelope` has no field for it at all, so
+  `retrieve()`'s heuristic hints (graph+wiki on low confidence,
+  contradictions on ≥3 sources, wiki+knowledge-search on empty results) are
+  computed every request and then silently dropped at the execution-core
+  boundary. Left as a defect for a future phase rather than fixed here:
+  wiring it in is a real design decision (auto-chain the suggested calls?
+  surface them as options to the model? which needs product judgment, not
+  a mechanical plumbing fix — matches the same "D14 was dead plumbing"
+  pattern this plan already tracks, just on the response side instead of
+  the request side.
+
+**Verification:** read `orchestrator.rs`'s confidence-gate logic and its
+existing doc comment (already correctly distinguishes "reranker didn't run"
+from "reranker ran and scored low" — a real bug class it already guards
+against, not something this phase needed to fix); `codegraph_search` for
+both field names across all 4648 indexed files; direct reads of the two
+Model Plane consumer files to confirm the mechanism, not just the presence
+of a matching identifier. No live retrieval request was run for this phase
+— the question was "does downstream code path exist," which is answered by
+static consumption, not a live call.
+
 ---
 
 ## 7. Architecture constraints this plan honours
