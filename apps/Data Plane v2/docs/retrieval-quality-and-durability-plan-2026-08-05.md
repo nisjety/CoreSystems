@@ -1700,9 +1700,52 @@ of a matching identifier. No live retrieval request was run for this phase
 — the question was "does downstream code path exist," which is answered by
 static consumption, not a live call.
 
----
+### 2026-08-06 — P2-9 D16 slow statements (closed — original hypothesis was wrong)
 
-## 7. Architecture constraints this plan honours
+Scoped as "confirm D16 slow statements are a dev-volume fsync artifact."
+Did not just confirm it — measured it, and the stated mechanism does not
+hold up.
+
+**`pg_test_fsync` run directly inside `data-plane-v2-postgres-1` against the
+real data-directory volume** (Postgres's own bundled diagnostic tool,
+purpose-built for exactly this question): `fdatasync` (Linux's default WAL
+sync method) — **678-708 usecs/op**. Even the slowest method tested
+(`open_sync`, tiny 1KB writes) tops out around 44ms/op. None of this is
+within three orders of magnitude of the reported 7.06s `COMMIT` / 3.97s
+`INSERT` / 4.0s advisory lock. **Raw fsync speed on this volume is not, and
+was probably never, the cause.**
+
+**Reproduced live, right now, on the same database**: a real `INSERT` +
+`COMMIT` in an explicit transaction, plus a real `pg_advisory_xact_lock`
+acquisition — `10.8ms` (create temp table), `5.0ms` (insert), `0.09ms`
+(commit), `0.37ms` (advisory lock). All normal. **The slowness does not
+reproduce.**
+
+**More plausible actual mechanism, at least for the advisory-lock data
+point**: `quickwit-adapter-rs/src/jobs.rs:609` takes a single global,
+hardcoded-key `pg_advisory_xact_lock(hashtext('quickwit-admin-claim'))` in
+`claim_next()` — ordinary leader-election-style lock contention if multiple
+job-claim polls overlap, nothing to do with disk speed. For the `COMMIT`/
+`INSERT` latencies, resource pressure was already ruled out in D16's own
+text and fsync speed is now ruled out here too; the remaining likely
+explanation is transient contention from concurrent heavy Docker I/O on this
+host — this session independently and repeatedly observed concurrent
+image builds and a full `docker system prune`/cold-rebuild happening on
+this exact machine during this general time window (see
+`reference_cold_rebuild_defects_2026-08-06` memory) — not a sustained
+characteristic of this dev environment or something that generalizes to
+production capacity planning.
+
+**Verification:** `pg_test_fsync -s 3` inside the live postgres container;
+a real timed `INSERT`/`COMMIT`/advisory-lock sequence via `psql \timing` on
+the live database; `grep` for every real `pg_advisory` call site in the
+DPv2 source tree (3 found, one is a plausible fit for the specific
+advisory-lock data point). **Not done, and not attempted**: reproducing the
+original slow measurement's exact conditions (unknown — D16 cites no
+source query, tool, or timestamp) to catch it in the act; that would need
+either a lucky repeat during another concurrent rebuild or purpose-built
+load generation, neither of which is proportionate for a P2 investigate
+item that was already ruled out as a capacity concern.
 
 1. No direct database crossing between planes.
 2. No independent embeddings/reranking outside isolated labs — embedding routes
