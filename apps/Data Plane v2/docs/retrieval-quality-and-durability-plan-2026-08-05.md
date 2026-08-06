@@ -1771,6 +1771,30 @@ silently reordering results") — which is itself evidence this was already
 understood as closed, just not marked as such anywhere central. No code
 changed for this item; nothing was broken or incomplete.
 
+### 2026-08-06 — P2-4 data_orchestrator_jobs durability: already done, closing the table row
+
+Checked before implementing, same as P2-5 — also landed in `30692909` ("P2
+partial") and never annotated.
+
+`internal/handler/orchestrator.go`'s `CreateJob`/`Reindex` no longer start a
+goroutine; they only insert a `pending` row and return 202 (their own
+comments cite P2-4 directly and explain why: the old fire-and-forget pinned
+work to whichever replica served the request and stranded the row in
+`running` forever on a mid-job restart). `internal/jobs/worker.go` is a real
+poller — `ClaimNext` uses `FOR UPDATE SKIP LOCKED`
+(`internal/jobs/store.go:220`, the exact idiom D12 asked for), a
+300s lease renewed by `SetProgress` (bounding silence, not total runtime,
+since a reindex can legitimately run for minutes), `MaxAttempts=3` counted
+on claim (so a worker that dies without reporting still burns an attempt,
+otherwise a reliably-crashing job retries forever), and `ExpireExhausted` as
+a terminal backstop so permanently-failing jobs don't sit in `running`
+forever once attempts run out. Confirmed it is actually running, not just
+defined: `cmd/main.go:107` starts it — `go jobs.NewWorker(...).Run(jobWorkerCtx)`.
+Doc comment even notes the three other queues that already had this shape
+(`wiki_event_outbox`, `index_deletion_outbox`, `quickwit_admin_jobs`) —
+`data_orchestrator_jobs` was the one left out, and now isn't. No code
+changed for this item either.
+
 ---
 
 ## 7. Architecture constraints this plan honours
