@@ -1747,6 +1747,10 @@ either a lucky repeat during another concurrent rebuild or purpose-built
 load generation, neither of which is proportionate for a P2 investigate
 item that was already ruled out as a capacity concern.
 
+---
+
+## 7. Architecture constraints this plan honours
+
 1. No direct database crossing between planes.
 2. No independent embeddings/reranking outside isolated labs — embedding routes
    through Model Plane `inference-core` (`EMBEDDING_PROVIDER=model_plane`).
