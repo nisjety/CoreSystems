@@ -337,6 +337,19 @@ export function AiActionReviewPanel(props: {
 		}))
 	}
 
+  function applyDecisionOutcome(decision: 'approve' | 'reject', latest: AiAction | undefined) {
+    if (decision === 'approve' && latest && isVerifiedExecution(latest)) {
+      if (isTicketFieldProposal(latest)) props.onTicketActionVerified?.()
+      setRecorded(executionReceipt(latest, i18n.tr))
+    } else {
+      setRecorded(
+        decision === 'approve'
+          ? i18n.tr('Godkjenningen er registrert. Venter på verifisert utførelse.', 'Approval recorded. Waiting for verified execution.')
+          : i18n.tr('Avgjørelse registrert — forslaget ble avvist.', 'Decision recorded — suggestion dismissed.'),
+      )
+    }
+  }
+
   async function decide(action: AiAction, decision: 'approve' | 'reject') {
 		const conversationId = props.conversationId
 		if (decision === 'approve' && isTicketFieldProposal(action) && teamProposalOf(action) && !canonicalTeamForFields(fieldsFor(action), props.ticketTeams ?? [])) {
@@ -358,19 +371,24 @@ export function AiActionReviewPanel(props: {
           : undefined
       await reviewAiAction(action.id, decision, { editedFields })
       const latestActions = await loadActions(conversationId)
-      const latest = latestActions?.find((item) => item.id === action.id)
-      if (decision === 'approve' && latest && isVerifiedExecution(latest)) {
-        if (isTicketFieldProposal(latest)) props.onTicketActionVerified?.()
-        setRecorded(executionReceipt(latest, i18n.tr))
-      } else {
-        setRecorded(
-          decision === 'approve'
-            ? i18n.tr('Godkjenningen er registrert. Venter på verifisert utførelse.', 'Approval recorded. Waiting for verified execution.')
-            : i18n.tr('Avgjørelse registrert — forslaget ble avvist.', 'Decision recorded — suggestion dismissed.'),
-        )
-      }
+      applyDecisionOutcome(decision, latestActions?.find((item) => item.id === action.id))
     } catch (err) {
-      setError(translateApiError(err, i18n.tr, { no: 'Kunne ikke registrere avgjørelsen. Prøv igjen.', en: 'Could not record the decision. Please retry.' }))
+      // reviewAiAction can fail (e.g. a transient 502) after the decision was
+      // already recorded server-side. Re-fetch and check the action's real
+      // status before asserting failure, instead of trusting the network
+      // error alone — otherwise a reviewer sees a false "could not record"
+      // banner for a decision that already went through.
+      const latest = (await loadActions(conversationId))?.find((item) => item.id === action.id)
+      if (latest && !isAwaitingReview(latest)) {
+        applyDecisionOutcome(decision, latest)
+      } else if (latest) {
+        setError(translateApiError(err, i18n.tr, { no: 'Kunne ikke registrere avgjørelsen. Prøv igjen.', en: 'Could not record the decision. Please retry.' }))
+      } else {
+        setError(i18n.tr(
+          'Vi fikk ikke bekreftet om avgjørelsen ble registrert. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the decision went through. Please wait a moment before trying again.",
+        ))
+      }
     } finally {
       setBusyId(null)
     }

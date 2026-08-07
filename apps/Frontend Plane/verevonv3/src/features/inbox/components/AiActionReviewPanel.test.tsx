@@ -431,6 +431,56 @@ describe('AiActionReviewPanel', () => {
     expect(onTicketActionVerified).toHaveBeenCalledOnce()
   })
 
+  it('reconciles a false-failure 502 by checking whether the decision was actually recorded', async () => {
+    let approved = false
+    const onTicketActionVerified = vi.fn()
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('/api/v1/inbox/ai-actions?')) {
+        return jsonResponse([
+          { ...suggestedClassification, status: approved ? 'executed' : 'suggest_ticket' },
+        ])
+      }
+      if (url.endsWith('/api/v1/inbox/ai-actions/aiact_1/approve') && init?.method === 'POST') {
+        // The decision reaches the backend and is durably recorded, but the
+        // response itself is lost to a transient gateway error.
+        approved = true
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      return jsonResponse([])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <AiActionReviewPanel conversationId="conv_1" onTicketActionVerified={onTicketActionVerified} />)
+
+    await screen.findByRole('textbox', { name: /alvorlighetsgrad.*redigerbar/i })
+    fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
+
+    expect(await screen.findByText(/utførelse verifisert.*support-saken er åpnet/i)).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(onTicketActionVerified).toHaveBeenCalledOnce()
+  })
+
+  it('shows a real failure when a decide request errors and the decision genuinely did not go through', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.startsWith('/api/v1/inbox/ai-actions?')) return jsonResponse([suggestedClassification])
+      if (url.endsWith('/api/v1/inbox/ai-actions/aiact_1/approve') && init?.method === 'POST') {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      return jsonResponse([])
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <AiActionReviewPanel conversationId="conv_1" />)
+
+    await screen.findByRole('textbox', { name: /alvorlighetsgrad.*redigerbar/i })
+    fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/kunne ikke registrere avgjørelsen/i)
+    expect(screen.queryByText(/registrert/i)).toBeNull()
+  })
+
   it('lets an operator edit the exact draft reply before approval', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
