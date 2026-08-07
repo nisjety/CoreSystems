@@ -360,6 +360,185 @@ describe('InboxAside Verevon actions', () => {
     expect(fetchMock.mock.calls.filter(([request]) => String(request).endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference'))).toHaveLength(2)
   })
 
+  it('reconciles a false-failure 502 by checking whether the follow preference was actually recorded', async () => {
+    let followed = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease')) {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'No lease' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/follow')) {
+        if (!followed) {
+          return new Response(JSON.stringify({ error: { code: 'not_found', message: 'Not followed' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+        }
+        return new Response(JSON.stringify({ data: {
+          org_id: 'org-coresystem', conversation_id: 'conversation-42', user_id: 'user-coresystem', created_at: '2026-08-03T10:00:00.000Z',
+        } }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/actions/execute')) {
+        // The follow action reaches the backend and is durably recorded, but
+        // the response itself is lost to a transient gateway error.
+        followed = true
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), { status: 502, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ data: {} }), { headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
+        userId="user-coresystem"
+      />
+    ))
+
+    openConversationActivity()
+    await screen.findByText(/lagre en personlig følgepreferanse|save a personal follow preference/i)
+    fireEvent.click(screen.getByRole('button', { name: /følg samtale|follow conversation/i }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /slutt å følge|unfollow/i })).toBeTruthy())
+    expect(screen.queryByText(/kunne ikke oppdateres|could not be updated/i)).toBeNull()
+  })
+
+  it('shows a real failure when following a conversation genuinely did not go through', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease')) {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'No lease' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/follow')) {
+        // Still not followed — the action genuinely didn't land.
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'Not followed' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/actions/execute')) {
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), { status: 502, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ data: {} }), { headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
+        userId="user-coresystem"
+      />
+    ))
+
+    openConversationActivity()
+    await screen.findByText(/lagre en personlig følgepreferanse|save a personal follow preference/i)
+    fireEvent.click(screen.getByRole('button', { name: /følg samtale|follow conversation/i }))
+
+    expect(await screen.findByText(/kunne ikke oppdateres|could not be updated/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /slutt å følge|unfollow/i })).toBeNull()
+  })
+
+  it('reconciles a false-failure 502 by checking whether the feedback preference was actually recorded', async () => {
+    let optedIn = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease')) {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'No lease' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/follow')) {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'Not followed' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference')) {
+        return new Response(JSON.stringify({ data: {
+          org_id: 'org-coresystem', conversation_id: 'conversation-42', contact_id: 'contact-42', opted_in: optedIn,
+          updated_by: 'user-coresystem', updated_at: '2026-08-03T10:00:00.000Z',
+        } }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/actions/execute')) {
+        // The preference reaches the backend and is durably recorded, but
+        // the response itself is lost to a transient gateway error.
+        optedIn = true
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), { status: 502, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ data: {} }), { headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
+        userId="user-coresystem"
+      />
+    ))
+
+    openConversationActivity()
+    await screen.findByText(/ingen spørreundersøkelse blir sendt|no survey will be sent/i)
+    fireEvent.click(screen.getByRole('button', { name: /registrer samtykke|record consent/i }))
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /trekk tilbake samtykke|withdraw consent/i })).toBeTruthy())
+    expect(screen.queryByText(/kunne ikke oppdateres|could not be updated/i)).toBeNull()
+  })
+
+  it('shows a real failure when recording a feedback preference genuinely did not go through', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease')) {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'No lease' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/follow')) {
+        return new Response(JSON.stringify({ error: { code: 'not_found', message: 'Not followed' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference')) {
+        // Still not opted in — the preference genuinely didn't land.
+        return new Response(JSON.stringify({ data: {
+          org_id: 'org-coresystem', conversation_id: 'conversation-42', contact_id: 'contact-42', opted_in: false,
+          updated_by: 'user-coresystem', updated_at: '2026-08-03T10:00:00.000Z',
+        } }), { headers: { 'Content-Type': 'application/json' } })
+      }
+      if (url.endsWith('/api/v1/actions/execute')) {
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), { status: 502, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ data: {} }), { headers: { 'Content-Type': 'application/json' } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => (
+      <InboxAside
+        orgId="org-coresystem"
+        articles={articles}
+        recent={[]}
+        onSelectRecent={vi.fn()}
+        onQueueDraftReply={vi.fn(async () => true)}
+        onMacroExecuted={vi.fn()}
+        onOpenModal={vi.fn()}
+        selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
+        userId="user-coresystem"
+      />
+    ))
+
+    openConversationActivity()
+    await screen.findByText(/ingen spørreundersøkelse blir sendt|no survey will be sent/i)
+    fireEvent.click(screen.getByRole('button', { name: /registrer samtykke|record consent/i }))
+
+    expect(await screen.findByText(/kunne ikke oppdateres|could not be updated/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /trekk tilbake samtykke|withdraw consent/i })).toBeNull()
+  })
+
   it('records a consented resolved-ticket CSAT outcome through the audited action without claiming survey delivery', async () => {
     let recordedScore: number | null = null
     let actionBody: unknown = null
