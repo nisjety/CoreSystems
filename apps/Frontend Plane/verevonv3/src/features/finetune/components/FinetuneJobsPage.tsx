@@ -96,9 +96,10 @@ export default function FinetuneJobsPage() {
   })
   const productionRateLabel = createMemo(() => formatHourlyRate(productionRate()))
 
-  const refreshJobs = () => {
-    void queryClient.invalidateQueries({ queryKey: finetuneQueryKeys.jobs(orgId()) })
-  }
+  // Returns the invalidate-and-refetch promise (not void) so a catch-block
+  // reconciliation (cancelJob) can await the fresh data landing in `jobs()`
+  // before asserting failure.
+  const refreshJobs = () => queryClient.invalidateQueries({ queryKey: finetuneQueryKeys.jobs(orgId()) })
 
   const createJob = async () => {
     const id = orgId()
@@ -136,7 +137,7 @@ export default function FinetuneJobsPage() {
           : i18n.tr('Fine-tune-jobb satt i kø som en gratis 24-timers test.', 'Fine-tune job queued as a free 24h test.'),
       )
       setFile(null)
-      refreshJobs()
+      void refreshJobs()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke opprette fine-tune-jobb.', 'Could not create fine-tune job.'))
     } finally {
@@ -153,9 +154,31 @@ export default function FinetuneJobsPage() {
     try {
       await cancelFinetuneJob(id, jobId)
       setNotice(i18n.tr('Fine-tune-jobb kansellert.', 'Fine-tune job cancelled.'))
-      refreshJobs()
+      void refreshJobs()
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke kansellere fine-tune-jobb.', 'Could not cancel fine-tune job.'))
+      // cancelFinetuneJob can fail (e.g. a transient 502) after the
+      // cancellation was already durably recorded server-side. Re-fetch and
+      // check the job's real status before asserting failure, instead of
+      // trusting the network error alone — otherwise a user sees a false
+      // "could not cancel" error for a cancellation that already went
+      // through.
+      let reconciled = true
+      try {
+        await refreshJobs()
+      } catch {
+        reconciled = false
+      }
+      const latest = jobs().find((job) => job.job_id === jobId)
+      if (reconciled && latest?.status === 'cancelled') {
+        setNotice(i18n.tr('Fine-tune-jobb kansellert.', 'Fine-tune job cancelled.'))
+      } else if (reconciled && latest) {
+        setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke kansellere fine-tune-jobb.', 'Could not cancel fine-tune job.'))
+      } else {
+        setError(i18n.tr(
+          'Vi fikk ikke bekreftet om fine-tune-jobben ble kansellert. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the fine-tune job was cancelled. Please wait a moment before trying again.",
+        ))
+      }
     } finally {
       setCancellingId(null)
     }
@@ -171,7 +194,7 @@ export default function FinetuneJobsPage() {
       await deployFinetuneJob(id, jobId, 'production')
       setConfirmingDeployId(null)
       setNotice(i18n.tr('Modell forfremmet til en produksjonsutrulling.', 'Model promoted to a production deployment.'))
-      refreshJobs()
+      void refreshJobs()
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke forfremme fine-tune til produksjon.', 'Could not promote fine-tune to production.'))
     } finally {
