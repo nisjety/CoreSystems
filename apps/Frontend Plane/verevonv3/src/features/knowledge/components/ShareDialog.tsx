@@ -61,7 +61,28 @@ export function ShareDialog(props: {
       await revokeDocumentShare(props.docId, subjectId)
       await refetch()
     } catch (error) {
-      setErrorMessage(translateApiError(error, i18n.tr, { no: 'Delingen kunne ikke fjernes.', en: 'The share could not be removed.' }))
+      // revokeDocumentShare can fail (e.g. a transient 502) after the share
+      // was already durably removed server-side. Re-fetch and check whether
+      // the subject is still listed before asserting failure, instead of
+      // trusting the network error alone — otherwise a sharer sees a false
+      // "could not be removed" error for a revoke that already went through.
+      let fresh: { grants: DocumentGrant[] } | null | undefined
+      try {
+        fresh = await refetch()
+      } catch {
+        fresh = undefined
+      }
+      if (!fresh) {
+        setErrorMessage(i18n.tr(
+          'Vi fikk ikke bekreftet om delingen ble fjernet. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the share was removed. Please wait a moment before trying again.",
+        ))
+      } else if (fresh.grants.some((grant) => grant.subject_id === subjectId)) {
+        // Still listed — the removal genuinely didn't land.
+        setErrorMessage(translateApiError(error, i18n.tr, { no: 'Delingen kunne ikke fjernes.', en: 'The share could not be removed.' }))
+      }
+      // Else: confirmed removed — refetch() already synced the shares
+      // resource that the list renders from; no further state change needed.
     } finally {
       setBusy(false)
     }
