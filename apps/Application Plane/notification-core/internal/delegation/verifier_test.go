@@ -144,7 +144,7 @@ func TestVerifierAcceptsVerevonGatewayCrossLanguageFixture(t *testing.T) {
 	request.Header.Set(HeaderTimestamp, "2026-07-13T12:00:00+00:00")
 	request.Header.Set(HeaderNonce, "fixed-nonce-1234567890")
 	request.Header.Set(HeaderBodySHA256, "KSAem_coGl1Xx_rU84ulYwo1-4Joui0ynxMypC4vHSk")
-	request.Header.Set(HeaderSignature, "pcjRMdFhwUheFX-sD8K7H-KMnVDum8gMyfD005mDqtc")
+	request.Header.Set(HeaderSignature, "iZbxn0GTXuuy-tZveuwQcAN-0a2bND6iR_9VB07LwIM")
 
 	principal, err := verifier.Verify(request, body)
 	if err != nil {
