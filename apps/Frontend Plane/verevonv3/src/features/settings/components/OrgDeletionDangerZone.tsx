@@ -2,7 +2,7 @@ import { Loader2, ShieldAlert, Trash2 } from 'lucide-solid'
 import { createSignal, Show } from 'solid-js'
 import { SettingsButton } from '@/features/settings/components/settings-ui'
 import { ApiError } from '@/shared/api/http'
-import { triggerOrgSoftDelete } from '@/shared/api/org-deletion-client'
+import { getDeletionStatus, triggerOrgSoftDelete } from '@/shared/api/org-deletion-client'
 import { getSession } from '@/shared/session/session-store'
 
 function errorMessage(error: unknown): string {
@@ -49,6 +49,16 @@ export function OrgDeletionDangerZone() {
     setError(null)
   }
 
+  // Shared by the delete happy path and by the catch-block reconciliation
+  // below: once the soft-delete is known to have landed — whether
+  // triggerOrgSoftDelete() succeeded outright, or discovered via re-fetch
+  // after it errored — the resulting UI state is identical either way.
+  function applyScheduledOutcome() {
+    setScheduled(true)
+    setShowConfirm(false)
+    setTypedName('')
+  }
+
   async function runDelete(event: Event) {
     event.preventDefault()
     const id = orgId()
@@ -57,11 +67,20 @@ export function OrgDeletionDangerZone() {
     setError(null)
     try {
       await triggerOrgSoftDelete(id, true, orgName())
-      setScheduled(true)
-      setShowConfirm(false)
-      setTypedName('')
+      applyScheduledOutcome()
     } catch (reason) {
-      setError(errorMessage(reason))
+      // triggerOrgSoftDelete can fail (e.g. a transient 502) after the
+      // soft-delete was already durably recorded server-side. Re-fetch and
+      // check whether the org is now actually pending deletion before
+      // asserting failure — otherwise the owner sees a hard error (and a
+      // "try again" affordance risking a duplicate schedule) for a deletion
+      // that already went through.
+      const fresh = await getDeletionStatus(id).catch(() => null)
+      if (fresh?.pending) {
+        applyScheduledOutcome()
+      } else {
+        setError(errorMessage(reason))
+      }
     } finally {
       setDeleting(false)
     }

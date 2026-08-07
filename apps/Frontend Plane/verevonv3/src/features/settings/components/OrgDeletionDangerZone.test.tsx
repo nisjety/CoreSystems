@@ -72,6 +72,57 @@ describe('OrgDeletionDangerZone', () => {
     expect(screen.queryByRole('button', { name: 'Delete organization' })).toBeNull()
   })
 
+  it('reconciles a false-failure 502 by checking whether the org was actually scheduled for deletion', async () => {
+    setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/gdpr/soft-delete' && init?.method === 'DELETE') {
+        // The soft-delete reaches the backend and is durably recorded, but
+        // the response itself is lost to a transient gateway error.
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        return jsonResponse({ pending: true, deadline: '2026-09-06T00:00:00Z', org_name: 'Acme AS' })
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <OrgDeletionDangerZone />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete organization…' }))
+    fireEvent.input(screen.getByRole('textbox'), { target: { value: 'Acme AS' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Delete organization' }))
+
+    expect(await screen.findByText(/deletion scheduled/i)).toBeTruthy()
+    expect(screen.queryByText(/bad gateway/i)).toBeNull()
+  })
+
+  it('shows a real failure when the soft-delete genuinely did not go through', async () => {
+    setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/gdpr/soft-delete' && init?.method === 'DELETE') {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        // Still not pending — the soft-delete genuinely didn't land.
+        return jsonResponse({ pending: false, org_name: 'Acme AS' })
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <OrgDeletionDangerZone />)
+    fireEvent.click(screen.getByRole('button', { name: 'Delete organization…' }))
+    fireEvent.input(screen.getByRole('textbox'), { target: { value: 'Acme AS' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Delete organization' }))
+
+    expect(await screen.findByText(/bad gateway/i)).toBeTruthy()
+    expect(screen.queryByText(/deletion scheduled/i)).toBeNull()
+  })
+
   it('surfaces an org-name mismatch error from the backend instead of silently failing', async () => {
     setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
