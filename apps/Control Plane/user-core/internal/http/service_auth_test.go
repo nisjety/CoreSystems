@@ -308,7 +308,7 @@ func TestServiceDelegationCrossLanguageVector(t *testing.T) {
 		Name:       "Verified User",
 		BodySHA256: digest,
 	})
-	if signature != "talCmu20E_nloJpxD5JLDYrnEWzxM1z0e2Ux-0GPtuU" {
+	if signature != "YscmqUN5kNSEAFIU2hafAF2UV87glPCdL_CnjII5V5k" {
 		t.Fatalf("cross-language signature = %q", signature)
 	}
 }

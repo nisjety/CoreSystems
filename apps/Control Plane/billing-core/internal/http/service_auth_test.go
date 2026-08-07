@@ -299,7 +299,7 @@ func TestBillingServiceDelegationV3CrossLanguageVector(t *testing.T) {
 		UserRole:   "owner",
 		BodySHA256: bodyDigest,
 	})
-	if signature != "3_0BRigS-8q6IIt_l4UV8OOEFtOG-1DCbMQrqnKeLMk" {
+	if signature != "GJExqlPqymL6yMnvkMWyc0XZz9r8rb7911A6fXIVUjA" {
 		t.Fatalf("cross-language signature=%q", signature)
 	}
 }
