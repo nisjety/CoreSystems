@@ -1,9 +1,15 @@
-use axum::{routing::get, Json, Router};
+use axum::{
+    routing::{get, post},
+    Json, Router,
+};
+
+mod embed;
 
 pub fn router() -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readyz))
+        .route("/v1/embed-text", post(embed::embed_text))
 }
 
 async fn health() -> Json<serde_json::Value> {
