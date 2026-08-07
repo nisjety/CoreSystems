@@ -184,7 +184,7 @@ function getSecurityControls(i18n: ReturnType<typeof useI18n>): { title: string;
 
 const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   // Phase 4 PR-2 de-fake: the workspace + integrations status grids carried a
-  // fabricated posture ('Verified' / 'aquatiq.no is ready' / 'Connected apps
+  // fabricated posture ('Verified' / 'coresystem.no is ready' / 'Connected apps
   // 2 / 4' / 'Healthy, synced 8 minutes ago'). No real producer exists, so the
   // grids are honestly empty; integration counts are shown truthfully by the
   // live <Metric> grid in IntegrationsSection.
@@ -477,9 +477,9 @@ function WorkspaceSection() {
         )}
       />
       <div class="verevon-settings-field-grid">
-        <SettingsField id="workspace-name" label={i18n.tr('Arbeidsområdenavn', 'Workspace name')} value="aquatiq-as" />
-        <SettingsField id="workspace-url" label={i18n.tr('Arbeidsområde-URL', 'Workspace URL')} value="aquatiq-as.verevon.ai" />
-        <SettingsField id="primary-domain" label={i18n.tr('Primært domene', 'Primary domain')} value="aquatiq.no" />
+        <SettingsField id="workspace-name" label={i18n.tr('Arbeidsområdenavn', 'Workspace name')} value="coresystem-as" />
+        <SettingsField id="workspace-url" label={i18n.tr('Arbeidsområde-URL', 'Workspace URL')} value="coresystem-as.verevon.ai" />
+        <SettingsField id="primary-domain" label={i18n.tr('Primært domene', 'Primary domain')} value="coresystem.no" />
         <SettingsSelect
           id="data-region"
           label={i18n.tr('Dataregion', 'Data region')}
@@ -592,7 +592,29 @@ function MembersSection(props: { orgId: string | null }) {
       setInviteEmail('')
       await loadMembers(orgId)
     } catch {
-      setActionError(i18n.tr('Invitasjonen kunne ikke sendes. Kontroller administratortilgangen din og prøv igjen.', 'The invitation could not be sent. Verify your admin access and try again.'))
+      // inviteMember can fail (e.g. a transient 502) after the invite was
+      // already durably recorded server-side. Re-fetch and check whether the
+      // invited email is now listed (any status — including a pending
+      // invite) before asserting failure, instead of trusting the network
+      // error alone — otherwise an admin sees a false "could not be sent"
+      // error and may resend a duplicate invite for one that already went
+      // out.
+      let reconciled = true
+      try {
+        await loadMembers(orgId)
+      } catch {
+        reconciled = false
+      }
+      if (!reconciled) {
+        setActionError(i18n.tr(
+          'Vi fikk ikke bekreftet om invitasjonen ble sendt. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the invitation was sent. Please wait a moment before trying again.",
+        ))
+      } else if (members().some((member) => member.email.toLowerCase() === email)) {
+        setInviteEmail('')
+      } else {
+        setActionError(i18n.tr('Invitasjonen kunne ikke sendes. Kontroller administratortilgangen din og prøv igjen.', 'The invitation could not be sent. Verify your admin access and try again.'))
+      }
     } finally {
       setActionBusy(false)
     }
@@ -627,7 +649,26 @@ function MembersSection(props: { orgId: string | null }) {
       setConfirmRemoveId(null)
       await loadMembers(orgId)
     } catch {
-      setActionError(i18n.tr('Medlemmet kunne ikke fjernes. Auth Core beholdt organisasjonseierens rolle intakt.', 'The member could not be removed. Auth Core kept the organization owner invariant intact.'))
+      // removeMember can fail (e.g. a transient 502) after the member was
+      // already durably removed server-side. Re-fetch and check whether
+      // they're still listed before asserting failure, instead of trusting
+      // the network error alone.
+      let reconciled = true
+      try {
+        await loadMembers(orgId)
+      } catch {
+        reconciled = false
+      }
+      if (!reconciled) {
+        setActionError(i18n.tr(
+          'Vi fikk ikke bekreftet om medlemmet ble fjernet. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the member was removed. Please wait a moment before trying again.",
+        ))
+      } else if (members().some((item) => item.userId === member.userId)) {
+        setActionError(i18n.tr('Medlemmet kunne ikke fjernes. Auth Core beholdt organisasjonseierens rolle intakt.', 'The member could not be removed. Auth Core kept the organization owner invariant intact.'))
+      } else {
+        setConfirmRemoveId(null)
+      }
     } finally {
       setActionBusy(false)
     }

@@ -149,9 +149,9 @@ describe('workspace settings page', () => {
     expect(screen.getByRole('heading', { name: /verifiserte domener/i })).toBeTruthy()
     // De-faked: no fabricated verified domains; honest empty state instead.
     expect(screen.getByText(/ingen domener er verifisert/i)).toBeTruthy()
-    expect(screen.queryByText('support.aquatiq.no')).toBeNull()
+    expect(screen.queryByText('support.coresystem.no')).toBeNull()
     expect(screen.getByRole('button', { name: /rediger tidsplan/i })).toBeTruthy()
-    expect((screen.getByRole('textbox', { name: /arbeidsområdenavn/i }) as HTMLInputElement).value).toBe('aquatiq-as')
+    expect((screen.getByRole('textbox', { name: /arbeidsområdenavn/i }) as HTMLInputElement).value).toBe('coresystem-as')
     expect(screen.queryByRole('textbox', { name: /invite by email/i })).toBeNull()
   })
 
@@ -226,6 +226,176 @@ describe('workspace settings page', () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/org_1/members/user_2')).toBe(true)
     })
+  })
+
+  it('reconciles a false-failure 502 by checking whether the invite was actually recorded', async () => {
+    setSessionUser({
+      id: 'owner_1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    let invited = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
+        return new Response(JSON.stringify({
+          members: invited
+            ? [{ id: 'membership_new', userId: 'user_new', role: 'admin', status: 'invited', user: { email: 'new@example.com' } }]
+            : [],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/orgs/org_1/members/invite' && init?.method === 'POST') {
+        // The invite reaches the backend and is durably recorded, but the
+        // response itself is lost to a transient gateway error.
+        invited = true
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 502,
+        })
+      }
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <VerevonWorkspaceSettingsPage section="members" />)
+    fireEvent.input(screen.getByRole('textbox', { name: /inviter via e-post/i }), {
+      target: { value: 'new@example.com' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /inviter medlem/i }))
+
+    expect(await screen.findAllByText('new@example.com')).not.toHaveLength(0)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect((screen.getByRole('textbox', { name: /inviter via e-post/i }) as HTMLInputElement).value).toBe('')
+  })
+
+  it('shows a real failure when inviting a member genuinely did not go through', async () => {
+    setSessionUser({
+      id: 'owner_1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
+        return new Response(JSON.stringify({ members: [] }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/orgs/org_1/members/invite' && init?.method === 'POST') {
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 502,
+        })
+      }
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <VerevonWorkspaceSettingsPage section="members" />)
+    fireEvent.input(screen.getByRole('textbox', { name: /inviter via e-post/i }), {
+      target: { value: 'new@example.com' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /inviter medlem/i }))
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.queryByText('new@example.com')).toBeNull()
+    expect((screen.getByRole('textbox', { name: /inviter via e-post/i }) as HTMLInputElement).value).toBe('new@example.com')
+  })
+
+  it('reconciles a false-failure 502 by checking whether the member was actually removed', async () => {
+    setSessionUser({
+      id: 'owner_1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    let removed = false
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
+        return new Response(JSON.stringify({
+          members: removed
+            ? []
+            : [{ id: 'membership_2', userId: 'user_2', role: 'member', user: { name: 'Teammate', email: 'teammate@example.com' } }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/orgs/org_1/members/user_2' && init?.method === 'DELETE') {
+        // The removal reaches the backend and is durably recorded, but the
+        // response itself is lost to a transient gateway error.
+        removed = true
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 502,
+        })
+      }
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <VerevonWorkspaceSettingsPage section="members" />)
+    expect(await screen.findByText('teammate@example.com')).toBeTruthy()
+
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: /fjern teammate/i }) as HTMLButtonElement).disabled,
+    ).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: /fjern teammate/i }))
+    fireEvent.click(screen.getByRole('button', { name: /bekreft fjerning av teammate/i }))
+
+    await waitFor(() => expect(screen.queryByText('teammate@example.com')).toBeNull())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows a real failure when removing a member genuinely did not go through', async () => {
+    setSessionUser({
+      id: 'owner_1',
+      email: 'owner@example.com',
+      name: 'Owner',
+      emailVerified: true,
+    })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
+        return new Response(JSON.stringify({
+          members: [{ id: 'membership_2', userId: 'user_2', role: 'member', user: { name: 'Teammate', email: 'teammate@example.com' } }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/orgs/org_1/members/user_2' && init?.method === 'DELETE') {
+        return new Response(JSON.stringify({ message: 'Bad Gateway' }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 502,
+        })
+      }
+      return new Response(JSON.stringify({ success: true }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <VerevonWorkspaceSettingsPage section="members" />)
+    expect(await screen.findByText('teammate@example.com')).toBeTruthy()
+
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: /fjern teammate/i }) as HTMLButtonElement).disabled,
+    ).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: /fjern teammate/i }))
+    fireEvent.click(screen.getByRole('button', { name: /bekreft fjerning av teammate/i }))
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.getByText('teammate@example.com')).toBeTruthy()
   })
 
   it('renders org-security controls and live Audit Core security events', async () => {
