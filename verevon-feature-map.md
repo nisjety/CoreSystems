@@ -1,0 +1,752 @@
+# Verevon Feature Map — Honest Deep-Dive Audit
+
+> **Execution clarification — 2026-08-03.** All implementation and deployment
+> gates in this document refer first to the local Docker stack. The next step
+> is to rebuild updated images, apply migrations, verify running services and
+> end-to-end flows, fix bugs, and continue implementation. This is not an
+> instruction to release Verevon externally.
+
+> **Current execution ledger — 2026-08-05.** For current status and ordered
+> execution across this audit, `VEREVON.md`, the AI-first audit, Vision,
+> Roadmap, and Support delivery record, use
+> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-05).
+> This feature map retains detailed and dated evidence; the ledger resolves any
+> conflicting current-status claim.
+
+> **2026-08-02 correction (resolution-plan review).** A bounded Inbox resolution plan can now correlate the separately staged `draft.reply`, `internal.note`, and existing-ticket `ticket.update` proposals in the durable, tenant-scoped AI-action ledger. The opaque correlation is visible to reviewers after reload but is deliberately not a bulk-approval, bulk-rejection, or execution capability: every proposal retains an independent payload, human decision, execution path, and receipt. An authenticated browser regression proves all three persisted entries retain separate review controls after reload. It does not turn Chat into the support system of record or claim Autopilot.
+
+> **2026-08-02 correction (Inbox operating modes).** The unified Support slice now has a Control-Plane-owned Inbox AI policy with three enforced states: `Off` blocks customer-transcript model invokes, `Assist` permits transient help only, and `Review` is required for durable AI proposals. Gateway enforcement also rejects retained proposals under ZDR. This is deliberately not an Autopilot claim: automatic sends, ticket mutations, routing, and proactive actions remain unimplemented until a separately governed and verified execution policy exists. See `verevon-inbox.md` for the source-level and browser-verification record.
+
+> **2026-07-20 correction (same-day, later pass):** the "one confirmed
+> cross-tenant IDOR (`x-verevon-org-id`, 17+ call sites) is open" claim in the
+> paragraph below is stale. A fresh source-level re-audit of
+> `apps/gateway/src/middleware.rs` and `upstream.rs` on `main` (not the dirty
+> working tree) found the header IDOR closed: `x-verevon-org-id`/`x-org-id` are
+> globally stripped at ingress (`STRIPPED_HEADERS`, applied as an axum layer
+> before any handler), org is derived only from the live-verified session
+> membership (`upstream::authorized_org_id`), that accessor is used at 107 call
+> sites across 31 domain files (a superset of the 17+ sites this claim cites),
+> and dedicated regression tests (`strips_forged_org_scoping_headers`,
+> `stripped_headers_includes_verevon_org_id`, plus IDOR-regression tests in
+> `main.rs`) assert a forged header is never forwarded. This does not touch the
+> separate, still-open `onboarding/graph-preview ?org_id=` query-param IDOR
+> described elsewhere in this doc and in `FRONTEND_PLANE_ROADMAP.md` — that is a
+> different vector and was not re-verified in this pass.
+
+> **2026-08-01 correction (chat engine + two live gates closed).** §1.2's "one live probe settles it" and §2 item 2's "verify with a real inference call" are done: this session drove real, streaming chat end-to-end for **hours** against the running stack (live Azure providers, tool loop, GraphRAG-fused retrieval) — not a smoke test, direct interactive use. This is a manual proof, not a CI gate — §1.2's "smoke test in CI" done-enough-gate item remains open. Two chat-parity gaps also shipped and were live-verified: **resumable streams** (a disconnect no longer cancels the run — the producer detaches, keeps generating, persists, and finishes the resume buffer, so a reconnect replays the complete answer) and **edit/regenerate version navigation** (a client-side 1/N switcher over an exchange's prior answers), the latter surfacing and fixing a real standing bug where Regenerate silently appended a duplicate answer instead of replacing it. §1.2's "Semantic memory degraded (`DEGRADED_SEMANTIC_UNVERIFIED`)" line is also stale — fixed (an embedding-dimension mismatch was silently zeroing every search; readiness now correctly reports degraded only when the backend has never returned a hit). ZDR is more precisely scoped than §1.2's "may block external inference" framing: the interactive-retention-policy exception §6.9 already resolved on 2026-07-21 is a different gap from the one that remains — enforcement is complete and verified across all 6 Verevon-side durable boundaries, and the sole open piece is **provider attestation** (a contract-plus-operator-flip, not code); see `apps/Model Plane/docs/ZDR.md`. Full detail on the two shipped features: `apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md`. New artifact: a 10-harness competitor study (Claude Code, Codex, OpenCode, ChatGPT, Perplexity, Manus, Hermes, OpenClaw, Pi + expert consensus) — `apps/Model Plane/docs/VEREVON_CHAT_PARITY_BACKLOG.md`. This note certifies only Model Plane chat-engine liveness and the two shipped features — it does not re-verify IDOR, RLS, insight-core wiring, credential rollout, image provenance, or anything else in §2/§3, which stand as last audited.
+
+> **Architecture synthesis — 2026-08-03.** This document is synchronized with the latest code-aware improvement sources:
+>
+> - `/Volumes/Lagring/Triodelab/CoreSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md`
+> - `/Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md`
+>
+> The resulting authority split is explicit: **Quarry captures and verifies web evidence; Data Plane owns durable knowledge and organizational memory; Model Plane plans, reasons, selects capabilities, and proposes memory updates; Application/Control own human intent, identity, and review surfaces.** Mem0 is treated as a Data Plane design donor and benchmark target, not as Verevon's canonical memory authority.
+
+**Date:** 2026-07-20
+**Method:** Full read of all 26 listed docs (6 parallel research streams), code-level audit of verevonv3 (routes, feature folders, API clients, all ~49 gateway domains), live competitor research (11 companies), and a 4-perspective council (pragmatic CTO, security/compliance, product/GTM, delivery-risk) on sequencing. No code was changed. This is an audit, not a promise.
+
+**How to read this:** Features are sorted by how far along they actually are — verified against code, not doc claims. Each feature ends with a "done-enough gate": what must be true before it works correctly and the team moves to the next thing. The cross-cutting blockers section matters more than any single feature — read it first if you read only one section.
+
+---
+
+## 0. The one-paragraph truth
+
+Verevon v3 is an organization intelligence-and-action workbench, not only a customer-support assistant. Its product loop connects company documents and systems, Norwegian public-data context, websites and web evidence to a durable knowledge layer; lets people and agents search, reason, call tools, and prepare work; and keeps consequential execution observable and approval-aware. **9 of 11 frontend surfaces are genuinely wired to real gateway domains with a documented honesty contract** (neutral empty states, self-labeled previews, no fabricated numbers), while the underlying planes provide deeper retrieval, graph, ingestion, agent, inbox, ticket, social, and contextual-data capabilities. The support inbox is a concrete wedge, not the category. Channel Plane external agents and meeting intelligence expand the same substrate in the future, but are docs-only today. **Runtime correction (verified live 2026-07-20):** the docs' 2026-07-13 "hot path down / Docker stopped" claims are stale — `docker ps` shows **94 containers up, zero unhealthy/restarting**, including model-gateway, inference-core, all of Quarry, shipping-core, verevon-gateway-rs, and the SPA; the Lagring volume has 116 GiB free. What remains true regardless of green health: **image provenance is unproven** (no SHA tags / `/version` endpoints, so runtime cannot be correlated to the hardened source), health checks are shallow, the credential rollout ritual is undone, and production promotion still needs deep smoke tests, tenant/security evidence, ZDR decisions, and scope discipline. Treat the docs' ~72% "production-real" figure as dated and verify runtime claims against the live host in both directions.
+
+### 0.1 Product model correction — 2026-07-22
+
+Verevon has five connected capability layers:
+
+1. **Sources** — company documents, connected systems, websites, web evidence, Norwegian public data, and future sources such as meetings and public conversations.
+2. **Knowledge and context** — hybrid retrieval, GraphRAG, wiki, citations, source traces, entity resolution, change monitoring, and bounded live lookups.
+3. **Reasoning and action** — chat, search, research, agents, browser actions, tool calls, MCP, plugins, and system integrations.
+4. **Governance** — permissions, policies, cost controls, approval gates, audit, retention, residency, and reversibility.
+5. **Work surfaces** — dashboard, chat, knowledge, inbox, tickets, agent runs, social, studio, insights, and future external channels.
+
+The core loop is **connect → understand → search → decide → act → approve → audit**. Customer support is one complete proof workflow for this loop, not the definition of the product.
+
+---
+
+## 1. Feature-by-feature map (sorted: furthest along first)
+
+### 1.1 Knowledge Base — furthest along, and the crown jewel
+
+**Vision:** internal database that connects data and makes it available to Verevon's AI (mnemon / cognee / contextual.ai class).
+
+**What verifiably exists**
+
+- UI: `src/features/knowledge/` — overview, operating map, **3D force-graph** of live knowledge nodes, chunks/retrieval inspector, wiki pages, document management, imports/upload, share dialogs via `ownership-client`. All backed by `knowledge-live-client` + `knowledge-client` (~1,270 LOC combined), zero mocks.
+- Backend (Data Plane v2, source + isolated verification): hybrid retrieval (Qdrant dense + Quickwit/Postgres sparse with fallback), retrieval traces with actor attribution, context packing, **GraphRAG** (entities/relationships/claims/communities in `graph-index-rs`), full wiki store (versions, backlinks, proposals, diffs, source logs), knowledge-unit extraction pipeline over NATS, document ACL gRPC in user-core for per-user ownership/sharing. retrieval-engine: 212 tests pass; real-authority browser E2E 2/2 — one user sees only their own knowledge.
+- This is exactly the "connections between data + source traces" ambition — it is not aspirational, it exists in source.
+
+- **New architecture target — Memory Intelligence, not a second vector store.** Data Plane should own durable user/customer/team/case/agent memory as typed, provenance-bearing claims with validity, contradiction, supersession, retention, and deletion proof. Model Plane proposes candidates; Control authorizes scope; Application exposes review/correction. Mem0 is a benchmark/design donor for async extraction, semantic+BM25+entity+temporal retrieval, and expiration—not a canonical dependency.
+
+**Memory done-enough gate:** one authorized end-to-end flow that turns a user-stated or provider-verified event into a typed candidate, detects a contradiction, promotes/supersedes correctly, retrieves the current fact with source proof, and permanently deletes canonical plus derived copies under a testable erasure request.
+
+**Honest gaps**
+
+- `AUTHCTX_ENFORCE=0`: documents-api verifies JWTs in **observe mode** — header trust is still live in practice.
+- The Model Plane embedding gRPC hop is broken/worked-around: embedding + retrieval fall back to **direct Azure HTTP**, which violates the "no independent embeddings outside Model Plane" architecture rule and blocks a self-hosted RAG story.
+- Strict mutation telemetry for Postgres/Qdrant/Quickwit/MinIO missing (release-evidence gap); several job/eval packages 27–53 % coverage; `retrieval-eval-py` is an empty service (decide: build or delete).
+- Cross-plane GDPR erasure: event emitted, **Data Plane purge subscriber partially unbuilt** — erasure does not yet actually purge chunks/embeddings/traces.
+- Nothing here is deployed to a production-shaped environment.
+
+**Competitor bar (Ayfie):** clickable per-answer sources ✅ (traces exist), permission-aware retrieval ✅ (in source), EU residency statement ✅ (Sweden Central), on-prem ❌ (not needed for SMB pilot).
+
+**Done-enough gate:** deployed with `AUTHCTX_ENFORCE=1`, embedding hop through inference-core proven (or the Azure fallback consciously accepted and documented for the pilot), one real org's crawl+docs corpus retrievable with sources in <15 min from signup.
+
+---
+
+### 1.2 Home Dashboard (AI composer / Search / Crawl) + Chat page — UI done, engine not plugged in
+
+**Vision:** an organization intelligence workbench that combines internal knowledge, Norwegian public-data context, web search, agentic research, crawling, and approved system actions.
+
+**What verifiably exists**
+
+- Composer (`DashboardComposer.tsx`, part of the 22-file / ~11.9k-LOC dashboard feature): streaming chat, thread history, voice dictation (`audio-client`), live model catalog from `/api/v1/models`, composer settings, tools opt-in.
+- Chat page: `streamChat`/`resumeStream` SSE with `tool_call`/`tool_result`/`attachment` event families, thread history, attachments both directions, model selector with 3 Verevon modes + live catalog, feedback endpoint. `buildChatWireBody` **does** emit tools now — the old "frontend sends no tools" gap is closed.
+- Search tab: `/search/web`, images, videos, find-similar, suggest, **streaming `/answer`** — the Exa-style surface is wired.
+- Crawl tab: page discovery → subset pick → crawl jobs, in-app browser chrome via `browser-client` (profiles/sessions) — the "see what to scrape" browser exists.
+- Backend truth: the Model Plane agent loop is **real, not nomenclature** — `execute_step` dispatches shell, browser_agent, subagents, web_search/knowledge_search, shipping, social, provider actions, MCP proxy; server-side HITL pauses risky tools _before_ execution.
+
+**Honest gaps**
+
+- **Engine status (corrected 2026-08-01):** model-gateway and inference-core are up, healthy, and **proven live** — this is no longer a probe-it-yourself gate. A real chat turn was driven end-to-end for hours (streaming, live Azure providers, tool loop, GraphRAG-fused retrieval) during the 2026-08-01 session. Still open: a CI-gated smoke test (this was a manual/interactive proof, not an automated one).
+- **All-ZDR posture:** resolved on 2026-07-21 (§6.9) — the undocumented interactive-retention-policy exception is removed, `zdr:false` is the real default, resolved live per org. A _separate_, still-open gap: no provider is currently attested for ZDR (`AZURE_OPENAI_ZDR_CONFIRMED` defaults false, azure-anthropic has no attestation knob), so a user who explicitly requests ZDR (per-turn toggle or org-wide switch) is correctly refused rather than silently downgraded — see `apps/Model Plane/docs/ZDR.md` for the exact gap and the path to closing it.
+- Post-approval continuation is a named P0: granting writes a tenant- and actor-scoped, identifier-only delivery-outbox record that can be leased/retried, but it deliberately has no execution dispatcher, successful-delivery state, or provider receipt. HITL can pause durably; it cannot yet resume an approved risky action.
+- Search quality: SearXNG effectiveness is **unproven**; "full Google" is not a 3-dev goal — a good grounded answer engine over web + own KB is.
+- ~~Semantic memory degraded (`DEGRADED_SEMANTIC_UNVERIFIED`)~~ **fixed 2026-08-01** — root cause was an embedding-dimension mismatch (config silently defaulted to 1536 while embeddings are 3072) that zeroed every search; readiness now correctly distinguishes a genuinely-empty index from a healthy one. Cost ledger in-memory (unchanged).
+- ~~MCP execution disabled for MVP; Visma integration is vaporware in-product (zero source matches)~~ **completely reversed 2026-07-28.** A real OAuth 2.1 + Dynamic Client Registration client lets model-gateway connect a third-party MCP server from nothing but its URL; the prior "bridge" transport was never real MCP at all (no genuine remote server could have worked) and was replaced with real MCP Streamable HTTP. **Live-verified: a real Visma Net ERP query answered through plain chat.** Caveats: HTTPS-only (stdio/legacy SSE quarantined), streaming path only, token refresh not load-tested under concurrent use.
+- **New this week — a P0 agent-loop-starvation bug, fixed 2026-07-28.** `MAX_TOOL_ROUNDS` was 3; a self-describing MCP server (like the Visma one above) spends its first rounds on tool-discovery calls, leaving zero rounds to act on results — the model would work out a fix and still have to hand it back to the user. Now 12 (configurable), plus tool-result truncation (was unbounded), a 4× larger answer budget (1024→4096 tokens), and honest signaling when the tool phase is cut short. Live-verified before/after on the same question.
+- **New this week — cost-aware model selection (Budget/Balance/Genius) was completely inert until 2026-07-29.** The budget-check call carried no auth header and 401'd on every single call since it was built, permanently pinning cost posture to `Unknown` — no request was ever actually downgraded by budget pressure. Any claim that this capability was "live" before this date should be read as source-real-but-not-enforced. Fixed and confirmed live (`posture:"Healthy"` observed).
+- **New this week — the per-answer confidence badge was hardcoded at 72% for every tool-grounded answer, fixed 2026-07-29.** The scorer's only path to a higher score required KB citations, which tool-sourced answers never carry — so every correct Visma/tool answer showed a false "Usikkert svar" (uncertain) caveat. Fixed by adding tool-success as its own grounding signal.
+- **New this week — delegated subagents were completely faked before 2026-07-28.** `execution-core`'s subagent dispatch returned a canned "spawned" string with no actual execution. Now really runs (isolated context, depth-1 cap, budget charged to the parent) — cannot yet pause for human approval mid-delegation.
+- **New this week — a response cache now reaches real chat traffic (2026-08-01).** The semantic response cache existed and worked but every call site was wired into a gRPC path real chat traffic never uses; now wired into the actual streaming invoke path. Live-verified: a repeat question went 7.7s→1.1s, zero tokens billed. Scoped out: turns using tools, citations, or structured output (replay-fidelity, not staleness).
+- **New this week — chat pinning is server-owned and no longer destructive (2026-08-01).** Pinning was previously client-only dead code with zero callers. Also found and fixed in the same pass: a sort-before-truncate bug was silently deleting any pinned thread past position 40 in the history list — a real, previously-undiscovered data-loss bug, not just a missing feature.
+- **New this week — memory provenance is now user-visible (2026-08-01).** Extracted memories carry a `stated`/`inferred`/`unknown` provenance field; the SPA shows an "Inferred by Verevon" badge only on `inferred` rows, so a user can tell what they actually said from what the AI concluded.
+- ChatPage.tsx 3,685 lines / DashboardComposer.tsx 2,349 lines — maintainability debt against your own 800-line rule. **Confirmed and worse in a 2026-08-02 sweep**: `DashboardComposer.tsx` is now 2,586 lines, `BrowserChrome.tsx` 2,104, `KnowledgeComposer.tsx` 1,949 — the 4 largest files in the entire repo, all driving the home Chat/Søk/Crawl surfaces, and **none of them have a component test** (only small pure-logic helper modules in the same folders are tested). A regression in composer submit, browser navigation, or knowledge-scrape-preview state has no automated guard.
+- **Resolved 2026-08-03 — Chat's auto-attached Brreg lookup tool schema.** `src/features/chat/lib/brreg-action.ts` now uses the canonical `brreg.lookup_organization` registry ID instead of the legacy underscore spelling, so `createSelectedAgentToolSpecs` supplies the registered required `q` and `size` schema rather than an empty dynamic-tool fallback. A focused regression constructs the prompt-selected tool exactly as Chat does and verifies that wire contract.
+
+**Competitor bar (ChatGPT/Perplexity/Chatbase):** streaming grounded chat with citations ✅ in source; time-to-value (crawl → useful answer < 15 min) is the Chatbase bar and is achievable with what exists; "combined ChatGPT+Claude+Manus+Perplexity" is **not** the pilot bar — grounded Norwegian answers with sources is.
+
+**Done-enough gate:** inference hot path deployed and pinned to a commit; ZDR exception/tier decided and documented; one smoke test that performs a real chat turn + a real grounded answer in CI; approval→continuation works for at least the preset agent actions used in the demo.
+
+---
+
+### 1.3 Inbox — most complete Application Plane surface
+
+**Vision:** Outlook + Intercom + Gorgias + Mimir parity, omnichannel.
+
+**What verifiably exists**
+
+- UI freshly overhauled (July 2026, 5 phases): sandboxed-iframe email rendering, resizable saved panels, Details tab on real data, real macros, and — the important part — `inbox-ai.ts` making **real model-plane calls** (`/api/v1/chat/invoke`) for draft/summarize/intent/ask with grounded sources.
+- Backend: conversation-core-go (293 tests) — inboxes, queue, conversations, messages, notes, status, assignment, tags, search, and a real **HITL ai-actions review/approve/reject queue**. Channel-agnostic model (free-form `channel` string).
+- Inbound pipeline proven channel-agnostic: Gmail/Outlook + Slack live earlier; Teams/Slack/X/Discord pollers landed 2026-07-18 (36/36 green; synthetic Teams → 202 → auto-inbox proven).
+
+**Honest gaps**
+
+- Same deployment gap: hardened source vs stale running images; conversation migrations unapplied; approval-event durable outbox, delivered/submitted provider callbacks, and stranded-row reconciliation missing.
+- Full Inbox AI/HITL E2E is **blocked on Model Plane health** + lack of authorized WhatsApp/Messenger/Novu sandbox recipients; the old audit finding "WA/Messenger replies silently never send" lives in this hole.
+- ZDR/retention unproven across message bodies/attachments/AI drafts; tenant retention policy absent.
+- Attachment metadata is now durable and visible in the transcript: core stores bounded provider descriptors and Inbox renders filename/type/size without exposing a provider or storage URL. Binary upload, malware scanning, retention-aware storage, and authorised download remain open. Draft reply review is editable before approval, personal Inbox preferences are server-backed, and the empty Inbox offers a self-service Gmail/Outlook OAuth session flow. Ingestion completion still determines when messages appear.
+- Parity honesty: canonical draft-collision protection is live (one-minute, actor-scoped conversation lease with a browser-proven conflict/renew/release flow). A personal, durable follow preference is also live through an audited low-risk action. Inbound-message fan-out is now wired through a least-privilege notification-core consumer with membership/preferences checked per follower and a generic content-free payload; the local notification runtime is disabled, so no live delivery is claimed. This remains personal follow—not a teammate-subscription directory. CSAT remains open.
+
+**Competitor bar (Zendesk/Intercom/Gorgias/Mimir):** unified inbox + AI drafts + human approve is _met in source and is your differentiator_ (approvable beats "90 % auto-resolved" for pilot trust). Full helpdesk parity (CSAT, SLA depth, voice, WFM) is **not** the pilot bar — do not chase it.
+
+**Done-enough gate:** deployed; a pilot org can connect its own email account self-serve; AI draft → human edit → approve → **actually sends and is confirmed delivered** on email (one channel done honestly beats six half-channels); reconciliation for stuck sends exists.
+
+---
+
+### 1.4 Ticketing — real and distinct, further than expected
+
+**Vision:** Zendesk + Intercom + Zammad class.
+
+**What verifiably exists**
+
+- Separate `/tickets` system (not just an inbox view): tickets, ticket views, macros, **SLA policies, automation rules**, per-org resources — `tickets-client` (415 LOC) + `tickets.rs` (333 LOC), all backend-driven.
+- Zammad exists only as a non-integrated bootstrap stack on a separate compose file — the first-party path is conversation-core + tickets domain, which is the right call.
+
+**Honest gaps**
+
+- Depth is untested against real volume; queue taxonomy remains a bounded product list; no CSAT or customer-facing portal/help-center. Ticketing has a deliberately narrow, deterministic state-rule builder, not a general autonomous routing engine, and still shares conversation-core's deployment/callback gaps.
+- No evidence of E2E under real multi-agent load.
+- **Code-health correction, 2026-08-03:** the earlier empty-array failure finding is no longer current. `loadTicketList` now retains the error as first-class state and `TicketingPage` renders **“Ticketing is unavailable”** instead of a false empty queue; focused coverage proves that branch. The primary ticket lifecycle controls now go through the typed `tickets.*` action helpers (`executeTicketPatch`, `executeTicketMacro`, checklist and resource-link actions) and reread the canonical ticket afterwards. Existing tickets now receive a bounded, reviewable `ticket.update` AI proposal instead of a duplicate suggested ticket; it cannot resolve, close, snooze, or change ownership, but it can carry a reviewer-correctable canonical team pair alongside active-work status and taxonomy. Support’s unified ticket sidebar now keeps exception queues distinct from operational configuration and exposes **Rules / queues**; its bounded builder can create deterministic ticket-state rules and pause/resume active rules through the scoped canonical endpoint, rather than presenting an opaque AI-autopilot control. Its bounded `tickets.create_macro` action is audited through the same gateway path. Remaining gaps are narrower: team administration still uses its dedicated admin client, rule/view/macro/SLA management is still partial (editing, governance and broad configuration are not claimed), and the page is still too large. Resource links now use an explicit protocol allow-list before rendering.
+
+**Competitor bar (Zendesk):** assignment, status, tags, macros, SLA — **already present in source**, which is genuinely ahead of schedule. Help center + CSAT are pilot-era, reporting is Insights' job.
+
+**Done-enough gate:** deployed alongside Inbox; one full lifecycle (create from inbound → assign → SLA clock → macro reply → resolve) demonstrated with real data; decide Zammad's fate (recommend: delete the stack, keep learnings).
+
+---
+
+### 1.5 Ingestion / Crawler page — real product, dead host; "SEO" does not exist
+
+**Vision:** URL management, scheduling, crawler profiles, SEO monitoring, Google/Meta ads tracking → rename to SEO.
+
+**What verifiably exists**
+
+- The crawler/ingestion product is real: `VerevonIngestionsPage` (1,137 LOC) → sources, **crawler profiles**, **schedules**, runs, evidence, actions; monitoring/change-watch client. Quarry-v2: scrape/crawl/batch (100+ URLs), URL security scanning, change tracking, webhook delivery, browser pooling, SSRF/DNS guards, production HMAC enforcement — 652 tests green.
+
+- **New Quarry reliability target — deterministic self-healing before more model calls.** Persist semantic element fingerprints, relocate read-only/extraction targets using structure/accessibility/context, classify acquisition challenges, compile verified trajectories into browser procedures, and connect source changes to affected workflows. Consequential targets (`send`, `publish`, `delete`, `approve`, `pay`) may never auto-repair from similarity alone.
+- **Immediate Quarry blockers are smaller and more urgent than the new features:** the latest code-aware audit confirms the headless/redirect/DNS SSRF path is broken in shape today, and the durable Postgres frontier is already written but feature-flagged off with zero production callers. Close and wire those before expanding runtime variety.
+- imports-core: Notion/HubSpot/Salesforce/Odoo/REST connectors + PDF/DOCX/CSV/JSON/HTML parsers with signed identity and fail-closed quota.
+
+**Honest gaps**
+
+- ~~The host is down~~ **Corrected 2026-07-20:** Quarry edge/control/orchestrator, imports-api, integration workers all up and healthy; 116 GiB free on the volume. The July disk outage is resolved but the 278 GiB Docker data image remains a standing risk — add a disk alert.
+- Schedule trigger/backfill Temporal wiring stubbed; `/v1/sources` schema TODO; artifact store has `unimplemented!()` paths; SearXNG unproven; imports-core coverage 48 %.
+- **There is zero SEO code anywhere.** No rank tracking, no ads integration, no traffic analytics, no AI-visibility tracking. The "SEO page" is 100 % future work, and the market bar has moved to AI-answer visibility (Peec: prompts × models × sentiment × cited sources, €85+/mo).
+
+**Competitor bar (Peec):** classic SEO is a losing catch-up game; a _Norwegian-language AI-visibility lite_ (~25 prompts × 2 models with cited-source reports) would be a genuinely open niche — but only **after** the pilot.
+
+**Done-enough gate (crawler):** host disk reclaimed, Docker up, scheduled re-crawl of one real site proven, change-watch firing into knowledge freshness. **SEO gate:** consciously deferred — write it on the roadmap as a post-pilot bet, stop calling it a current feature.
+
+---
+
+### 1.6 Social — strongest gateway domain, strategically parked
+
+**Vision:** merged into Studio "in a smart way."
+
+**What verifiably exists**
+
+- The largest gateway domain (`social.rs`, 3,088 LOC): posts, calendar, drafts-from-inbox, adapters/accounts, approvals workflow, campaigns, evergreen, competitor-watch, trends, metrics, commerce catalogs. social-core backend healthy with worker-enforced HITL at execution time. Real LinkedIn/X/IG/FB/TikTok integrations in source.
+
+**Honest gaps**
+
+- "Live authenticated UI/provider proof still pending" — no verified end-to-end post to a real account in the current pass. Historical audit flagged fabricated trends/competitor-watch and demo-account fallbacks (some cleaned; verify before showing).
+- Social domain test coverage 41.7 %.
+- The Studio merge is architecture-roadmap (Studio Plane Phase 4), i.e., far away.
+- **Resolved 2026-08-03**: the stale June `2026-06-15`/`2026-06-17` fixture
+  dates were removed from `SocialCalendarPage.tsx`. The calendar now derives
+  its initial month, current-day highlight, Today control, and new-draft
+  timestamp from the live UTC clock. A component regression test freezes time
+  on 2026-08-03 and verifies that the create-post request carries the current
+  timestamp rather than a stale fixture date.
+- **Resolved 2026-08-03 — Social publish approval boundary.** The earlier bypass claim was false: the browser-facing route and action dispatcher both terminate at social-core, whose authoritative `ensurePublishApproved` re-reads the post's approval state before scheduling, enqueueing, and publisher-worker execution. It returns `approval_required` when human review is absent; it never trusts a client `approvalId`. The calendar now makes that behavior visible by withholding schedule/publish controls for an unapproved post and linking directly to Social → Approvals; component coverage proves that no mutating control is exposed. The generic action contract still accepts an unused `approvalId`, and the duplicate gateway paths should be consolidated/validated consistently, but neither permits an unapproved provider post.
+
+**Done-enough gate:** park it. Before it appears in any demo: one real authenticated post to one real account, and every remaining fabricated fallback removed. Do not spend the merge-into-Studio effort pre-pilot.
+
+---
+
+### 1.7 Settings / Integrations — broad and real
+
+**What verifiably exists**
+
+- Providers/connections/connect-sessions/sync-jobs (real OAuth connect flows), cron, MCP servers, plugins, skills, privacy/Trust Center, 2FA, passkeys, org members/roles, billing, audit log — 13 files, ~5.4k LOC, all real clients, admin-gated.
+
+**Honest gaps**
+
+- SSO + org-security cards honestly unwired (render neutral — good). Better-Auth oRPC has placeholder paths (consent persistence, passkeys backends, admin stats). Billing has no live checkout proof; Nexi creds populated but unexercised in this stack.
+- **Resolved 2026-08-03 — 2FA step-up password visibility**: enrollment now uses a dedicated `type="password"` input with `autocomplete="current-password"`, so the account password is masked and password managers receive the correct semantic signal. A focused component regression test verifies both properties. The shared `SettingsField` remains intentionally unchanged while its concurrent work is in flight.
+- **`WorkspaceSettingsPage.tsx` is a 2,053-line god-file** holding ~12 unrelated concerns (workspace, members, billing/checkout state machine, SSO, org-security, integrations+OAuth+SSE sync) — 2.5x the project's 800-line max, raising blast radius for any single-domain change. Within it, the Members & roles section is the one place that renders admin-only controls (invite, role change, remove) with **no client-side admin gate** at all, unlike every sibling section in the same file.
+- Roughly half of the 17 settings components have zero tests, including both of the highest-stakes flows: 2FA enrollment and GDPR account erasure.
+
+**Done-enough gate:** already good enough for closed demo. Pilot gate: the 2-3 providers your wedge needs (email + website crawl) connect self-serve without a dev.
+
+### 1.7a Norwegian public-data context — deployed bounded lookup layer
+
+**What verifiably exists**
+
+- `information-core` is a real Application Plane service for bounded, read-only, provenance-bearing contextual lookups rather than a second knowledge corpus or ERP runtime.
+- The rebuilt local artifact verified Kartverket address/property location, SSB metadata, Entur journeys, Storting representatives, Norges Bank SDMX, MET weather, Statens vegvesen traffic/NVDB, NVE warnings, Riksantikvaren features, and Miljødirektoratet observations.
+- Responses carry a canonical source envelope with provider, dataset, source URL, retrieval time, quality/status and coverage semantics. This allows Verevon to distinguish measured, forecast, partial, stale, unavailable, and source-only results.
+- These sources can enrich search, agent runs, logistics, property/context preflight, regulatory research, market intelligence, and Norwegian company work without being confused with the organization's private knowledge.
+
+**Honest gaps**
+
+- Lovdata, DATEX II, and Frost remain source-only until provider credentials are provisioned and live acceptance passes.
+- eInnsyn, full Matrikkel/Grunnbok, Folkeregisteret, Maskinporten/Altinn data, closed AIS, and other restricted datasets require explicit purpose, authorization, legal basis, retention, and delegation decisions.
+- Durable feeds, versioned corpora, and recurring catalog/source ingestion belong in Ingestion/Data Plane, not in the bounded lookup service.
+- The July audit found stale or over-broad assumptions around Bring tracking, Kartverket, Lovdata, eInnsyn, Doffin, and Frost; product claims must use the current `deployed_verified`, `source_only`, `blocked`, and `discovery` states.
+
+**Done-enough gate:** each source is independently feature-flagged, source-attributed, bounded, rate-limited, tenant-safe, ZDR/GDPR-reviewed, and consumed through a named product workflow rather than exposed as an unqualified list of APIs.
+
+---
+
+### 1.8 Agents — real runs console, fake builder; the biggest honesty gap in the product
+
+**Vision:** n8n + Intercom Fin + Chatbase + workflow builders.
+
+**What verifiably exists**
+
+- `/agents/runs` **Agent Run Console is real**: runs list/detail, SSE timeline, plans/todos/lineage via orchestration-client. Server-side HITL is real and enforced (execution-core pauses risky tools pre-execution; durable approvals in session-core). Cost (`/agents/cost`) and eval (`/agents/quality`) pages wired.
+- **Durable Temporal workflows are now reachable end-to-end (fixed 2026-07-31, previously they were NOT)** — deep task, wide research, memory consolidation, skill promotion, and feedback promotion had zero production callers as of that morning (registered, tested, deployed, never once invoked outside a test file). By end of day: a real cron-fired run is claimed, completed, and consumed by the learning-review path with no human in the loop — live-verified against real DB rows, not just code inspection. This specifically unblocks the 3 ZDR-denying workflows (memory/skill/feedback promotion), which were refused by caller _identity_ (an internal/shared-secret caller can never satisfy a ZDR-denial gate) until a mintable JWT audience for the orchestrator was added.
+- **Delegated subagents were completely faked before 2026-07-28** — returned a canned "spawned" string with no execution. Now really run (isolated context, depth-1 cap, budget charged to the parent); cannot yet pause for human approval mid-delegation.
+- **Real code interpreter + canvas artifacts, new 2026-07-30.** Execution-core runs real sandboxed Python (and `sh`) via bwrap; canvas artifacts are genuine generated files (xlsx/docx/pdf via pandas/openpyxl/python-docx/reportlab — not a stub), with a real pageable version history (a `‹ v2/3 ›` stepper) and working downloads (a prior bug served files as a blocked top-level `data:` link).
+- **Cron-fired runs are now visible (read-only) in the console (2026-08-01)** — the SPA-side companion to the durable-orchestration fix above.
+
+**Honest gaps**
+
+- `AgentsPage`, `WorkflowBuilder`, `WorkflowCanvas`, `ChatbotStudio`, `ChatbotPlayground` import **no API clients** — they render 861 LOC of hardcoded blueprint data. The code says it itself: "Phase 4 honesty sweep: … has no backend yet." There is no create/save/deploy-agent call in the product.
+- Post-approval continuation P0 (see 1.2). Cost ledger in-memory. Sandbox/browser-broker stores in-memory.
+- **Resolved 2026-08-03 — Cross-tenant approval IDOR:** reads and decisions now carry the verified organization through model-gateway to session-core, whose SQL predicates bind the approval ID, organization, actor and requested state in the same compare-and-set transition. Focused session-core tests prove cross-tenant decisions are rejected and tenant-scoped reads are required. The service-only approval-delivery outbox remains intentionally separate from execution: it cannot resume an action or produce a success receipt without a future durable continuation contract.
+- **Capability catalog, corrected 2026-07-30:** "all 27 rows unavailable pending health attestation" is now half-true. execution-core added a real self-attestation heartbeat for `cap.command.shell`/`cap.command.sandbox` specifically (the code interpreter/canvas capabilities above) — but the scope that heartbeat needs is **not yet granted in the deployed service-principal registry**, so it can still be silently refused in production pending an operator/admin change. The other 25 rows, including `cap.browser.open`, have no attestor anywhere in the repo and remain permanently unavailable.
+- **Resolved 2026-08-03 — Run Console route state:** `AgentsProvider` now receives CoreShell's reactive `@solidjs/router` location and resets its URL-derived role state on ordinary SPA navigation, rather than relying solely on browser `popstate`. A focused regression proves that a selected service role does not leak into Support or a bare `/agents` route. `AgentRunConsole.tsx` remains a 1,782-line file with zero component-level tests; the broader testability/refactor finding is still open.
+
+**Competitor bar (Fin/Chatbase/Mimir):** the bar is an agent that **acts in customer systems under guardrails** — not a canvas. Your HITL + audit + cost primitives are the differentiator; the n8n canvas is commodity UI on top.
+
+**Done-enough gate:** ship **3–5 preset approvable agents** (e.g., "besvar kunde-epost med kilder", "oppsummer nye henvendelser", "hold kunnskapsbasen oppdatert fra nettsiden") running on the existing runs console + HITL. **Hide the builder/studio/playground routes until then** — a static prototype in a live demo is a credibility grenade. Build the canvas only when pilot users ask to modify presets.
+
+**Architecture refinement:** author these presets as document-like Procedures/Skills, not canvas graphs. Compile each into capability requirements, retrieval context, authority/approval boundaries, deterministic verification, rollback behavior, and a simulation suite. Harden the existing linear step/run model before introducing greenfield GraphPlan/DAG execution.
+
+**Quality done-enough gate:** every preset has deterministic state assertions, stateful provider/browser simulation, shadow replay, cost/latency budgets, and a promotion/rollback record. A judge-model score alone is insufficient.
+
+---
+
+### 1.9 Insights — honest but thin, backend least mature
+
+**Vision:** analytics on everything Verevon does + benefit reporting.
+
+**What verifiably exists**
+
+- Real but minimal: `/insights/connectors` + `/insights/overview` scorecards with an enforced honesty contract (no fabricated values, `live` never attaches to an unproduced number). 7 section routes exist. Raw material is genuinely there: audit-core (append-only audit + usage + summaries), cost-core paths (in source), run events, inbox metrics.
+
+**2026-08-05 implementation correction — scoped real-data surface.** Insights
+is no longer a single generic scorecard list beneath static section tabs.
+Overview, Inbox/Support, Social, Agents, Chat, Knowledge, Ingestion, Campaigns,
+and External sources now use an allowlisted Gateway contract. The active
+organization is the non-forgeable tenant boundary: the Gateway derives it from
+the authenticated session and drops arbitrary client org/user fields. The
+optional **My activity** selector only forwards `scope=me`; Insight Core applies
+the verified session user as an additional filter inside that authorized tenant.
+It is not a client-controlled user selector.
+
+Support consumes Conversation Core lifecycle records. Chat consumes only new
+Model Gateway global-chat start events that contain a verified organization and
+actor; no chat body is copied into Insights. Ingestion consumes durable Import,
+Crawl, and Integration Core sync lifecycle events as content-free counts.
+Knowledge uses the existing gateway-minted Data Plane user token for a live
+snapshot of visible document, indexed-document, and source counts. That is
+real, user- and tenant-scoped monitoring of current Knowledge state. A durable
+Data Plane→Insight Core bridge now adds only safe lifecycle history: it reads
+the already-published Data Plane outbox and publishes event ID, organization,
+verified actor when present, and time through a dedicated publish-only NATS
+identity. ZDR, private, shared, and legacy rows without explicit organization
+visibility are completed without emitting a metric; document IDs, titles,
+sources, URLs, and bodies never cross the boundary. The bridge's own durable
+completion marker prevents an Insights outage from delaying Knowledge writes or
+indexing.
+
+Each event-backed tab renders only real recorded scorecards and its matching
+connector registry. The static GA4/Search Console API-shape panels were
+removed; the external tab shows only provider metrics actually recorded by
+Insight Core. The overview now pairs the two existing Support outcome numbers
+with a real, independent Cost Core organization-level AI-usage total. This is
+deliberately **not** named cost per resolution: current Cost Core entries have
+producer/run attribution but no support-surface or resolved-ticket outcome
+attribution, so dividing the total by resolved tickets would be a false claim.
+Focused Data Plane, Insight Core, Gateway, and frontend tests plus typecheck
+pass. Local runtime binding is complete: the Data Plane migration applied,
+Documents API is healthy using the explicit cross-plane Docker overlay, and the
+Knowledge mirror plus Insight consumers are bound. The pre-bridge local outbox
+had no explicit visibility field, so it correctly yielded no Knowledge metric
+history rather than a retroactive privacy leak. The remaining acceptance proof
+is one real organization-visible, non-ZDR document lifecycle—with a verified
+actor where applicable—and a signed-in browser render once the in-app browser
+can reach the locally healthy frontend.
+
+**Honest gaps**
+
+- insight-core is the least mature Application service ("no material change; daily-brief path not proven"). No charting depth, no report builder, no "value delivered" story. The old "insights 404" is fixed in wiring but the content is skeletal.
+
+**Competitor bar:** every inbox competitor ships resolution/deflection/CSAT dashboards. Your open angle is **cost-per-resolution transparency** — but it remains a future, attributable metric, not a ratio inferred from the current organization-level ledger.
+
+**Done-enough gate (pilot, not demo):** conversations handled and AI-draft acceptance must come from real scoped outcome rows; AI usage cost may be shown only as the separate real Cost Core ledger total. The third desired number, cost per resolution, is complete only after Cost Core carries an authoritative support-surface + verified-outcome attribution that can be joined to the same time window. Deflection/CSAT, charting depth, report building, and a broader "value delivered" story remain post-pilot work.
+
+---
+
+### 1.10 Studio — small real canvas today, big plan on paper
+
+**What verifiably exists**
+
+- A real block-based content canvas (`studio-client` → `/api/v1/studio/projects`, create/save/export-to-social-draft). Persistence just moved past gateway-memory prototype status per docs — verify which is live.
+- Studio Plane = a README (2026-07-19). Zero services. 8-phase plan (revenue/market/campaigns/create/work/operations), explicitly gated, explicitly "don't create empty services."
+- **Found 2026-08-02**: the campaign-planner and templates pages (`/studio/campaigns`, `/studio/templates`) are fully static placeholder content — three hardcoded title/description tuples, no data wiring, one link to the real canvas. They sit in the same route tree as the fully-wired canvas, so from the nav alone the two look equivalently real but are not.
+
+**Done-enough gate:** none pre-pilot. Keep the canvas as-is (it feeds Social drafts, that's useful). The Studio Plane plan is good _paper_ — resist starting Phase 0 until the wedge is sold. The "social merges into studio" idea lands at Studio Phase 4, which is several gates away by its own doc.
+
+---
+
+### 1.11 SEO (as a named surface) — does not exist
+
+Restated for the sorted list: no code, no route, no client, no backend. Everything under 1.5's SEO gate applies. Rename the ambition, not the ingestions page: the crawler page is a crawler page; a future "AI-visibility" page is a new product bet.
+
+### 1.12 External agents and meeting intelligence — future source/distribution layers
+
+**Channel Plane** is docs-only. Its future role is to deploy Verevon agents into websites, Shopify, WooCommerce, WordPress, and other public channels, bootstrap visitor identity, run external conversations, and route handoffs into the internal inbox. No current Channel Plane services, APIs, migrations, or tests exist.
+
+**Meeting intelligence** is also docs-only. The intended design treats a meeting as another source type: transcript segments become Data Plane documents, slides/keyframes become visual evidence, people/decisions/action items become graph entities, and Model Plane reasoning can produce minutes and approved follow-up actions. Capture, self-hosted ASR/diarization, and sovereign visual embedding remain future work; the concept reuses existing planes rather than creating a separate meeting product.
+
+---
+
+## 2. Cross-cutting blockers — why nothing demos _today_
+
+These block **every** feature above and are the actual roadmap. _(Corrected 2026-07-20 against the live host — items 2 and 3 as originally doc-claimed were stale.)_
+
+1. **Deployment-reality gap → now a _provenance_ gap (still the #1 item).** The stack IS up (94 healthy containers, model-gateway + inference-core + Quarry included), but nothing proves the running images match the hardened source — no SHA tags, no `/version` endpoints, no rollback artifacts, and July showed health can stay green over a broken path. Fix: git-SHA image tags, `/version` endpoints, CI that builds+deploys the slice from main, deep smoke tests (one real chat turn, one real retrieval, one real inbox send — not port checks). Until then, "healthy" is a claim, not evidence.
+2. **~~Model Plane hot path down~~ RESOLVED, now fully proven (2026-08-01).** Container-level resolution (2026-07-20) plus a real live inference call (2026-08-01 — hours of streaming chat, tool loop, GraphRAG retrieval). The ZDR posture question is also resolved (§6.9, 2026-07-21): `zdr:false` is the real default, no undocumented exception. The one remaining ZDR item is provider attestation, not policy — see `apps/Model Plane/docs/ZDR.md`.
+3. **~~Ingestion host dead~~ RESOLVED.** Docker up, all Quarry/imports/integration workers running, 116 GiB free on Lagring. Keep a disk-usage alert; the 278 GiB Docker image that caused the July outage is still the standing risk.
+4. **Credential rollout.** Control (58 creds + 10 files preflight) and Data plane scoped-broker provisioning are operator-owned tasks nobody has run. For one demo environment: consolidate/pre-seed (you already proved zero-rotation recreate for Control on 2026-07-17) rather than doing the full production ritual.
+5. **Cross-tenant IDOR + observe-mode auth.** One fix at the BFF chokepoint (derive org from session, never from header) covers the demo; RLS activation + enforce-mode + negative-test suite in CI is the pilot gate.
+6. **CI is red.** verevonv3 `pnpm test` fails (loadStudioWorkspace unhandled rejections); Quarry-v2 workspace tests fail to compile (`DataPlaneIngestRequest` constructors). A team cannot gate deploys on a suite it ignores.
+7. **Ops sustainability (structural).** Six planes / ~10 stateful infra systems is a 20–30-engineer topology run by 3 people, and its failures are already ops failures (disk, stale images, stopped daemons). Not demo-blocking, but the council's minority-report warning (below) deserves a real team decision.
+8. **2026-08-02 down-the-stack critical audit, partially resolved 2026-08-03.** Full detail remains in `verevon-roadmap.md` §3a. (a) **Headless navigation is fail-closed and Chromium now has page-request interception:** the shared `quarry-browser` guard admits only blank or HTTP(S) targets that pass the common URL policy and resolve wholly to public addresses. Chromiumoxide guards `goto()` and initial `new_tab()` before CDP navigation, then installs a CDP Fetch listener which applies the same guard to page-controlled requests and aborts rejected resource loads or redirect follow-ups. Browserless, Browserbase, and Kernel retain the direct `goto()` guard; a blocked Browserbase target creates no remote session. **Still open:** comparable request-level containment for remote browser providers, an end-to-end HTTP-redirect fixture, and browser DNS pinning after preflight. (b) **Resolved for direct static and TLS-profile egress:** `StaticDriver` disables implicit reqwest redirects and rejects every 3xx response as `SecurityBlocked`; a regression proves the redirect target receives no request. Its direct-egress runtime path and `TlsProfileDriver` now receive PageRunner's public-address-checked DNS result. Static uses a no-fallback Reqwest resolver; TLS uses a per-request wreq DNS override while preserving the original hostname for TLS SNI/HTTP authority and disables inherited proxies. Both reject malformed/private pins, and focused TLS/runtime suites pass (9/418). Imports-core's customer-controlled CMS and Odoo paths now receive their public DNS answer set as a target object and use proxy-free pinned HTTPX/httpcore and urllib transports respectively; they dial only those addresses while preserving the original hostname for TLS/Host validation, and reject private or unpreflighted pins. The focused connector/network suite and full imports-core suite pass (52 tests). Browser providers and proxy-egress remain unpinned: proxy destination resolution needs an explicit proxy-side address-authority contract, not a client-side resolver override. (c) **social-core's production publisher now uses integration-corev2 actions for LinkedIn, Facebook Page, and Instagram writes.** The tokenless governed publisher passes only a connection ID and bounded action payload; a regression proves the action path, while X, TikTok, and Snapchat now fail closed until their complete action contracts exist. The old raw-token publisher is retained only as unconstructed compatibility/test code and must be removed after that contract work, so this is a material runtime closure rather than complete source-level removal.
+
+---
+
+## 3. Competitor bar — the minimum to be credible in Norway
+
+| Surface            | Who sets the bar             | Pilot-minimum bar                                                                                                                                       | Verevon vs bar                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Grounded assistant | Ayfie (NO ent.), Chatbase    | Crawl site + docs → cited Norwegian answers in <15 min; EU residency in writing                                                                         | **Met in source**; blocked on deployment + ZDR decision                                                                                                                                                                                                                                                                                                                              |
+| Inbox + AI         | Intercom, Gorgias, Mimir     | Email unified, AI draft + human approve, delivery confirmed                                                                                             | AI draft/review, self-service Gmail/Outlook connection, content-free personal follow preferences, and a governed follow-notification fan-out are implemented. Exact Meta delivery callbacks now persist for WhatsApp/Messenger/Instagram; the local notification runtime is disabled, so live follow delivery, email delivery/bounce callbacks, and live-provider proof remain open. |
+| Ticketing          | Zendesk                      | Assign/status/tags/macros/SLA and a bounded operator activity trail                                                                                     | **Met in source** — assignment, lifecycle, links, SLA, macros and tenant-scoped created/updated/linked activity are wired; CSAT, portal, and broad automation remain staged                                                                                                                                                                                                          |
+| Agents             | Fin, Mimir, Chatbase Actions | ≥3 real actions in customer systems w/ guardrails + audit                                                                                               | HITL/audit real; preset agents needed; builder not required                                                                                                                                                                                                                                                                                                                          |
+| Knowledge/RAG      | Ayfie                        | One corpus feeds search + agent, source traces, permissions                                                                                             | **Met in source** — differentiated (graph + wiki + traces)                                                                                                                                                                                                                                                                                                                           |
+| SEO/AI-visibility  | Peec                         | Prompt-set tracking across models (post-pilot niche in Norwegian)                                                                                       | Does not exist — deliberate deferral                                                                                                                                                                                                                                                                                                                                                 |
+| Analytics          | all inbox players            | Deflection/acceptance/cost per resolution                                                                                                               | Thin; cost transparency is the open angle                                                                                                                                                                                                                                                                                                                                            |
+| GTM mechanics      | Cobrief, Taito               | Norwegian UI, flat self-serve org pricing (Trial 0 kr, Hobby 299 kr/mnd, Standard 999 kr/mnd, Pro 1499 kr/mnd — not per-seat), free trial, viewer seats | Shipped: flat per-org monthly tiers live in onboarding + billing settings; per-inquiry usage rates shown in paywall/billing copy are display-only today, not enforced (Lago has zero plans configured)                                                                                                                                                                               |
+
+**Market shape:** inbox/helpdesk = red ocean (don't lead with it). Norwegian SMB self-serve grounded assistant = near-empty (Ayfie is enterprise/sales-led). The _combination_ is the moat, but it's a **retention** story — acquisition needs one wedge.
+
+**Correction 2026-07-20 — boost.ai was missing from this list, and it's a real Norwegian threat.** Sandnes-founded conversational AI platform (general knowledge — not independently re-verified today beyond the live site fetch below): "The conversational AI platform regulated industries trust." Hybrid NLU+GenAI architecture, chat + **voice** channels, three use cases (self-service, internal support, **agent-assist**), enterprise/demo-gated motion (no public pricing), case study with Acorn Insurance (UK). This is a bigger direct threat than Ayfie _specifically in the AI-support-agent space_ — Ayfie is enterprise search, boost.ai's whole product is conversational support automation, sold to Nordic banks/insurance/telco/public sector for years. **Curated counter:** take their hybrid-reliability framing ("predictable, governed AI" — matches your visible per-action HITL approval, arguably stronger since it's provably approved not just architecturally hybrid) and their explicit "agent-assist" naming for what inbox-ai already does; skip voice (no wedge evidence, real build cost) and skip chasing their enterprise incumbency (their gap is precisely no self-serve/no public pricing — that's still open ground for a Norwegian SMB self-serve motion).
+
+---
+
+## 4. Council verdict — how to tackle it
+
+Four independent perspectives evaluated: (A) deploy-first, (B) security-first, (C) feature-depth-first, (D) vertical-slice-first.
+
+**Unanimous points**
+
+- **C (feature-depth-first) rejected 4/4.** Building the Agents builder or Insights depth while the inference path isn't deployed is "polishing a car with no engine" / "how the platform dies." The wishlist is ~8 companies' roadmaps for 3 devs.
+- **D (vertical-slice-first) wins 4/4** — but only as a _container_ for A and B: the slice must be genuinely deployed (A's discipline) and minimally safe (B's demo-tier fixes), not demo-hacked.
+- Security is **tiered, not first**: a single-org closed demo makes the cross-tenant IDOR literally unexercisable, so demo-tier security = deploy hardened images + kill header-derived org at the BFF + real HMACs + remove any remaining fabricated trust UI. Full IDOR closure + active RLS + enforce-mode + reachable DSAR/erasure + proven-or-withdrawn ZDR = the **hard gate between closed demo and open pilot**, verified by an automated cross-tenant negative test in CI.
+- Preset agents over builder: ship 3–5 approvable preset agents on the existing runs console; build the canvas only on demonstrated pilot pull.
+
+**Pros/cons in brief**
+
+- **A deploy-first** — Pro: the deployment-reality gap is the #1 verified failure; nothing else is real until code and runtime are the same system. Con: "deploy all 6 planes" is months of ops with no user payoff; deploy the _slice_, adopt the _discipline_ (SHA tags, /version, smoke, env manifests) everywhere.
+- **B security-first** — Pro: trust IS the product; a tenancy breach in pilot is company-ending given the positioning. Con: hardening code that isn't even deployed is "security theater squared"; full-estate hardening before any user starves you of feedback.
+- **C feature-depth-first** — Pro: closes the only real feature gap (Agents builder) and the visible thin spot (Insights). Con: enters two red oceans, grows blast radius on an unsound boundary, and delays user contact indefinitely. Rejected.
+- **D vertical-slice-first** — Pro: converts source progress into the only currency that matters (a thing a stranger can use); forces deploy+security fixes where they're needed; matches the near-empty Norwegian wedge. Con: requires accepting that most of the built surface stays hidden for a while; risk of duct-tape shortcuts that don't generalize — mitigated by the gates below.
+
+**Minority report (delivery-risk voice, worth a team discussion, not a demo blocker):** the 6-plane topology is unsustainable for 3 people long-term. Consider collapsing to 2–3 deployables (gateway+app tier, worker tier), one Postgres with schemas+RLS, keep NATS+Qdrant, defer Temporal/Quickwit/Convex/MinIO where substitutable — keeping plane boundaries as _modules_, not _deployments_, and re-splitting when headcount justifies it.
+
+---
+
+## 5. The recommended sequence (order + gates, no dates)
+
+**The wedge:** _"Norwegian grounded answers from your company's own knowledge — with sources — and an inbox that drafts replies from it, which a human approves."_ Crawl → Knowledge → Chat-with-citations → Inbox AI draft → HITL approve → send. This is simultaneously your most-finished path, your architecture's spine, and the open market gap.
+
+**Phase 0 — Demo-safety + truth sprint.**
+Reclaim Ingestion host disk; deploy current hardened source of the slice's services (Control auth path, Data retrieval, Model gateway+inference, Quarry edge/control, conversation-core, gateway) with git-SHA tags and `/version`; decide the ZDR exception for pilot inference; fix the two red test suites; wire CI to block on them + one deep smoke test; derive org from session at the BFF (kill `x-verevon-org-id` trust at the chokepoint); sweep any remaining fabricated trust UI.
+_Gate: a teammate on a clean machine completes crawl → cited answer → inbox draft → approve → send, with zero dev intervention, twice in a row._
+
+**Phase 1 — Wedge polish on the slice only.**
+Hide: Agents builder/ChatbotStudio/Playground, SEO ambitions, Social, Insights sections beyond overview, Studio (keep canvas reachable but off-nav if rough). Ship 3–5 preset approvable agents on the runs console. Seed the demo org with a real Norwegian corpus (Aquatiq). Inbox reply proposals are already editable before approval; keep coverage on that review boundary. Add the three honest Insight numbers (handled / accepted % / cost per resolution).
+_Gate: scripted 20-minute demo runs 5× consecutively without failure; crawl-to-first-cited-answer < 15 minutes._
+
+**Phase 2 — Closed demo (10 friendly users, single org).**
+Instrument everything; weekly fix cycles; collect the "which preset agents do they want to modify" signal that decides whether the builder ever gets built.
+_Gate: ≥5 of 10 complete the core loop unassisted; no P0 open for a week; at least one user says they'd pay at the shipped flat-tier price (Trial 0 kr / Hobby 299 kr/mnd / Standard 999 kr/mnd / Pro 1499 kr/mnd — per-org, not per-seat; note per-inquiry usage pricing shown in paywall copy is display-only today, not enforced)._
+
+**Phase 3 — Pilot hardening (the security gate).**
+Full IDOR closure across all call sites + RLS active + enforce-mode documents auth + automated cross-tenant negative tests in CI; erasure/DSAR reachable end-to-end (build the Data Plane purge subscriber); ZDR proven for the default path or the claim withdrawn from all materials; per-service credential split + rotation of the exposed Data Plane credential; provider delivery callbacks + stuck-send reconciliation for email; DPA/RoPA/sub-processor list/incident runbook on paper.
+_Gate: internal cross-tenant pen-test passes; a GDPR erasure demonstrably propagates; a second org onboards with zero shared-credential exposure._
+
+**Phase 4 — Open pilot (real Norwegian companies).**
+Self-serve onboarding (email connect + site crawl without a dev), NOK pricing published, Norwegian UI pass, feedback loop.
+_Gate: 10 external users active weekly; deflection/acceptance metrics honest on the Insights page._
+
+**Phase 5 — Expansion, strictly pull-driven.**
+In rough order of expected pull: Agents canvas (if preset-modification demand is real) → Insights depth/reports → more inbox channels (WA/Messenger with sandbox recipients) → Social live-proof + Studio Phase 1 → Norwegian AI-visibility ("SEO") as a new bet → Zendesk-parity ticketing extras. Each only when a paying user asks.
+
+**Explicitly not now:** n8n-parity builder, full Google-class search, SEO suite, Studio Plane services, Channel Plane, meeting notes/voice (already cut), enterprise items both plane docs correctly defer (mTLS/SPIFFE, HA/DR, multi-region, SOC2 — sequence _after_ revenue, though the cert path is the enterprise unlock later).
+
+---
+
+## 6. Ecosystem addendum (2026-07-20) — one platform, how many products?
+
+Question raised: merge avelis (SEO), agenci (support widget), and the Aquatiq integration services into Verevon? Run them as a Microsoft-style product family? Or a hybrid? Verified findings first, then the recommendation.
+
+### 6.1 What the codebases actually are
+
+**avelis** (`apps/Frontend Plane/avelis`) — a ~6-source-file Next.js 16 shell: correct CoreSystem-native auth (calls auth-core `/api/v2/auth/getSession`), clean Dockerfile, 4 tests — and **zero product features**. `/` renders a heading. No SEO, crawl, keyword, or lighthouse code exists. It is ~1 day of good scaffolding wearing a product name.
+
+**The six `/Volumes/Lagring/services`** — a legacy "QualAI"-era fleet, none wired to CoreSystem (Clerk auth or their own gateway headers; own Kafka/RabbitMQ/Mongo islands):
+
+- **DiscoveryBot** — the real asset: tested Scrapy crawler, 7 spiders (incl. `SEODiscoverySpider`), link health, security headers, site-tree building, Celery scheduling. Production-shaped.
+- **GrammarService** — deep, DI-architected **Norwegian grammar engine** (Ordbank data, norBERT, GPT adapter) with real unit+integration tests. Genuinely differentiated for a Norwegian product.
+- **ReadabilityService** — spellcheck (NO+EN Hunspell), Lix readability, AI sentiment/summarization sub-services. Working, bloated (committed venv, nested duplicate GrammarService).
+- **TextService / CnCRatioService** — WCAG/contrast/content-to-code analyzers. Working prototypes, stubbed or Clerk auth.
+- **ScreenshotService** — empty husk (2 files). Delete.
+
+Net: **real SEO/content-analysis capability exists — DiscoveryBot + GrammarService + Readability — but 0 % of it is integrated**; the gap is plumbing (auth-core + gateway + NATS instead of Clerk/QualAI/Kafka), not capability.
+
+**agenci** (`apps/Frontend Plane/agenci`) — a **working near-MVP product**, not a prototype: ~42k LOC Turborepo (Next.js 15 + Convex + Clerk + Stripe + Firecrawl + OpenAI + Vapi voice), Norwegian throughout, real billing webhooks, real RAG (`@convex-dev/rag`, per-org namespaces), embeddable widget + anonymous visitor sessions + bookings with GDPR auto-delete. Active product-focused git history. Weaknesses: ~zero tests, no CI, no containers. **It shares zero code with CoreSystem** — and it is functionally a working realization of the Channel Plane vision (external widget + visitor identity + public conversation runtime) on a completely different stack.
+
+**Aquatiq integrasjonen** — a Python/Rust **ETL-to-warehouse fleet** (BigQuery/Azure SQL/PowerBI/GCS), not an action broker: moment (~2.3k LOC, 26 REST routes), contifico (~2k), socrm (~8.3k, real Azure-AD OAuth), currency (reference data), odoo (54-line stub), plus two excellent Rust engines — visma_v2 (11 crates, ~11k LOC, tenant-id-per-row multi-tenant datamart sync) and xero_v2 (8 crates, stateless CLI → GCS raw landing). Architecture mismatch with integration-corev2 (synchronous OAuth broker + named-action executor): **the API knowledge ports, the runtimes don't.** moment/contifico/socrm → feasible corev2 adapters (low→medium effort); currency → plain internal service; visma_v2/xero_v2 → belong in a _bulk-sync worker tier_, not the actions surface; odoo → nothing to port. ⚠ Flagged: committed GCP private keys (3 locations), gateway `AUTH_ENABLED=false`, default JWT secret, hardcoded Redis password — none of this may carry over.
+
+### 6.2 The three options
+
+**Option 1 — merge everything into Verevon: rejected.**
+Pros: one brand, one auth, one KB, the "combination" moat. Cons are decisive: three foreign stacks would need full rewrites (agenci's Convex/Clerk backend cannot sit behind verevon-gateway-rs; the QualAI fleet needs re-auth + re-bus; the ETL fleet is architecturally different from corev2); it re-inflates the scope cancer the council killed 4-0; it buries agenci's near-term revenue under a migration; and it adds ~10 more nav items to a product whose pilot problem is focus. This is how all three products end up 70 % done.
+
+**Option 2 — Microsoft-style ecosystem (Verevon / Avelis / Agenci as sibling products): partially right, honestly premature.**
+Pros: matches the reality that agenci already IS a separate product with separate GTM (PLG widget SaaS vs. workspace); brands can win/fail independently; the support-widget market (Chatbase/Fin) and the workspace market want different pricing and onboarding. Cons: Microsoft's ecosystem works because of a shared platform (identity, Graph, billing) — today these three share **nothing**: two auth systems (auth-core vs Clerk), two billing systems (Lago/Nexi vs Stripe), three data stores. Announcing an "ecosystem" of three unintegrated products is a story, not an architecture — and 3 devs cannot give three products real roadmaps simultaneously. Avelis as a "product" doesn't exist yet at all.
+
+**Option 3 — the hybrid (recommended): one platform, staggered fronts, harvest capabilities not runtimes.**
+
+1. **Verevon stays the flagship and the only product the team actively builds.** Nothing merges into it now. The wedge and phase gates in §5 are unchanged.
+2. **Agenci ships as-is, as a separate revenue product — deliberately NOT ported.** It is the closest thing to money in the whole portfolio (working billing, PLG motion, Norwegian, near-launch). Porting it onto the planes now would kill that. Cap its cost: minimal maintenance, add the missing basics (a smoke-test CI, error budgets), and set one hard rule — **no shared customer data or cross-product promises until it's on shared identity.** Long-term (pull-driven, post-pilot): agenci either becomes the Channel Plane's frontend fed by Data/Model planes, or stays standalone and its widget/visitor/booking patterns get harvested into a native Channel Plane. Decide with revenue data, not now.
+3. **Avelis: do not invest pre-pilot.** It's an empty shell and the SEO bet is Phase 5 by this map's own sequencing. When (if) the SEO wedge is validated: harvest **capabilities** into CoreSystem workers behind the gateway — GrammarService + Readability as a Norwegian content-quality engine (genuinely differentiated, nobody local has it), DiscoveryBot's SEO analysis (link health, headers, site tree) as an analysis layer _on top of Quarry_ (Quarry stays the only crawler — don't run two). Whether the resulting surface lives at `/seo` inside verevonv3 or as the avelis app is a branding decision to make then; the plumbing is identical. Delete ScreenshotService.
+4. **"Integration Plane": adopt the idea as two tiers, skip the ceremony.** Tier 1 = integration-corev2 as-is (actions/OAuth broker; port moment → socrm as adapters when a paying Verevon/Aquatiq workflow needs them). Tier 2 = a new **bulk-sync worker tier** in the Ingestion Plane for warehouse-grade provider sync — this is where visma_v2/xero_v2's engines and hard-won invariants (tenant-id-per-row, checkpoint-after-validated-write, raw-landing) belong. Whether Aquatiq's warehouse fleet stays a client-specific deployment or generalizes is a business call; either way rotate the committed GCP keys **now** and never import the `AUTH_ENABLED=false` gateway pattern.
+
+**The principle underneath:** CoreSystem's planes ARE the "Microsoft Graph" of this ecosystem — one identity, one knowledge substrate, one model runtime, one audit spine. Products (verevonv3 today, agenci later, avelis maybe) are _fronts_ on that platform. The ecosystem becomes real the day a second front consumes shared identity — not the day a slide says "suite." Sequence: Verevon pilot first, agenci earns independently, everything else is harvested on pull.
+
+### 6.3 Team-learned engineering notes (2026-07-20, post-build hindsight)
+
+Three things the team observed while building Verevon, all correct and worth locking in as standing decisions:
+
+- **SolidJS + Vite over Next.js for every app-shell surface.** Fine-grained reactivity (signals → direct DOM, no VDOM diff) suits update-heavy UIs — chat streams, dashboards, live crawl views — better than React's reconciliation model, and a Solid SPA is one long-lived shell so client state survives route changes without extra plumbing. **One caveat, not a refutation:** any surface that needs public Google-indexed pages (agenci's marketing site; a future avelis marketing page) shouldn't go pure client-rendered SPA — use SolidStart or a plain static page for that surface specifically, kept separate from the app shell. Don't let an SEO product lose its own SEO.
+- **Corrected 2026-07-20 — agenci's real numbers change the framing entirely.** Live 3 months, zero users, ~400 NOK/month — there is no vendor bill to watch, so the "cost-crossover trigger" originally written here doesn't exist yet; strike it. **The actual stated goal is not to run agenci as a product — it's to sell it to a buyer organization**, on the pitch that orgs prefer to own their stack rather than depend on vendor sprawl. That pitch is in tension with agenci's own architecture (Convex+Clerk+Stripe+Firecrawl+Vapi+OpenAI is exactly the vendor sprawl such a buyer wants to avoid owning). Resolution: **agenci is the proof-of-concept, not the deliverable.** It de-risks the sale (a live, working demo of the widget+RAG+billing pattern) — the actual thing sold to an "own-our-stack" buyer is a CoreSystem-native rebuild of the same UX (Clerk→auth-core, Convex→Data Plane, Firecrawl→Quarry, raw OpenAI→Model Plane). Sell the demo, deliver the substrate.
+- **On "AI agent leverage removes the 3-dev constraint":** true for code production, not for the actual bottlenecks this audit found. The blockers were image provenance, one IDOR, an unmade ZDR policy decision, and scope focus — none are dev-hour-bound; AI throughput doesn't relax any of them, and if code is cheap to produce, deciding what's worth building matters _more_, not less.
+- **Avelis's current Next.js code is not an asset to preserve — it was going to need a full rewrite regardless of sequencing.** This removes any cost to waiting: nothing decays by deferring avelis to its turn (§5 Phase 5). **Confirmed template to follow:** verevonv3 already runs the exact split needed — `apps/verevon-web` (Next.js 16, public/marketing/SEO-indexed pages), `src` (SolidJS 1.9 + Vite 8, the authenticated app shell), `apps/gateway` (shared Rust BFF). Avelis should copy this shape exactly rather than reinvent it: an `avelis-web` Next front for anything that must rank in Google, a Solid app-shell for the workspace UI, both behind the _same_ `verevon-gateway-rs` (new domains, not a fourth gateway). Pull DiscoveryBot/GrammarService/Readability in as new Go/Rust workers behind that gateway; do not port their Node/Python/Flask runtimes, and treat the current avelis repo as a spec to read once, not code to migrate.
+- **SEO placement lean (open question, not yet decided by GTM data):** build it as a Verevon-native module/tab first, not a separate branded app — it costs zero marginal integration (Quarry already crawls, KB already stores, gateway already exists) and strengthens the combination moat instead of fragmenting it. Only fork it into a separately-branded product if a distinct non-Verevon buyer segment (e.g. SEO agencies who'd never buy an AI workspace) is confirmed to want it standalone.
+
+### 6.4 North star — what Verevon is if every feature is stripped away
+
+Strip chat, inbox, ticketing, agents, KB, social, insights, crawler down to zero. What's left is the plane substrate, and it has three properties no competitor currently combines:
+
+1. **Grounded retrieval with real source traces + a knowledge graph** (Ayfie has this alone — enterprise/on-prem/sales-led, no self-serve inbox).
+2. **Server-enforced, visible, approvable agent execution** — a paused tool call with cost and source attached, waiting on a human, not a vendor's black-box resolution-rate claim.
+3. **EU/Norway residency and audit as a plane _contract_** (ZDR posture, cross-plane audit-core, GDPR metadata propagation by architectural rule) — not a compliance PDF bolted on after the fact.
+
+No competitor has all three: Ayfie has #1 without #2; Intercom/Zendesk/Gorgias have automation without #2's transparency or #3's EU-native architecture; Chatbase/agenci-shaped RAG-widget products have #1 cheaply but own none of the pipeline underneath, so they can't show a customer the actual evidence chain. **This is the moat — and it is currently a capability the source is built for, not yet a proof the running system has demonstrated.** The IDOR, observe-mode auth, unproven end-to-end ZDR, and past fabricated-trust-UI findings mean §5 Phase 3 (the security gate) is not bureaucratic caution — it is the literal work of manufacturing proof of the one thing meant to make Verevon un-copyable. Skip it and the features still work; the moat just isn't real yet.
+
+**2026-07-20 concrete finding — Application Plane's Convex already has half of "rebuild agenci" designed and working.** `apps/Application Plane/convex-core/convex/schema.ts`'s `agents` table (tagged Wave 9 / `ui-ux-verevon-gap.md §19`) already has `publicEnabled`/`publicSecret` (rotated per-agent embed secret), `embedTheme`, `knowledgeBindings` (per-agent RAG scoping into the real Data Plane retrieval engine), `retrievalConfig` (dense/BM25/graph/wiki weights), and `profile: "chat"|"deployed_agent"`. `convex/agents.ts` has real working mutations `enablePublicEmbed`/`disablePublicEmbed`/`getEmbedConfig`. Missing: the public HTTP ingress (`/api/embed/...` — no gateway route exists), an anonymous visitor-identity table (agenci's `contactSessions`), and the widget loader/UI. **Verdict: finish the Convex side (it's the "smarter backend" already routing to real retrieval), add only the public ingress as Channel Plane's first real component (visitor bootstrap + secret validation + write into existing `conversations`/`messages`), and port agenci's real `apps/embed`+`apps/widget` loader code + its good consent-capture UX verbatim.** Land it as `publicEnabled=true` on an existing Studio blueprint (e.g. "Build your own chatbot"/"Service agent"), not a sixth app — one more channel into the existing Inbox/HITL substrate.
+
+**Corollary — do not let "combine Verevon + Agenci" collapse into "build Intercom, but Norwegian and smaller."** Intercom already IS an omnichannel inbox + RAG agent + KB + analytics, at a scale and price no 3-person team beats on checklist parity (§3 table). A merged Verevon+Agenci only earns its keep if it leads with what Intercom structurally cannot be: native Norwegian language quality (not translated), EU-native residency (not a US company's EU add-on), and visibly approvable execution (not a trust-us resolution rate). Test every "should we build this" question against §6.4's three properties — if the answer doesn't lean on grounding, approvability, or EU-native trust, it's parity work, not moat work.
+
+### 6.5 "Verevon Support" — the curated Intercom-equivalent (2026-07-20)
+
+Decision: package the existing Inbox + Ticketing + AI-draft-HITL + embeddable-widget work (§1.3, §1.4, §6.4's agenci-inside-Verevon plan) as a named, curated Intercom-equivalent — not a feature-parity clone. **Precision matters for the pitch:** the wedge is not "GDPR forbids Intercom" (false — Intercom offers EU residency/SCCs, and overclaiming this is the exact trust-misrepresentation failure mode flagged earlier in this audit). The real, defensible wedge is US CLOUD Act reach + Schrems-II-era sovereignty anxiety + Intercom's per-seat cost ($55–115+/agent on AI-capable tiers) — a combination Ayfie already proves converts at Norwegian enterprise scale (Oslo Børs-listed AYFIE; Telenor Norge selected it as GenAI platform) even though Ayfie has no inbox/ticketing/support-agent product at all. Verevon's position: Ayfie's EU trust posture, with an actual support product Ayfie doesn't have.
+
+**Take (already real or one step away):** shared omnichannel inbox (conversation-core-go); AI drafts with human approval (`inbox-ai.ts` → real Model Plane calls — the actual differentiator vs. Fin's "trust our resolution rate," since you show the paused tool call, source, and cost); embeddable website widget over RAG (§6.4's Convex + Channel-Plane-ingress plan, agenci's widget loader/consent UX ported in); ticketing with macros/SLA/bounded automation rules (already real via tickets-client); copilot-style draft suggestions in the reply composer, editable before review approval.
+
+**Skip for v1 (real Intercom features, wrong fight for a 3-person team):** outbound/proactive messaging, banners, tours, checklists (saturated growth-tooling market); voice/phone; public help-center article pages; n8n-style workflow/routing builder (already decided: preset agents over canvas, same call applies here).
+
+**Adopt the philosophy, not the mechanism:** Intercom's Fin prices per-resolution ($0.99) — don't copy the exact model, but "cost per resolved conversation, shown transparently" is already half-built via cost-core/Insights and is a claim neither Intercom (opaque black box) nor Ayfie (no support product) can make.
+
+---
+
+### 6.6a Cross-competitor pattern check (2026-07-20) — the doctrine is the region's playbook, not a compromise
+
+Checked 6 Scandinavian/adjacent AI companies for shared structure: Ayfie, boost.ai (Sandnes-founded conversational AI, hybrid NLU+GenAI, chat+voice, "regulated industries trust," enterprise/demo-gated), Semine (Norwegian AP-invoice automation — ERP-integrated into SAP/NetSuite/D365/Visma Net/Xledger, approval routing by amount/cost-centre/entity, 10,000+ companies, Norwegian-airline+OBOS logos, Gartner+Deloitte recognized), Simplifai (Norwegian agentic AI for insurers, back-office-specific), Sana Labs (Swedish "superintelligence for work" knowledge/learning platform, Strava/Robinhood/Asics logos), DeepL (German, translation-only, the outlier).
+
+**Meta-pattern, zero exceptions among the 5 Nordic ones: one narrow wedge, never a combined suite.** Ayfie=search only, boost.ai=conversational support only, Semine=AP only, Simplifai=insurance back-office only, Sana=knowledge/learning only. Zero functional overlap between any of them. **This is not a 3-person-team compromise — it is how every company in this exact market actually goes to market.** Two sub-patterns: (A) narrow workflow automation bolted onto existing systems of record — Semine/Simplifai/boost.ai integrate into the ERP/CRM/contact-center you already run rather than replacing it; Verevon's architecture (own inbox+own KB+own agents+own search, replacing many tools at once) is structurally the _opposite_ of pattern A, reinforcing why shipping one wedge deep (§5) rather than all 11 surfaces matters beyond team-capacity reasons. (B) horizontal bring-your-own-data AI layer — Ayfie/Sana, still single-function (search vs. learning). DeepL doesn't fit either pattern — not workflow-embedded, not vertical, pure point-utility on raw quality; treat it as the **quality benchmark** for any "native Norwegian language" claim, not a GTM peer.
+
+**Universal thread, no exceptions:** trust/compliance/governance is the first marketing message, features second, across all 6 — confirming §6.5's "visible approval, EU-native" framing matches the actual regional category convention rather than being an invented differentiator. Also steal: Norwegian-named social proof as a trust signal (Semine names "Norwegian" the airline + OBOS + Deloitte's Norway-specific ranking) — do the same once Verevon has more logos than Aquatiq.
+
+**Sharpened 2026-07-20 — added trymimir.com and isolated the exact mechanism: two trust levers, every winning company has at least one, agenci has neither.** Mimir's homepage has no GDPR/security page at all (checked, zero results) — it doesn't need one, it's Oslo-based, sovereignty is implicit. Instead it markets the other lever explicitly: _"Complete control by default — choose between fully automated replies or AI drafts your team approves."_ Cross-referencing all 7 (Ayfie, boost.ai, Semine, Simplifai, Sana, DeepL, Mimir): every one offers either **(a) an explicit sovereignty/compliance claim** (needed when the buyer can't assume it by default — Ayfie's Telenor partnership, boost.ai's security headline box, DeepL's "securely") **or (b) an explicit approval/control mechanic** (works even without loud compliance marketing, because national origin already implies sovereignty — Mimir's automated-vs-approve toggle, Semine's approval routing, boost.ai's "hybrid control" does both).
+
+**This is the precise mechanism behind why agenci doesn't sell as currently built** (sharpening §6.2/6.3's earlier "sell the demo, deliver the substrate" call): agenci fails both levers. Sovereignty — its real audited stack is Clerk (US auth) + Convex (US BaaS) + OpenAI direct + Firecrawl (US crawl API) + Vapi (US voice) + Stripe, every byte of a customer conversation/RAG document routed through foreign-owned vendors by default with no EU-residency guarantee found in the code — this is an infrastructure fact, not a marketing gap, and cannot be fixed by better copy. Approval mechanic — agenci has escalate/resolve conversation states (human handoff exists) but nothing built or marketed as an explicit server-enforced draft-then-approve gate the way Mimir's toggle or Verevon's own HITL does. Verevon's planes already clear both bars (execution-core's real server-side approval pause beats a UI toggle; even with the Ayfie/Telenor sovereignty gap noted above, Verevon's posture still beats raw OpenAI/Clerk/Convex). Confirms: rebuilding agenci's capability on Verevon's substrate isn't abstract "own your stack" preference — it is the literal fix for the only two things every winning company in this exact market sells on, and agenci alone in this set has neither.
+
+### 6.6 Curated-wedge doctrine, applied per competitor + backend layer (2026-07-20)
+
+**Operating principle (explicit, team-stated):** Verevon cannot and should not chase full feature parity with any competitor — pick the one best-in-class feature per category that users actually want, make it better on the axis that matters (grounding / approvability / trust), and consciously skip the rest.
+
+**Correction first — the Ayfie+Telenor AI Factory partnership (press release, 2026-02-23) closes the sovereignty gap Verevon hasn't closed.** Their offer: data stored and processed **in Norway, on Norwegian-owned-and-operated infrastructure** (Telenor AI Factory's sovereign AI cloud), RAG answers with citations, fast integration, model choice run in a closed environment, renewable-energy capacity. CEO quote: _"Many want generative AI but stop at confidentiality/privacy/digital-sovereignty requirements... a fully-Norwegian foundation, on Norwegian servers."_ **Verevon runs on Azure OpenAI Sweden Central — an EU/Nordic region, but Azure is a US hyperscaler regardless of region.** This is a real, currently-unclosed gap, not just competitive color: Ayfie can now make a sovereignty claim Verevon cannot. Do not oversell "EU residency" as equivalent to this. Long-term open question worth tracking: a Norwegian-infrastructure partnership of Verevon's own if sovereignty becomes an RFP gate. What still holds regardless: Ayfie is search/chat only — it has no acting, approvable agent product, no inbox, no ticketing. That gap is Verevon's regardless of who wins on sovereignty.
+
+**Per-competitor curated counter:**
+
+| Competitor | Their one real pull                                      | Verevon's curated counter                                                                  | Explicitly don't chase                                                              |
+| ---------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| Ayfie      | Grounded answers + (now) full NO sovereignty via Telenor | Grounded answers _plus_ an acting, approvable agent (Ayfie can't act)                      | On-prem enterprise motion; matching Telenor-grade sovereignty via engineering alone |
+| Mimir      | AI that acts in merchant backend systems                 | Same acting pattern with a visible approval step they don't show                           | Their 90% auto-resolve number — a safe 30-40% with an audit trail wins trust harder |
+| Cobrief    | NOK self-serve GTM, free viewer seats                    | Copy the pricing/GTM mechanics, not the tender vertical                                    | Building anything tender/anbud-related                                              |
+| Taito      | —                                                        | Price anchor only (€8-10/seat/mo = EU SMB seat expectation)                                | No surface overlap                                                                  |
+| Wonderful  | Native-language quality, forward-deployed teams          | Native Norwegian quality without the enterprise-only price floor                           | Their services/consulting layer                                                     |
+| Attio      | Agents that update records, not just chat                | If CRM-lite ever ships (Studio Phase 3+): "agent acts on the record"                       | Building a general CRM now                                                          |
+| Peec       | AI-answer visibility tracking                            | Norwegian-language version, later, as a Verevon module (§6.4)                              | Classic SEO (rank tracking/backlinks) — already lost to Ahrefs/Semrush              |
+| Intercom   | Fin resolution-rate + composer copilot                   | Same shape, SMB-priced, visible paused-approved action instead of a trust-us number (§6.5) | Outbound/tours/banners, voice, help-center pages                                    |
+| Chatbase   | Crawl-to-agent in <15 min, free tier                     | Match the time-to-value number exactly — it's testable                                     | Multi-model marketplace — one well-routed model beats a picker                      |
+| Gorgias    | Per-ticket pricing, no seat tax                          | Consider per-resolution/per-ticket pricing as an SMB option                                | Deep Shopify-specific commerce actions unless asked                                 |
+| Zendesk    | Ticketing completeness (SLA/macros/routing/CSAT)         | Already matched in source (§1.4) — hold, don't extend                                      | Full enterprise suite breadth (WFM/QA/voice)                                        |
+
+**Backend/infra layer — same doctrine, one level down:**
+
+- **Model Plane vs. Claude Code / Hermes / Phi-style agent tooling:** don't build a general coding agent. Finish what's ~90% built — a durable, observable, **approval-gated** tool-use loop (execution-core already dispatches real tools + real HITL). Take Claude Code's lesson (reliable resume after a pause — the named P0), Phi's lesson (cheap small models for high-volume narrow tasks: triage, intent classification), Hermes's lesson (reliable function-calling from smaller/open models keeps cost-per-resolution down under ZDR constraints). Moat = tiered, cost-aware, approval-gated execution, not matching any one tool feature-for-feature.
+- **Quarry v2 vs. Firecrawl / Apify:** Quarry already outputs clean LLM-ready markdown/JSON like Firecrawl — don't add complexity chasing it. From Apify, take the lesson not the breadth: rock-solid anti-bot resilience on the handful of sources a Norwegian SMB actually needs (own site, Brreg, Proff, LinkedIn company pages), not a general scraping marketplace.
+- **Data Plane vs. GraphRAG / VisionRAG:** GraphRAG is already built (graph-index-rs) and differentiates against every competitor above — none have a knowledge graph. Priority isn't adding VisionRAG next (correctly already off, no MVP blocker) — it's closing the one real architecture violation: the embedding hop still falls back to direct Azure instead of routing through inference-core. That's the difference between "we own the whole grounded pipeline" being true vs. half-true.
+
+## 6.7 Phase 0 execution log (2026-07-20, implementation pass)
+
+Ran the audit-before-implementing discipline this doc itself prescribed. Result: **6 of 10 Phase 0 items were already fixed by the team before this pass ran** — confirms the "you may have already built this" warning completely, and means Phase 0's real remaining scope was much smaller than §5 assumed.
+
+**Already fixed, verified by direct code/test inspection, not by this session:**
+
+- IDOR closed: `x-verevon-org-id`/`x-org-id` stripped globally at gateway ingress, org derived only from live session membership (`authorized_org_id()`, 107 call sites/31 files), regression-tested. Pre-existing commit `d8e11459`.
+- documents-api-go: `AUTHCTX_ENFORCE=1` live and fail-closed by default in code too.
+- verevonv3 tests green (406/406 + 4/4); Quarry-v2 compiles + tests green (408/408).
+- Fabricated trust UI: gone, regression-tested against reintroduction.
+- Bonus finding: **inbox draft-edit-before-send and ticket-classification review edits both work**. The review queue exposes category, intent, priority, severity and an exact canonical Ticketing-team routing pair for a human to inspect or change before approval; a proposed routing pair must match the active directory exactly.
+
+**Real gaps closed or in progress this session:**
+
+- `/version` + git-SHA image labels: **done on all 5 slice services** — gateway (reference), model-gateway, quarry-edge, quarry-control, inference-core. All compile clean (independently re-verified: `go build`/`go vet`/`cargo check` all exit 0). Nothing staged or committed — left for review (one file, Ingestion `docker-compose.yml`, mixes the fix with an unrelated pre-existing tuning change and was deliberately left untouched).
+- Quarry-v2 CI: added `cargo test --workspace` alongside the existing `cargo check --workspace` in `quarry-v2-ci.yml` — real test-gating closed.
+- **Live smoke test still blocked — needs a human, not more automation.** Both automated attempts (chat/retrieval/inbox + IDOR-forgery-with-real-session) confirmed the code is right by inspection but could not complete a live HTTP proof: dev-bypass is correctly off on live containers (`ALLOW_DEV_AUTH_BYPASS=false`), and `local@verevon.dev`'s documented fallback password returned 401 (the seed script requires an operator-supplied `SEED_DEV_PASSWORD` with no code default). Closing this gate requires the team to supply the real seed password, temporarily flip the bypass flag, or do one manual login as the actual proof — this is intentionally not something an agent should self-authorize.
+- Editor note: a gopls "BrokenImport"/"UnusedImport" panel appeared against the quarry-control edit — verified false alarm (independent `go build`/`go vet` both clean, `os.Getenv` genuinely used twice). Root cause: quarry-control has its own `go.mod` with no top-level `go.work` linking it, so gopls loses all external-package resolution when the workspace root isn't scoped to that module — pre-existing monorepo quirk, not a regression.
+- Docs synced: 12 files got dated correction banners (not rewrites) — `STATUS.md`'s stale "30/30 gates 100%" claim, Data Plane's stale observe-mode claim, Model/Ingestion's stale down-host claims, this doc's own IDOR claim.
+- Minor: `WorkspaceSettingsPage.tsx` hardcodes placeholder org form defaults ("coresystem-as" etc.) — cosmetic, not a trust fabrication, noted for later.
+
+## 6.8 Phase 1 execution log (2026-07-20)
+
+5 parallel workstreams, independently verified (typecheck/lint/full test suite, plus a manual `go build`/`go vet`/`go test` re-check on insight-core after a scary-looking but false gopls diagnostic — same missing-`go.work` artifact class as Quarry-v2 in §6.7, confirmed harmless both times).
+
+**Shipped and verified:**
+
+- **4 preset approvable agents** on the real Agent Run Console (`draft-reply-with-sources`, `summarize-new-inquiries`, `refresh-knowledge-base`, `triage-urgent-tickets`) — wired through the real `createSelectedAgentToolSpecs`/`streamChat` path so selecting a preset actually puts tool ids on the model-plane request (previously `runTask()` read `blueprintId` for display only and discarded it). HITL inherited from `action-registry.ts`, not reimplemented — no bypass. `AgentsPage`/`WorkflowBuilder`/`ChatbotStudio`/`ChatbotPlayground` and their honesty-enforced tests untouched.
+- **2 of 3 Insight numbers wired to real data**: "conversations handled" (pure relabel of the already-flowing `inbox.tickets_resolved` scorecard) and "AI draft acceptance %" (real Go change in insight-core's `metric_subscriber.go` splitting one undifferentiated count into `ai_actions_approved`/`ai_actions_rejected` keyed on the actual `decision` field, 6 new tests). "Cost per resolution" correctly left in the honest-empty state — investigated both push and pull designs and found cost-core has no per-surface cost dimension and insight-core has zero existing integration with it; faking a ratio (org-wide cost ÷ tickets) would misattribute spend, so it wasn't built. Real follow-up: give cost-core's `Entry`/`AggregateFilter` a surface dimension, then wire insight-core to it.
+- **Inbox review-queue edit — now fully functional end-to-end (fixed 2026-07-20, later same-day pass).** `AiActionReviewPanel.tsx` lets a reviewer edit AI-suggested category/intent/priority inline before approving, and the edit now actually takes effect: conversation-core-go's `ReviewAIAction` merges the whitelisted edited fields (`category`/`priority`/`severity`/`intent`/`team_id`/`team_name` — the frontend currently sends the first 3) into `payload.suggested_fields` via `jsonb_set`, atomically within the same transaction as the approve decision — no new DB round-trip. Double-gated on `decision=='approved'` at both the service layer and defense-in-depth in the SQL itself, so reject and no-edit-approve are provably unchanged (same `execCalls` count as before). `ai_action_executor.go`'s `promote()` needed zero changes — it already does a fresh DB read after the reviewed event fires, so it naturally observes the merge. 8 new tests, wire shape (`edited_fields`/`category`/`intent`/`priority`) confirmed byte-for-byte match frontend-to-backend, independently re-verified twice.
+- **Nav hidden for the demo**: Agents builder section + 5 of 6 Insights sub-routes (kept Overview). Social and Studio were freshly re-verified as real (not stale-audit-assumed) and left visible. Single reversible flag (`DEMO_MODE_HIDE_UNFINISHED_NAV` in `sidebar-navigation.ts`) — flip to `false` for the open pilot, nothing else changes.
+- **Caught and fixed a cross-workstream regression myself**: hiding the whole "agents" sidebar section also removed the only click-path to `/agents/runs` — where the new preset agents live. Root cause was deeper than expected: `CoreSidebar.tsx` special-cases `section.id === 'agents'` to render an entirely separate `AgentsExpandedSidebarPanel` component that never reads `sidebar-navigation.ts`'s generic items at all (it's a hardcoded role/feature switcher for the mock builder only, with no route navigation). Fix: repointed the Overview quick-link (`overview-agents`, which _does_ render generically) from the mock `/agents` to the real `/agents/runs`, and un-hid it. Verified: `tsc --noEmit` clean, 13/13 targeted tests pass.
+
+**Correctly not built — genuinely blocked, not a shortfall:**
+
+- **Demo-data seed (Aquatiq crawl)**: thorough, honest investigation found no legitimate service-level ingestion path exists — the only two `quarry`-audience service principals are hardcoded to ZDR retention, and ZDR tokens are architecturally blocked from the durable-ingest write path; Aquatiq AS is confirmed provisioned as the intended non-ZDR demo org, but that path requires a real interactive session with no service-principal equivalent. Quarry-edge's own dev-bypass is on but was correctly declined — it maps to a stub identity unrelated to any real org, so using it wouldn't even land data in the right place. Verified ground truth directly: Data Plane v2's `documents` table has 0 rows for every org. **Needs a human**: same shape as the Phase 0 smoke-test blocker — someone logs in as a real Aquatiq-AS member once and triggers the crawl.
+- ⚠️ **Security hygiene note**: investigating the above read live service-principal HMAC credentials via `docker exec` on local dev containers (already on disk in `.env.generated-secrets`, not newly exposed externally, but they passed through a subagent's tool output this session — worth being aware of).
+
+**Net effect:** the wedge (crawl → KB → cited answer → inbox HITL) now also has preset agents and two real Insight numbers sitting on top of it, with every genuine remaining gap named precisely rather than papered over. Two items need a human, not more engineering: the Phase 0 smoke-test credential, and one manual Aquatiq crawl trigger for demo data.
+
+## 6.9 Phase 2 + Phase 3 execution log (2026-07-20)
+
+**Phase 2 — shipped:** a real, minimal feedback-collection widget (floating pill on every authenticated route → gateway → Inbox, tagged `demo-feedback`, idempotent, RBAC-gated). Reuses existing Inbox machinery, no new backend service. Verified end-to-end (Go/Rust/TS builds + tests), not yet checked against a live running stack.
+
+**Phase 3 — fresh audit against 8 named gates, not trusting the original roadmap's characterization (matches the Phase 0 pattern: several items were further along or further behind than documented):**
+
+**Closed, real, verified against fresh disposable Postgres:**
+
+- Query-param IDOR (`onboarding/graph-preview?org_id=`) — confirmed already closed by the same commit (`d8e11459`) that fixed the header IDOR; added the missing regression test.
+- **New tenant-isolation gap found and closed**: `org-core`'s `internal/rbac/repository.go` (role/permission-editor endpoints) had zero RLS scoping and zero per-request authz — its own comment admitted it trusted the frontend to check permissions. Now routed through `WithOrgScope`, backstopped by migration 013's fail-closed RLS policies. Verified against a real RLS-enforcing Postgres (not mocked).
+- Two new cross-tenant regression tests: documents-api-go `Get`-by-known-id-from-another-org (404s correctly), user-core ACL grant isolation. Both genuinely pass against real Postgres.
+- Inbox stuck-send reconciliation: a real sweep (5 min interval, 15 min stale threshold) now exists — atomically flips `sending`→`unknown` and the linked AI-action, using an index that existed for this exact purpose since migration 004 but was never queried until now.
+
+**RLS reality check (materially better than the original doc, with one real caveat):** org-core's RLS is NOT "inert/gated/zero-callers" as previously documented — migrations 009/011/013 are ungated and fail-closed, `WithOrgScope` has 20 real call sites, and real Postgres integration tests exist proving cross-org isolation. The caveat: org-core's app connection role is Postgres **superuser**, which unconditionally bypasses RLS regardless of `FORCE ROW LEVEL SECURITY` — the entire enforcement burden rests on `WithOrgScope`'s `SET LOCAL ROLE` correctly firing on every sensitive call site. It does, for the 20+1 (rbac) paths checked. A handful of documented cross-org-by-design exceptions remain (admin list-all, GDPR erasure) — confirmed intentional, not oversights.
+
+**Open — needs a human decision, not more engineering:**
+
+- ✅ **RESOLVED 2026-07-21**: the undocumented `AUTH_CORE_INTERACTIVE_RETENTION_POLICY_JSON` ZDR exception (Aquatiq AS + one other org, no decision record) is removed. Stated business intent — ZDR is opt-in, paid, plan-gated, never the standard — is now the actual default: `interactive-retention-policy.ts`'s `DEFAULT_POSTURE` is `zdr:false`, and the effective posture is resolved live per org against org-core (stored self-serve toggle intent AND org-core's own plan-entitlement check, both required; any org-core failure fails closed to `zdr:false` without blocking login). See `apps/Control Plane/docs/core-research/auth-core.md`'s 2026-07-21 addendum for detail.
+- Data Plane v2's erasure/DSAR purge subscriber: confirmed it only transfers ownership, never purges content, and this is a deliberate documented scope boundary, not a bug — needs a product/legal decision (does hard-delete purge only private documents or everything the user owns regardless of visibility? does anonymize purge any content at all?) before any code gets written.
+- Data Plane credential rotation: confirmed still genuinely open (not just stale docs) — needs operator secret-manager access, out of agent scope by design.
+
+**Open — structural, real but not urgent:**
+
+- **CI does not actually gate any cross-tenant test today.** The workflows that would run them point at nonexistent paths (`services/user-service/**`, `services/org-service/**` don't exist in this repo) or live in a nested `.github/workflows/` folder GitHub Actions never reads (only repo-root `.github/workflows/` executes). Tests are real and pass locally; nothing blocks a merge on them yet.
+- **Bonus find, unrelated to this pass**: `documents-api-go`'s idempotent-create path has a real bug — a repeated create with the same idempotency key returns the _second_ title instead of reusing the first row. Reproduced twice against real Postgres, confirmed pre-existing (untouched by today's diff). Worth a follow-up fix.
+
+## 6.10 Chat-engine verification + two chat-parity features (2026-08-01)
+
+Independent pass, not a continuation of the same session as §6.7-6.9. Scope: verify the Model Plane hot path live (the standing gate §1.2/§2 had left open since 2026-07-20), then implement and live-verify two named chat-parity gaps from the competitive backlog.
+
+**Verified live, not just by inspection:**
+
+- Real, sustained interactive chat against the running stack: streaming answers via live Azure providers, tool loop, GraphRAG-fused retrieval, over multiple hours. This is the "one live probe" every prior pass (§1.2, §2 item 2) deferred to a human — it is now done, manually, not yet as a CI gate.
+- Zero Data Retention re-confirmed at the precision this doc's ZDR mentions lacked: enforcement is complete and verified across all 6 Verevon-side durable boundaries (session-core threads/messages, Dreaming/agent-memory extraction, response cache, implicit feedback, provider-side prompt cache, NATS/audit envelopes). The sole remaining gap is provider attestation (`AZURE_OPENAI_ZDR_CONFIRMED` / an Anthropic equivalent) — a signed-contract-plus-operator-flip task, not an engineering one. Full detail and a step-by-step production-readiness guide: `apps/Model Plane/docs/ZDR.md`.
+
+**Shipped and live-verified (both were designed in an earlier pass, rejected on first design by adversarial review for data-corruption risk, and implemented from the corrected design once a live session became available — see `apps/Model Plane/docs/CHAT_RESUME_AND_VERSIONS_SPEC.md`):**
+
+- **Resumable streams.** The gateway producer used to treat a client disconnect (closed tab, reload, network drop) identically to a deliberate cancel — the run terminalized `Cancelled`, the answer never persisted, and a reconnect found nothing to replay. It now detaches instead: generation continues, the assistant message persists, and the run terminalizes `Completed`, so a reconnect replays the complete answer. Verified two ways: a deterministic Rust test that drops the SSE receiver mid-stream (fails against the pre-fix code) and a live browser test (reload mid-generation → full answer, no stuck spinner).
+- **Edit/regenerate version navigation.** A client-only 1/N switcher over the final exchange's prior answers — session-lifetime, not persisted, so a nested version tree (the flaw that sank the first design) is structurally impossible. Live-verified with a non-deterministic prompt (paged through 3 real versions, each restoring its exact question+answer pair). Building it surfaced a real, previously-undiscovered bug: Regenerate had been silently _appending_ a duplicate answer instead of replacing it since the feature shipped — fixed in the same change.
+
+**New artifact — competitor research, not yet acted on beyond the above two items:** a 10-harness study (Claude Code, Codex, OpenCode, ChatGPT, Perplexity, Manus, Hermes, OpenClaw, Pi + expert consensus) produced a ranked chat-parity backlog. Top 5: server-authoritative sessions + resume (of which resumable streams above is the first slice), a gateway hook/permission layer, skills-as-files, citation chips + a quality gate, subagent fan-out. `apps/Model Plane/docs/VEREVON_CHAT_PARITY_BACKLOG.md`.
+
+**Also fixed this session, adjacent to the chat engine:** agent-memory semantic recall (an embedding-dimension mismatch was silently zeroing every search — §1.2's "Semantic memory degraded" line is now stale, see above) and the Auth Core service-principal registry reconciled to the live fleet (14/14, no drift — relevant to this doc's credential-rollout concern in §2 item 4, though the broader rollout ritual itself was not re-run).
+
+**Explicitly not touched by this pass:** IDOR/RLS/tenancy depth, insight-core wiring, Agents builder, Social live-proof, image provenance/SHA tags, credential rollout ritual, CI gating. All of §1-§6.9 stands as last verified on the dates given.
+
+## 6.11 The rest of the week (2026-07-28 → 2026-07-31), read from diffs not messages
+
+§6.10 covered one day's work by one pass. This entry covers the ~90 commits from the four days before it, reviewed by reading the actual diffs (not just commit subjects) specifically to catch cases where a commit message undersells or oversells what changed — several did.
+
+### MCP server integration (2026-07-28) — went from "cannot work" to live-verified in one day
+
+The starting state was worse than "gated": the existing `http` MCP transport POSTed to `/tools/list`/`/tools/call` paths that were never real MCP — a "bridge" that was never built. **No genuine remote MCP server could work at all.** The day's chain of commits fixed this in layers: a real OAuth 2.1 + Dynamic Client Registration client (connect a server from nothing but its URL, no pre-registration), AES-256-GCM-encrypted token storage, real MCP Streamable HTTP transport, tool auto-discovery (no manual allowlist), and — a separate, earlier restriction — MCP tools had been explicitly blocked from plain chat entirely (only execution-core's governed agent surface could call them); that restriction was lifted the same day. Several live-user bugs were found and fixed along the way (a missing `Bearer` prefix, a catalog upsert silently keeping the wrong server id, an internal token route wrongly gated by the per-user JWT check). **End state, confirmed live: a real Visma Net ERP query answered through plain chat.** Caveats that remain: HTTPS Streamable HTTP only (stdio/legacy SSE stay quarantined), only the streaming chat path (not the non-streaming JSON invoke), and token refresh was not load-tested under concurrent requests.
+
+### The agent-loop-starvation P0 (2026-07-28)
+
+`MAX_TOOL_ROUNDS` was 3. A self-describing MCP server (like Visma, above) spends its first rounds on `list_skills`/`get_skill` discovery calls before its first real query — leaving zero rounds to act on results or self-correct, so the model would work out the right fix and still have to hand it back to the user instead of applying it. Raised to 12 (configurable, ceiling 32). Fixing this alone would have worsened two latent issues, so both were fixed in the same change: tool results were being inlined into the prompt **untruncated** (now capped at 8k chars with an explicit "INCOMPLETE" marker), and every streamed answer was capped at 1024 tokens regardless of what the tool phase produced (now 4096). Two more defects surfaced while verifying: context assembly spent its whole budget on chat history first and dropped retrieval/knowledge/goal context entirely once exhausted (now proportioned); and a failed inference round previously streamed as a confident-but-silently-ungrounded answer (now tells the model the tool phase was cut short, so it says so instead of guessing). **Live-verified before/after**: the same question went from "3 tool calls and a question back to the user" to "12 steps, self-corrects, grounded answer."
+
+### Chat identity, grounding, and shipping (2026-07-28) — no caveats, all live
+
+- Plain chat previously **never requested knowledge grounding** — `buildChatWireBody` only requested the `tools` feature when the client declared explicit tool specs, which plain chat never does, so `knowledge_search`/`fetch_url` never attached regardless of what the user asked. Now always requested.
+- Every chat request now carries the caller's verified org/user identity as system context, so "we/our" resolves to the org and "I/my" to the user — live-verified.
+- `shipping.get_quotes` is now a real chat-callable builtin, not only an Agent-Console action — reached this state in two steps the same week (an earlier commit added it Agent-Console-only; a later one wired the tool-loop bearer and fixed a dotted-tool-name bug that had been silently breaking the _entire_ request under the provider's tool-naming rules).
+- Sole-org auto-activation on sign-in also landed this day (Better Auth was never setting `activeOrganizationId` for a single-org user).
+
+### Reliability/security wave (2026-07-29)
+
+- **Tool-routing chain, a real production bug**: the complexity scorer gave "tools offered" one point short of the threshold that routes to a tool-capable model, so an ordinary question with tools attached got answered by a model that declined to call any of them — and separately, even once floored onto the right model, the _answer_ call re-resolved the model from scratch with tools withheld, so a 14-tool-call investigation got answered by a model that had never seen the tool definitions exist. Both fixed (hard floor + model carryover), plus a hardcoded Azure deployment id that 404'd whenever an operator's real deployment name differed, plus a real ordered provider fallback ladder (there was none before — one 429 killed the whole turn).
+- **Cost-aware routing (Budget/Balance/Genius) was completely inert since it was built** — see §1.2's honest-gaps update, this is the single most consequential correction this pass found.
+- **The confidence badge was hardcoded at 72%** — see §1.2.
+- Two proactive security fixes with no actual exposure window: a cross-tenant cache key missing org/user (a timing-based existence oracle, never a content leak) and a bearer token sitting on a struct with `#[derive(Debug)]` (would have logged the raw JWT on the next `{:?}` call/panic — caught before any such log line existed).
+
+### Hybrid-agent Wave 1 (2026-07-30) — see §1.8's update for the code-interpreter/canvas detail and the capability-attestation caveat.
+
+### Durable orchestration + a research-quality pass (2026-07-31, the biggest single day) — see §1.8's update for the headline (7 workflows, zero callers → live cron-to-completion in one day). Also landed the same day:
+
+- A Manus-style live agent panel in chat (reused the `BrowserChrome` devtools/replay UI that already existed for Knowledge, now mounted in chat too). Known limitation: chat-initiated runs don't yet register a gateway browser session, so real frames still 404 pending further wiring — the panel renders, the live view doesn't always have something to show yet.
+- Deep-research quality: fetched pages were never actually surfaced as readable text (now fixed), a new relevance gate stops citing sources that can't answer the question instead of citing them anyway, and web-search queries are now built properly instead of from a raw conversational sentence.
+- A real token-budget billing-accuracy fix: prompt budgets were charged via `len()/4` (byte-based), undercounting Norwegian/JSON payloads by 12–26% (risking silent provider truncation) and overcounting English by 60% (trimming grounding unnecessarily) — replaced with a real BPE tokenizer.
+- ZDR posture was completely missing from the Go event leg's envelope (unlike the Rust producer, which already carried it) — completions were silently unmarked; fixed with an explicit tri-state field rather than defaulting to a guess.
+- The verevonv3 dev server had been OOM-crashing near its container heap cap with a healthy-looking container and an empty browser console — looked exactly like a UI bug, was actually the dev server dying silently. Heap raised, confirmed settled post-fix.
+
+### Signal-quality loop: implicit dissatisfaction + quarantine (2026-08-01, adjacent to §6.10's chat-parity work but distinct)
+
+A new control loop for the skill/capability registry: Regenerate, edit-resubmit, near-duplicate, and explicit-correction are now all implicit dissatisfaction signals (Regenerate and edit-resubmit were dead code client-side until this day — only explicit correction could fire before), scored with a Wilson-95%-lower-bound estimate per skill (explicit ratings full weight, implicit signals discounted). Below a threshold, a skill is **quarantined** — meaning its injection into future prompts is disabled via a dedicated RPC, not that any memory or content is deleted. Hysteresis prevents flapping; capped at 5 quarantines per sweep. Wired end-to-end, but recovery from quarantine is deliberately manual for now (the system can't yet distinguish a policy quarantine from a human deliberately disabling a skill).
+
+**Net effect of the full week**: several previously-documented "live" capabilities (cost-aware routing, the confidence badge, MCP tool execution, delegated subagents, durable Temporal workflows) were either completely inert or outright faked, and are now real and live-verified — this is a materially different state than any prior pass in this document described, not an incremental refinement.
+
+## 6.12 Cross-plane improvement synthesis — 2026-08-03
+
+**Canonical source documents**
+
+- `/Volumes/Lagring/Triodelab/CoreSystem/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md`
+- `/Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md`
+
+The two code-aware reviews plus the Data Plane memory analysis change the feature map in a precise way: they add a **quality-and-proof substrate** beneath existing product surfaces rather than adding another surface.
+
+| Product promise              | Required platform capability                                                                | Owner                                          | Current posture                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
+| Grounded answer              | source/evidence capture, hybrid retrieval, provenance, contradiction-aware memory           | Quarry + Data Plane                            | strong base; memory truth lifecycle incomplete                              |
+| Approved action              | exact authority, durable continuation, typed effects, independent postconditions            | Control/Application + Model/Integration/Quarry | approval persistence exists; dispatcher/verification consistency incomplete |
+| Reliable web work            | secure runtime, durable frontier, adaptive targets, challenge classification, change impact | Quarry                                         | strong runtime; SSRF gap and unwired frontier are P0                        |
+| Repeatable agent behavior    | Procedures/Skills, simulations, shadow mode, promotion/rollback                             | Model Plane                                    | partial skill lifecycle; compiler/quality loop incomplete                   |
+| Trust customers can inspect  | Runtime Evidence Manifest + Verevon Proof Bundle                                            | cross-plane projection                         | greenfield contract, high product leverage                                  |
+| Useful organizational memory | typed candidates, authorized scopes, temporal/supersession state, deletion proof            | Data Plane                                     | provenance exists; canonical Memory Intelligence incomplete                 |
+
+### Product-level implication
+
+The next differentiated UI is not a larger workflow canvas. It is a **proof and quality experience** inside Chat, Agents, Knowledge, Inbox, Tickets, Monitoring, and Trust:
+
+- what sources and memory claims were used;
+- which procedure/skill and model/harness version ran;
+- what authority and approval applied;
+- what browser/tool/provider effects occurred;
+- whether the external state was verified;
+- what it cost and where data was processed;
+- what failure/gap class prevented completion;
+- which correction became a regression test.
+
+This is how Verevon makes its existing grounding, approvability, and EU/Nordic governance moat visible rather than merely architectural.
+
+---
+
+## 7. Appendix
+
+**Doc trust guide** (for future audits): trust 2026-07-13+ correction banners as the current layer. `apps/STATUS.md` (2026-04-23) is the most misleading doc in the repo — "30/30 gates closed" measures crate tests, not runtime, and predates the discovery that the hot path was down; update or delete it. Feb-2026 "Production Ready v1.0.0" READMEs (Ingestion, Model) are formally retracted by their own July docs. `docs/core-research/mock-backed-surfaces.md` is flagged stale. Eight stale Ingestion docs await sign-off in `STALE_DOC_DELETION_REGISTER.md`.
+
+**Known red tests to fix in Phase 0:** verevonv3 `pnpm test` (loadStudioWorkspace unhandled rejection when session lacks `orgs`); Quarry-v2 workspace compile (`DataPlaneIngestRequest` missing `initiator_user_id`/`visibility`).
+
+**Things that are better than you think** (keep morale honest too): the frontend honesty contract is genuinely unusual and good; ticketing SLA/macros already exist; the HITL gate is real server-side enforcement, not decoration; GraphRAG + wiki + source traces is a real cognee-class substrate; the inbound pipeline is proven channel-agnostic; the gateway has zero mocks across ~49 domains. The team's instinct that "features don't work" is a _deployment_ problem wearing a feature costume.
