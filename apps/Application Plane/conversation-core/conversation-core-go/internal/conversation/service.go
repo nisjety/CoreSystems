@@ -2025,6 +2025,62 @@ func (s *Service) PurgeConversationDraftsByOrg(ctx context.Context, orgID string
 	return s.repository.PurgeConversationDraftsByOrg(ctx, orgID)
 }
 
+// DistinctOrgIDsWithActiveTickets, ActiveTicketsForSupportRecurrenceCorpus,
+// UpsertSupportRecurrenceCorpusEntry, EvictStaleSupportRecurrenceCorpusEntries,
+// PurgeSupportRecurrenceCorpusByOrg, and ListSupportRecurrenceCorpus back the
+// semantic support-recurrence corpus builder (consumers package) and, later,
+// the anchor-ticket similarity search. Thin, validated pass-throughs — the
+// ZDR-ineligibility and permission/membership checks live in the caller
+// (the corpus builder, and the gateway respectively), not here.
+
+func (s *Service) DistinctOrgIDsWithActiveTickets(ctx context.Context) ([]string, error) {
+	return s.repository.DistinctOrgIDsWithActiveTickets(ctx)
+}
+
+func (s *Service) ActiveTicketsForSupportRecurrenceCorpus(ctx context.Context, orgID string) ([]Ticket, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.ActiveTicketsForSupportRecurrenceCorpus(ctx, orgID)
+}
+
+func (s *Service) UpsertSupportRecurrenceCorpusEntry(ctx context.Context, orgID, ticketID string, embedding []float32, algorithmVersion string, corpusWindowStart time.Time) error {
+	orgID = strings.TrimSpace(orgID)
+	ticketID = strings.TrimSpace(ticketID)
+	if orgID == "" || ticketID == "" {
+		return fmt.Errorf("%w: org_id and ticket_id are required", ErrInvalidInput)
+	}
+	if len(embedding) == 0 {
+		return fmt.Errorf("%w: embedding must not be empty", ErrInvalidInput)
+	}
+	return s.repository.UpsertSupportRecurrenceCorpusEntry(ctx, orgID, ticketID, embedding, algorithmVersion, corpusWindowStart)
+}
+
+func (s *Service) EvictStaleSupportRecurrenceCorpusEntries(ctx context.Context, orgID string, windowStart time.Time) error {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.EvictStaleSupportRecurrenceCorpusEntries(ctx, orgID, windowStart)
+}
+
+func (s *Service) PurgeSupportRecurrenceCorpusByOrg(ctx context.Context, orgID string) error {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.PurgeSupportRecurrenceCorpusByOrg(ctx, orgID)
+}
+
+func (s *Service) ListSupportRecurrenceCorpus(ctx context.Context, orgID string) ([]SupportRecurrenceCorpusEntry, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return nil, fmt.Errorf("%w: org_id is required", ErrInvalidInput)
+	}
+	return s.repository.ListSupportRecurrenceCorpus(ctx, orgID)
+}
+
 func (s *Service) publishTicket(ctx context.Context, subject string, ticket *Ticket, actorUserID string) {
 	if ticket == nil {
 		return

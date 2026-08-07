@@ -208,6 +208,15 @@ type Repository interface {
 	// HardPurgeByOrg: enabling interactive Zero Data Retention must never
 	// erase the durable support record, tickets, or provider evidence.
 	PurgeConversationDraftsByOrg(ctx context.Context, orgID string) error
+
+	// Support-recurrence corpus (semantic ticket-similarity preview). See
+	// migrations/027_support_recurrence_corpus.sql.
+	DistinctOrgIDsWithActiveTickets(ctx context.Context) ([]string, error)
+	ActiveTicketsForSupportRecurrenceCorpus(ctx context.Context, orgID string) ([]Ticket, error)
+	UpsertSupportRecurrenceCorpusEntry(ctx context.Context, orgID, ticketID string, embedding []float32, algorithmVersion string, corpusWindowStart time.Time) error
+	EvictStaleSupportRecurrenceCorpusEntries(ctx context.Context, orgID string, windowStart time.Time) error
+	PurgeSupportRecurrenceCorpusByOrg(ctx context.Context, orgID string) error
+	ListSupportRecurrenceCorpus(ctx context.Context, orgID string) ([]SupportRecurrenceCorpusEntry, error)
 }
 
 // TicketActivityRepository is an optional read capability for the small,

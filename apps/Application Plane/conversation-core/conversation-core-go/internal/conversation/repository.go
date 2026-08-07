@@ -4317,3 +4317,139 @@ func mustJSONStringMap(value map[string]string) string {
 	}
 	return string(bytes)
 }
+
+// SupportRecurrenceCorpusEntry is one org's ticket embedding row, as read
+// back for a similarity search.
+type SupportRecurrenceCorpusEntry struct {
+	TicketID  string
+	Embedding []float32
+}
+
+// ActiveTicketsForSupportRecurrenceCorpus returns the bounded per-ticket text
+// (never the customer transcript) the corpus builder embeds, for every
+// active ticket in an org. "Active" mirrors the existing SLA-risk/breach
+// convention used elsewhere in this file: status NOT IN ('resolved', 'closed').
+func (r *PGRepository) ActiveTicketsForSupportRecurrenceCorpus(ctx context.Context, orgID string) ([]Ticket, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT id, category, intent, work_type
+FROM conversation_tickets
+WHERE org_id = $1 AND status NOT IN ('resolved', 'closed')`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tickets := []Ticket{}
+	for rows.Next() {
+		var ticket Ticket
+		if err := rows.Scan(&ticket.ID, &ticket.Category, &ticket.Intent, &ticket.WorkType); err != nil {
+			return nil, err
+		}
+		ticket.OrgID = orgID
+		tickets = append(tickets, ticket)
+	}
+	return tickets, rows.Err()
+}
+
+// UpsertSupportRecurrenceCorpusEntry stores or refreshes one ticket's bounded
+// embedding. Never called for a ZDR-enabled org — enforced by the caller
+// (the corpus builder checks ZDR before this is ever reached), not here.
+func (r *PGRepository) UpsertSupportRecurrenceCorpusEntry(ctx context.Context, orgID, ticketID string, embedding []float32, algorithmVersion string, corpusWindowStart time.Time) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	_, err := r.pool.Exec(ctx, `
+INSERT INTO conversation_support_recurrence_corpus (org_id, ticket_id, embedding, algorithm_version, corpus_window_start, updated_at)
+VALUES ($1, $2, $3, $4, $5, NOW())
+ON CONFLICT (org_id, ticket_id) DO UPDATE SET
+  embedding = EXCLUDED.embedding,
+  algorithm_version = EXCLUDED.algorithm_version,
+  corpus_window_start = EXCLUDED.corpus_window_start,
+  updated_at = NOW()`,
+		orgID, ticketID, embedding, algorithmVersion, corpusWindowStart)
+	return err
+}
+
+// EvictStaleSupportRecurrenceCorpusEntries removes an org's corpus rows for
+// tickets that are no longer active, or whose entry predates the current
+// corpus window — keeping the corpus bounded to what ActiveTickets... would
+// embed today, not an ever-growing history.
+func (r *PGRepository) EvictStaleSupportRecurrenceCorpusEntries(ctx context.Context, orgID string, windowStart time.Time) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	_, err := r.pool.Exec(ctx, `
+DELETE FROM conversation_support_recurrence_corpus c
+WHERE c.org_id = $1
+  AND (
+    c.corpus_window_start < $2
+    OR NOT EXISTS (
+      SELECT 1 FROM conversation_tickets t
+      WHERE t.id = c.ticket_id AND t.org_id = c.org_id AND t.status NOT IN ('resolved', 'closed')
+    )
+  )`, orgID, windowStart)
+	return err
+}
+
+// PurgeSupportRecurrenceCorpusByOrg deletes an entire org's corpus
+// immediately — the reactive counterpart to the sweep-based eviction above,
+// used when an org newly enables ZDR.
+func (r *PGRepository) PurgeSupportRecurrenceCorpusByOrg(ctx context.Context, orgID string) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	_, err := r.pool.Exec(ctx, `DELETE FROM conversation_support_recurrence_corpus WHERE org_id = $1`, orgID)
+	return err
+}
+
+// ListSupportRecurrenceCorpus returns an org's current corpus rows for a
+// similarity search. Small and bounded by construction (one row per active
+// ticket in the corpus window), so an in-process cosine-similarity scan
+// needs no vector database.
+func (r *PGRepository) ListSupportRecurrenceCorpus(ctx context.Context, orgID string) ([]SupportRecurrenceCorpusEntry, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT ticket_id, embedding FROM conversation_support_recurrence_corpus WHERE org_id = $1`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := []SupportRecurrenceCorpusEntry{}
+	for rows.Next() {
+		var entry SupportRecurrenceCorpusEntry
+		if err := rows.Scan(&entry.TicketID, &entry.Embedding); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+// DistinctOrgIDsWithActiveTickets is the corpus builder's sweep scope: an org
+// with nothing active has nothing to build a corpus from.
+func (r *PGRepository) DistinctOrgIDsWithActiveTickets(ctx context.Context) ([]string, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT DISTINCT org_id FROM conversation_tickets WHERE status NOT IN ('resolved', 'closed')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	orgIDs := []string{}
+	for rows.Next() {
+		var orgID string
+		if err := rows.Scan(&orgID); err != nil {
+			return nil, err
+		}
+		orgIDs = append(orgIDs, orgID)
+	}
+	return orgIDs, rows.Err()
+}

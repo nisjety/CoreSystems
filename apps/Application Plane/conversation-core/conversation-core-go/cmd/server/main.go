@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/attestation"
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/consumers"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
@@ -144,6 +145,23 @@ func main() {
 	reconciler.Start(ctx)
 	defer reconciler.Stop()
 
+	// Semantic support-recurrence corpus builder (preview): maintains a
+	// bounded per-org ticket-similarity embedding corpus. Disabled — not
+	// fatal — when org-core or embedding-engine-rs aren't configured, since
+	// this is optional preview infrastructure, not a durable data path.
+	orgCoreClient := clients.NewOrgCoreClient(cfg.OrgCoreBaseURL, cfg.OrgCoreServicePrincipal, cfg.OrgCoreServiceToken)
+	embeddingClient := clients.NewEmbeddingClient(cfg.EmbeddingEngineBaseURL)
+	if orgCoreClient != nil && embeddingClient != nil {
+		corpusBuilder := consumers.NewSupportRecurrenceCorpusBuilder(
+			service, orgCoreClient, embeddingClient,
+			10*time.Minute, 90*24*time.Hour,
+		)
+		corpusBuilder.Start(ctx)
+		defer corpusBuilder.Stop()
+	} else {
+		log.Printf("conversation-core-go: support-recurrence corpus builder disabled (org-core or embedding-engine client not configured)")
+	}
+
 	// W4 HITL executor: when a human approves an action, promote the ticket
 	// (ticket.classification) or send the reply (draft.reply). Only runs when
 	// JetStream is available (publisher set above). Idempotent by action id.
@@ -199,6 +217,16 @@ func main() {
 			log.Printf("conversation-core-go: interactive-retention consumer: %v", err)
 		} else {
 			defer interactiveRetentionConsumer.Stop()
+		}
+		// Reactive backstop for the corpus builder above: deletes an org's
+		// support-recurrence corpus immediately on ZDR-enable, rather than
+		// waiting for the next sweep. Independent durable, so it runs
+		// regardless of whether the builder itself is configured.
+		recurrencePurgeConsumer := consumers.NewSupportRecurrenceZDRPurgeConsumer(sharedNatsClient.JS, service)
+		if err := recurrencePurgeConsumer.Start(ctx); err != nil {
+			log.Printf("conversation-core-go: support-recurrence zdr-purge consumer: %v", err)
+		} else {
+			defer recurrencePurgeConsumer.Stop()
 		}
 	}
 

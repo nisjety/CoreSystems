@@ -55,6 +55,17 @@ type Config struct {
 	// sweep is never accidentally disabled by omission.
 	OutboundReconcileInterval   time.Duration
 	OutboundReconcileStaleAfter time.Duration
+	// OrgCoreBaseURL/OrgCoreServicePrincipal/OrgCoreServiceToken configure the
+	// support-recurrence corpus builder's live ZDR check
+	// (clients.OrgCoreClient.ZDREnabledOrgIDs). EmbeddingEngineBaseURL
+	// configures the same builder's call to Data Plane v2's synchronous
+	// EmbedText RPC. All optional: any unset value disables the corpus
+	// builder for this cycle rather than failing startup, since it is a
+	// preview feature — see cmd/server/main.go.
+	OrgCoreBaseURL          string
+	OrgCoreServicePrincipal string
+	OrgCoreServiceToken     string
+	EmbeddingEngineBaseURL  string
 	// FeedbackMirrorOrgID is the Verevon-owned monitored organization that every
 	// pilot-feedback submission (conversation.Service.SubmitFeedback) is
 	// mirrored into, in addition to the submitter's own org. This exists
@@ -111,6 +122,10 @@ func Load() (*Config, error) {
 		AttestationKeyID:             strings.TrimSpace(getEnv("CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID", "")),
 		OutboundReconcileInterval:    time.Duration(getEnvPositiveInt("CONVERSATION_OUTBOUND_RECONCILE_INTERVAL_SECONDS", 300)) * time.Second,
 		OutboundReconcileStaleAfter:  time.Duration(getEnvPositiveInt("CONVERSATION_OUTBOUND_RECONCILE_STALE_AFTER_SECONDS", 900)) * time.Second,
+		OrgCoreBaseURL:               strings.TrimSpace(getEnv("ORG_CORE_BASE_URL", "")),
+		OrgCoreServicePrincipal:      strings.TrimSpace(getEnv("ORG_CORE_SERVICE_PRINCIPAL", "conversation-core")),
+		OrgCoreServiceToken:          strings.TrimSpace(getEnv("ORG_CORE_SERVICE_TOKEN", "")),
+		EmbeddingEngineBaseURL:       strings.TrimSpace(getEnv("EMBEDDING_ENGINE_BASE_URL", "")),
 		FeedbackMirrorOrgID:          strings.TrimSpace(getEnv("FEEDBACK_MIRROR_ORG_ID", "")),
 	}
 
