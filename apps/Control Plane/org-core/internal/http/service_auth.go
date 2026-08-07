@@ -350,6 +350,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:projection:delete:any"}
 	case len(rest) == 4 && rest[1] == "members" && rest[3] == "succession" && method == http.MethodPost:
 		return []string{"org:membership:succession:any"}
+	case len(rest) == 4 && rest[1] == "roles" && rest[3] == "capabilities" && method == http.MethodGet:
+		return []string{"org:read:any"}
 	default:
 		return nil
 	}

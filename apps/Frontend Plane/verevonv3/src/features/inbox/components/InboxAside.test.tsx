@@ -362,7 +362,7 @@ describe('InboxAside Verevon actions', () => {
 
   it('reconciles a false-failure 502 by checking whether the follow preference was actually recorded', async () => {
     let followed = false
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease')) {
         return new Response(JSON.stringify({ error: { code: 'not_found', message: 'No lease' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })

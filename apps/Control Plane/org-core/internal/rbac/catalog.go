@@ -53,6 +53,10 @@ var catalog = []CatalogEntry{
 		Description: "See connected sources (Microsoft 365, SharePoint, etc.)."},
 	{Key: "integrations:manage", Group: "Integrations", Label: "Manage integrations",
 		Description: "Connect or disconnect data sources."},
+
+	// Support (Ticketing)
+	{Key: "support:recurrence:read", Group: "Support", Label: "View support-recurrence similarity candidates",
+		Description: "See semantic similarity candidates for a support ticket (preview)."},
 }
 
 // Catalog returns the immutable catalog.

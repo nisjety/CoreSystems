@@ -150,6 +150,7 @@ func (s *Server) setupRoutes() {
 	// background services that must service every tenant (no per-request
 	// acting user to scope a normal /orgs read to). See listOrganizationsInternal.
 	internal.GET("/orgs", s.listOrganizationsInternal)
+	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)
 	internal.POST("/orgs/:orgId/onboarding/state", s.updateOnboardingState)
