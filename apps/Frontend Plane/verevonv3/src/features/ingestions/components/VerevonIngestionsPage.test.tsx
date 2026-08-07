@@ -75,6 +75,78 @@ describe('VerevonIngestionsPage', () => {
     await waitFor(() => expect(screen.getByText(/ingen varige kjøringer ennå/i)).toBeTruthy())
   })
 
+  it('reconciles a false-failure 502 by checking whether the run was actually started', async () => {
+    let created = false
+    const newRun = {
+      id: 'job_new_1',
+      kind: 'scrape',
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      target: 'https://example.com/new-page',
+      progress: {},
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/api/ingestions/runs') && method === 'POST') {
+          // The run reaches the backend and is durably created, but the
+          // response itself is lost to a transient gateway error.
+          created = true
+          return jsonResponse({ message: 'Bad Gateway' }, 502)
+        }
+        if (url.endsWith('/api/ingestions/runs')) {
+          return jsonResponse(created ? [newRun] : [])
+        }
+        if (url.endsWith('/api/ingestions/schedules')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/sources')) return jsonResponse({ integrations: [], quarrySources: [] })
+        if (url.endsWith('/api/ingestions/profiles')) return jsonResponse({ profiles: [] })
+        return jsonResponse({ error: { code: 'not_found', message: `Unhandled ${url}` } }, 404)
+      }),
+    )
+
+    renderIngestions()
+    await waitFor(() => expect(screen.getByText(/ingen varige kjøringer ennå/i)).toBeTruthy())
+
+    fireEvent.input(screen.getByRole('textbox', { name: /mål-url/i }), {
+      target: { value: 'https://example.com/new-page' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /start kjøring/i }))
+
+    await waitFor(() => expect(screen.getByText('https://example.com/new-page')).toBeTruthy())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows a real failure when starting a run genuinely did not go through', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/api/ingestions/runs') && method === 'POST') {
+          return jsonResponse({ message: 'Bad Gateway' }, 502)
+        }
+        if (url.endsWith('/api/ingestions/runs')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/schedules')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/sources')) return jsonResponse({ integrations: [], quarrySources: [] })
+        if (url.endsWith('/api/ingestions/profiles')) return jsonResponse({ profiles: [] })
+        return jsonResponse({ error: { code: 'not_found', message: `Unhandled ${url}` } }, 404)
+      }),
+    )
+
+    renderIngestions()
+    await waitFor(() => expect(screen.getByText(/ingen varige kjøringer ennå/i)).toBeTruthy())
+
+    fireEvent.input(screen.getByRole('textbox', { name: /mål-url/i }), {
+      target: { value: 'https://example.com/new-page' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /start kjøring/i }))
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.queryByText('https://example.com/new-page')).toBeNull()
+  })
+
   it('runs an on-demand monitoring check and renders real history (no scheduling control)', async () => {
     const checkBody = {
       sourceUrl: 'https://example.com/',
@@ -209,6 +281,77 @@ describe('VerevonIngestionsPage', () => {
     const deleteCall = calls.find((c) => c.url.includes('/api/ingestions/sources/') && c.method === 'DELETE')
     expect(deleteCall).toBeTruthy()
     expect(deleteCall!.url).toContain('/api/ingestions/sources/src_01')
+  })
+
+  it('reconciles a false-failure 502 by checking whether the source was actually removed', async () => {
+    const sourceRecord = {
+      id: 'src_01', name: 'Acme pricing', url: 'https://acme.example/pricing',
+      kind: 'scrape', status: 'active', createdAt: '', updatedAt: '', config: {},
+    }
+    let removed = false
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/api/ingestions/runs')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/schedules')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/profiles')) return jsonResponse({ profiles: [] })
+        if (url.includes('/api/ingestions/sources/') && method === 'DELETE') {
+          // The removal reaches the backend and is durably recorded, but the
+          // response itself is lost to a transient gateway error.
+          removed = true
+          return jsonResponse({ message: 'Bad Gateway' }, 502)
+        }
+        if (url.endsWith('/api/ingestions/sources')) {
+          return jsonResponse({ integrations: [], quarrySources: removed ? [] : [sourceRecord] })
+        }
+        return jsonResponse({ error: { code: 'not_found', message: `Unhandled ${url}` } }, 404)
+      }),
+    )
+
+    renderIngestions()
+    fireEvent.click(screen.getByRole('button', { name: /kilder/i }))
+    await waitFor(() => expect(screen.getByText('Acme pricing')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /fjern/i }))
+
+    await waitFor(() => expect(screen.getByText(/ingen varige kilderegistreringer ennå/i)).toBeTruthy())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows a real failure when removing a source genuinely did not go through', async () => {
+    const sourceRecord = {
+      id: 'src_01', name: 'Acme pricing', url: 'https://acme.example/pricing',
+      kind: 'scrape', status: 'active', createdAt: '', updatedAt: '', config: {},
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input)
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/api/ingestions/runs')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/schedules')) return jsonResponse([])
+        if (url.endsWith('/api/ingestions/profiles')) return jsonResponse({ profiles: [] })
+        if (url.includes('/api/ingestions/sources/') && method === 'DELETE') {
+          return jsonResponse({ message: 'Bad Gateway' }, 502)
+        }
+        if (url.endsWith('/api/ingestions/sources')) {
+          // Still present — the removal genuinely didn't land.
+          return jsonResponse({ integrations: [], quarrySources: [sourceRecord] })
+        }
+        return jsonResponse({ error: { code: 'not_found', message: `Unhandled ${url}` } }, 404)
+      }),
+    )
+
+    renderIngestions()
+    fireEvent.click(screen.getByRole('button', { name: /kilder/i }))
+    await waitFor(() => expect(screen.getByText('Acme pricing')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /fjern/i }))
+
+    expect(await screen.findByRole('alert')).toBeTruthy()
+    expect(screen.getByText('Acme pricing')).toBeTruthy()
   })
 
   it('keeps the v2 ingestion sidebar menu available on the v3 shell', () => {

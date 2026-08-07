@@ -200,8 +200,11 @@ export default function VerevonIngestionsPage() {
 
   async function submitRun() {
     setError(null)
+    // Captured before the request so a catch-block reconciliation can tell a
+    // run that already existed apart from one this attempt just created.
+    const attemptStartedAt = Date.now()
+    const form = runForm()
     try {
-      const form = runForm()
       const payload: RunCreateRequest =
         form.kind === 'batch'
           ? {
@@ -226,11 +229,39 @@ export default function VerevonIngestionsPage() {
       }
       await loadWorkspace()
     } catch (nextError) {
-      setError(
-        nextError instanceof Error
-          ? nextError.message
-          : i18n.tr('Kjøringen kunne ikke startes.', 'Run could not be started.'),
-      )
+      // createIngestionRun can fail (e.g. a transient 502) after the run was
+      // already durably created server-side. Re-fetch and check whether a
+      // run matching this submission now exists before asserting failure,
+      // instead of trusting the network error alone. This is a best-effort
+      // match (no id survives a lost response): a non-batch submission
+      // matches on its exact target URL; either kind must also have been
+      // created no earlier than this attempt started (with a small buffer
+      // for clock skew) so an unrelated pre-existing run can't false-match.
+      let reconciled = true
+      try {
+        await loadWorkspace()
+      } catch {
+        reconciled = false
+      }
+      const submittedTarget = form.kind === 'batch' ? null : form.url.trim()
+      const landed = reconciled && runs().some((run) => {
+        if (new Date(run.createdAt).getTime() < attemptStartedAt - 10_000) return false
+        return submittedTarget ? run.target === submittedTarget : true
+      })
+      if (landed) {
+        setActiveView('runs')
+      } else if (reconciled) {
+        setError(
+          nextError instanceof Error
+            ? nextError.message
+            : i18n.tr('Kjøringen kunne ikke startes.', 'Run could not be started.'),
+        )
+      } else {
+        setError(i18n.tr(
+          'Vi fikk ikke bekreftet om kjøringen ble startet. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the run was started. Please wait a moment before trying again.",
+        ))
+      }
     }
   }
 
@@ -305,11 +336,31 @@ export default function VerevonIngestionsPage() {
       await deleteIngestionSource(id)
       await loadWorkspace()
     } catch (nextError) {
-      setError(
-        nextError instanceof Error
-          ? nextError.message
-          : i18n.tr('Kilden kunne ikke fjernes.', 'Source could not be removed.'),
-      )
+      // deleteIngestionSource can fail (e.g. a transient 502) after the
+      // source was already durably removed server-side. Re-fetch and check
+      // whether it's still listed before asserting failure, instead of
+      // trusting the network error alone.
+      let reconciled = true
+      try {
+        await loadWorkspace()
+      } catch {
+        reconciled = false
+      }
+      const stillPresent = reconciled && (sources()?.quarrySources ?? []).some((source) => source.id === id)
+      if (reconciled && stillPresent) {
+        setError(
+          nextError instanceof Error
+            ? nextError.message
+            : i18n.tr('Kilden kunne ikke fjernes.', 'Source could not be removed.'),
+        )
+      } else if (!reconciled) {
+        setError(i18n.tr(
+          'Vi fikk ikke bekreftet om kilden ble fjernet. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the source was removed. Please wait a moment before trying again.",
+        ))
+      }
+      // Else: confirmed removed — loadWorkspace() already synced the
+      // sources list the UI renders from; no further state change needed.
     } finally {
       setDeletingSourceId(null)
     }
