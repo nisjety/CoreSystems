@@ -176,6 +176,28 @@ describe('AgentRunConsole approval decide reconciliation (task_d6420100)', () =>
     expect(screen.getByRole('button', { name: /gjenoppta kjøring/i })).toBeTruthy()
   })
 
+  it('treats a 502 as success for a rejection too, once the re-fetch confirms it landed', async () => {
+    // The other "confirmed success" test only ever exercises approve — this
+    // covers applyDecisionFollowThrough's other branch (cancelRun + the
+    // cancelled-status flip), which otherwise has zero coverage.
+    renderConsole()
+    await driveToApprovalDeck()
+
+    mockDecideApproval.mockRejectedValueOnce(new Error('502 Bad Gateway'))
+    mockListApprovals
+      .mockResolvedValueOnce([{ ...pendingApproval(), status: 'DENIED' }])
+      .mockResolvedValue([{ ...pendingApproval(), status: 'DENIED' }])
+
+    fireEvent.click(screen.getByRole('button', { name: /avvis/i }))
+
+    await waitFor(() => expect(mockCancelRun).toHaveBeenCalledWith('run_1'))
+    expect(screen.queryByRole('alert')).toBeNull()
+    // Exact match: the header status pill's own text is exactly "Kansellert" —
+    // a substring/regex match would also hit AnswerPanel's unrelated sentence
+    // ("Kjøring kansellert — delvis output over"), matching two elements.
+    expect(screen.getByText('Kansellert')).toBeTruthy()
+  })
+
   it('shows a distinct message when the re-fetch shows it was already decided differently', async () => {
     renderConsole()
     await driveToApprovalDeck()
