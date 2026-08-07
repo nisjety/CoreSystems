@@ -1,7 +1,0 @@
-- generic [active] [ref=e1] [box=0,0,1366,768]:
-  - generic [ref=e2] [box=0,0,1366,768]:
-    - generic [ref=e3] [box=0,0,1366,768]
-    - region "Notifications alt+T" [box=0,768,1366,0]
-  - button "Open Next.js Dev Tools" [ref=e275] [cursor=pointer] [box=22,714,32,32]:
-    - img [ref=e276] [box=22,710,40,40]
-  - alert [ref=e279] [box=-1,767,1,1]
