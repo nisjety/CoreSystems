@@ -23,6 +23,7 @@ pub mod browserless;
 pub mod chromiumoxide;
 #[cfg(feature = "kernel")]
 pub mod kernel;
+pub mod navigation;
 pub mod persistent_session;
 pub mod pool;
 pub mod session;

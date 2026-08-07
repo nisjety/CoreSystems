@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::BrowserLease;
 
+use crate::navigation::guard_navigation_target;
 use crate::session::{Cookie, ProfileStore, SessionSnapshot};
 use crate::{BrowserDriver, BrowserSession, SessionInner};
 
@@ -546,6 +547,7 @@ impl BrowserDriver for KernelDriver {
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        guard_navigation_target(url).await?;
         let id = self.ensure_browser(&session.lease).await?;
         self.post_bytes(&id, "goto", json!({ "url": url })).await?;
         self.state.lock().await.current_url = Some(url.to_string());

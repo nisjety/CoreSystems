@@ -29,6 +29,7 @@ use tokio::sync::Mutex;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::BrowserLease;
 
+use crate::navigation::guard_navigation_target;
 use crate::{BrowserDriver, BrowserSession, SessionInner};
 
 /// Tiny URL-encoder for proxy_server values (only the characters we
@@ -187,6 +188,7 @@ impl BrowserDriver for BrowserlessDriver {
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        guard_navigation_target(url).await?;
         self.nav.lock().await.current_url = Some(url.to_string());
         let mut inner = session.inner.lock().await;
         inner.pages_served = inner.pages_served.saturating_add(1);

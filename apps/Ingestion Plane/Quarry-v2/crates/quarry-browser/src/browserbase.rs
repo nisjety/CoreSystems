@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::BrowserLease;
 
+use crate::navigation::guard_navigation_target;
 use crate::{BrowserDriver, BrowserSession, SessionInner};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +232,7 @@ impl BrowserDriver for BrowserbaseDriver {
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        guard_navigation_target(url).await?;
         self.ensure_session().await?;
         self.state.lock().await.current_url = Some(url.to_string());
         let mut inner = session.inner.lock().await;
@@ -264,6 +266,7 @@ impl BrowserDriver for BrowserbaseDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quarry_core::error::ErrorCode;
     use quarry_core::ids::kinds;
     use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
     use wiremock::matchers::{header, method, path as wpath};
@@ -295,6 +298,34 @@ mod tests {
             context_id: None,
             recording: false,
         }
+    }
+
+    fn unstarted_session() -> BrowserSession {
+        BrowserSession {
+            lease: make_lease(),
+            inner: Arc::new(Mutex::new(SessionInner {
+                connected: true,
+                pages_served: 0,
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_target_does_not_create_a_browserbase_session() {
+        let server = MockServer::start().await;
+        let driver = BrowserbaseDriver::new(make_config(&server.uri()));
+
+        let err = driver
+            .goto(&unstarted_session(), "http://127.0.0.1:8080/private")
+            .await
+            .expect_err("private navigation must be blocked locally");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        assert!(server
+            .received_requests()
+            .await
+            .expect("request log")
+            .is_empty());
     }
 
     #[tokio::test]
