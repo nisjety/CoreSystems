@@ -1156,7 +1156,18 @@ function ActivityPanel(props: { orgId: string; selectedTicket: ZammadTicket | nu
       })
       await refetchConversationFollow()
     } catch {
-      setFollowError(i18n.tr('Følgepreferansen kunne ikke oppdateres. Ingen lokal endring ble antatt.', 'The follow preference could not be updated. No local change was assumed.'))
+      // executeAction can fail (e.g. a transient 502) after the follow
+      // preference was already durably recorded server-side. Re-fetch the
+      // real state before asserting failure, instead of trusting the network
+      // error alone — otherwise a user sees a false "no local change was
+      // assumed" error for a preference that already changed.
+      const intended = current.state !== 'following' ? 'following' : 'not-following'
+      const fresh = await refetchConversationFollow()
+      if (fresh?.state !== intended) {
+        setFollowError(i18n.tr('Følgepreferansen kunne ikke oppdateres. Ingen lokal endring ble antatt.', 'The follow preference could not be updated. No local change was assumed.'))
+      }
+      // Else: confirmed changed — refetchConversationFollow() already synced
+      // the resource the UI renders from; no further state change needed.
     } finally {
       setSavingFollow(false)
     }
@@ -1178,7 +1189,16 @@ function ActivityPanel(props: { orgId: string; selectedTicket: ZammadTicket | nu
     try {
       await executeAction('inbox.set_csat_preference', { type: 'human', orgId, userId: props.userId }, { conversationId: selectedConversationId, optedIn: current.state !== 'opted-in' })
       await refetchCSATPreference()
-    } catch { setCSATPreferenceError(i18n.tr('Tilbakemeldingspreferansen kunne ikke oppdateres. Ingen lokal endring ble antatt.', 'The feedback preference could not be updated. No local change was assumed.')) }
+    } catch {
+      // Same false-failure risk as toggleConversationFollow: executeAction
+      // can fail after the preference already landed. Re-fetch and check
+      // before asserting failure.
+      const intended = current.state !== 'opted-in' ? 'opted-in' : 'not-opted-in'
+      const fresh = await refetchCSATPreference()
+      if (fresh?.state !== intended) {
+        setCSATPreferenceError(i18n.tr('Tilbakemeldingspreferansen kunne ikke oppdateres. Ingen lokal endring ble antatt.', 'The feedback preference could not be updated. No local change was assumed.'))
+      }
+    }
     finally { setSavingCSATPreference(false) }
   }
   const [csatOutcome, { refetch: refetchCSATOutcome }] = createResource(
