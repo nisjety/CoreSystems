@@ -1105,7 +1105,28 @@ export default function InboxPage() {
       replaceSupportTicket(updated)
       setNotice(i18n.tr('Saken er løst og verifisert på nytt.', 'Ticket resolved and reread from the source of truth.'))
     } catch (reason) {
-      setNotice(translateApiError(reason, i18n.tr, { no: 'Saken kunne ikke løses.', en: 'The ticket could not be resolved.' }))
+      // executeTicketPatch can fail (e.g. a transient 502) after the status
+      // change was already durably recorded server-side. Re-fetch the real
+      // ticket state before asserting failure, instead of trusting the
+      // network error alone — otherwise a user sees a false "could not be
+      // resolved" error for a resolution that already went through.
+      let reconciled = true
+      try {
+        await refreshSelectedSupportTicket()
+      } catch {
+        reconciled = false
+      }
+      const latestStatus = selectedTicket()?.supportTicket?.status
+      if (reconciled && latestStatus === 'resolved') {
+        setNotice(i18n.tr('Saken er løst og verifisert på nytt.', 'Ticket resolved and reread from the source of truth.'))
+      } else if (reconciled && latestStatus) {
+        setNotice(translateApiError(reason, i18n.tr, { no: 'Saken kunne ikke løses.', en: 'The ticket could not be resolved.' }))
+      } else {
+        setNotice(i18n.tr(
+          'Vi fikk ikke bekreftet om saken ble løst. Vent litt før du prøver på nytt.',
+          "We couldn't confirm whether the ticket was resolved. Please wait a moment before trying again.",
+        ))
+      }
     }
   }
 

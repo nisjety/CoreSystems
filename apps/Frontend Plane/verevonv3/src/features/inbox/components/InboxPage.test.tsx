@@ -1154,4 +1154,122 @@ describe('InboxPage', () => {
     ])
     expect(randomUUID).toHaveBeenCalledTimes(1)
   })
+
+  it('reconciles a false-failure 502 by checking whether the ticket was actually resolved', async () => {
+    const resolvableTicket = {
+      id: 'ticket_resolve_1',
+      org_id: 'org-demo',
+      conversation_id: conversationSummary.id,
+      ticket_key: 'TCK-200',
+      status: 'open',
+      priority: 'high',
+      severity: 'high',
+      category: 'delivery',
+      intent: 'customer_follow_up',
+      source: 'manual',
+      created_at: '2026-08-02T12:00:00.000Z',
+      updated_at: '2026-08-02T12:00:00.000Z',
+    }
+    let resolved = false
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/session')) {
+        return jsonResponse({ user: { id: 'user-demo', email: 'verevon@example.com', name: 'Verevon Demo', emailVerified: true } })
+      }
+      if (url.endsWith('/api/v1/me/session-context')) {
+        return jsonResponse({ orgId: 'org-demo', orgs: [{ id: 'org-demo', name: 'Verevon', role: 'owner' }] })
+      }
+      if (url.startsWith('/api/v1/inbox/conversations?')) {
+        return jsonResponse([conversationSummary])
+      }
+      if (url.endsWith('/api/v1/inbox/inboxes')) {
+        return jsonResponse([{ id: 'inbox-support', name: 'Commerce context' }])
+      }
+      if (url.endsWith(`/api/v1/inbox/conversations/${conversationSummary.id}`)) {
+        return jsonResponse(conversationDetail)
+      }
+      if (url.startsWith('/api/v1/tickets?')) {
+        return jsonResponse(resolved ? [{ ...resolvableTicket, status: 'resolved' }] : [resolvableTicket])
+      }
+      if (url.endsWith('/api/v1/actions/execute') && init?.method === 'POST') {
+        return jsonResponse({ actionId: 'tickets.update', runId: 'run_resolve', status: 'completed', auditId: 'audit_resolve', eventStream: '' })
+      }
+      if (url.endsWith(`/api/v1/tickets/${resolvableTicket.id}`) && (!init || !init.method)) {
+        // executeTicketPatch's own follow-up getTicket() read (after the
+        // actions/execute mutation above already durably recorded the status
+        // change) is what's lost to a transient gateway error here.
+        resolved = true
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      return jsonResponse({})
+    }))
+
+    renderInbox()
+
+    const ticketList = await screen.findByRole('list', { name: /saker/i })
+    fireEvent.click(within(ticketList).getByRole('button', { name: /order marked delivered but missing/i }))
+
+    const resolveButtons = await screen.findAllByRole('button', { name: /løs sak|resolve ticket/i })
+    fireEvent.click(resolveButtons[0]!)
+
+    expect(await screen.findByText(/saken er løst og verifisert på nytt|ticket resolved and reread/i)).toBeTruthy()
+    expect(screen.queryByText(/saken kunne ikke løses|the ticket could not be resolved/i)).toBeNull()
+  })
+
+  it('shows a real failure when resolving a ticket genuinely did not go through', async () => {
+    const resolvableTicket = {
+      id: 'ticket_resolve_1',
+      org_id: 'org-demo',
+      conversation_id: conversationSummary.id,
+      ticket_key: 'TCK-200',
+      status: 'open',
+      priority: 'high',
+      severity: 'high',
+      category: 'delivery',
+      intent: 'customer_follow_up',
+      source: 'manual',
+      created_at: '2026-08-02T12:00:00.000Z',
+      updated_at: '2026-08-02T12:00:00.000Z',
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/auth/session')) {
+        return jsonResponse({ user: { id: 'user-demo', email: 'verevon@example.com', name: 'Verevon Demo', emailVerified: true } })
+      }
+      if (url.endsWith('/api/v1/me/session-context')) {
+        return jsonResponse({ orgId: 'org-demo', orgs: [{ id: 'org-demo', name: 'Verevon', role: 'owner' }] })
+      }
+      if (url.startsWith('/api/v1/inbox/conversations?')) {
+        return jsonResponse([conversationSummary])
+      }
+      if (url.endsWith('/api/v1/inbox/inboxes')) {
+        return jsonResponse([{ id: 'inbox-support', name: 'Commerce context' }])
+      }
+      if (url.endsWith(`/api/v1/inbox/conversations/${conversationSummary.id}`)) {
+        return jsonResponse(conversationDetail)
+      }
+      if (url.startsWith('/api/v1/tickets?')) {
+        // Still open — the resolution genuinely didn't land.
+        return jsonResponse([resolvableTicket])
+      }
+      if (url.endsWith('/api/v1/actions/execute') && init?.method === 'POST') {
+        return jsonResponse({ actionId: 'tickets.update', runId: 'run_resolve', status: 'completed', auditId: 'audit_resolve', eventStream: '' })
+      }
+      if (url.endsWith(`/api/v1/tickets/${resolvableTicket.id}`) && (!init || !init.method)) {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      return jsonResponse({})
+    }))
+
+    renderInbox()
+
+    const ticketList = await screen.findByRole('list', { name: /saker/i })
+    fireEvent.click(within(ticketList).getByRole('button', { name: /order marked delivered but missing/i }))
+
+    const resolveButtons = await screen.findAllByRole('button', { name: /løs sak|resolve ticket/i })
+    fireEvent.click(resolveButtons[0]!)
+
+    expect(await screen.findByText(/saken kunne ikke løses|the ticket could not be resolved/i)).toBeTruthy()
+    expect(screen.queryByText(/saken er løst og verifisert på nytt|ticket resolved and reread/i)).toBeNull()
+  })
 })
