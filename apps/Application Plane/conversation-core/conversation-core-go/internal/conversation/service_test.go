@@ -19,34 +19,35 @@ import (
 )
 
 type fakeRepository struct {
-	mu                sync.Mutex
-	inboxes           []Inbox
-	conversations     []ConversationSummary
-	details           map[string]*ConversationDetail
-	stored            map[string]*StoredEventResult
-	lastMessage       AddMessageInput
-	addMessageCalls   int
-	addMessageErr     error
-	threadRefs        map[string]*ChannelThreadRef
-	threadRefErr      error
-	statusUpdate      StatusUpdate
-	tickets           map[string]*Ticket
-	macros            map[string]*TicketMacro
-	checklists        map[string]*TicketChecklist
-	rules             []TicketAutomationRule
-	classifications   []TicketClassificationInput
-	aiActions         []AIAction
-	lastReview        AIActionReview
-	reviewCalls       int
-	reviewErr         error
-	outboundIntents   map[string]*OutboundIntent
-	outboundMessages  map[string]*Message
-	reconcileResult   []OutboundIntent
-	reconcileErr      error
-	reconcileCalls    []time.Duration
-	hardPurgeCalls    []string
-	hardPurgeErr      error
-	storeInboundCalls int
+	mu                      sync.Mutex
+	inboxes                 []Inbox
+	conversations           []ConversationSummary
+	details                 map[string]*ConversationDetail
+	stored                  map[string]*StoredEventResult
+	lastMessage             AddMessageInput
+	addMessageCalls         int
+	addMessageErr           error
+	threadRefs              map[string]*ChannelThreadRef
+	threadRefErr            error
+	statusUpdate            StatusUpdate
+	tickets                 map[string]*Ticket
+	macros                  map[string]*TicketMacro
+	checklists              map[string]*TicketChecklist
+	rules                   []TicketAutomationRule
+	classifications         []TicketClassificationInput
+	aiActions               []AIAction
+	lastReview              AIActionReview
+	reviewCalls             int
+	reviewErr               error
+	outboundIntents         map[string]*OutboundIntent
+	outboundMessages        map[string]*Message
+	reconcileResult         []OutboundIntent
+	reconcileErr            error
+	reconcileCalls          []time.Duration
+	hardPurgeCalls          []string
+	hardPurgeErr            error
+	storeInboundCalls       int
+	supportRecurrenceCorpus []SupportRecurrenceCorpusEntry
 }
 
 func newFakeRepository() *fakeRepository {
@@ -564,7 +565,7 @@ func (f *fakeRepository) PurgeSupportRecurrenceCorpusByOrg(_ context.Context, _ 
 }
 
 func (f *fakeRepository) ListSupportRecurrenceCorpus(_ context.Context, _ string) ([]SupportRecurrenceCorpusEntry, error) {
-	return nil, nil
+	return f.supportRecurrenceCorpus, nil
 }
 
 func (f *fakeRepository) RecordTicketClassification(_ context.Context, input TicketClassificationInput, payload map[string]any) (*TicketClassification, error) {
