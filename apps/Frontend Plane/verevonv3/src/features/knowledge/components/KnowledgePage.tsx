@@ -391,17 +391,24 @@ export default function KnowledgePage() {
     }
   }
 
-  async function loadOperatingMapWorkspace(signal?: AbortSignal) {
+  // Returns the fetched snapshot (not just void) so a catch-block reconciliation
+  // elsewhere (task_kp_review_reconcile) can inspect a proposal's real status
+  // straight from the response, instead of re-reading the `operatingMap` signal
+  // and risking a staleness race.
+  async function loadOperatingMapWorkspace(signal?: AbortSignal): Promise<OperatingMapSnapshot | null> {
     setOperatingMapLoading(true)
     try {
-      setOperatingMap(await loadOperatingMap(activeOrgId, signal))
+      const snapshot = await loadOperatingMap(activeOrgId, signal)
+      setOperatingMap(snapshot)
+      return snapshot
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') return
+      if (error instanceof DOMException && error.name === 'AbortError') return null
       setOperatingMap(null)
       setNotice({
         tone: 'warn',
         message: translateApiError(error, i18n.tr, { no: 'Operating Map kunne ikke lastes.', en: 'Operating Map could not be loaded.' }),
       })
+      return null
     } finally {
       setOperatingMapLoading(false)
     }
@@ -678,23 +685,57 @@ export default function KnowledgePage() {
     }
   }
 
+  // Shared by the review happy path and by the catch-block reconciliation below
+  // (task_kp_review_reconcile): once a decision is known to have landed —
+  // whether reviewOperatingMapProposal() succeeded outright, or discovered via
+  // re-fetch after it errored — the resulting notice is identical either way.
+  function applyOperatingMapReviewOutcome(decision: 'accept' | 'reject') {
+    setNotice({
+      tone: 'good',
+      message: decision === 'accept'
+        ? i18n.tr('Operating Map er godkjent og publisert i Kunnskap-wikien.', 'Operating Map accepted and published into Knowledge wiki.')
+        : i18n.tr('Operating Map-forslaget ble avvist.', 'Operating Map proposal rejected.'),
+    })
+  }
+
   async function handleReviewOperatingMapProposal(proposal: OperatingMapProposal, decision: 'accept' | 'reject') {
     setBusyAction(`operating-map-${decision}`)
     setNotice(null)
     try {
       await reviewOperatingMapProposal(activeOrgId, proposal.id, decision)
       await loadOperatingMapWorkspace()
-      setNotice({
-        tone: 'good',
-        message: decision === 'accept'
-          ? i18n.tr('Operating Map er godkjent og publisert i Kunnskap-wikien.', 'Operating Map accepted and published into Knowledge wiki.')
-          : i18n.tr('Operating Map-forslaget ble avvist.', 'Operating Map proposal rejected.'),
-      })
+      applyOperatingMapReviewOutcome(decision)
     } catch (error) {
-      setNotice({
-        tone: 'warn',
-        message: translateApiError(error, i18n.tr, { no: 'Forslaget til Operating Map kunne ikke behandles.', en: 'Operating Map proposal could not be reviewed.' }),
-      })
+      // reviewOperatingMapProposal can fail (e.g. a transient 502) after the
+      // decision was already recorded server-side. Re-fetch and check the
+      // proposal's real status before asserting failure, instead of trusting
+      // the network error alone — otherwise a reviewer sees a false "could not
+      // be reviewed" banner for a decision that already went through.
+      const snapshot = await loadOperatingMapWorkspace()
+      const latest = snapshot?.proposals.find((item) => item.id === proposal.id)
+      if (latest && latest.status !== 'pending') {
+        // Found and no longer pending — it actually went through.
+        applyOperatingMapReviewOutcome(decision)
+      } else if (latest) {
+        // Found and still pending — the review genuinely didn't land.
+        setNotice({
+          tone: 'warn',
+          message: translateApiError(error, i18n.tr, { no: 'Forslaget til Operating Map kunne ikke behandles.', en: 'Operating Map proposal could not be reviewed.' }),
+        })
+      } else {
+        // Not found (or the reconciliation re-fetch itself failed) — cannot
+        // tell whether it landed. Deliberately not treated as success: unlike
+        // AiActionReviewPanel's `listAiActions({ status: 'all' })`, this
+        // endpoint's `proposals` list may only ever surface pending items, so
+        // "missing" here is genuinely ambiguous rather than proof of review.
+        setNotice({
+          tone: 'warn',
+          message: i18n.tr(
+            'Vi fikk ikke bekreftet om Operating Map-forslaget ble behandlet. Vent litt før du prøver på nytt.',
+            "We couldn't confirm whether the Operating Map proposal was reviewed. Please wait a moment before trying again.",
+          ),
+        })
+      }
     } finally {
       setBusyAction(null)
     }

@@ -411,7 +411,10 @@ describe('KnowledgePage', () => {
     fireEvent.click(screen.getByRole('button', { name: /graf/i }))
 
     expect(screen.getByRole('region', { name: /raggraph-relasjonskart/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /shipping policy/i, level: 2 })).toBeTruthy()
+    // The Graf tab opens on the workspace root — the top level of the tree —
+    // rather than auto-selecting an arbitrary extracted entity. Deeper tiers
+    // (providers, documents, entities) are reached by expanding a node.
+    expect(screen.getByRole('heading', { name: /^kunnskapsbase$/i, level: 2 })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /utdrag/i }))
 
@@ -485,6 +488,122 @@ describe('KnowledgePage', () => {
     expect(screen.getByRole('region', { name: /evidence for support triage/i })).toBeTruthy()
     expect(screen.getByText(/graph: support workspace/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: /accept/i })).toBeTruthy()
+  })
+
+  it('reconciles a false-failure 502 by checking whether the Operating Map proposal was actually reviewed', async () => {
+    let generated = false
+    let reviewed = false
+    const draftMap = {
+      operating_map_id: 'map-1',
+      org_id: 'org-1',
+      status: 'draft',
+      current_version_id: null,
+      generated_from: {},
+      created_at: '2026-06-18T12:00:00.000Z',
+      updated_at: '2026-06-18T12:00:00.000Z',
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/knowledge/operating-map') {
+        if (!generated) return makeFetchResponse(emptyOperatingMapPayload)
+        return makeFetchResponse({
+          data: {
+            map: draftMap,
+            current_version: null,
+            proposals: [
+              {
+                ...generatedOperatingMapPayload.data.proposal,
+                proposal_status: reviewed ? 'accepted' : 'pending',
+              },
+            ],
+          },
+        })
+      }
+      if (url === '/api/v1/knowledge/operating-map/generate') {
+        generated = true
+        return makeFetchResponse(generatedOperatingMapPayload, 202)
+      }
+      if (url === '/api/v1/knowledge/operating-map/runs/run-1/events') {
+        return new Response('event: status\ndata: {"status":"completed","detail":"Operating Map proposal is ready."}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+          status: 200,
+        })
+      }
+      if (url === '/api/v1/knowledge/operating-map/proposals/proposal-1/review' && init?.method === 'POST') {
+        // The decision reaches the backend and is durably recorded, but the
+        // response itself is lost to a transient gateway error.
+        reviewed = true
+        return makeFetchResponse({ message: 'Bad Gateway' }, 502)
+      }
+      return makeFetchResponse(knowledgePayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderKnowledgePage()
+
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
+    fireEvent.click(screen.getByRole('button', { name: /generate map/i }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /proposal awaiting review/i })).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /accept/i }))
+
+    expect(await screen.findByText(/operating map er godkjent og publisert/i)).toBeTruthy()
+    expect(screen.queryByText(/kunne ikke behandles/i)).toBeNull()
+    expect(screen.queryByText(/fikk ikke bekreftet/i)).toBeNull()
+  })
+
+  it('shows a real failure when a proposal review request errors and the review genuinely did not go through', async () => {
+    let generated = false
+    const draftMap = {
+      operating_map_id: 'map-1',
+      org_id: 'org-1',
+      status: 'draft',
+      current_version_id: null,
+      generated_from: {},
+      created_at: '2026-06-18T12:00:00.000Z',
+      updated_at: '2026-06-18T12:00:00.000Z',
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/v1/knowledge/operating-map') {
+        if (!generated) return makeFetchResponse(emptyOperatingMapPayload)
+        return makeFetchResponse({
+          data: {
+            map: draftMap,
+            current_version: null,
+            proposals: [generatedOperatingMapPayload.data.proposal],
+          },
+        })
+      }
+      if (url === '/api/v1/knowledge/operating-map/generate') {
+        generated = true
+        return makeFetchResponse(generatedOperatingMapPayload, 202)
+      }
+      if (url === '/api/v1/knowledge/operating-map/runs/run-1/events') {
+        return new Response('event: status\ndata: {"status":"completed","detail":"Operating Map proposal is ready."}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+          status: 200,
+        })
+      }
+      if (url === '/api/v1/knowledge/operating-map/proposals/proposal-1/review' && init?.method === 'POST') {
+        return makeFetchResponse({ message: 'Bad Gateway' }, 502)
+      }
+      return makeFetchResponse(knowledgePayload)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderKnowledgePage()
+
+    await screen.findByRole('heading', { name: /^mapper$/i })
+    fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
+    fireEvent.click(screen.getByRole('button', { name: /generate map/i }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /proposal awaiting review/i })).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /accept/i }))
+
+    expect(await screen.findByText(/kunne ikke behandles/i)).toBeTruthy()
+    expect(screen.queryByText(/godkjent og publisert/i)).toBeNull()
   })
 
   it('creates a durable blueprint suggestion from an accepted Operating Map', async () => {
