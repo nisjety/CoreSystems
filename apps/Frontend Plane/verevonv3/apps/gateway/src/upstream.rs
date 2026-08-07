@@ -2207,7 +2207,7 @@ mod tests {
         assert!(headers.contains_key("x-delegation-body-sha256"));
         assert_eq!(
             headers.get("x-delegation-signature").map(String::as_str),
-            Some("sG_AhFjLnFXYkEfnku8KLV_PqkbYFC2XTOHUdxx0BF0")
+            Some("JMYH35hoU13_zzSt39WJPqRIH3neTFfrsPI1HwqIZ2U")
         );
         assert!(!headers.contains_key("x-internal-api-key"));
         assert!(!headers.contains_key("x-user-role"));
@@ -2246,7 +2246,7 @@ mod tests {
         );
         assert_eq!(
             headers.get("x-delegation-signature").map(String::as_str),
-            Some("talCmu20E_nloJpxD5JLDYrnEWzxM1z0e2Ux-0GPtuU")
+            Some("YscmqUN5kNSEAFIU2hafAF2UV87glPCdL_CnjII5V5k")
         );
         assert_eq!(
             headers.get("x-delegation-timestamp").map(String::as_str),
@@ -2305,7 +2305,7 @@ mod tests {
         );
         assert_eq!(
             headers.get("x-delegation-signature").map(String::as_str),
-            Some("mqDXNviLBrxUOmDmUzsgWGwNtot7jpD6YawTAcsawZY")
+            Some("mHWFgO2sgeHul--jSM9dYL7mOs0mt_x3rxHc58wCgrk")
         );
         assert!(!headers.contains_key("x-internal-api-key"));
     }
@@ -2356,7 +2356,7 @@ mod tests {
         );
         assert_eq!(
             headers.get("x-delegation-signature").map(String::as_str),
-            Some("pcjRMdFhwUheFX-sD8K7H-KMnVDum8gMyfD005mDqtc")
+            Some("iZbxn0GTXuuy-tZveuwQcAN-0a2bND6iR_9VB07LwIM")
         );
         assert!(!headers.contains_key("x-internal-api-key"));
         assert!(!headers.contains_key("x-service-token"));
@@ -2394,7 +2394,7 @@ mod tests {
         );
         assert_eq!(
             headers.get("x-delegation-signature").map(String::as_str),
-            Some("0BVt97NOdBwX5Yo-YuEw5RkrWT4imcuTCaNMXWokB28")
+            Some("YTL2cFsFBP8k-7kctwC-GVYdLxpTCX3pkABl_f-eTvE")
         );
         assert_eq!(
             headers.get("x-user-role").map(String::as_str),
