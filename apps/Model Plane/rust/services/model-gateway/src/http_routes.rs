@@ -19,17 +19,18 @@ use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
 use mp_contracts::model_plane::v1::{
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, Approval, ApprovalKind,
-    ApprovalState, BatchTranslateTextRequest, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
-    CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest,
-    ExtractImageTextRequest, GenerateImageRequest, GetApprovalRequest, GetPlanRequest,
+    ApprovalProof, ApprovalState, BatchTranslateTextRequest, ContinuationExecution,
+    CreateEmbeddingRequest, CreateRealtimeSessionRequest, CreateVideoGenerationJobRequest,
+    DecideApprovalRequest, DetectTextLanguageRequest, ExtractImageTextRequest,
+    GenerateImageRequest, GetApprovalRequest, GetPlanRequest, GetRunProofBundleRequest,
     GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
     ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest, ListPlansRequest,
     ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
     ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep, PlanStepState,
-    RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
+    RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail, RunProofBundle,
     StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole, SynthesizeSpeechRequest,
     Todo, TodoPriority, TodoState, TranscribeSpeechRequest, TransitionPlanRequest,
-    TransitionTodoRequest, TranslateTextRequest, TranslationInput,
+    TransitionTodoRequest, TranslateTextRequest, TranslationInput, VerificationStatus,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -202,6 +203,10 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/runs/:run_id/approvals",
             get(list_approvals),
+        )
+        .route(
+            "/v1/orchestration/runs/:run_id/proof-bundle",
+            get(get_run_proof_bundle),
         )
         .route(
             "/v1/orchestration/approvals/:approval_id",
@@ -783,6 +788,36 @@ async fn list_approvals(
     Ok(Json(json!({
         "approvals": response.approvals.iter().map(approval_value).collect::<Vec<_>>(),
     })))
+}
+
+/// The Verevon Proof Bundle for one run (roadmap P1.2). Read-only; the org is
+/// taken from the caller's verified JWT, never from a client-suppliable value.
+async fn get_run_proof_bundle(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_run_proof_bundle(authenticated_session_request(
+            GetRunProofBundleRequest {
+                run_id,
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    let bundle = response
+        .bundle
+        .as_ref()
+        .map(proof_bundle_value)
+        .unwrap_or(Value::Null);
+    Ok(Json(json!({ "bundle": bundle })))
 }
 
 async fn get_approval(
@@ -5026,6 +5061,81 @@ fn approval_value(approval: &Approval) -> Value {
         "requested_of": approval.requested_of,
         "decided_by": empty_to_null(&approval.decided_by),
         "decision_reason": empty_to_null(&approval.decision_reason),
+    })
+}
+
+/// Serialize a Verevon Proof Bundle. Every stage that did not happen stays
+/// `null` rather than becoming an empty object — a reader must never mistake
+/// "no execution recorded" for "executed with blank fields".
+fn proof_bundle_value(bundle: &RunProofBundle) -> Value {
+    json!({
+        "bundle_version": bundle.bundle_version,
+        "run_id": bundle.run_id,
+        "org_id": bundle.org_id,
+        "generated_at": bundle.generated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "run": bundle.run.as_ref().map_or(Value::Null, |run| json!({
+            "goal": run.goal,
+            "agent_id": run.agent_id,
+            "status": run.status,
+            "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        })),
+        "approvals": bundle.approvals.iter().map(proof_approval_value).collect::<Vec<_>>(),
+        "unavailable": bundle.unavailable.iter().map(|section| json!({
+            "section": section.section,
+            "reason": section.reason,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn proof_approval_value(proof: &ApprovalProof) -> Value {
+    json!({
+        "approval_id": proof.approval_id,
+        "kind": proof.kind,
+        "status": proof.status,
+        "requested_by": empty_to_null(&proof.requested_by),
+        "decided_by": empty_to_null(&proof.decided_by),
+        "decision_reason": empty_to_null(&proof.decision_reason),
+        "requested_at": proof.requested_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "decided_at": proof.decided_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "execution": proof.execution.as_ref().map_or(Value::Null, proof_execution_value),
+    })
+}
+
+/// Render the shared verification vocabulary on the wire. Deliberately the
+/// same lowercase strings session-core persists and `run-console-client.ts`
+/// already documents, so the value means one thing across the whole chain.
+/// `UNSPECIFIED` and any unknown value render as `"unknown"` — never as a
+/// success variant, and never as `null` (which a reader could mistake for
+/// "no verification was attempted").
+fn verification_status_name(status: i32) -> &'static str {
+    match VerificationStatus::try_from(status) {
+        Ok(VerificationStatus::VerifiedSuccess) => "verified_success",
+        Ok(VerificationStatus::VerifiedFailure) => "verified_failure",
+        Ok(VerificationStatus::PartiallyVerified) => "partially_verified",
+        _ => "unknown",
+    }
+}
+
+fn proof_execution_value(execution: &ContinuationExecution) -> Value {
+    json!({
+        "receipt_id": execution.receipt_id,
+        "delivery_id": execution.delivery_id,
+        "action_fingerprint": execution.action_fingerprint,
+        "execution_service_id": execution.execution_service_id,
+        "descriptor_version": execution.descriptor_version,
+        "started_at": execution.started_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "outcome": execution.outcome.as_ref().map_or(Value::Null, |outcome| json!({
+            "outcome": outcome.outcome,
+            "provider_receipt_id": empty_to_null(&outcome.provider_receipt_id),
+            "failure_code": empty_to_null(&outcome.failure_code),
+            "finalized_at": outcome.finalized_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            "verification": outcome.verification.as_ref().map_or(Value::Null, |v| json!({
+                "status": verification_status_name(v.status),
+                "method": empty_to_null(&v.method),
+                "reason": empty_to_null(&v.reason),
+                "verified_at": v.verified_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            })),
+        })),
     })
 }
 

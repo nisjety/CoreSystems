@@ -71,6 +71,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_approvals),
         )
         .route(
+            "/api/v1/orchestration/runs/:run_id/proof-bundle",
+            get(get_run_proof_bundle),
+        )
+        .route(
             "/api/v1/orchestration/approvals/:approval_id",
             get(get_approval),
         )
@@ -358,6 +362,24 @@ async fn list_approvals(
         &user,
         &headers,
         &format!("/v1/orchestration/runs/{}/approvals", enc(&run_id)),
+    )
+    .await
+}
+
+/// The Verevon Proof Bundle for one run — the portable evidence record of what
+/// was authorized, executed, observed, and independently verified. Read-only;
+/// model-gateway scopes it to the caller's verified org.
+async fn get_run_proof_bundle(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!("/v1/orchestration/runs/{}/proof-bundle", enc(&run_id)),
     )
     .await
 }

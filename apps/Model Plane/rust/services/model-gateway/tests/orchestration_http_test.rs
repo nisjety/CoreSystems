@@ -17,12 +17,14 @@ use mp_contracts::model_plane::v1::{
     ApprovalState, AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
     CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
-    GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
-    GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse,
-    LineageEdge, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse,
-    ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ListTodosRequest,
-    ListTodosResponse, OrchestrationEvent,
+    GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest,
+    GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest, GetSubagentLineageRequest,
+    GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, LineageEdge, ListApprovalsRequest,
+    ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunsRequest, ListRunsResponse,
+    ListSystemRunsRequest, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
     OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
+    RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse,
+    RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse,
     RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, ResolveRunOwnerRequest,
     ResolveRunOwnerResponse, RunDetail, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
     TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
@@ -496,11 +498,49 @@ impl OrchestrationCoreService for MockOrchestration {
         Err(Status::unimplemented("not needed in this test"))
     }
 
+    async fn get_approval_continuation(
+        &self,
+        _: TonicRequest<GetApprovalContinuationRequest>,
+    ) -> Result<Response<GetApprovalContinuationResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+
+    async fn record_approval_continuation_started(
+        &self,
+        _: TonicRequest<RecordApprovalContinuationStartedRequest>,
+    ) -> Result<Response<RecordApprovalContinuationStartedResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+
+    async fn record_approval_continuation_outcome(
+        &self,
+        _: TonicRequest<RecordApprovalContinuationOutcomeRequest>,
+    ) -> Result<Response<RecordApprovalContinuationOutcomeResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+
     async fn acknowledge_approval_delivery(
         &self,
         _: TonicRequest<AcknowledgeApprovalDeliveryRequest>,
     ) -> Result<Response<AcknowledgeApprovalDeliveryResponse>, Status> {
         Err(Status::unimplemented("not needed in this test"))
+    }
+
+    async fn get_run_proof_bundle(
+        &self,
+        request: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::GetRunProofBundleResponse>, Status> {
+        let request = request.into_inner();
+        Ok(Response::new(
+            mp_contracts::model_plane::v1::GetRunProofBundleResponse {
+                bundle: Some(mp_contracts::model_plane::v1::RunProofBundle {
+                    bundle_version: 1,
+                    run_id: request.run_id,
+                    org_id: request.org_id,
+                    ..Default::default()
+                }),
+            },
+        ))
     }
 
     async fn get_subagent_lineage(
@@ -1007,10 +1047,34 @@ impl OrchestrationCoreService for OrgScopedMock {
     ) -> Result<Response<ClaimApprovalDeliveriesResponse>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
+    async fn get_approval_continuation(
+        &self,
+        _: TonicRequest<GetApprovalContinuationRequest>,
+    ) -> Result<Response<GetApprovalContinuationResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn record_approval_continuation_started(
+        &self,
+        _: TonicRequest<RecordApprovalContinuationStartedRequest>,
+    ) -> Result<Response<RecordApprovalContinuationStartedResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn record_approval_continuation_outcome(
+        &self,
+        _: TonicRequest<RecordApprovalContinuationOutcomeRequest>,
+    ) -> Result<Response<RecordApprovalContinuationOutcomeResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
     async fn acknowledge_approval_delivery(
         &self,
         _: TonicRequest<AcknowledgeApprovalDeliveryRequest>,
     ) -> Result<Response<AcknowledgeApprovalDeliveryResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn get_run_proof_bundle(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::GetRunProofBundleResponse>, Status> {
         Err(Status::unimplemented("not needed in this test"))
     }
     async fn get_subagent_lineage(
