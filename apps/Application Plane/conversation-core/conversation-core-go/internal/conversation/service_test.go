@@ -543,6 +543,30 @@ func (f *fakeRepository) HardPurgeByOrg(_ context.Context, orgID string) error {
 	return nil
 }
 
+func (f *fakeRepository) DistinctOrgIDsWithActiveTickets(_ context.Context) ([]string, error) {
+	return nil, nil
+}
+
+func (f *fakeRepository) ActiveTicketsForSupportRecurrenceCorpus(_ context.Context, _ string) ([]Ticket, error) {
+	return nil, nil
+}
+
+func (f *fakeRepository) UpsertSupportRecurrenceCorpusEntry(_ context.Context, _, _ string, _ []float32, _ string, _ time.Time) error {
+	return nil
+}
+
+func (f *fakeRepository) EvictStaleSupportRecurrenceCorpusEntries(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
+
+func (f *fakeRepository) PurgeSupportRecurrenceCorpusByOrg(_ context.Context, _ string) error {
+	return nil
+}
+
+func (f *fakeRepository) ListSupportRecurrenceCorpus(_ context.Context, _ string) ([]SupportRecurrenceCorpusEntry, error) {
+	return nil, nil
+}
+
 func (f *fakeRepository) RecordTicketClassification(_ context.Context, input TicketClassificationInput, payload map[string]any) (*TicketClassification, error) {
 	f.classifications = append(f.classifications, input)
 	return &TicketClassification{
