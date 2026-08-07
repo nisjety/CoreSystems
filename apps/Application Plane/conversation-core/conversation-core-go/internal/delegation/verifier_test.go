@@ -145,7 +145,7 @@ func TestVerifierAcceptsGatewayCrossLanguageFixture(t *testing.T) {
 	request.Header.Set(HeaderOrganizationID, "org-1")
 	request.Header.Set(HeaderRole, "admin")
 	request.Header.Set(HeaderBodySHA256, "zIWXrcFcB2V6qcMYvMSL9BWhHM37zJ5N96fr8I-wyRI")
-	request.Header.Set(HeaderSignature, "0BVt97NOdBwX5Yo-YuEw5RkrWT4imcuTCaNMXWokB28")
+	request.Header.Set(HeaderSignature, "YTL2cFsFBP8k-7kctwC-GVYdLxpTCX3pkABl_f-eTvE")
 
 	principal, err := verifier.Verify(request, body)
 	if err != nil {
