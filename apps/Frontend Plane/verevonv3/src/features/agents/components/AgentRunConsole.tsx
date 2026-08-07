@@ -366,6 +366,10 @@ export default function AgentRunConsole() {
           // A new/replayed run has already reset state under us — bail rather
           // than clobber it with a reconciliation for a run that's gone.
         } else if (fresh === null) {
+          // Two failures in a row (the original decide, now the reconciliation
+          // re-fetch) with no server-side signal either way — worth a trace
+          // even without a logging library, since this is otherwise invisible.
+          console.warn('[AgentRunConsole] decideApproval failed and the reconciliation re-fetch also failed; could not confirm whether the decision landed', { approvalId, runId, decision })
           setState('error', i18n.tr(
             'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
             "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
@@ -373,27 +377,33 @@ export default function AgentRunConsole() {
         } else {
           setState('approvals', fresh)
           const match = fresh.find((approval) => approval.id === approvalId)
-          // Canonicalized already by normalizeApproval, but matched the same
-          // defensive uppercasing `pendingApprovals` uses on this same field —
-          // a casing regression there must not misroute a real success into
-          // the "decided differently" branch below.
-          const matchStatus = (match?.status ?? '').toUpperCase()
           const expected = decision === 'approve' ? 'GRANTED' : 'DENIED'
-          if (matchStatus === expected) {
-            // It actually went through — proceed exactly as success would have.
-            await applyDecisionFollowThrough(runId, decision)
-          } else if (matchStatus === 'PENDING') {
-            setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
-          } else if (match) {
-            setState('error', i18n.tr(
-              'Denne forespørselen er allerede avgjort — trolig av en annen bruker.',
-              'This request has already been decided — likely by someone else.',
-            ))
-          } else {
+          if (!match) {
+            // Not the same as "still pending" — the re-fetch succeeded but this
+            // approval isn't in it at all, so there's genuinely nothing to read
+            // a status from. Distinct log from the fresh === null branch above.
+            console.warn('[AgentRunConsole] decideApproval failed and the reconciliation re-fetch no longer lists this approval at all', { approvalId, runId, decision })
             setState('error', i18n.tr(
               'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
               "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
             ))
+          } else {
+            // Canonicalized already by normalizeApproval, but matched the same
+            // defensive uppercasing + PENDING fallback `pendingApprovals` uses
+            // on this same field — a casing/absence regression there must not
+            // misroute a real success into the "decided differently" branch.
+            const matchStatus = (match.status ?? 'PENDING').toUpperCase()
+            if (matchStatus === expected) {
+              // It actually went through — proceed exactly as success would have.
+              await applyDecisionFollowThrough(runId, decision)
+            } else if (matchStatus === 'PENDING') {
+              setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
+            } else {
+              setState('error', i18n.tr(
+                'Denne forespørselen er allerede avgjort — trolig av en annen bruker.',
+                'This request has already been decided — likely by someone else.',
+              ))
+            }
           }
         }
       }

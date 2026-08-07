@@ -217,6 +217,9 @@ async fn mg_post(
     .await
 }
 
+const DECIDE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+const DECIDE_RETRY_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Retries `/decide` exactly once on a retryable status, after a short fixed
 /// backoff. Safe ONLY for this route: session-core's `DecideApproval` is a
 /// single CAS-guarded state transition with no side effects of its own (a
@@ -227,9 +230,6 @@ async fn mg_post(
 /// placeholder: it 502s only on the literal Requested->Granted transition, and
 /// by the second attempt the DB row is already Granted, so that branch is
 /// skipped.
-const DECIDE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
-const DECIDE_RETRY_TIMEOUT: Duration = Duration::from_secs(8);
-
 async fn mg_post_decide_with_retry(
     state: &AppState,
     user: &AuthenticatedUser,
