@@ -292,6 +292,7 @@ impl BrowserEventSink for OrchestrationEventSink {
                 detail.action_id,
                 detail.risk_category.as_str()
             ),
+            continuation_descriptor_json: String::new(),
         }) {
             Ok(request) => orchestration.create_approval(request).await,
             Err(error) => Err(error),
@@ -466,6 +467,7 @@ mod tests {
         AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest,
         ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse,
         DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse,
+        GetApprovalContinuationRequest, GetApprovalContinuationResponse,
         GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse,
         GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse,
         ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse,
@@ -500,6 +502,13 @@ mod tests {
 
     #[tonic::async_trait]
     impl OrchestrationCoreService for NeverResolvingOrchestration {
+        async fn get_run_proof_bundle(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::GetRunProofBundleResponse>, Status>
+        {
+            Err(Status::unimplemented("not needed in this test"))
+        }
         async fn list_plans(
             &self,
             _: TonicRequest<ListPlansRequest>,
@@ -629,6 +638,24 @@ mod tests {
             &self,
             _: TonicRequest<ClaimApprovalDeliveriesRequest>,
         ) -> Result<Response<ClaimApprovalDeliveriesResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn get_approval_continuation(
+            &self,
+            _: TonicRequest<GetApprovalContinuationRequest>,
+        ) -> Result<Response<GetApprovalContinuationResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn record_approval_continuation_started(
+            &self,
+            _: TonicRequest<pb::RecordApprovalContinuationStartedRequest>,
+        ) -> Result<Response<pb::RecordApprovalContinuationStartedResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn record_approval_continuation_outcome(
+            &self,
+            _: TonicRequest<pb::RecordApprovalContinuationOutcomeRequest>,
+        ) -> Result<Response<pb::RecordApprovalContinuationOutcomeResponse>, Status> {
             Err(Status::unimplemented("not needed in this test"))
         }
         async fn acknowledge_approval_delivery(

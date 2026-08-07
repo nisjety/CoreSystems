@@ -2419,6 +2419,13 @@ mod tests {
     impl OrchestrationCoreService for MockOrchestration {
         type StreamRunEventsStream = RunEventStream;
 
+        async fn get_run_proof_bundle(
+            &self,
+            _: Request<pb::GetRunProofBundleRequest>,
+        ) -> Result<Response<pb::GetRunProofBundleResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+
         async fn record_orchestration_event(
             &self,
             request: Request<pb::RecordOrchestrationEventRequest>,
