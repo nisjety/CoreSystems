@@ -85,6 +85,57 @@ describe('OrgDeletionBanner', () => {
     await waitFor(() => expect(onRefetch).toHaveBeenCalled())
   })
 
+  it('reconciles a false-failure 502 by checking whether the deletion was actually cancelled', async () => {
+    setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/gdpr/restore') {
+        // The restore reaches the backend and is durably recorded, but the
+        // response itself is lost to a transient gateway error.
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        return jsonResponse({ pending: false, org_name: 'Acme AS' } satisfies DeletionStatus)
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRefetch = vi.fn()
+    const status: DeletionStatus = { pending: true, deadline: futureDeadline(3), org_name: 'Acme AS' }
+
+    render(() => <OrgDeletionBanner status={status} onRefetch={onRefetch} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Avbryt sletting' }))
+
+    await waitFor(() => expect(onRefetch).toHaveBeenCalled())
+    expect(screen.queryByText(/unexpected error|bad gateway/i)).toBeNull()
+  })
+
+  it('shows a real failure when cancelling deletion genuinely did not go through', async () => {
+    setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/gdpr/restore') {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        // Still pending — the restore genuinely didn't land.
+        return jsonResponse({ pending: true, deadline: futureDeadline(3), org_name: 'Acme AS' } satisfies DeletionStatus)
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRefetch = vi.fn()
+    const status: DeletionStatus = { pending: true, deadline: futureDeadline(3), org_name: 'Acme AS' }
+
+    render(() => <OrgDeletionBanner status={status} onRefetch={onRefetch} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Avbryt sletting' }))
+
+    await waitFor(() => expect(screen.getByText(/bad gateway/i)).toBeTruthy())
+    expect(onRefetch).not.toHaveBeenCalled()
+  })
+
   it('downloads the DSAR export then marks it received', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
@@ -122,6 +173,75 @@ describe('OrgDeletionBanner', () => {
     await waitFor(() => expect(onRefetch).toHaveBeenCalled())
   })
 
+  it('reconciles a false-failure 502 by checking whether the export checkpoint was actually recorded', async () => {
+    setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/privacy/export') {
+        return jsonResponse({
+          subject: 'user', subject_id: 'user_1', generated_at: '2026-07-20T00:00:00Z',
+          profile: {}, org_memberships: [], api_keys: [], notes: [],
+        })
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/mark-exported') {
+        // The checkpoint reaches the backend and is durably recorded, but the
+        // response itself is lost to a transient gateway error.
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        return jsonResponse({
+          pending: true, deadline: futureDeadline(10), org_name: 'Acme AS',
+          member_status: { user_id: 'user_1', exported_at: '2026-08-07T00:00:00Z' },
+        } satisfies DeletionStatus)
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRefetch = vi.fn()
+    const status: DeletionStatus = { pending: true, deadline: futureDeadline(10), org_name: 'Acme AS' }
+
+    render(() => <OrgDeletionBanner status={status} onRefetch={onRefetch} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Eksporter mine data' }))
+
+    await waitFor(() => expect(onRefetch).toHaveBeenCalled())
+    expect(screen.queryByText(/unexpected error|bad gateway/i)).toBeNull()
+  })
+
+  it('shows a real failure when the export checkpoint genuinely was not recorded', async () => {
+    setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/privacy/export') {
+        return jsonResponse({
+          subject: 'user', subject_id: 'user_1', generated_at: '2026-07-20T00:00:00Z',
+          profile: {}, org_memberships: [], api_keys: [], notes: [],
+        })
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/mark-exported') {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        // No exported_at — the checkpoint genuinely didn't land.
+        return jsonResponse({
+          pending: true, deadline: futureDeadline(10), org_name: 'Acme AS',
+          member_status: { user_id: 'user_1' },
+        } satisfies DeletionStatus)
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRefetch = vi.fn()
+    const status: DeletionStatus = { pending: true, deadline: futureDeadline(10), org_name: 'Acme AS' }
+
+    render(() => <OrgDeletionBanner status={status} onRefetch={onRefetch} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Eksporter mine data' }))
+
+    await waitFor(() => expect(screen.getByText(/bad gateway/i)).toBeTruthy())
+    expect(onRefetch).not.toHaveBeenCalled()
+  })
+
   it('acknowledges the pending-deletion notice for the calling member', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
@@ -138,6 +258,61 @@ describe('OrgDeletionBanner', () => {
     expect(path).toBe('/api/v1/orgs/org_1/gdpr/deletion/acknowledge')
     expect(init.method).toBe('POST')
     await waitFor(() => expect(onRefetch).toHaveBeenCalled())
+  })
+
+  it('reconciles a false-failure 502 by checking whether the acknowledgement was actually recorded', async () => {
+    setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/acknowledge') {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        return jsonResponse({
+          pending: true, deadline: futureDeadline(2), org_name: 'Acme AS',
+          member_status: { user_id: 'user_1', acknowledged_at: '2026-08-07T00:00:00Z' },
+        } satisfies DeletionStatus)
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRefetch = vi.fn()
+    const status: DeletionStatus = { pending: true, deadline: futureDeadline(2), org_name: 'Acme AS' }
+
+    render(() => <OrgDeletionBanner status={status} onRefetch={onRefetch} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Bekreft' }))
+
+    await waitFor(() => expect(onRefetch).toHaveBeenCalled())
+    expect(screen.queryByText(/unexpected error|bad gateway/i)).toBeNull()
+  })
+
+  it('shows a real failure when acknowledging genuinely did not go through', async () => {
+    setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/acknowledge') {
+        return jsonResponse({ message: 'Bad Gateway' }, 502)
+      }
+      if (path === '/api/v1/orgs/org_1/gdpr/deletion/status') {
+        // No acknowledged_at — the acknowledgement genuinely didn't land.
+        return jsonResponse({
+          pending: true, deadline: futureDeadline(2), org_name: 'Acme AS',
+          member_status: { user_id: 'user_1' },
+        } satisfies DeletionStatus)
+      }
+      return jsonResponse({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const onRefetch = vi.fn()
+    const status: DeletionStatus = { pending: true, deadline: futureDeadline(2), org_name: 'Acme AS' }
+
+    render(() => <OrgDeletionBanner status={status} onRefetch={onRefetch} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Bekreft' }))
+
+    await waitFor(() => expect(screen.getByText(/bad gateway/i)).toBeTruthy())
+    expect(onRefetch).not.toHaveBeenCalled()
   })
 
   it('shows the already-exported / already-acknowledged checkpoint state', () => {

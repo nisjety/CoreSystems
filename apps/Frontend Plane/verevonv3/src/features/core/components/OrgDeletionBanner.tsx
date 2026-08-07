@@ -4,6 +4,7 @@ import { useI18n } from '@/shared/i18n'
 import { ApiError } from '@/shared/api/http'
 import {
   acknowledgeDeletion,
+  getDeletionStatus,
   markExported,
   restoreOrg,
   type DeletionStatus,
@@ -79,7 +80,17 @@ export function OrgDeletionBanner(props: {
       await markExported(id)
       props.onRefetch()
     } catch (reason) {
-      setActionError(errorMessage(reason))
+      // exportMyData/markExported can fail (e.g. a transient 502) after the
+      // export checkpoint was already durably recorded server-side. Re-fetch
+      // the real status before asserting failure, instead of trusting the
+      // network error alone — otherwise a member sees a false "could not
+      // export" error for a checkpoint that already landed.
+      const fresh = await getDeletionStatus(id).catch(() => null)
+      if (fresh?.member_status?.exported_at) {
+        props.onRefetch()
+      } else {
+        setActionError(errorMessage(reason))
+      }
     } finally {
       setExporting(false)
     }
@@ -94,7 +105,15 @@ export function OrgDeletionBanner(props: {
       await acknowledgeDeletion(id)
       props.onRefetch()
     } catch (reason) {
-      setActionError(errorMessage(reason))
+      // Same false-failure risk as handleExport: acknowledgeDeletion can
+      // fail after the checkpoint already landed. Re-fetch and check before
+      // asserting failure.
+      const fresh = await getDeletionStatus(id).catch(() => null)
+      if (fresh?.member_status?.acknowledged_at) {
+        props.onRefetch()
+      } else {
+        setActionError(errorMessage(reason))
+      }
     } finally {
       setAcknowledging(false)
     }
@@ -109,7 +128,18 @@ export function OrgDeletionBanner(props: {
       await restoreOrg(id)
       props.onRefetch()
     } catch (reason) {
-      setActionError(errorMessage(reason))
+      // restoreOrg can fail (e.g. a transient 502) after the organization was
+      // already durably restored server-side. Re-fetch and check whether
+      // it's still pending before asserting failure — otherwise an owner
+      // sees a false "could not cancel deletion" error for a restore that
+      // already went through, which is about as high-stakes a false failure
+      // as this pattern gets.
+      const fresh = await getDeletionStatus(id).catch(() => null)
+      if (fresh && !fresh.pending) {
+        props.onRefetch()
+      } else {
+        setActionError(errorMessage(reason))
+      }
     } finally {
       setCancelling(false)
     }
