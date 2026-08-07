@@ -552,7 +552,7 @@ mod tests {
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
             auth_core_url: "http://127.0.0.1:1".into(),
-            velion_public_origin: "http://localhost:5173".into(),
+            verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
             session_core_service_token: "0123456789abcdef0123456789abcdef".into(),
             user_core_service_token: "abcdef0123456789abcdef0123456789".into(),
