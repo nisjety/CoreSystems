@@ -39,6 +39,12 @@ pub struct FetchHints {
     /// Previous response's `Last-Modified`. Sent as
     /// `If-Modified-Since` when `If-None-Match` is absent.
     pub if_modified_since: Option<String>,
+    /// DNS addresses resolved and checked during the request security
+    /// preflight. Direct static and TLS-profile fetch use this to connect
+    /// without performing a second, attacker-controlled hostname lookup.
+    /// Browser and proxy egress need their own connection-level pinning
+    /// contracts and must not be described as covered by this hint.
+    pub resolved_target: Option<crate::dns_guard::ResolvedTarget>,
     /// Render hints. Only browser drivers honour these; static and
     /// TLS-profile drivers ignore them. Plumbed from the public
     /// `ScrapeRequest.render` field on the edge.
