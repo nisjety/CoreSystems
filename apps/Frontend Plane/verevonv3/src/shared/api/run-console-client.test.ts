@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { streamRunEvents } from './run-console-client'
+import { getRunProofBundle, streamRunEvents } from './run-console-client'
 import { listPlans, listTodos } from './orchestration-client'
 
 /** A single SSE frame: `event:`/`data:` lines terminated by a blank line. */
@@ -286,5 +286,113 @@ describe('orchestration run console reads', () => {
     const [path] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(path).toBe('/api/v1/orchestration/threads/thread_1/todos')
     expect(result).toEqual([{ id: 'todo_1', threadId: 'thread_1', state: 'PENDING', title: 'Step one' }])
+  })
+})
+
+describe('getRunProofBundle', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  // The bundle's value is that `null` survives the wire→logical hop intact. A
+  // normalizer that folded a missing `execution`/`outcome`/`verification` into
+  // an empty object would let the UI show "not proven" as a finished, verified
+  // fact — the exact misreading the artifact exists to prevent.
+  it('preserves each null link in the evidence chain instead of inventing an empty one', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        bundle: {
+          bundle_version: 1,
+          run_id: 'run_1',
+          org_id: 'org-1',
+          generated_at: '2026-08-08T10:00:00Z',
+          run: { goal: 'Book a shipment', agent_id: 'general-v1', status: 'completed', created_at: '2026-08-08T09:00:00Z' },
+          approvals: [
+            { approval_id: 'appr_1', kind: 'tool', status: 'granted', execution: null },
+            {
+              approval_id: 'appr_2',
+              kind: 'tool',
+              status: 'granted',
+              execution: { receipt_id: 'rcpt_2', started_at: '2026-08-08T09:30:00Z', outcome: null },
+            },
+            {
+              approval_id: 'appr_3',
+              kind: 'tool',
+              status: 'granted',
+              execution: {
+                receipt_id: 'rcpt_3',
+                outcome: { outcome: 'completed', provider_receipt_id: 'LC652849244NO', verification: null },
+              },
+            },
+          ],
+          unavailable: [],
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const bundle = await getRunProofBundle('run_1')
+
+    const [path] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/v1/orchestration/runs/run_1/proof-bundle')
+    expect(bundle?.approvals[0]?.execution).toBeNull()
+    expect(bundle?.approvals[1]?.execution?.outcome).toBeNull()
+    expect(bundle?.approvals[2]?.execution?.outcome?.verification).toBeNull()
+    // A key that is simply absent means the same thing as an explicit null.
+    expect(bundle?.approvals[2]?.execution?.startedAt).toBeUndefined()
+  })
+
+  it('normalizes a fully-evidenced approval, snake_case or camelCase', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        bundle: {
+          bundle_version: 1,
+          run_id: 'run_1',
+          run: null,
+          approvals: [{
+            approval_id: 'appr_1',
+            kind: 'shipping.book_shipment',
+            status: 'granted',
+            requested_by: 'model',
+            decided_by: 'user-1',
+            decision_reason: 'looks right',
+            execution: {
+              receiptId: 'rcpt_1',
+              deliveryId: 'dlv_1',
+              actionFingerprint: 'a'.repeat(64),
+              executionServiceId: 'execution-core',
+              descriptorVersion: 1,
+              outcome: {
+                outcome: 'completed',
+                provider_receipt_id: 'LC652849244NO',
+                verification: { status: 'verified_success', method: 'structural', reason: 'tracking id present', verified_at: '2026-08-08T09:32:00Z' },
+              },
+            },
+          }],
+          unavailable: [{ section: 'charged', reason: 'Billing is reconciled outside the run record.' }],
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const bundle = await getRunProofBundle('run_1')
+
+    expect(bundle?.run).toBeNull()
+    const execution = bundle?.approvals[0]?.execution
+    expect(execution?.deliveryId).toBe('dlv_1')
+    expect(execution?.descriptorVersion).toBe(1)
+    expect(execution?.outcome?.providerReceiptId).toBe('LC652849244NO')
+    expect(execution?.outcome?.verification?.status).toBe('verified_success')
+    expect(execution?.outcome?.verification?.verifiedAt).toBe('2026-08-08T09:32:00Z')
+    expect(bundle?.unavailable).toEqual([
+      { section: 'charged', reason: 'Billing is reconciled outside the run record.' },
+    ])
+  })
+
+  it('resolves to null when the run has no bundle at all', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ bundle: null }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    expect(await getRunProofBundle('run_1')).toBeNull()
   })
 })

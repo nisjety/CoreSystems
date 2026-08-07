@@ -5879,6 +5879,261 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+/* Proof bundle — the run's portable evidence record.
+   The `unproven` tone is intentionally its own visual state, distinct from
+   both ok and error: it says "this was not proven", which is neither a
+   success nor a failure. */
+.verevon-run-proof__version {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--linear-main-bg);
+  color: var(--verevon-text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.dark .verevon-run-proof__version {
+  background: #101116;
+}
+
+.verevon-run-proof__note {
+  margin: 0 0 12px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.verevon-run-proof__goal {
+  margin: 0 0 12px;
+  color: var(--verevon-dark-surface-soft);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.dark .verevon-run-proof__goal {
+  color: var(--panel);
+}
+
+.verevon-run-proof__agent {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-run-proof__approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.verevon-run-proof__approval {
+  padding: 11px 13px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--linear-main-bg);
+}
+
+.dark .verevon-run-proof__approval {
+  background: #101116;
+  border-color: var(--border);
+}
+
+.verevon-run-proof__approval-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.verevon-run-proof__kind {
+  color: var(--verevon-dark-surface-soft);
+  font-size: 12.5px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.dark .verevon-run-proof__kind {
+  color: var(--panel);
+}
+
+.verevon-run-proof__meta {
+  margin: 0 0 6px;
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-run-proof__pill {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.verevon-run-proof__pill--neutral {
+  background: var(--linear-main-bg);
+  color: var(--verevon-text-muted);
+}
+
+.dark .verevon-run-proof__pill--neutral {
+  background: #17181e;
+}
+
+.verevon-run-proof__pill--ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.verevon-run-proof__pill--warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning-ink);
+}
+
+.verevon-run-proof__pill--error {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+/* Not proven: a dashed outline and muted ink, so it can never be mistaken for
+   a filled success or failure pill at a glance. */
+.verevon-run-proof__pill--unproven {
+  border: 1px dashed var(--verevon-text-muted);
+  padding: 1px 6px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-run-proof__claim {
+  padding: 8px 10px;
+  border-left: 2px solid var(--verevon-border);
+  border-radius: 0 8px 8px 0;
+  background: var(--verevon-surface);
+  margin-top: 8px;
+}
+
+.dark .verevon-run-proof__claim {
+  background: #15161a;
+  border-left-color: var(--border);
+}
+
+.verevon-run-proof__claim--ok { border-left-color: var(--success); }
+.verevon-run-proof__claim--warn { border-left-color: var(--warning); }
+.verevon-run-proof__claim--error { border-left-color: var(--danger); }
+
+.verevon-run-proof__claim--unproven,
+.dark .verevon-run-proof__claim--unproven {
+  border-left-style: dashed;
+  border-left-color: var(--verevon-text-muted);
+}
+
+.verevon-run-proof__claim-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.verevon-run-proof__claim-label {
+  color: var(--verevon-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.verevon-run-proof__claim-note {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-run-proof__receipt {
+  display: grid;
+  gap: 3px;
+  margin: 8px 0 0;
+}
+
+.verevon-run-proof__receipt-row {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.verevon-run-proof__receipt-row dt {
+  flex-shrink: 0;
+  min-width: 92px;
+  color: var(--verevon-text-muted);
+  font-weight: 600;
+}
+
+.verevon-run-proof__receipt-row dd {
+  margin: 0;
+  color: var(--verevon-dark-surface-soft);
+  overflow-wrap: anywhere;
+}
+
+.dark .verevon-run-proof__receipt-row dd {
+  color: var(--panel);
+}
+
+.verevon-run-proof__receipt-row code {
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-run-proof__unavailable {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-run-proof__unavailable-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px dashed var(--verevon-border);
+  border-radius: 9px;
+}
+
+.dark .verevon-run-proof__unavailable-item {
+  border-color: var(--border);
+}
+
+.verevon-run-proof__unavailable-section {
+  color: var(--verevon-dark-surface-soft);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.dark .verevon-run-proof__unavailable-section {
+  color: var(--panel);
+}
+
+.verevon-run-proof__unavailable-reason {
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-run-proof__stamp {
+  margin: 0;
+  color: var(--verevon-e-subtle);
+  font-size: 10.5px;
+}
+
 /* Agents v2 parity layer.
    These Solid views intentionally reuse v2 component markup, but v3 does not
    ship Tailwind. This compact utility subset restores the layout primitives

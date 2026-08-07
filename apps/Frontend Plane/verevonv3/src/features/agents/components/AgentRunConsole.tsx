@@ -56,7 +56,11 @@ import {
   type VerevonMode,
 } from '@/shared/api/chat-client'
 import {
+  getRunProofBundle,
   streamRunEvents,
+  type ProofApproval,
+  type ProofBundle,
+  type ProofUnavailableSection,
   type RunEventHandlers,
 } from '@/shared/api/run-console-client'
 import {
@@ -219,6 +223,20 @@ export default function AgentRunConsole() {
   const [selectedRunId, setSelectedRunId] = createSignal<string | null>(null)
   const activeRunId = createMemo(() => selectedRunId() ?? state.runId)
   const [runDetail] = createResource(activeRunId, (runId) => getRun(runId))
+
+  // The run's portable evidence record. Fetched for whichever run the console
+  // is pinned to (live or replayed) — a finished run is exactly when its proof
+  // matters most. A rejected fetch surfaces as an explicit "could not load"
+  // state rather than an empty panel: silence would read as "nothing to prove".
+  const [proofBundle] = createResource(activeRunId, (runId) => getRunProofBundle(runId))
+
+  // Reading a Solid resource in its errored state re-throws, so the error is
+  // checked before the value is ever read — a failed proof fetch must degrade
+  // to a visible "could not load" note, never to an uncaught throw.
+  const proofView = createMemo<{ bundle: ProofBundle | null; failed: boolean; loading: boolean }>(() => {
+    if (proofBundle.error != null) return { bundle: null, failed: true, loading: false }
+    return { bundle: proofBundle() ?? null, failed: false, loading: proofBundle.loading }
+  })
 
   // Telemetry merges the durable RunDetail (steps, tokens, status) with the
   // live usage event the chat stream emits (cost, latency, confidence) — the
@@ -829,6 +847,14 @@ export default function AgentRunConsole() {
               <TrustPanel citations={state.citations} usage={state.usage} />
             </Show>
 
+            <Show when={activeRunId()}>
+              <ProofBundlePanel
+                bundle={proofView().bundle}
+                failed={proofView().failed}
+                loading={proofView().loading}
+              />
+            </Show>
+
             <TimelinePanel entries={state.timeline} status={state.status} />
 
             <Show when={state.error}>
@@ -1406,6 +1432,342 @@ function UsageStat(props: { label: string; value: string }) {
   )
 }
 
+// ── Proof bundle ─────────────────────────────────────────────────────────────
+// The run's portable evidence record. It extends the same convention the
+// timeline's `verification` kind established (ShieldCheck + a status that is
+// deliberately not a plain "done"), and applies it to the whole authorize →
+// execute → finalize → verify chain.
+//
+// The panel's single job is to keep three answers apart: proven true, proven
+// false, and not proven. Every `null` in the bundle is the third — so it gets
+// its own tone, `unproven`, instead of being shaded into ok or error. Reading
+// "no execution recorded" as a failure, or "no verification recorded" as a
+// success, is exactly the misreading this artifact exists to prevent.
+
+type EvidenceTone = 'ok' | 'warn' | 'error' | 'unproven'
+
+/** A resolved claim about one link in the evidence chain. */
+type EvidenceClaim = { tone: EvidenceTone; label: string; note: string }
+
+/** What the approval's `execution` link proves — including that it proves nothing. */
+function executionClaim(i18n: ReturnType<typeof useI18n>, approval: ProofApproval): EvidenceClaim {
+  const execution = approval.execution
+  if (!execution) {
+    return {
+      tone: 'unproven',
+      label: i18n.tr('Ingen utførelse registrert', 'No execution recorded'),
+      note: i18n.tr(
+        'Avgjørelsen ble registrert, men ingenting beviser at arbeidet startet. Det betyr ikke at det mislyktes.',
+        'The decision was recorded, but nothing proves the work started. That does not mean it failed.',
+      ),
+    }
+  }
+
+  const outcome = execution.outcome
+  if (!outcome) {
+    return {
+      tone: 'warn',
+      label: i18n.tr('Under utførelse', 'In flight'),
+      note: i18n.tr(
+        'Arbeidet startet og er ennå ikke sluttført.',
+        'The work started and has not finalized yet.',
+      ),
+    }
+  }
+
+  switch ((outcome.outcome ?? '').toLowerCase()) {
+    case 'completed':
+      return {
+        tone: 'ok',
+        label: i18n.tr('Sluttført', 'Finalized'),
+        note: outcome.providerReceiptId
+          ? i18n.tr(
+              `Utføreren rapporterte fullført, kvittering ${outcome.providerReceiptId}.`,
+              `The executor reported completion, receipt ${outcome.providerReceiptId}.`,
+            )
+          : i18n.tr('Utføreren rapporterte fullført.', 'The executor reported completion.'),
+      }
+    case 'failed':
+      return {
+        tone: 'error',
+        label: i18n.tr('Mislyktes', 'Failed'),
+        note: outcome.failureCode
+          ? i18n.tr(`Feilkode ${outcome.failureCode}.`, `Failure code ${outcome.failureCode}.`)
+          : i18n.tr('Utføreren rapporterte at arbeidet mislyktes.', 'The executor reported the work failed.'),
+      }
+    case 'cancelled':
+      return {
+        tone: 'warn',
+        label: i18n.tr('Kansellert', 'Cancelled'),
+        note: i18n.tr('Arbeidet ble stoppet før det fullførte.', 'The work was stopped before it completed.'),
+      }
+    default:
+      // A finalized outcome the console does not recognize is reported as-is
+      // and left unproven — guessing a tone would be inventing evidence.
+      return {
+        tone: 'unproven',
+        label: outcome.outcome ?? i18n.tr('Ukjent utfall', 'Unknown outcome'),
+        note: i18n.tr(
+          'Utfallet ble sluttført med en verdi konsollet ikke kjenner igjen.',
+          'The outcome finalized with a value the console does not recognize.',
+        ),
+      }
+  }
+}
+
+/**
+ * What independently verified the outcome — or the explicit fact that nothing
+ * did. Returns `null` only when there is no finalized outcome to verify yet,
+ * since "unverified" is not a meaningful claim about work still in flight.
+ */
+function verificationClaim(i18n: ReturnType<typeof useI18n>, approval: ProofApproval): EvidenceClaim | null {
+  const outcome = approval.execution?.outcome
+  if (!outcome) return null
+
+  const verification = outcome.verification
+  if (!verification) {
+    return {
+      tone: 'unproven',
+      label: i18n.tr('Ingen uavhengig verifisering', 'No independent verification'),
+      note: i18n.tr(
+        'Utfallet over er utførerens egen rapport. Ingen uavhengig verifisering ble registrert — det bekrefter verken suksess eller feil.',
+        "The outcome above is the executor's own report. No independent verification was recorded — that confirms neither success nor failure.",
+      ),
+    }
+  }
+
+  const status = (verification.status ?? 'unknown').toLowerCase()
+  const tone: EvidenceTone =
+    status === 'verified_success' ? 'ok'
+    : status === 'verified_failure' ? 'error'
+    : status === 'partially_verified' ? 'warn'
+    : 'unproven'
+  return {
+    tone,
+    label: statusLabel(i18n, status),
+    note: verification.reason
+      || (verification.method
+        ? i18n.tr(`Verifisert ved ${verification.method}.`, `Verified by ${verification.method}.`)
+        : ''),
+  }
+}
+
+/** Localized name for an evidence dimension the bundle declines to claim. */
+function unavailableSectionLabel(i18n: ReturnType<typeof useI18n>, section?: string): string {
+  switch ((section ?? '').toLowerCase()) {
+    case 'known': return i18n.tr('Hva kjøringen visste', 'What the run knew')
+    case 'charged': return i18n.tr('Hva det kostet', 'What it cost')
+    case 'retained': return i18n.tr('Hvilken lagring som gjaldt', 'What retention applied')
+    default: return section ?? i18n.tr('Udokumentert dimensjon', 'Undocumented dimension')
+  }
+}
+
+/** First 16 chars of a 64-hex action fingerprint; the full value stays in `title`. */
+function shortFingerprint(value: string): string {
+  return value.length > 16 ? `${value.slice(0, 16)}…` : value
+}
+
+function ProofBundlePanel(props: { bundle: ProofBundle | null; failed: boolean; loading: boolean }) {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-run-panel verevon-run-proof">
+      <div class="verevon-run-panel__head">
+        <span class="verevon-run-panel__eyebrow">
+          <ShieldCheck size={14} strokeWidth={2.1} /> {i18n.tr('Bevispakke', 'Proof bundle')}
+        </span>
+        <Show when={props.bundle?.bundleVersion != null}>
+          <span class="verevon-run-proof__version">v{props.bundle?.bundleVersion}</span>
+        </Show>
+      </div>
+
+      <Show when={props.loading}>
+        <p class="verevon-run-proof__note">{i18n.tr('Henter bevispakken …', 'Fetching the proof bundle…')}</p>
+      </Show>
+
+      <Show when={props.failed}>
+        <p class="verevon-run-proof__note">
+          {i18n.tr(
+            'Kunne ikke hente bevispakken. Fraværet her er et hentefeil, ikke et bevis på at ingenting skjedde.',
+            'Could not load the proof bundle. What is missing here is a fetch failure, not evidence that nothing happened.',
+          )}
+        </p>
+      </Show>
+
+      <Show when={!props.loading && !props.failed && !props.bundle}>
+        <p class="verevon-run-proof__note">
+          {i18n.tr(
+            'Ingen bevispakke er registrert for denne kjøringen ennå.',
+            'No proof bundle has been recorded for this run yet.',
+          )}
+        </p>
+      </Show>
+
+      <Show when={props.bundle}>
+        {(bundle) => (
+          <>
+            <Show when={bundle().run}>
+              {(run) => (
+                <p class="verevon-run-proof__goal">
+                  {run().goal || i18n.tr('Uten mål', 'No goal recorded')}
+                  <Show when={run().agentId}>
+                    <span class="verevon-run-proof__agent"> · {run().agentId}</span>
+                  </Show>
+                </p>
+              )}
+            </Show>
+
+            <p class="verevon-run-trust__subhead">{i18n.tr('Godkjenninger', 'Approvals')}</p>
+            <Show
+              when={bundle().approvals.length > 0}
+              fallback={(
+                <p class="verevon-run-proof__note">
+                  {i18n.tr(
+                    'Ingen godkjenninger er registrert for denne kjøringen.',
+                    'No approvals were recorded for this run.',
+                  )}
+                </p>
+              )}
+            >
+              <div class="verevon-run-proof__approvals">
+                <For each={bundle().approvals}>
+                  {(approval) => <ProofApprovalCard approval={approval} />}
+                </For>
+              </div>
+            </Show>
+
+            {/* Always rendered, never collapsed: the dimensions this bundle
+                deliberately does not claim are part of the evidence, and a
+                reader must be able to tell them from "nothing happened". */}
+            <p class="verevon-run-trust__subhead">{i18n.tr('Ikke dekket av denne pakken', 'Not covered by this bundle')}</p>
+            <Show
+              when={bundle().unavailable.length > 0}
+              fallback={(
+                <p class="verevon-run-proof__note">
+                  {i18n.tr(
+                    'Pakken oppgir ingen dimensjoner den lar være å bevise.',
+                    'The bundle declares no dimensions it leaves unproven.',
+                  )}
+                </p>
+              )}
+            >
+              <ul class="verevon-run-proof__unavailable">
+                <For each={bundle().unavailable}>
+                  {(item: ProofUnavailableSection) => (
+                    <li class="verevon-run-proof__unavailable-item">
+                      <span class="verevon-run-proof__unavailable-section">
+                        {unavailableSectionLabel(i18n, item.section)}
+                      </span>
+                      <Show when={item.reason}>
+                        <span class="verevon-run-proof__unavailable-reason">{item.reason}</span>
+                      </Show>
+                    </li>
+                  )}
+                </For>
+              </ul>
+            </Show>
+
+            <Show when={bundle().generatedAt}>
+              {(generatedAt) => (
+                <p class="verevon-run-proof__stamp">
+                  {i18n.tr('Generert', 'Generated')} {formatRelative(i18n, generatedAt())}
+                </p>
+              )}
+            </Show>
+          </>
+        )}
+      </Show>
+    </div>
+  )
+}
+
+function ProofApprovalCard(props: { approval: ProofApproval }) {
+  const i18n = useI18n()
+  const execution = () => executionClaim(i18n, props.approval)
+  const verification = () => verificationClaim(i18n, props.approval)
+  const decidedLine = () => {
+    const by = props.approval.decidedBy
+    const at = formatRelative(i18n, props.approval.decidedAt)
+    if (!by && !at) return ''
+    if (!by) return i18n.tr(`Avgjort ${at}`, `Decided ${at}`)
+    if (!at) return i18n.tr(`Avgjort av ${by}`, `Decided by ${by}`)
+    return i18n.tr(`Avgjort av ${by} · ${at}`, `Decided by ${by} · ${at}`)
+  }
+
+  return (
+    <article class="verevon-run-proof__approval">
+      <div class="verevon-run-proof__approval-head">
+        <span class="verevon-run-proof__kind">
+          {props.approval.kind || i18n.tr('Handling', 'Action')}
+        </span>
+        <Show when={props.approval.status}>
+          {(status) => (
+            <span class={cn('verevon-run-proof__pill', `verevon-run-proof__pill--${normalizeStatusTone(status())}`)}>
+              {statusLabel(i18n, status())}
+            </span>
+          )}
+        </Show>
+      </div>
+
+      <Show when={decidedLine()}>
+        <p class="verevon-run-proof__meta">{decidedLine()}</p>
+      </Show>
+      <Show when={props.approval.decisionReason}>
+        <p class="verevon-run-proof__meta">“{props.approval.decisionReason}”</p>
+      </Show>
+
+      <EvidenceLine claim={execution()} label={i18n.tr('Utførelse', 'Execution')} />
+
+      <Show when={props.approval.execution}>
+        {(exec) => (
+          <dl class="verevon-run-proof__receipt">
+            <Show when={exec().receiptId}>
+              <div class="verevon-run-proof__receipt-row">
+                <dt>{i18n.tr('Kvittering', 'Receipt')}</dt>
+                <dd>{shortId(exec().receiptId!)}</dd>
+              </div>
+            </Show>
+            <Show when={exec().actionFingerprint}>
+              <div class="verevon-run-proof__receipt-row">
+                <dt>{i18n.tr('Fingeravtrykk', 'Fingerprint')}</dt>
+                <dd title={exec().actionFingerprint}>
+                  <code>{shortFingerprint(exec().actionFingerprint!)}</code>
+                </dd>
+              </div>
+            </Show>
+            <Show when={exec().executionServiceId}>
+              <div class="verevon-run-proof__receipt-row">
+                <dt>{i18n.tr('Utført av', 'Executed by')}</dt>
+                <dd>{exec().executionServiceId}</dd>
+              </div>
+            </Show>
+          </dl>
+        )}
+      </Show>
+
+      <Show when={verification()}>
+        {(claim) => <EvidenceLine claim={claim()} label={i18n.tr('Verifisering', 'Verification')} />}
+      </Show>
+    </article>
+  )
+}
+
+/** One link in the evidence chain: its tone, its claim, and why it says that. */
+function EvidenceLine(props: { claim: EvidenceClaim; label: string }) {
+  return (
+    <div class={cn('verevon-run-proof__claim', `verevon-run-proof__claim--${props.claim.tone}`)}>
+      <div class="verevon-run-proof__claim-head">
+        <span class="verevon-run-proof__claim-label">{props.label}</span>
+        <span class={cn('verevon-run-proof__pill', `verevon-run-proof__pill--${props.claim.tone}`)}>
+          {props.claim.label}
+        </span>
+      </div>
+      <Show when={props.claim.note}>
+        <p class="verevon-run-proof__claim-note">{props.claim.note}</p>
+      </Show>
+    </div>
+  )
+}
+
 // ── Timeline ──────────────────────────────────────────────────────────────────
 
 const TIMELINE_ICON: Record<TimelineKind, IconComponent> = {
@@ -1434,6 +1796,13 @@ function statusLabel(i18n: ReturnType<typeof useI18n>, status: string): string {
   if (value === 'verified_success') return i18n.tr('Verifisert', 'Verified')
   if (value === 'verified_failure') return i18n.tr('Verifisert som mislykket', 'Verified as failed')
   if (value === 'partially_verified') return i18n.tr('Delvis verifisert', 'Partially verified')
+  // `unknown` is a real VerificationStatus: a verification ran and could not
+  // conclude. It is not a failure, so it must not read as one.
+  if (value === 'unknown') return i18n.tr('Ikke konkludert', 'Inconclusive')
+  // Approval-decision states, as carried by the proof bundle and the
+  // `approval_state_changed` timeline entries.
+  if (value === 'granted') return i18n.tr('Godkjent', 'Granted')
+  if (value === 'denied') return i18n.tr('Avvist', 'Denied')
   return status
 }
 

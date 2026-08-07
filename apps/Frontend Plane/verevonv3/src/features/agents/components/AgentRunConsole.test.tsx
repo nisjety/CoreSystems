@@ -4,7 +4,7 @@ import { Route, Router } from '@solidjs/router'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatStreamHandlers } from '@/shared/api/chat-client'
-import type { RunEventHandlers } from '@/shared/api/run-console-client'
+import type { ProofBundle, RunEventHandlers } from '@/shared/api/run-console-client'
 import type { Approval } from '@/shared/api/orchestration-client'
 import type { RunDetail } from '@/shared/api/runs-client'
 
@@ -20,6 +20,7 @@ import type { RunDetail } from '@/shared/api/runs-client'
 const {
   mockStreamChat,
   mockStreamRunEvents,
+  mockGetRunProofBundle,
   mockListApprovals,
   mockDecideApproval,
   mockResumeRun,
@@ -30,6 +31,7 @@ const {
 } = vi.hoisted(() => ({
   mockStreamChat: vi.fn(),
   mockStreamRunEvents: vi.fn(),
+  mockGetRunProofBundle: vi.fn(),
   mockListApprovals: vi.fn(),
   mockDecideApproval: vi.fn(),
   mockResumeRun: vi.fn(),
@@ -45,6 +47,7 @@ vi.mock('@/shared/api/chat-client', async (importOriginal) => {
 })
 vi.mock('@/shared/api/run-console-client', () => ({
   streamRunEvents: mockStreamRunEvents,
+  getRunProofBundle: mockGetRunProofBundle,
 }))
 vi.mock('@/shared/api/orchestration-client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/shared/api/orchestration-client')>()
@@ -122,6 +125,7 @@ describe('AgentRunConsole approval decide reconciliation (task_d6420100)', () =>
   beforeEach(() => {
     mockStreamChat.mockReset()
     mockStreamRunEvents.mockReset()
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
     mockListApprovals.mockReset()
     mockDecideApproval.mockReset()
     mockResumeRun.mockReset()
@@ -244,5 +248,193 @@ describe('AgentRunConsole approval decide reconciliation (task_d6420100)', () =>
 
     await waitFor(() => expect(mockResumeRun).toHaveBeenCalledWith('run_1'))
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+// ── Verevon Proof Bundle panel ───────────────────────────────────────────────
+// The panel's whole contract is honesty about absence. `execution: null`,
+// `outcome: null`, and `verification: null` each mean "not proven", and none of
+// them may render as either success or failure — a reader must be able to tell
+// "not proven yet" from "nothing happened". The `unavailable` sections are the
+// same claim at bundle level and are always shown, reasons included.
+
+/** Starts a run and connects it, so the console pins to `run_1` and fetches that
+ * run's proof bundle. Nothing is pending — these tests are about the durable
+ * evidence record, not the live HITL deck. */
+function driveToConnectedRun(): void {
+  mockStreamChat.mockImplementation((_request: unknown, handlers: ChatStreamHandlers) => {
+    handlers.onConnected?.({ runId: 'run_1', threadId: 'thread_1', model: 'balanced' })
+    return new Promise<void>(() => {}) // never resolves — nothing here depends on chat-stream completion
+  })
+  mockStreamRunEvents.mockImplementation(() => new Promise<void>(() => {}))
+  mockListApprovals.mockResolvedValue([])
+
+  fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+  fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
+}
+
+function proofBundle(overrides: Partial<ProofBundle> = {}): ProofBundle {
+  return {
+    bundleVersion: 1,
+    runId: 'run_1',
+    orgId: 'org-1',
+    generatedAt: '2026-08-08T10:00:00Z',
+    run: { goal: 'Book a shipment', agentId: 'general-v1', status: 'completed', createdAt: '2026-08-08T09:00:00Z' },
+    approvals: [],
+    unavailable: [
+      { section: 'known', reason: 'Retrieval context is not captured per run.' },
+      { section: 'charged', reason: 'Billing is reconciled outside the run record.' },
+      { section: 'retained', reason: 'Retention policy is evaluated at the storage boundary.' },
+    ],
+    ...overrides,
+  }
+}
+
+/** The evidence-chain block whose pill reads `label`. */
+function claimFor(label: string): HTMLElement {
+  const node = screen.getByText(label).closest('.verevon-run-proof__claim')
+  expect(node).toBeTruthy()
+  return node as HTMLElement
+}
+
+describe('AgentRunConsole proof bundle panel', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockStreamRunEvents.mockReset()
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListApprovals.mockReset()
+    mockDecideApproval.mockReset()
+    mockResumeRun.mockReset().mockResolvedValue(undefined)
+    mockCancelRun.mockReset().mockResolvedValue(undefined)
+    mockGetRun.mockReset().mockResolvedValue(null)
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+  })
+
+  it('renders a granted approval with no execution as unproven — neither failed nor succeeded', async () => {
+    mockGetRunProofBundle.mockResolvedValue(proofBundle({
+      approvals: [{
+        approvalId: 'appr_1',
+        kind: 'tool',
+        status: 'granted',
+        requestedBy: 'model',
+        decidedBy: 'user-1',
+        decisionReason: 'looks right',
+        requestedAt: '2026-08-08T09:10:00Z',
+        decidedAt: '2026-08-08T09:11:00Z',
+        execution: null,
+      }],
+    }))
+
+    renderConsole()
+    driveToConnectedRun()
+
+    await waitFor(() => expect(screen.getByText('Ingen utførelse registrert')).toBeTruthy())
+    const claim = claimFor('Ingen utførelse registrert')
+    expect(claim.classList.contains('verevon-run-proof__claim--unproven')).toBe(true)
+    expect(claim.querySelector('.verevon-run-proof__pill--error')).toBeNull()
+    expect(claim.querySelector('.verevon-run-proof__pill--ok')).toBeNull()
+    expect(claim.querySelector('.verevon-run-proof__pill--unproven')).toBeTruthy()
+
+    // The authorization itself is still reported truthfully as granted; only
+    // what followed from it is unproven.
+    expect(screen.getByText('Godkjent')).toBeTruthy()
+    // Nothing executed, so there is no outcome to verify and no verification
+    // claim is made either way.
+    expect(screen.queryByText('Verifisering')).toBeNull()
+  })
+
+  it('does not render a finalized outcome with no verification as verified', async () => {
+    mockGetRunProofBundle.mockResolvedValue(proofBundle({
+      approvals: [{
+        approvalId: 'appr_1',
+        kind: 'shipping.book_shipment',
+        status: 'granted',
+        decidedBy: 'user-1',
+        execution: {
+          receiptId: 'rcpt_1',
+          deliveryId: 'dlv_1',
+          actionFingerprint: 'a'.repeat(64),
+          executionServiceId: 'execution-core',
+          descriptorVersion: 1,
+          startedAt: '2026-08-08T09:30:00Z',
+          outcome: {
+            outcome: 'completed',
+            providerReceiptId: 'LC652849244NO',
+            finalizedAt: '2026-08-08T09:31:00Z',
+            verification: null,
+          },
+        },
+      }],
+    }))
+
+    renderConsole()
+    driveToConnectedRun()
+
+    await waitFor(() => expect(screen.getByText('Ingen uavhengig verifisering')).toBeTruthy())
+    const claim = claimFor('Ingen uavhengig verifisering')
+    expect(claim.classList.contains('verevon-run-proof__claim--unproven')).toBe(true)
+    expect(claim.querySelector('.verevon-run-proof__pill--ok')).toBeNull()
+    expect(claim.querySelector('.verevon-run-proof__pill--error')).toBeNull()
+
+    // The executor's own "finalized" report is still shown — and stays
+    // visibly distinct from an independently verified outcome.
+    expect(screen.getByText('Sluttført')).toBeTruthy()
+    expect(screen.queryByText('Verifisert')).toBeNull()
+  })
+
+  it('renders a started-but-unfinalized execution as in flight, not as a failure', async () => {
+    mockGetRunProofBundle.mockResolvedValue(proofBundle({
+      approvals: [{
+        approvalId: 'appr_1',
+        kind: 'tool',
+        status: 'granted',
+        execution: {
+          receiptId: 'rcpt_1',
+          actionFingerprint: 'b'.repeat(64),
+          executionServiceId: 'execution-core',
+          startedAt: '2026-08-08T09:30:00Z',
+          outcome: null,
+        },
+      }],
+    }))
+
+    renderConsole()
+    driveToConnectedRun()
+
+    await waitFor(() => expect(screen.getByText('Under utførelse')).toBeTruthy())
+    const claim = claimFor('Under utførelse')
+    expect(claim.querySelector('.verevon-run-proof__pill--error')).toBeNull()
+    expect(claim.querySelector('.verevon-run-proof__pill--ok')).toBeNull()
+    // Work that has not finalized cannot be verified, so no verification claim
+    // is made — an absent verification here must not read as a missing one.
+    expect(screen.queryByText('Ingen uavhengig verifisering')).toBeNull()
+  })
+
+  it('always renders the unavailable sections and every reason, even with approvals present', async () => {
+    mockGetRunProofBundle.mockResolvedValue(proofBundle({
+      approvals: [{ approvalId: 'appr_1', kind: 'tool', status: 'granted', execution: null }],
+    }))
+
+    renderConsole()
+    driveToConnectedRun()
+
+    await waitFor(() => expect(screen.getByText('Ikke dekket av denne pakken')).toBeTruthy())
+    expect(screen.getByText('Hva kjøringen visste')).toBeTruthy()
+    expect(screen.getByText('Hva det kostet')).toBeTruthy()
+    expect(screen.getByText('Hvilken lagring som gjaldt')).toBeTruthy()
+    expect(screen.getByText('Retrieval context is not captured per run.')).toBeTruthy()
+    expect(screen.getByText('Billing is reconciled outside the run record.')).toBeTruthy()
+    expect(screen.getByText('Retention policy is evaluated at the storage boundary.')).toBeTruthy()
+  })
+
+  it('says a failed proof fetch is a fetch failure, not evidence that nothing happened', async () => {
+    mockGetRunProofBundle.mockRejectedValue(new Error('503 Service Unavailable'))
+
+    renderConsole()
+    driveToConnectedRun()
+
+    await waitFor(() => expect(screen.getByText(/kunne ikke hente bevispakken/i)).toBeTruthy())
+    expect(screen.getByText(/ikke et bevis på at ingenting skjedde/i)).toBeTruthy()
   })
 })
