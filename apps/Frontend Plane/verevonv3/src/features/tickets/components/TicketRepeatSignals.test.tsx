@@ -16,6 +16,7 @@ const signals = [{
   workType: 'customer_case',
   count: 2,
   ticketKeys: ['TCK-1', 'TCK-2'],
+  ticketIds: ['ticket-1', 'ticket-2'],
 }]
 
 describe('TicketRepeatSignals', () => {
@@ -45,5 +46,58 @@ describe('TicketRepeatSignals', () => {
 
     expect(await screen.findByText(/Could not verify Knowledge coverage|Kunne ikke bekrefte kunnskapsdekning/i)).toBeTruthy()
     expect(screen.queryByText(/gap candidate.*not proof|gapkandidat.*ikke bevis/i)).toBeNull()
+  })
+
+  it('labels a similarity candidate result as a preview, never a shared cause, and anchors on the first evidence ticket', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      data: { status: 'candidate_found', candidates: [{ ticket_id: 'ticket-9' }], algorithm_version: 'v1' },
+    }), { headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <I18nProvider><TicketRepeatSignals orgId="org-demo" signals={signals} /></I18nProvider>)
+    fireEvent.click(screen.getByRole('button', { name: /Check similarity candidates for refund|Sjekk likhetskandidater for refund/i }))
+
+    expect(await screen.findByText(/Similarity candidate \(preview\)|Likhetskandidat \(forhåndsvisning\)/i)).toBeTruthy()
+    expect(screen.getByText(/ticket-9/)).toBeTruthy()
+    expect(screen.getByText(/not a shared cause, incident, or problem|ikke en felles årsak, hendelse eller problem/i)).toBeTruthy()
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(0)
+      const call = fetchMock.mock.calls[0] as [string, RequestInit | undefined] | undefined
+      expect(call?.[0]).toBe('/api/v1/tickets/ticket-1/support-recurrence-candidates')
+      expect(new Headers(call?.[1]?.headers).get('x-verevon-org-id')).toBe('org-demo')
+    })
+  })
+
+  it('reports no candidates above threshold distinctly from an unavailable check', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      data: { status: 'no_candidate', candidates: [] },
+    }), { headers: { 'Content-Type': 'application/json' } })))
+
+    render(() => <I18nProvider><TicketRepeatSignals orgId="org-demo" signals={signals} /></I18nProvider>)
+    fireEvent.click(screen.getByRole('button', { name: /Check similarity candidates for refund|Sjekk likhetskandidater for refund/i }))
+
+    expect(await screen.findByText(/No similarity candidates above the threshold|Ingen likhetskandidater over terskelen/i)).toBeTruthy()
+  })
+
+  it('surfaces ZDR unavailability distinctly from a missing permission', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 'zdr_recurrence_forbidden', message: 'ZDR enabled' },
+    }), { status: 412, headers: { 'Content-Type': 'application/json' } })))
+
+    render(() => <I18nProvider><TicketRepeatSignals orgId="org-demo" signals={signals} /></I18nProvider>)
+    fireEvent.click(screen.getByRole('button', { name: /Check similarity candidates for refund|Sjekk likhetskandidater for refund/i }))
+
+    expect(await screen.findByText(/Zero Data Retention enabled|Zero Data Retention aktivert/i)).toBeTruthy()
+  })
+
+  it('surfaces a missing permission distinctly from unavailability', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: { code: 'support_recurrence_permission_required', message: 'Forbidden' },
+    }), { status: 403, headers: { 'Content-Type': 'application/json' } })))
+
+    render(() => <I18nProvider><TicketRepeatSignals orgId="org-demo" signals={signals} /></I18nProvider>)
+    fireEvent.click(screen.getByRole('button', { name: /Check similarity candidates for refund|Sjekk likhetskandidater for refund/i }))
+
+    expect(await screen.findByText(/do not have permission to view similarity candidates|ikke tilgang til å se likhetskandidater/i)).toBeTruthy()
   })
 })

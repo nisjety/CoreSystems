@@ -35,6 +35,7 @@ describe('deriveTicketRepeatSignals', () => {
       workType: 'customer_case',
       count: 2,
       ticketKeys: ['TCK-1', 'TCK-2'],
+      ticketIds: ['ticket-1', 'ticket-2'],
     }])
   })
 
@@ -45,8 +46,8 @@ describe('deriveTicketRepeatSignals', () => {
     ])
 
     expect(signals).toEqual([
-      { category: 'refund', intent: 'refund_follow_up', workType: 'customer_case', count: 4, ticketKeys: ['TCK-R0', 'TCK-R1', 'TCK-R2'] },
-      { category: 'delivery', intent: 'carrier_follow_up', workType: 'customer_case', count: 2, ticketKeys: ['TCK-D0', 'TCK-D1'] },
+      { category: 'refund', intent: 'refund_follow_up', workType: 'customer_case', count: 4, ticketKeys: ['TCK-R0', 'TCK-R1', 'TCK-R2'], ticketIds: ['refund-0', 'refund-1', 'refund-2'] },
+      { category: 'delivery', intent: 'carrier_follow_up', workType: 'customer_case', count: 2, ticketKeys: ['TCK-D0', 'TCK-D1'], ticketIds: ['delivery-0', 'delivery-1'] },
     ])
   })
 })

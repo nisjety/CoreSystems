@@ -408,6 +408,27 @@ export function getTicketCSATOutcome(orgId: string, ticketId: string, signal?: A
   })
 }
 
+/** A bounded piece of evidence: a ticket ID the caller is already authorized
+ * to see. Deliberately nothing more -- no score, no inferred relationship. */
+export type SupportRecurrenceCandidate = { ticket_id: string }
+
+/** Mirrors conversation-core-go's SupportRecurrenceResult -- a
+ * "similarity candidate" claim, never a shared-cause or incident claim. */
+export type SupportRecurrenceResult = {
+  status: 'candidate_found' | 'no_candidate' | 'unavailable'
+  candidates: SupportRecurrenceCandidate[]
+  algorithm_version?: string
+  corpus_window_start?: string
+  similarity_threshold?: number
+}
+
+export function getSupportRecurrenceCandidates(orgId: string, ticketId: string, signal?: AbortSignal) {
+  return requestJson<SupportRecurrenceResult>(
+    `/api/v1/tickets/${encodeURIComponent(ticketId)}/support-recurrence-candidates`,
+    { headers: { 'x-verevon-org-id': orgId }, signal },
+  )
+}
+
 export function getCSATScorecard(orgId: string, signal?: AbortSignal) {
   return requestJson<CSATScorecard>('/api/v1/tickets/csat-scorecard', {
     headers: { 'x-verevon-org-id': orgId }, signal,
