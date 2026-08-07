@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/timestamp.proto";
+import "model_plane/v1/verified_outcome.proto";
+
+// Verevon Proof Bundle (verevon-vision.md §2 moat #3 / §2.1, roadmap P1 item
+// 2) — the portable record of "what was known, decided, authorized, executed,
+// observed, verified, retained, and charged" for one run.
+//
+// This is v1 and it is deliberately PARTIAL. Only the dimensions Model Plane's
+// session-core owns authoritatively are populated: authority (approvals),
+// execution (continuation receipts), observation (continuation outcomes), and
+// verification (the shared VerificationResult contract). The dimensions owned
+// by other planes — what was KNOWN (Data Plane retrieval/citations), what was
+// CHARGED (cost-core), what RETENTION applied (Control Plane org policy) —
+// are NOT fabricated here. They are named explicitly in `unavailable` with a
+// reason, so a reader can tell "not proven yet" apart from "nothing happened".
+// That distinction is the entire point of the bundle; an evidence artifact
+// that quietly omits its own gaps is worse than no artifact at all, and it is
+// the same honesty discipline the Trust Center already applies to the
+// sovereignty claim.
+//
+// Assembling this cross-plane (adding the known/charged/retained sections) is
+// separately scoped work; no shared database exists between planes, so each
+// section must arrive through its owner's own contract.
+message RunProofBundle {
+  // Always 1 for this shape. A reader that does not recognize the version
+  // must refuse to interpret the bundle rather than guess.
+  int32 bundle_version = 1;
+
+  string run_id = 2;
+  string org_id = 3;
+
+  // When this bundle was assembled — NOT when the work happened. Every
+  // evidence timestamp below is the real one.
+  google.protobuf.Timestamp generated_at = 4;
+
+  RunProvenance run = 5;
+
+  // One entry per approval on this run, each carrying its own evidence chain
+  // as far as that chain actually got. Empty when the run had no approvals —
+  // which is a fact about the run, not a missing section.
+  repeated ApprovalProof approvals = 6;
+
+  // Evidence dimensions this bundle does not claim. Always populated for the
+  // cross-plane sections v1 cannot reach.
+  repeated UnavailableSection unavailable = 7;
+}
+
+// What work this bundle is about.
+message RunProvenance {
+  string goal = 1;
+  string agent_id = 2;
+  string status = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// One approval's evidence chain: AUTHORIZED (always) → EXECUTED → OBSERVED →
+// VERIFIED. Each later stage is absent until it genuinely occurred; absence is
+// never rendered as failure, and never as success.
+message ApprovalProof {
+  // --- AUTHORIZED: durable human authority, always present. ---
+  string approval_id = 1;
+  string kind = 2;
+  string status = 3;
+  string requested_by = 4;
+  string decided_by = 5;
+  string decision_reason = 6;
+  google.protobuf.Timestamp requested_at = 7;
+  google.protobuf.Timestamp decided_at = 8;
+
+  // --- EXECUTED: absent until a dispatcher proved it started the exact
+  // approved work. An approval alone is authority, never evidence of work.
+  ContinuationExecution execution = 9;
+}
+
+message ContinuationExecution {
+  string receipt_id = 1;
+  string delivery_id = 2;
+
+  // Binds this execution to the exact approved action; a mismatch means the
+  // work that ran was not the work that was approved.
+  string action_fingerprint = 3;
+
+  string execution_service_id = 4;
+  int32 descriptor_version = 5;
+  google.protobuf.Timestamp started_at = 6;
+
+  // --- OBSERVED: absent while the continuation is still in flight. ---
+  ContinuationOutcome outcome = 7;
+}
+
+message ContinuationOutcome {
+  // completed | failed | cancelled — the dispatcher's workflow state, which is
+  // NOT by itself a claim that the real-world effect happened.
+  string outcome = 1;
+
+  // Authoritative id from the provider boundary, when one exists.
+  string provider_receipt_id = 2;
+  string failure_code = 3;
+  google.protobuf.Timestamp finalized_at = 4;
+
+  // --- VERIFIED: the independent judgment, using the shared contract. Absent
+  // when the producing worker recorded none — never defaulted to a status.
+  VerificationResult verification = 5;
+}
+
+// A dimension of the vision's evidence model that this bundle deliberately
+// does not assert.
+message UnavailableSection {
+  // Stable identifier: "known" | "charged" | "retained".
+  string section = 1;
+
+  // Plain-language reason, shown to the reader. Never blank.
+  string reason = 2;
+}
+
+message GetRunProofBundleRequest {
+  string run_id = 1;
+
+  // Required. The bundle is assembled only for the caller's own verified
+  // organization; a run belonging to another org resolves to not-found rather
+  // than a partial or empty bundle.
+  string org_id = 2;
+}
+
+message GetRunProofBundleResponse {
+  RunProofBundle bundle = 1;
+}

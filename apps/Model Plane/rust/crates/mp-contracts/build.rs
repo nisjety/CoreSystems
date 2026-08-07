@@ -18,6 +18,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/inference.proto",
         "model_plane/v1/execution.proto",
         "model_plane/v1/orchestration.proto",
+        // Listed explicitly even though orchestration.proto imports them:
+        // relying on a transitive import is what let verified_outcome.proto
+        // stay uncommitted and silently break the whole workspace build on a
+        // clean checkout (fixed in cf117135).
+        "model_plane/v1/verified_outcome.proto",
+        "model_plane/v1/proof_bundle.proto",
         "model_plane/v1/finetune.proto",
         "model_plane/v1/routing_policy.proto",
     ];

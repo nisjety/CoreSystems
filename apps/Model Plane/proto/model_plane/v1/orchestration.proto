@@ -7,6 +7,7 @@ option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 import "model_plane/v1/verified_outcome.proto";
+import "model_plane/v1/proof_bundle.proto";
 
 // OrchestrationCore — authoritative state for plans, approvals, todos,
 // and subagent lineage. Mirrors the Rust mp-orchestration crate records and
@@ -89,6 +90,10 @@ service OrchestrationCoreService {
 
   // Attach a subagent lineage edge (parent_run_id -> child_run_id).
   rpc AttachSubagent(AttachSubagentRequest) returns (AttachSubagentResponse);
+
+  // Assemble the Verevon Proof Bundle for one run — the portable evidence
+  // record defined in proof_bundle.proto. Read-only; org-scoped.
+  rpc GetRunProofBundle(GetRunProofBundleRequest) returns (GetRunProofBundleResponse);
 
   // Stream orchestration events for a run. Server-streaming over gRPC;
   // SSE-compatible at the gateway (/v1/runs/{id}/events).

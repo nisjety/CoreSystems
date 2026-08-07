@@ -766,6 +766,138 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
     }
 }
 
+/// The evidence dimensions the vision's proof model names that this plane
+/// cannot assert. Stated explicitly in every bundle rather than silently
+/// omitted — a reader must be able to tell "not proven" from "nothing
+/// happened". Assembling these needs each owning plane's own contract; there
+/// is no shared database to join across.
+fn unavailable_proof_sections() -> Vec<proto::UnavailableSection> {
+    vec![
+        proto::UnavailableSection {
+            section: "known".to_string(),
+            reason: "Retrieval sources and citations are owned by Data Plane and are not \
+                     joinable from Model Plane; this bundle makes no claim about what the \
+                     run knew."
+                .to_string(),
+        },
+        proto::UnavailableSection {
+            section: "charged".to_string(),
+            reason: "Cost and token accounting are owned by cost-core and are not included \
+                     in this bundle version."
+                .to_string(),
+        },
+        proto::UnavailableSection {
+            section: "retained".to_string(),
+            reason: "Retention/ZDR posture is owned by Control Plane organization policy \
+                     and is not restated here; reading it from this plane could report a \
+                     posture that has since changed."
+                .to_string(),
+        },
+    ]
+}
+
+/// Build a run's proof bundle from already-fetched, already-tenant-scoped
+/// rows. Pure so the evidence-shaping rules — especially the ones about never
+/// inventing a stage that did not happen — are unit-testable without Postgres.
+fn build_run_proof_bundle(
+    run_id: &str,
+    org_id: &str,
+    provenance: &store::RunProvenanceRow,
+    approvals: &[store::ApprovalRow],
+    evidence: &[store::ContinuationEvidenceRow],
+) -> proto::RunProofBundle {
+    let approvals = approvals
+        .iter()
+        .map(|approval| {
+            // At most one continuation per approval: approval_delivery_outbox
+            // holds a UNIQUE constraint on approval_id, and receipts are 1:1
+            // with a delivery.
+            let execution = evidence
+                .iter()
+                .find(|e| e.approval_id == approval.id)
+                .map(continuation_execution_from_row);
+            proto::ApprovalProof {
+                approval_id: approval.id.clone(),
+                kind: approval.kind.clone(),
+                status: approval.status.clone(),
+                requested_by: approval.requested_by.clone(),
+                decided_by: approval.decided_by.clone(),
+                decision_reason: approval.decision_reason.clone(),
+                requested_at: Some(ts(approval.requested_at)),
+                decided_at: approval.decided_at.map(ts),
+                execution,
+            }
+        })
+        .collect();
+
+    proto::RunProofBundle {
+        bundle_version: 1,
+        run_id: run_id.to_string(),
+        org_id: org_id.to_string(),
+        generated_at: Some(now_ts()),
+        run: Some(proto::RunProvenance {
+            goal: provenance.goal.clone(),
+            agent_id: provenance.agent_id.clone(),
+            status: provenance.status.clone(),
+            created_at: Some(ts(provenance.created_at)),
+        }),
+        approvals,
+        unavailable: unavailable_proof_sections(),
+    }
+}
+
+fn continuation_execution_from_row(
+    row: &store::ContinuationEvidenceRow,
+) -> proto::ContinuationExecution {
+    // A receipt without an outcome row is a continuation that really started
+    // and has not finalized. It must stay `None` rather than become a
+    // fabricated terminal state.
+    let outcome = row
+        .outcome
+        .as_ref()
+        .map(|outcome| proto::ContinuationOutcome {
+            outcome: outcome.clone(),
+            provider_receipt_id: row.provider_receipt_id.clone().unwrap_or_default(),
+            failure_code: row.failure_code.clone().unwrap_or_default(),
+            finalized_at: row.finalized_at.map(ts),
+            // The verification triple is stored all-or-nothing (migration 0020's
+            // together-constraint); a worker that recorded none leaves this
+            // absent instead of defaulting to a status.
+            verification: row.verification_status.as_ref().map(|status| {
+                proto::VerificationResult {
+                    effect_id: row.receipt_id.clone(),
+                    status: verification_status_to_proto(status),
+                    method: row.verification_method.clone().unwrap_or_default(),
+                    reason: row.verification_reason.clone().unwrap_or_default(),
+                    verified_at: row.finalized_at.map(ts),
+                }
+            }),
+        });
+
+    proto::ContinuationExecution {
+        receipt_id: row.receipt_id.clone(),
+        delivery_id: row.delivery_id.clone(),
+        action_fingerprint: row.action_fingerprint.clone(),
+        execution_service_id: row.execution_service_id.clone(),
+        descriptor_version: i32::from(row.descriptor_version),
+        started_at: Some(ts(row.started_at)),
+        outcome,
+    }
+}
+
+/// Map the stored verification status string to the shared contract enum. An
+/// unrecognized value becomes `UNKNOWN`, never a success variant — the
+/// migration's CHECK constrains the column, so this is a defensive floor for
+/// a future value this build does not know about.
+fn verification_status_to_proto(status: &str) -> i32 {
+    match status {
+        "verified_success" => proto::VerificationStatus::VerifiedSuccess as i32,
+        "verified_failure" => proto::VerificationStatus::VerifiedFailure as i32,
+        "partially_verified" => proto::VerificationStatus::PartiallyVerified as i32,
+        _ => proto::VerificationStatus::Unknown as i32,
+    }
+}
+
 fn todo_from_row(row: &store::TodoRow) -> proto::Todo {
     let assignee = metadata_str_field(&row.metadata, "assignee");
     let description = metadata_str_field(&row.metadata, "description");
@@ -1291,6 +1423,64 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("list_approvals", started, result.is_ok());
+        result
+    }
+
+    /// Assemble the Verevon Proof Bundle for one run.
+    ///
+    /// Read-only and tenant-scoped through exactly the same guards as
+    /// `list_approvals`: an approval-evidence record is at least as sensitive
+    /// as the approval it describes, so it must not be reachable on weaker
+    /// terms.
+    async fn get_run_proof_bundle(
+        &self,
+        request: Request<proto::GetRunProofBundleRequest>,
+    ) -> Result<Response<proto::GetRunProofBundleResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetRunProofBundleResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
+            let req = request.into_inner();
+            if req.run_id.is_empty() {
+                return Err(Status::invalid_argument("run_id is required"));
+            }
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
+
+            let provenance =
+                store::get_run_provenance_for_org(&self.pool, &req.run_id, &req.org_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .ok_or_else(|| Status::not_found("run not found"))?;
+
+            let approvals = store::list_approvals_by_run_full_for_org(
+                &self.pool,
+                &req.run_id,
+                &req.org_id,
+                caller.user_id(),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            let evidence =
+                store::list_continuation_evidence_for_run(&self.pool, &req.run_id, &req.org_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+
+            let bundle = build_run_proof_bundle(
+                &req.run_id,
+                &req.org_id,
+                &provenance,
+                &approvals,
+                &evidence,
+            );
+            Ok(Response::new(proto::GetRunProofBundleResponse {
+                bundle: Some(bundle),
+            }))
+        }
+        .await;
+        record_metrics("get_run_proof_bundle", started, result.is_ok());
         result
     }
 
@@ -2715,5 +2905,221 @@ mod tests {
 
         let buffered = replay.replay_after("run_rec", "").await;
         assert_eq!(buffered.len(), 1, "browser event buffered for replay");
+    }
+
+    // -----------------------------------------------------------------------
+    // Proof bundle assembly
+    // -----------------------------------------------------------------------
+
+    fn test_provenance() -> store::RunProvenanceRow {
+        store::RunProvenanceRow {
+            goal: "book the shipment".to_owned(),
+            agent_id: "general-v1".to_owned(),
+            status: "completed".to_owned(),
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    fn test_approval(id: &str) -> store::ApprovalRow {
+        store::ApprovalRow {
+            id: id.to_owned(),
+            run_id: "run_1".to_owned(),
+            plan_id: None,
+            kind: "tool".to_owned(),
+            status: "granted".to_owned(),
+            requested_by: "model".to_owned(),
+            decided_by: "user-1".to_owned(),
+            decision_reason: "looks right".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            idempotency_key: String::new(),
+            metadata: serde_json::json!({}),
+            requested_at: chrono::Utc::now(),
+            decided_at: Some(chrono::Utc::now()),
+            expires_at: None,
+        }
+    }
+
+    fn test_evidence(approval_id: &str) -> store::ContinuationEvidenceRow {
+        store::ContinuationEvidenceRow {
+            approval_id: approval_id.to_owned(),
+            receipt_id: "rcpt_1".to_owned(),
+            delivery_id: "dlv_1".to_owned(),
+            action_fingerprint: "a".repeat(64),
+            execution_service_id: "execution-core".to_owned(),
+            descriptor_version: 1,
+            started_at: chrono::Utc::now(),
+            outcome: None,
+            provider_receipt_id: None,
+            failure_code: None,
+            finalized_at: None,
+            verification_status: None,
+            verification_method: None,
+            verification_reason: None,
+        }
+    }
+
+    #[test]
+    fn proof_bundle_always_declares_the_sections_it_cannot_prove() {
+        let bundle = build_run_proof_bundle("run_1", "org-1", &test_provenance(), &[], &[]);
+
+        assert_eq!(bundle.bundle_version, 1);
+        assert_eq!(bundle.run_id, "run_1");
+        assert_eq!(bundle.org_id, "org-1");
+        // A run with no approvals is a fact about the run, not a missing
+        // section — but the cross-plane gaps must still be named.
+        assert!(bundle.approvals.is_empty());
+        let sections: Vec<&str> = bundle
+            .unavailable
+            .iter()
+            .map(|s| s.section.as_str())
+            .collect();
+        assert_eq!(sections, vec!["known", "charged", "retained"]);
+        for section in &bundle.unavailable {
+            assert!(
+                !section.reason.trim().is_empty(),
+                "every unavailable section must state why: {}",
+                section.section
+            );
+        }
+    }
+
+    #[test]
+    fn an_approval_without_a_continuation_reports_no_execution() {
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[test_approval("appr_1")],
+            &[],
+        );
+
+        let proof = &bundle.approvals[0];
+        assert_eq!(proof.approval_id, "appr_1");
+        assert_eq!(proof.decided_by, "user-1");
+        // Authority is present; execution must NOT be invented from it.
+        assert!(
+            proof.execution.is_none(),
+            "an approval alone is authority, never evidence that work started"
+        );
+    }
+
+    #[test]
+    fn an_in_flight_continuation_reports_execution_but_no_outcome() {
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[test_approval("appr_1")],
+            &[test_evidence("appr_1")],
+        );
+
+        let execution = bundle.approvals[0]
+            .execution
+            .as_ref()
+            .expect("receipt proves the work started");
+        assert_eq!(execution.receipt_id, "rcpt_1");
+        assert_eq!(execution.execution_service_id, "execution-core");
+        assert!(
+            execution.outcome.is_none(),
+            "a receipt with no outcome row must not become a fabricated terminal state"
+        );
+    }
+
+    #[test]
+    fn a_verified_outcome_carries_the_shared_contract_status() {
+        let mut evidence = test_evidence("appr_1");
+        evidence.outcome = Some("completed".to_owned());
+        evidence.provider_receipt_id = Some("LC652849244NO".to_owned());
+        evidence.finalized_at = Some(chrono::Utc::now());
+        evidence.verification_status = Some("verified_success".to_owned());
+        evidence.verification_method = Some("structural".to_owned());
+        evidence.verification_reason =
+            Some("provider returned an authoritative receipt".to_owned());
+
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[test_approval("appr_1")],
+            &[evidence],
+        );
+
+        let outcome = bundle.approvals[0]
+            .execution
+            .as_ref()
+            .and_then(|e| e.outcome.as_ref())
+            .expect("finalized continuation has an outcome");
+        assert_eq!(outcome.outcome, "completed");
+        assert_eq!(outcome.provider_receipt_id, "LC652849244NO");
+
+        let verification = outcome
+            .verification
+            .as_ref()
+            .expect("a recorded verification must survive assembly");
+        assert_eq!(
+            verification.status,
+            proto::VerificationStatus::VerifiedSuccess as i32
+        );
+        // `method` is what stops today's mechanical check being read as an
+        // independent postcondition verification.
+        assert_eq!(verification.method, "structural");
+        assert_eq!(verification.effect_id, "rcpt_1");
+    }
+
+    #[test]
+    fn an_outcome_without_a_recorded_verification_claims_none() {
+        let mut evidence = test_evidence("appr_1");
+        evidence.outcome = Some("failed".to_owned());
+        evidence.failure_code = Some("provider_rejected".to_owned());
+        evidence.finalized_at = Some(chrono::Utc::now());
+
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[test_approval("appr_1")],
+            &[evidence],
+        );
+
+        let outcome = bundle.approvals[0]
+            .execution
+            .as_ref()
+            .and_then(|e| e.outcome.as_ref())
+            .expect("finalized continuation has an outcome");
+        assert_eq!(outcome.outcome, "failed");
+        assert!(
+            outcome.verification.is_none(),
+            "absent verification must stay absent, never default to a status"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_verification_status_never_reads_as_success() {
+        for value in ["", "definitely_fine", "success", "unknown"] {
+            assert_eq!(
+                verification_status_to_proto(value),
+                proto::VerificationStatus::Unknown as i32,
+                "unrecognized status {value:?} must floor to UNKNOWN"
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_is_matched_to_its_own_approval() {
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[test_approval("appr_1"), test_approval("appr_2")],
+            // Evidence belongs to appr_2 only.
+            &[test_evidence("appr_2")],
+        );
+
+        assert!(
+            bundle.approvals[0].execution.is_none(),
+            "appr_1 has no continuation and must not borrow appr_2's evidence"
+        );
+        assert!(bundle.approvals[1].execution.is_some());
     }
 }

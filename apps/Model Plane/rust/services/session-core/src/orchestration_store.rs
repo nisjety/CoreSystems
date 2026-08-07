@@ -831,6 +831,103 @@ pub async fn list_lineage_by_thread(pool: &Pool, thread_id: &str) -> Result<Vec<
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// Proof bundle (verevon-vision.md §2 moat #3 / roadmap P1 item 2)
+// ---------------------------------------------------------------------------
+
+/// The run facts a proof bundle states about itself. Deliberately excludes
+/// `final_output` and `error`: a proof bundle is an evidence record about
+/// authority and effects, not a transcript of model output.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RunProvenanceRow {
+    pub goal: String,
+    pub agent_id: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One approval's continuation evidence, flattened across the receipt and its
+/// (optional) outcome. A receipt with no outcome row is a continuation that
+/// genuinely started and has not finalized — represented as `None` outcome
+/// fields rather than an invented terminal state.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ContinuationEvidenceRow {
+    pub approval_id: String,
+    pub receipt_id: String,
+    pub delivery_id: String,
+    pub action_fingerprint: String,
+    pub execution_service_id: String,
+    pub descriptor_version: i16,
+    pub started_at: DateTime<Utc>,
+    pub outcome: Option<String>,
+    pub provider_receipt_id: Option<String>,
+    pub failure_code: Option<String>,
+    pub finalized_at: Option<DateTime<Utc>>,
+    pub verification_status: Option<String>,
+    pub verification_method: Option<String>,
+    pub verification_reason: Option<String>,
+}
+
+/// Fetch one run's provenance, constrained at the database boundary to one
+/// tenant. A run owned by another organization resolves to `None` — never a
+/// partially-populated bundle.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn get_run_provenance_for_org(
+    pool: &Pool,
+    run_id: &str,
+    org_id: &str,
+) -> Result<Option<RunProvenanceRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    let row = sqlx::query_as::<_, RunProvenanceRow>(
+        "SELECT goal, agent_id, status, created_at \
+         FROM runs WHERE id = $1 AND org_id = $2",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// List every continuation evidence chain recorded for one run, tenant-scoped.
+///
+/// The join is a LEFT JOIN on purpose: the receipt is the durable proof that
+/// the approved work *started*, and it must appear in the bundle even when no
+/// outcome has been recorded yet.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn list_continuation_evidence_for_run(
+    pool: &Pool,
+    run_id: &str,
+    org_id: &str,
+) -> Result<Vec<ContinuationEvidenceRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    let rows = sqlx::query_as::<_, ContinuationEvidenceRow>(
+        "SELECT r.approval_id, r.receipt_id, r.delivery_id, r.action_fingerprint, \
+                r.execution_service_id, r.descriptor_version, r.started_at, \
+                o.outcome, o.provider_receipt_id, o.failure_code, o.finalized_at, \
+                o.verification_status, o.verification_method, o.verification_reason \
+         FROM approval_continuation_receipts r \
+         LEFT JOIN approval_continuation_outcomes o ON o.receipt_id = r.receipt_id \
+         WHERE r.run_id = $1 AND r.org_id = $2 \
+         ORDER BY r.started_at ASC",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
