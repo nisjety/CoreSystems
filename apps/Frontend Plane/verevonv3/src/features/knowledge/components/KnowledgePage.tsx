@@ -30,18 +30,19 @@ import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, 
 import { Dynamic } from 'solid-js/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
-// The Graf tab reuses the onboarding Connect step's 3D force-graph scene so
-// the RAGGraph relationship map matches that design (WebGL with a Canvas-2D
-// fallback, same palette/labels/interaction), instead of the old static
-// server-computed ring layout.
+// The Graf tab renders a 2D scene (knowledgeGraph2D.ts) styled to match the
+// Polygres/react-flow reference exactly: dark dotted canvas, pill nodes,
+// straight animated edges. `GRAPH_CORE_COLOR`/`hueForKey`/the visual node
+// and edge types are still the onboarding Connect step's shared vocabulary —
+// only the rendering engine (createConnectGraphScene) was swapped out.
 import {
-  createConnectGraphScene,
   GRAPH_CORE_COLOR,
   hueForKey,
   type SourceGraphSceneController,
   type SourceGraphVisualEdge,
   type SourceGraphVisualNode,
 } from '@/features/onboarding/components/steps/connectGraphScene'
+import { createKnowledgeGraph2DScene } from '@/features/knowledge/components/knowledgeGraph2D'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
 import {
@@ -1642,7 +1643,7 @@ function GraphPanel(props: {
     const reducedMotion = typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
       : false
-    sceneController = createConnectGraphScene(graphRef, hostRef, {
+    sceneController = createKnowledgeGraph2DScene(graphRef, hostRef, {
       reducedMotion,
       onHoverNode: (node) => setHoveringNode(Boolean(node)),
       onSelectNode: (pick) => {

@@ -2643,6 +2643,42 @@ textarea:focus-visible {
   padding-top: 2px;
 }
 
+.core-sidebar-email-connect {
+  display: grid;
+  gap: 6px;
+  padding: 2px 8px 8px;
+}
+
+.core-sidebar-email-connect__hint {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.core-sidebar-email-connect__actions {
+  display: grid;
+  gap: 6px;
+}
+
+.core-sidebar-email-connect__notice {
+  margin: 0;
+  color: var(--verevon-danger, #b3261e);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.core-sidebar-email-connect__upgrade-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .core-sidebar-email-account__link {
   min-width: 0;
 }
@@ -19340,6 +19376,152 @@ textarea:focus-visible {
 
 .dark .knowledge-graph-grid {
   opacity: 0.3;
+}
+
+/* Knowledge graph — Graf tab 2D scene (knowledgeGraph2D.ts). Matches the
+   Polygres/react-flow reference style: dark canvas, dotted background,
+   pill-shaped nodes with a book icon, straight animated green edges. Every
+   selector below is namespaced `kg2d` and owned entirely by that module —
+   nothing else should target these classes. */
+.kg2d {
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  background: #131316;
+  cursor: grab;
+  touch-action: none;
+}
+
+.kg2d:active {
+  cursor: grabbing;
+}
+
+.kg2d__background {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.kg2d__dot {
+  fill: rgb(255 255 255 / 6%);
+}
+
+.kg2d__viewport {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.kg2d__edges {
+  position: absolute;
+  inset: 0;
+  /* No viewBox is set, so SVG user-space is 1:1 with this box's own pixels
+     and (0, 0) is this box's top-left corner — which is exactly `viewport`'s
+     origin, matching the plain simulation (x, y) coordinates edges are drawn
+     with. `overflow: visible` means paths outside these bounds (most of the
+     graph, since nodes spread from a centered origin) still paint instead of
+     clipping at the box edge. */
+  overflow: visible;
+  pointer-events: none;
+}
+
+.kg2d__edge-path {
+  fill: none;
+  stroke: #2be198;
+  stroke-width: 1.8;
+  stroke-dasharray: 5 5;
+  animation: kg2d-edge-dash 0.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .kg2d__edge-path {
+    animation: none;
+  }
+}
+
+@keyframes kg2d-edge-dash {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+.kg2d__arrowhead {
+  stroke: #2be198;
+  fill: #2be198;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.kg2d__nodes {
+  position: absolute;
+  inset: 0;
+}
+
+.kg2d__node {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.kg2d__node-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  touch-action: none;
+  background: rgb(28 28 31 / 95%);
+  border: 1px solid rgb(255 255 255 / 6%);
+  color: #a1a1aa;
+  box-shadow: 0 10px 25px -8px rgb(0 0 0 / 55%);
+  backdrop-filter: blur(12px);
+  transition: color 0.2s, border-color 0.2s, transform 0.2s;
+}
+
+.kg2d__node-pill:hover {
+  border-color: rgb(255 255 255 / 20%);
+  color: #fff;
+  transform: scale(1.03);
+}
+
+.kg2d__node-pill:active {
+  transform: scale(0.95);
+}
+
+.kg2d__node-pill:focus-visible {
+  outline: 2px solid #2be198;
+  outline-offset: 2px;
+}
+
+.kg2d__node--active .kg2d__node-pill {
+  border-color: #2be198;
+  color: #fff;
+}
+
+.kg2d__node-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: #71717a;
+}
+
+.kg2d__node--active .kg2d__node-icon {
+  color: #2be198;
+}
+
+.kg2d__node-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
 }
 
 .knowledge-graph-svg,
@@ -36244,6 +36426,126 @@ textarea:focus-visible {
   color: var(--verevon-primary-foreground);
 }
 
+.verevon-insights-range {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 9px 10px 9px 12px;
+}
+
+.verevon-insights-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.verevon-insights-controls .verevon-insights-range {
+  margin-top: 0;
+}
+
+.verevon-insights-scope {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 8px 10px;
+}
+
+.verevon-insights-scope > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.verevon-insights-scope > div {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.verevon-insights-scope button {
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 9px;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.verevon-insights-scope button:hover,
+.verevon-insights-scope button:focus-visible {
+  border-color: var(--verevon-border);
+  background: var(--verevon-surface-soft);
+  outline: none;
+}
+
+.verevon-insights-scope button.is-active {
+  border-color: var(--verevon-primary);
+  background: var(--verevon-primary);
+  color: var(--verevon-primary-foreground);
+}
+
+.verevon-insights-knowledge-note {
+  margin: 14px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.verevon-insights-range > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.verevon-insights-range > div {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.verevon-insights-range button {
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  padding: 0 9px;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.verevon-insights-range button:hover,
+.verevon-insights-range button:focus-visible {
+  border-color: var(--verevon-border);
+  background: var(--verevon-surface-soft);
+  outline: none;
+}
+
+.verevon-insights-range button.is-active {
+  border-color: var(--verevon-primary);
+  background: var(--verevon-primary);
+  color: var(--verevon-primary-foreground);
+}
+
 .verevon-insights-loading,
 .verevon-insights-source {
   display: flex;
@@ -36770,6 +37072,11 @@ textarea:focus-visible {
   .verevon-insights-metrics,
   .verevon-social-ops-create {
     grid-template-columns: 1fr;
+  }
+
+  .verevon-insights-range {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .verevon-studio-topbar {
