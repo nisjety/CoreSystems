@@ -365,19 +365,23 @@ The following order is authoritative where it conflicts with older Phase A wordi
    succeeded, and a screenshot or DOM snapshot was retained so the claim is
    inspectable. ZDR runs keep no page content and are therefore inconclusive
    by construction.
-   **So browser procedures can currently be refuted but never confirmed** —
-   `PlanConfig` carries no postcondition distinct from `stop_criteria`. That
-   is the honest current state and a test asserts it, so adding a
-   confirmation path has to be deliberate. Adding that one field is the
-   change that unlocks it; the confirmation path is already implemented and
-   tested.
+   **Confirmation unlocked 2026-08-08.** `PlanConfig` now carries a
+   `postcondition`, settable from the `browser_agent` tool input, so a
+   procedure that declares one can be independently confirmed. Its doc
+   states the constraint that makes it worth anything: it must not be the
+   same string as `stop_criteria`, and a caller who sets them equal gets an
+   honest "inconclusive" rather than a failure — but no confirmation.
+   Omitting the field keeps exactly the previous behavior (refutable, never
+   confirmable), so this is additive for every existing caller. Good values
+   name something only the *completed* effect would put on the page and that
+   the agent was not steering toward: an order number, a confirmation-page
+   heading, a receipt id.
    The verdict is attached to the completed step's output rather than used
    to rewrite the lifecycle status — downgrading `Completed` to `Failed`
    would change execution semantics on an unestablished inference about when
    those states can legitimately co-occur.
-   Remaining: the rest of `execute_provider_action`'s write operations (each
-   needs a matching frozen-surface read), and a declared browser
-   postcondition field.
+   Remaining: the rest of `execute_provider_action`'s write operations, each
+   needing a matching read on the frozen surface.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
