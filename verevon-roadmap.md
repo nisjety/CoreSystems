@@ -332,10 +332,25 @@ The following order is authoritative where it conflicts with older Phase A wordi
    run is never credited as one that ran and passed. Unknown or in-between
    states (`pending`, or a status a future shipping-core adds) are
    inconclusive rather than guessed.
-   Remaining: `execute_provider_action`'s many operations (each needs a
-   read-back from the frozen actions surface — several writes already have
-   a matching read, e.g. Slack `message.send` → `messages.list`), and
-   browser procedures.
+   **Extended to `execute_provider_action` the same day.** Read-backs reuse
+   only operations already on the **frozen** actions surface — no provider
+   capability was added: Slack `message.send` → `messages.list`
+   (channel-scoped `conversations.history`), Gmail `gmail.send` →
+   `gmail.messages`.
+   The design point is `ReadBackStrength`, encoded in the type system rather
+   than a comment. Shipping's `GET /api/bookings/{id}` asks about one
+   specific effect, so **absence refutes**. A provider *listing* returns a
+   bounded window, so **presence confirms but absence proves nothing** — the
+   effect may simply lie past the window, and calling that a refutation
+   would manufacture false failures, as harmful as the false successes this
+   layer catches. Matching is on identifier-shaped fields only, never a
+   substring of arbitrary text, so an id quoted inside a message body cannot
+   confirm that the id's own message exists.
+   Microsoft `mail.send` is **not verifiable by construction** and now says
+   so: it returns `202` with no id, so the dispatcher never reaches a
+   `Completed` disposition for it at all.
+   Remaining: the rest of `execute_provider_action`'s write operations
+   (each needs a matching frozen-surface read), and browser procedures.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
