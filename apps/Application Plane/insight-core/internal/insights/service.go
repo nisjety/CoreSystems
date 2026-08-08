@@ -107,6 +107,7 @@ func normalizeMetricEvent(input IngestMetricEventInput, now func() time.Time) (M
 	event := MetricEvent{
 		ID:            strings.TrimSpace(input.ID),
 		OrgID:         orgID,
+		ActorUserID:   strings.TrimSpace(input.ActorUserID),
 		Surface:       surface,
 		Metric:        metric,
 		Value:         input.Value,
@@ -137,10 +138,11 @@ func normalizeOverviewQuery(query OverviewQuery) (OverviewQuery, error) {
 		return OverviewQuery{}, fmt.Errorf("%w: from must be before to", ErrInvalidInput)
 	}
 	return OverviewQuery{
-		OrgID:    orgID,
-		Surfaces: surfaces,
-		From:     query.From,
-		To:       query.To,
+		OrgID:       orgID,
+		ActorUserID: strings.TrimSpace(query.ActorUserID),
+		Surfaces:    surfaces,
+		From:        query.From,
+		To:          query.To,
 	}, nil
 }
 

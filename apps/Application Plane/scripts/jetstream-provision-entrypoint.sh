@@ -48,5 +48,6 @@ add_consumer VEREVON_INGESTION  conversation-core-webhook-received       verevon
 add_consumer VEREVON_MODEL      conversation-core-model-action-proposed  verevon.model.action.proposed                        _VEREVON.APPLICATION.DELIVER.conversation.model-action-proposed
 add_consumer VEREVON_APPLICATION conversation-core-ai-action-executor    verevon.application.conversation.ai_action.reviewed  _VEREVON.APPLICATION.DELIVER.conversation.ai-action-reviewed
 add_consumer VEREVON_APPLICATION insight-core-metric-subscriber          "verevon.application.>"                              _VEREVON.APPLICATION.DELIVER.insight.metrics
+add_consumer VEREVON_INGESTION  insight-core-ingestion-subscriber        "verevon.ingestion.>"                                _VEREVON.APPLICATION.DELIVER.insight.ingestion
 
 echo "[jetstream-provisioner] complete"

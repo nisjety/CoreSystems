@@ -57,11 +57,27 @@ func (h *Handler) ListConnectors(c *gin.Context) {
 }
 
 func (h *Handler) IngestEvent(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
 	var body insights.IngestMetricEventInput
 	if err := decodeJSONBody(c, &body); err != nil {
 		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
 		return
 	}
+	// This endpoint is internal-only, but it still never lets the request body
+	// select a tenant. A caller must present the organization in its trusted
+	// delegation header, and any contradictory body is rejected instead of being
+	// silently redirected across tenants.
+	if suppliedOrgID := strings.TrimSpace(body.OrgID); suppliedOrgID != "" && suppliedOrgID != orgID {
+		c.JSON(http.StatusBadRequest, errorPayload("org_scope_mismatch", "org_id must match x-org-id."))
+		return
+	}
+	body.OrgID = orgID
+	// Actor scope is likewise supplied by the trusted gateway/delegated worker,
+	// never by a JSON field that an upstream caller could forge.
+	body.ActorUserID = strings.TrimSpace(c.GetHeader("x-user-id"))
 	event, err := h.service.RecordMetricEvent(c.Request.Context(), body)
 	if err != nil {
 		writeServiceError(c, err)
@@ -79,11 +95,24 @@ func overviewQueryFromRequest(c *gin.Context, orgID string) (insights.OverviewQu
 	if err != nil {
 		return insights.OverviewQuery{}, err
 	}
+	scope := strings.TrimSpace(c.DefaultQuery("scope", "organization"))
+	actorUserID := ""
+	switch scope {
+	case "organization":
+	case "me":
+		actorUserID = strings.TrimSpace(c.GetHeader("x-user-id"))
+		if actorUserID == "" {
+			return insights.OverviewQuery{}, errors.New("x-user-id is required for scope=me")
+		}
+	default:
+		return insights.OverviewQuery{}, errors.New("scope must be organization or me")
+	}
 	return insights.OverviewQuery{
-		OrgID:    orgID,
-		Surfaces: surfacesFromRequest(c),
-		From:     from,
-		To:       to,
+		OrgID:       orgID,
+		ActorUserID: actorUserID,
+		Surfaces:    surfacesFromRequest(c),
+		From:        from,
+		To:          to,
 	}, nil
 }
 
@@ -119,12 +148,6 @@ func decodeJSONBody(c *gin.Context, target any) error {
 
 func requireOrgID(c *gin.Context) string {
 	orgID := strings.TrimSpace(c.GetHeader("x-org-id"))
-	if orgID == "" {
-		orgID = strings.TrimSpace(c.Query("org_id"))
-	}
-	if orgID == "" {
-		orgID = strings.TrimSpace(c.Query("orgId"))
-	}
 	if orgID == "" {
 		c.JSON(http.StatusBadRequest, errorPayload("missing_org_id", "x-org-id is required."))
 		return ""

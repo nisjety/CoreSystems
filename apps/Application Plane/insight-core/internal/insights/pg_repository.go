@@ -3,6 +3,7 @@ package insights
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,10 +33,10 @@ func (r *PGRepository) RecordMetricEvent(ctx context.Context, event MetricEvent)
 	}
 	if _, err := r.pool.Exec(ctx, `
 INSERT INTO insight_core.insight_metric_events
-	(id, org_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+	(id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
 ON CONFLICT (id) DO NOTHING`,
-		event.ID, event.OrgID, event.Surface, event.Metric, event.Value, event.Unit,
+		event.ID, event.OrgID, event.ActorUserID, event.Surface, event.Metric, event.Value, event.Unit,
 		event.Source, event.ConnectorType, dims, event.OccurredAt); err != nil {
 		return nil, err
 	}
@@ -47,15 +48,20 @@ ON CONFLICT (id) DO NOTHING`,
 // optional time window. The service normalizes query.Surfaces (defaulting to all
 // supported surfaces), matching the in-memory repo's surface filter.
 func (r *PGRepository) ListMetricEvents(ctx context.Context, query OverviewQuery) ([]MetricEvent, error) {
+	var actorUserID *string
+	if candidate := strings.TrimSpace(query.ActorUserID); candidate != "" {
+		actorUserID = &candidate
+	}
 	rows, err := r.pool.Query(ctx, `
-SELECT id, org_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at
+SELECT id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at
 FROM insight_core.insight_metric_events
 WHERE org_id = $1
-  AND surface = ANY($2)
-  AND ($3::timestamptz IS NULL OR occurred_at >= $3)
-  AND ($4::timestamptz IS NULL OR occurred_at <= $4)
+  AND ($2::text IS NULL OR actor_user_id = $2)
+  AND surface = ANY($3)
+  AND ($4::timestamptz IS NULL OR occurred_at >= $4)
+  AND ($5::timestamptz IS NULL OR occurred_at <= $5)
 ORDER BY occurred_at DESC`,
-		query.OrgID, query.Surfaces, query.From, query.To)
+		query.OrgID, actorUserID, query.Surfaces, query.From, query.To)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +72,7 @@ ORDER BY occurred_at DESC`,
 		var e MetricEvent
 		var dims []byte
 		if err := rows.Scan(
-			&e.ID, &e.OrgID, &e.Surface, &e.Metric, &e.Value, &e.Unit,
+			&e.ID, &e.OrgID, &e.ActorUserID, &e.Surface, &e.Metric, &e.Value, &e.Unit,
 			&e.Source, &e.ConnectorType, &dims, &e.OccurredAt,
 		); err != nil {
 			return nil, err

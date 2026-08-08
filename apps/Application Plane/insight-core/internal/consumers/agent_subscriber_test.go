@@ -35,6 +35,43 @@ func TestAgentProcess_MapsRunCompletedToAgentsSurface(t *testing.T) {
 	}
 }
 
+func TestAgentProcess_RecordsUserScopedChatStartFromModelGateway(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &AgentSubscriber{recorder: rec}
+	e := agentEvt("mp-chat-1", "RUN_STARTED", "org-1")
+	e.UserID = "user-1"
+	e.Producer = "model-gateway"
+	e.ResourceRef = "request/req-1"
+
+	if got := sub.process(context.Background(), e); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 2 {
+		t.Fatalf("recorded %d metrics, want agent and chat", rec.count())
+	}
+	if rec.inputs[0].ActorUserID != "user-1" {
+		t.Errorf("agent metric actor = %q, want user-1", rec.inputs[0].ActorUserID)
+	}
+	chat := rec.inputs[1]
+	if chat.Surface != insights.SurfaceChat || chat.Metric != "chat_turns_started" || chat.ActorUserID != "user-1" {
+		t.Errorf("chat metric = %+v, want user-bound chat start", chat)
+	}
+}
+
+func TestAgentProcess_DropsZeroRetentionEnvelope(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &AgentSubscriber{recorder: rec}
+	e := agentEvt("mp-zdr", "RUN_STARTED", "org-1")
+	e.ZDR = true
+
+	if got := sub.process(context.Background(), e); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 0 {
+		t.Fatalf("zero-retention event produced %d durable metric rows", rec.count())
+	}
+}
+
 func TestAgentProcess_MapsApprovalAndTool(t *testing.T) {
 	cases := []struct {
 		eventType  string

@@ -52,9 +52,10 @@ func main() {
 	}
 	service := insights.NewService(repository)
 
-	// W3 (PR-5): when the shared application NATS is wired, consume conversation-core
-	// AND social-core application events and record them as metrics — two of the real
-	// producers behind the metrics view. No-op when NATS_URL is empty.
+	// When the shared application NATS is wired, consume conversation-core and
+	// social-core events plus the durable Ingestion Plane lifecycle stream. These
+	// count only real content-free lifecycle records; no direct cross-plane DB
+	// reads are used. No-op when NATS_URL is empty.
 	if cfg.NATSURL != "" {
 		natsClient, err := appnats.NewClient(appnats.Config{
 			URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
@@ -70,6 +71,13 @@ func main() {
 				log.Printf("insight-core: metric subscriber: %v", err)
 			} else {
 				defer subscriber.Stop()
+			}
+			ingestionSubscriber := consumers.NewIngestionSubscriber(natsClient.JS, service)
+			if err := ingestionSubscriber.Start(context.Background()); err != nil {
+				log.Printf("insight-core: ingestion subscriber: %v", err)
+			} else {
+				defer ingestionSubscriber.Stop()
+				log.Printf("insight-core: ingestion producer enabled")
 			}
 		}
 	}

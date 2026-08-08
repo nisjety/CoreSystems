@@ -16,12 +16,12 @@ if ! docker info > /dev/null 2>&1; then
     exit 1
 fi
 
-# Check if aquatiq-local network exists
-if ! docker network inspect aquatiq-local > /dev/null 2>&1; then
-    echo "📡 Creating aquatiq-local Docker network..."
-    docker network create aquatiq-local
+# Check if coresystem-local network exists
+if ! docker network inspect coresystem-local > /dev/null 2>&1; then
+    echo "📡 Creating coresystem-local Docker network..."
+    docker network create coresystem-local
 else
-    echo "✅ Docker network aquatiq-local already exists"
+    echo "✅ Docker network coresystem-local already exists"
 fi
 
 # Check if .env.local exists

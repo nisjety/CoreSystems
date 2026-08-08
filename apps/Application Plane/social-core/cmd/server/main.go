@@ -55,17 +55,9 @@ func main() {
 		BaseURL:        cfg.IntegrationCoreURL,
 		InternalAPIKey: cfg.InternalAPIKey,
 	})
-	publisher := social.NewHTTPPublisher(integrationClient, nil, social.PublisherConfig{
-		LinkedInAPIBaseURL:         cfg.LinkedInAPIBaseURL,
-		LinkedInAPIVersion:         cfg.LinkedInAPIVersion,
-		XAPIBaseURL:                cfg.XAPIBaseURL,
-		InstagramGraphAPIBaseURL:   cfg.InstagramGraphAPIBaseURL,
-		FacebookGraphAPIBaseURL:    cfg.FacebookGraphAPIBaseURL,
-		TikTokAPIBaseURL:           cfg.TikTokAPIBaseURL,
-		SnapchatAPIBaseURL:         cfg.SnapchatAPIBaseURL,
-		SnapchatBusinessAPIBaseURL: cfg.SnapchatBusinessAPIBaseURL,
-		SnapchatLivePublishing:     cfg.SnapchatLivePublishing,
-	})
+	// Provider writes use integration-corev2's governed action surface. The
+	// social service must not lease raw OAuth tokens to publish a post.
+	publisher := social.NewGovernedPublisher(integrationClient)
 	service := social.NewService(
 		repository,
 		social.WithAccountSource(integrationClient),

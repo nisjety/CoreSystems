@@ -94,7 +94,7 @@ func TestSearchParsesCompanyFieldsOnly(t *testing.T) {
           "forretningsadresse": { "kommunenummer": "4601", "poststed": "BERGEN" },
           "antallAnsatte": 42,
           "registreringsdatoEnhetsregisteret": "1995-08-09",
-          "hjemmeside": "aquatiq.com",
+          "hjemmeside": "coresystem.com",
           "konkurs": false,
           "underAvvikling": false,
           "epostadresse": "should-not-be-mapped@example.com",

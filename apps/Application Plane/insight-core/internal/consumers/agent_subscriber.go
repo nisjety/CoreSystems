@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -34,10 +35,14 @@ const (
 // are ignored. `EventType` is the discriminator (RUN_COMPLETED, …); `Ts` is the
 // canonical event timestamp.
 type agentEvent struct {
-	EventID   string    `json:"event_id"`
-	EventType string    `json:"event_type"`
-	OrgID     string    `json:"org_id"`
-	Ts        time.Time `json:"ts"`
+	EventID     string    `json:"event_id"`
+	EventType   string    `json:"event_type"`
+	Producer    string    `json:"producer"`
+	OrgID       string    `json:"org_id"`
+	UserID      string    `json:"user_id,omitempty"`
+	ResourceRef string    `json:"resource_ref,omitempty"`
+	ZDR         bool      `json:"zdr"`
+	Ts          time.Time `json:"ts"`
 }
 
 // agentMetricMapping maps a Model Plane envelope `event_type` to a
@@ -112,6 +117,12 @@ func (s *AgentSubscriber) handle(msg *nats.Msg) {
 // event_id so a duplicate JetStream delivery resolves to the same row. Testable
 // without NATS.
 func (s *AgentSubscriber) process(ctx context.Context, ev agentEvent) outcome {
+	// Model Plane explicitly marks zero-data-retention runs. Insight Core must
+	// not make a durable aggregate from those envelopes, even if the aggregate
+	// contains no content.
+	if ev.ZDR {
+		return outcomeAck
+	}
 	target, ok := agentMetricMapping[ev.EventType]
 	if !ok {
 		return outcomeAck // not a metric-bearing event type — skip
@@ -120,17 +131,45 @@ func (s *AgentSubscriber) process(ctx context.Context, ev agentEvent) outcome {
 		return outcomeAck // cannot attribute without an org — skip
 	}
 	if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
-		ID:         metricEventID(ev.EventID, target.metric),
-		OrgID:      ev.OrgID,
-		Surface:    target.surface,
-		Metric:     target.metric,
-		Value:      1,
-		Unit:       "count",
-		Source:     target.source,
-		OccurredAt: ev.Ts,
+		ID:          metricEventID(ev.EventID, target.metric),
+		OrgID:       ev.OrgID,
+		ActorUserID: ev.UserID,
+		Surface:     target.surface,
+		Metric:      target.metric,
+		Value:       1,
+		Unit:        "count",
+		Source:      target.source,
+		OccurredAt:  ev.Ts,
 	}); err != nil {
 		log.Printf("[insight-core/agent-subscriber] record %s for org %s: %v", target.metric, ev.OrgID, err)
 		return outcomeRetry
 	}
+	if isGlobalChatStart(ev) {
+		if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
+			ID:          metricEventID(ev.EventID, "chat_turns_started"),
+			OrgID:       ev.OrgID,
+			ActorUserID: ev.UserID,
+			Surface:     insights.SurfaceChat,
+			Metric:      "chat_turns_started",
+			Value:       1,
+			Unit:        "count",
+			Source:      "model-gateway",
+			OccurredAt:  ev.Ts,
+		}); err != nil {
+			log.Printf("[insight-core/agent-subscriber] record chat start for org %s: %v", ev.OrgID, err)
+			return outcomeRetry
+		}
+	}
 	return outcomeAck
+}
+
+// isGlobalChatStart recognizes only the user-bound Model Gateway envelope for
+// a new full-workspace Chat request. It intentionally avoids classifying a
+// support-side assistant run, a background agent run, or an arbitrary model
+// lifecycle event as Chat activity.
+func isGlobalChatStart(ev agentEvent) bool {
+	return ev.EventType == "RUN_STARTED" &&
+		strings.TrimSpace(ev.Producer) == "model-gateway" &&
+		strings.HasPrefix(strings.TrimSpace(ev.ResourceRef), "request/") &&
+		strings.TrimSpace(ev.UserID) != ""
 }

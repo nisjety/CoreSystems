@@ -110,6 +110,7 @@ func TestIngestAndOverviewAreOrgScoped(t *testing.T) {
 		}
 		req := httptest.NewRequest(http.MethodPost, "/internal/insight-events", bytes.NewReader(payload))
 		req.Header.Set("x-internal-api-key", "test-key")
+		req.Header.Set("x-org-id", orgID)
 		resp := httptest.NewRecorder()
 		router.ServeHTTP(resp, req)
 		if resp.Code != http.StatusAccepted {
@@ -169,12 +170,49 @@ func TestIngestRejectsUnknownJSONFields(t *testing.T) {
 	router := testRouter()
 	req := httptest.NewRequest(http.MethodPost, "/internal/insight-events", bytes.NewReader([]byte(`{"org_id":"org-1","surface":"social","metric":"posts","value":1,"raw_secret":"nope"}`)))
 	req.Header.Set("x-internal-api-key", "test-key")
+	req.Header.Set("x-org-id", "org-1")
 	resp := httptest.NewRecorder()
 
 	router.ServeHTTP(resp, req)
 
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", resp.Code, http.StatusBadRequest)
+	}
+}
+
+func TestOverviewMeScopeUsesOnlyTheTrustedActorHeader(t *testing.T) {
+	router := testRouter()
+	for _, actorUserID := range []string{"user-a", "user-b"} {
+		payload := []byte(`{"surface":"inbox","metric":"tickets_resolved","value":1}`)
+		req := httptest.NewRequest(http.MethodPost, "/internal/insight-events", bytes.NewReader(payload))
+		req.Header.Set("x-internal-api-key", "test-key")
+		req.Header.Set("x-org-id", "org-1")
+		req.Header.Set("x-user-id", actorUserID)
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
+		if resp.Code != http.StatusAccepted {
+			t.Fatalf("ingest status = %d, want %d, body=%s", resp.Code, http.StatusAccepted, resp.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/insights/overview?surface=inbox&scope=me&user_id=user-b", nil)
+	req.Header.Set("x-internal-api-key", "test-key")
+	req.Header.Set("x-org-id", "org-1")
+	req.Header.Set("x-user-id", "user-a")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("overview status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+
+	var decoded struct {
+		Data insights.Overview `json:"data"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("Unmarshal overview: %v", err)
+	}
+	if got := decoded.Data.Surfaces[0].Metrics[0].Value; got != 1 {
+		t.Fatalf("scoped overview value = %v, want 1", got)
 	}
 }
 

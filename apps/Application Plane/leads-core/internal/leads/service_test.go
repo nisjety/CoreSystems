@@ -77,7 +77,7 @@ func TestExportCSVIsCompanyOnly(t *testing.T) {
 			Poststed:            "BERGEN",
 			AntallAnsatte:       intPtr(42),
 			Registreringsdato:   "1995-08-09",
-			Hjemmeside:          "aquatiq.com",
+			Hjemmeside:          "coresystem.com",
 		}},
 	}}
 	svc := NewService(repo, nil)

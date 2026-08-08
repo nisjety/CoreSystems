@@ -186,6 +186,36 @@ func TestOverviewDoesNotLeakEventsAcrossOrganizations(t *testing.T) {
 	}
 }
 
+func TestOverviewNarrowsAnOrganizationReadToTheVerifiedActor(t *testing.T) {
+	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})))
+	for _, event := range []IngestMetricEventInput{
+		{OrgID: "org-1", ActorUserID: "user-a", Surface: SurfaceInbox, Metric: "tickets_resolved", Value: 2},
+		{OrgID: "org-1", ActorUserID: "user-b", Surface: SurfaceInbox, Metric: "tickets_resolved", Value: 5},
+		// Inbound activity has no authenticated human actor. It must stay in the
+		// organization roll-up and must not appear in a "my activity" result.
+		{OrgID: "org-1", Surface: SurfaceInbox, Metric: "messages_received", Value: 9},
+	} {
+		if _, err := service.RecordMetricEvent(context.Background(), event); err != nil {
+			t.Fatalf("RecordMetricEvent error: %v", err)
+		}
+	}
+
+	overview, err := service.Overview(context.Background(), OverviewQuery{
+		OrgID:       "org-1",
+		ActorUserID: "user-a",
+		Surfaces:    []string{SurfaceInbox},
+	})
+	if err != nil {
+		t.Fatalf("Overview error: %v", err)
+	}
+	if len(overview.Scorecards) != 1 {
+		t.Fatalf("scorecards = %#v, want only user-a activity", overview.Scorecards)
+	}
+	if got := overview.Scorecards[0].Value; got != 2 {
+		t.Fatalf("actor-scoped value = %v, want 2", got)
+	}
+}
+
 func TestOverviewFiltersByWindowAndSurfaceList(t *testing.T) {
 	now := time.Date(2026, 6, 16, 9, 0, 0, 0, time.UTC)
 	service := NewService(NewMemoryRepository(DefaultConnectorSlots(ConnectorSlotOptions{})), WithNow(func() time.Time {

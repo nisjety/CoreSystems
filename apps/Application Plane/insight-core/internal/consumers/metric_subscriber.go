@@ -51,11 +51,12 @@ type SocialMetricsFetcher interface {
 // (snake_case) that conversation-core and social-core both publish. Unknown
 // fields are ignored. The `Type` is the subject minus its domain prefix.
 type applicationEvent struct {
-	ID         string         `json:"id"`
-	Type       string         `json:"type"`
-	OrgID      string         `json:"org_id"`
-	Data       map[string]any `json:"data"`
-	OccurredAt time.Time      `json:"occurred_at"`
+	ID          string         `json:"id"`
+	Type        string         `json:"type"`
+	OrgID       string         `json:"org_id"`
+	ActorUserID string         `json:"actor_user_id,omitempty"`
+	Data        map[string]any `json:"data"`
+	OccurredAt  time.Time      `json:"occurred_at"`
 }
 
 // metricsSnapshottedType is social-core's event type (subject minus the
@@ -228,14 +229,15 @@ func (s *MetricSubscriber) process(ctx context.Context, subject string, ev appli
 		return outcomeAck // cannot attribute without an org — skip
 	}
 	if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
-		ID:         metricEventID(ev.ID, target.metric),
-		OrgID:      ev.OrgID,
-		Surface:    target.surface,
-		Metric:     target.metric,
-		Value:      1,
-		Unit:       "count",
-		Source:     target.source,
-		OccurredAt: ev.OccurredAt,
+		ID:          metricEventID(ev.ID, target.metric),
+		OrgID:       ev.OrgID,
+		ActorUserID: ev.ActorUserID,
+		Surface:     target.surface,
+		Metric:      target.metric,
+		Value:       1,
+		Unit:        "count",
+		Source:      target.source,
+		OccurredAt:  ev.OccurredAt,
 	}); err != nil {
 		log.Printf("[insight-core/metric-subscriber] record %s for org %s: %v", target.metric, ev.OrgID, err)
 		return outcomeRetry
@@ -259,14 +261,15 @@ func (s *MetricSubscriber) processAIActionReviewed(ctx context.Context, ev appli
 		return outcomeAck // unknown/missing decision — skip, never guessed
 	}
 	if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
-		ID:         metricEventID(ev.ID, metric),
-		OrgID:      ev.OrgID,
-		Surface:    insights.SurfaceInbox,
-		Metric:     metric,
-		Value:      1,
-		Unit:       "count",
-		Source:     metricSourceConversation,
-		OccurredAt: ev.OccurredAt,
+		ID:          metricEventID(ev.ID, metric),
+		OrgID:       ev.OrgID,
+		ActorUserID: ev.ActorUserID,
+		Surface:     insights.SurfaceInbox,
+		Metric:      metric,
+		Value:       1,
+		Unit:        "count",
+		Source:      metricSourceConversation,
+		OccurredAt:  ev.OccurredAt,
 	}); err != nil {
 		log.Printf("[insight-core/metric-subscriber] record %s for org %s: %v", metric, ev.OrgID, err)
 		return outcomeRetry

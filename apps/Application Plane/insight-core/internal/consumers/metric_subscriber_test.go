@@ -64,6 +64,20 @@ func TestProcess_MapsKnownEventToMetric(t *testing.T) {
 	}
 }
 
+func TestProcess_PreservesConversationActorForUserScopedInsights(t *testing.T) {
+	rec := &fakeRecorder{}
+	sub := &MetricSubscriber{recorder: rec}
+	e := evt("evt-actor", "ai_action.executed", "org-1")
+	e.ActorUserID = "user-1"
+
+	if got := sub.process(context.Background(), conversationSubject, e); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if rec.count() != 1 || rec.inputs[0].ActorUserID != "user-1" {
+		t.Fatalf("actor was not preserved in metric input: %#v", rec.inputs)
+	}
+}
+
 func TestProcess_MapsSocialEventToSocialSurface(t *testing.T) {
 	rec := &fakeRecorder{}
 	sub := &MetricSubscriber{recorder: rec}

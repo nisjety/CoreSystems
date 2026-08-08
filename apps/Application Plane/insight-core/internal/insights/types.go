@@ -10,6 +10,9 @@ const (
 	SurfaceSocial            = "social"
 	SurfaceInbox             = "inbox"
 	SurfaceAgents            = "agents"
+	SurfaceChat              = "chat"
+	SurfaceKnowledge         = "knowledge"
+	SurfaceIngestion         = "ingestion"
 	SurfaceCampaigns         = "campaigns"
 	SurfaceExternalAnalytics = "external_analytics"
 
@@ -34,15 +37,22 @@ type Repository interface {
 }
 
 type OverviewQuery struct {
-	OrgID    string
-	Surfaces []string
-	From     *time.Time
-	To       *time.Time
+	// OrgID is always resolved by the trusted gateway / event producer. It is
+	// the tenant boundary; browser query parameters never select a tenant.
+	OrgID string
+	// ActorUserID is an optional, verified user narrowing within OrgID. Empty
+	// means organization scope. It is deliberately not an authorization grant:
+	// the gateway only supplies the signed-in actor for scope=me.
+	ActorUserID string
+	Surfaces    []string
+	From        *time.Time
+	To          *time.Time
 }
 
 type IngestMetricEventInput struct {
 	ID            string         `json:"id"`
 	OrgID         string         `json:"org_id"`
+	ActorUserID   string         `json:"actor_user_id,omitempty"`
 	Surface       string         `json:"surface"`
 	Metric        string         `json:"metric"`
 	Value         float64        `json:"value"`
@@ -56,6 +66,7 @@ type IngestMetricEventInput struct {
 type MetricEvent struct {
 	ID            string         `json:"id"`
 	OrgID         string         `json:"org_id"`
+	ActorUserID   string         `json:"actor_user_id,omitempty"`
 	Surface       string         `json:"surface"`
 	Metric        string         `json:"metric"`
 	Value         float64        `json:"value"`

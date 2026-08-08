@@ -44,6 +44,9 @@ func (r *MemoryRepository) ListMetricEvents(_ context.Context, query OverviewQue
 		if event.OrgID != query.OrgID {
 			continue
 		}
+		if query.ActorUserID != "" && event.ActorUserID != query.ActorUserID {
+			continue
+		}
 		if _, ok := surfaces[event.Surface]; !ok {
 			continue
 		}

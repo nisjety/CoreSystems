@@ -46,7 +46,16 @@ func normalizeSurfaceList(values []string) []string {
 }
 
 func SupportedSurfaces() []string {
-	return []string{SurfaceSocial, SurfaceInbox, SurfaceAgents, SurfaceCampaigns, SurfaceExternalAnalytics}
+	return []string{
+		SurfaceSocial,
+		SurfaceInbox,
+		SurfaceAgents,
+		SurfaceChat,
+		SurfaceKnowledge,
+		SurfaceIngestion,
+		SurfaceCampaigns,
+		SurfaceExternalAnalytics,
+	}
 }
 
 func isSupportedSurface(surface string) bool {
@@ -67,7 +76,7 @@ func surfaceSet(surfaces []string) map[string]struct{} {
 }
 
 func stableEventID(event MetricEvent) string {
-	hash := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%s|%f|%d", event.OrgID, event.Surface, event.Metric, event.Source, event.Value, event.OccurredAt.UnixNano())))
+	hash := sha1.Sum([]byte(fmt.Sprintf("%s|%s|%s|%s|%s|%f|%d", event.OrgID, event.ActorUserID, event.Surface, event.Metric, event.Source, event.Value, event.OccurredAt.UnixNano())))
 	return "ins_evt_" + hex.EncodeToString(hash[:10])
 }
 
@@ -83,6 +92,7 @@ func copyMetricEvent(event MetricEvent) MetricEvent {
 	return MetricEvent{
 		ID:            event.ID,
 		OrgID:         event.OrgID,
+		ActorUserID:   event.ActorUserID,
 		Surface:       event.Surface,
 		Metric:        event.Metric,
 		Value:         event.Value,

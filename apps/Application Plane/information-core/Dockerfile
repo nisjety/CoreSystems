@@ -6,8 +6,23 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 
 COPY go.mod go.sum ./
+# Retry the module fetch: proxy.golang.org intermittently returns
+# "net/http: TLS handshake timeout" when several Go services in this plane
+# build in parallel, and a bare `go mod download` fails the whole plane on the
+# first blip (observed 2026-08-06 on golang.org/x/crypto). Mirrors the
+# notification-core Dockerfile, which already survives this. The go-build cache
+# mount is included here too so this layer matches every sibling service.
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    --mount=type=cache,target=/root/.cache/go-build \
+    set -e; \
+    for i in 1 2 3 4 5; do \
+        if go mod download; then \
+            exit 0; \
+        fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \

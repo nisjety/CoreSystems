@@ -1,6 +1,6 @@
 # Convex Integration: The Real-time Application State Plane
 
-> **Verified 2026-07-11 (Application Plane audit, Phase 5).** The conceptual guidance below (the Golden Rule, allowed/forbidden domains, event-flow mental model) is still accurate and authoritative. Several concrete operational specifics are stale — corrections are inlined and consolidated in the *2026-07-11 Verification addendum* at the end. Highlights: the `onOrganizationMemberRemoved` handler is **referenced but not defined** (would throw); the real host ports are `convex-backend :3210/:3211`, `convex-gateway :3006`, `convex-dashboard :6791` (there is **no** `localhost:3000` listener); and the `aquatiq-*` / `AI_CORE_URL=ai-core:8000` names in the examples are legacy.
+> **Verified 2026-07-11 (Application Plane audit, Phase 5).** The conceptual guidance below (the Golden Rule, allowed/forbidden domains, event-flow mental model) is still accurate and authoritative. Several concrete operational specifics are stale — corrections are inlined and consolidated in the *2026-07-11 Verification addendum* at the end. Highlights: the `onOrganizationMemberRemoved` handler is **referenced but not defined** (would throw); the real host ports are `convex-backend :3210/:3211`, `convex-gateway :3006`, `convex-dashboard :6791` (there is **no** `localhost:3000` listener); and the `coresystem-*` / `AI_CORE_URL=ai-core:8000` names in the examples are legacy.
 
 ## Overview & The Golden Rule
 
@@ -162,9 +162,9 @@ convex-gateway:
   ports:
     - "3000:3000"   # Convex HTTP API
   networks:
-    - aquatiq-local
+    - coresystem-local
   depends_on:
-    aquatiq-nats-local:
+    coresystem-nats-local:
       condition: service_healthy
     auth-core:
       condition: service_healthy
@@ -176,7 +176,7 @@ convex-gateway:
 
 **Required** in `.env.local`:
 ```
-NATS_URL=nats://aquatiq-nats-local:4222
+NATS_URL=nats://coresystem-nats-local:4222
 NATS_TOKEN=nats
 NATS_SERVICE_NAME=convex-gateway
 ```
@@ -201,7 +201,7 @@ curl http://localhost:3210/version   # convex-backend API
 # Open http://localhost:6791 in browser
 ```
 
-> **Stale (verified 2026-07-11):** the `3000:3000` / `curl http://localhost:3000` guidance above and in the compose snippet does not match the live stack. Real published host ports: `convex-backend :3210` (API) + `:3211` (HTTP actions), `convex-gateway :3006`, `convex-dashboard :6791`, `convex-subscriber` (no published port). The example service/network names (`aquatiq-nats-local`, network `aquatiq-local`) are legacy; the live compose uses network `app-net`.
+> **Stale (verified 2026-07-11):** the `3000:3000` / `curl http://localhost:3000` guidance above and in the compose snippet does not match the live stack. Real published host ports: `convex-backend :3210` (API) + `:3211` (HTTP actions), `convex-gateway :3006`, `convex-dashboard :6791`, `convex-subscriber` (no published port). The example service/network names (`coresystem-nats-local`, network `coresystem-local`) are legacy; the live compose uses network `app-net`.
 
 ## Data Isolation
 
@@ -307,7 +307,7 @@ const user = await ctx.db
 
 ### Convex not syncing orgs/users
 
-1. Check NATS connection: `docker logs aquatiq-nats-local`
+1. Check NATS connection: `docker logs coresystem-nats-local`
 2. Check Convex logs: `docker logs convex-gateway`
 3. Verify NATS_URL and NATS_TOKEN in `.env.local`
 4. Restart Convex: `docker compose restart convex-gateway`

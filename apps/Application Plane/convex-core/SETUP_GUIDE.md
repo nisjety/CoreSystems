@@ -193,7 +193,7 @@ Key variables in `.env.local`:
 
 ```
 # NATS Configuration
-NATS_URL=nats://localhost:4222  # Or nats://aquatiq-nats-local:4222 if in Docker
+NATS_URL=nats://localhost:4222  # Or nats://coresystem-nats-local:4222 if in Docker
 NATS_TOKEN=nats
 NATS_SERVICE_NAME=convex-gateway
 
