@@ -84,6 +84,12 @@ pub struct RawEmailEvent {
     #[serde(default)]
     pub in_reply_to_header: String,
     #[serde(default)]
+    pub auto_submitted: String,
+    #[serde(default)]
+    pub content_type: String,
+    #[serde(default)]
+    pub outbound_correlation_id: String,
+    #[serde(default)]
     pub direction: String,
     #[serde(default)]
     pub subject: String,
@@ -109,6 +115,12 @@ pub struct CanonicalEvent {
     pub provider_event_id: String,
     pub provider_message_id: String,
     pub provider_thread_id: String,
+    pub message_id_header: String,
+    pub references_header: String,
+    pub in_reply_to_header: String,
+    pub auto_submitted: String,
+    pub content_type: String,
+    pub outbound_correlation_id: String,
     pub direction: String,
     pub subject: String,
     pub from: Participant,
@@ -463,6 +475,9 @@ pub fn normalize_email_event(mut raw: RawEmailEvent) -> Result<CanonicalEvent, N
     raw.message_id_header = raw.message_id_header.trim().to_owned();
     raw.references_header = raw.references_header.trim().to_owned();
     raw.in_reply_to_header = raw.in_reply_to_header.trim().to_owned();
+    raw.auto_submitted = raw.auto_submitted.trim().to_owned();
+    raw.content_type = raw.content_type.trim().to_owned();
+    raw.outbound_correlation_id = raw.outbound_correlation_id.trim().to_owned();
     raw.direction = normalize_direction(&raw.direction, &raw.provider)?;
     raw.subject = normalize_subject(&raw.subject);
     raw.from.name = raw.from.name.trim().to_owned();
@@ -523,6 +538,12 @@ pub fn normalize_email_event(mut raw: RawEmailEvent) -> Result<CanonicalEvent, N
         provider_event_id: raw.provider_event_id,
         provider_message_id,
         provider_thread_id,
+        message_id_header: raw.message_id_header,
+        references_header: raw.references_header,
+        in_reply_to_header: raw.in_reply_to_header,
+        auto_submitted: raw.auto_submitted,
+        content_type: raw.content_type,
+        outbound_correlation_id: raw.outbound_correlation_id,
         direction: raw.direction,
         subject: raw.subject,
         from: raw.from,
@@ -630,6 +651,9 @@ mod tests {
             message_id_header: "<msg@example.com>".into(),
             references_header: "<root@example.com>".into(),
             in_reply_to_header: String::new(),
+            auto_submitted: String::new(),
+            content_type: String::new(),
+            outbound_correlation_id: String::new(),
             direction: String::new(),
             subject: " Need help ".into(),
             from: Participant {
@@ -652,6 +676,8 @@ mod tests {
         assert_eq!(event.from.email, "ada@example.com");
         assert_eq!(event.provider_message_id, "<msg@example.com>");
         assert_eq!(event.provider_thread_id, "<root@example.com>");
+        assert_eq!(event.message_id_header, "<msg@example.com>");
+        assert_eq!(event.references_header, "<root@example.com>");
         assert_eq!(event.body_text, "Hello there");
         assert!(event.idempotency_key.starts_with("email:"));
     }

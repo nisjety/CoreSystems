@@ -492,6 +492,56 @@ func TestSend_Success_EmptyBodyIsStillSuccess(t *testing.T) {
 	}
 }
 
+func TestSend_GmailEmptyAcceptedResponseRequiresReconciliation(t *testing.T) {
+	// Gmail users.messages.send returns a Message resource on success, including
+	// its provider id. Unlike Graph sendMail, a bodyless 202 cannot establish a
+	// durable correlation key and must never become a submitted receipt.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv.URL).Send(context.Background(), authorizedTestRequest(t, SendRequest{
+		OrgID: "org-test", Provider: "google", ConnectionID: "c1", BodyText: "x", To: []string{"a@b.no"},
+	}))
+	if err == nil || IsTerminal(err) || IsSafeToRetry(err) || ErrorCode(err) != "invalid_response" {
+		t.Fatalf("Send() error = %v, want reconciliation-required invalid_response for an uncorrelatable Gmail success", err)
+	}
+}
+
+func TestSend_GmailPersistsReturnedMessageID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"operation":"gmail.send","result":{"id":"gmail-message-42"}}}}`))
+	}))
+	defer srv.Close()
+
+	result, err := newTestClient(t, srv.URL).Send(context.Background(), authorizedTestRequest(t, SendRequest{
+		OrgID: "org-test", Provider: "google", ConnectionID: "c1", BodyText: "x", To: []string{"a@b.no"},
+	}))
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if result.Operation != "gmail.send" || result.ProviderMessageID != "gmail-message-42" {
+		t.Fatalf("result = %#v, want gmail operation and returned Message.id", result)
+	}
+}
+
+func TestSend_GmailSuccessEnvelopeWithoutMessageIDRequiresReconciliation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"action":{"operation":"gmail.send","result":{"ok":true}}}}`))
+	}))
+	defer srv.Close()
+
+	_, err := newTestClient(t, srv.URL).Send(context.Background(), authorizedTestRequest(t, SendRequest{
+		OrgID: "org-test", Provider: "google", ConnectionID: "c1", BodyText: "x", To: []string{"a@b.no"},
+	}))
+	if err == nil || IsTerminal(err) || IsSafeToRetry(err) || ErrorCode(err) != "invalid_response" {
+		t.Fatalf("Send() error = %v, want reconciliation-required invalid_response for a Gmail response without Message.id", err)
+	}
+}
+
 func TestSend_RejectsMalformedOrFalseSuccess2xx(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
@@ -927,6 +977,33 @@ func TestBuildSendOperation_SlackThreadRefSplit(t *testing.T) {
 	}
 	if _, present := body["thread_ts"]; present {
 		t.Error("thread_ts must be absent for top-level channel replies")
+	}
+}
+
+func TestBuildSendOperation_GmailIncludesTrustedThreadProvenance(t *testing.T) {
+	op, params, body, err := buildSendOperation(SendRequest{
+		Provider:              "google",
+		ProviderThreadID:      "gmail-thread-1",
+		InReplyTo:             "<customer-message@example.com>",
+		References:            "<root@example.com> <customer-message@example.com>",
+		OutboundCorrelationID: "outintent_123",
+		BodyText:              "Checked",
+		To:                    []string{"customer@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("buildSendOperation error: %v", err)
+	}
+	if op != "gmail.send" || params["threadId"] != "gmail-thread-1" {
+		t.Fatalf("operation/params = %q/%#v", op, params)
+	}
+	if body["inReplyTo"] != "<customer-message@example.com>" {
+		t.Fatalf("inReplyTo = %#v", body["inReplyTo"])
+	}
+	if body["references"] != "<root@example.com> <customer-message@example.com>" {
+		t.Fatalf("references = %#v", body["references"])
+	}
+	if body["correlationId"] != "outintent_123" {
+		t.Fatalf("correlationId = %#v", body["correlationId"])
 	}
 }
 

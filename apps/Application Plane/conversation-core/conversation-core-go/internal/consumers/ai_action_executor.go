@@ -17,7 +17,11 @@ import (
 const (
 	aiActionExecutorDurable  = "conversation-core-ai-action-executor"
 	kindTicketClassification = "ticket.classification"
+	kindTicketUpdate         = "ticket.update"
+	kindIncidentCreate       = "incident.create"
+	kindProblemCreate        = "problem.create"
 	kindDraftReply           = "draft.reply"
+	kindInternalNote         = "internal.note"
 	executorActor            = "ai-action-executor"
 	retryableStateAttempts   = 3
 	retryableStateTimeout    = 2 * time.Second
@@ -40,6 +44,20 @@ type ActionStore interface {
 // it, so promotion runs through the normal normalize + publish + automation path.
 type TicketPromoter interface {
 	UpdateTicket(ctx context.Context, input conversation.UpdateTicketInput) (*conversation.Ticket, error)
+}
+
+type ApprovedIncidentCreator interface {
+	CreateIncidentForApprovedAction(ctx context.Context, input conversation.ApprovedIncidentCreateInput) (*conversation.Incident, error)
+}
+
+type ApprovedProblemCreator interface {
+	CreateProblemForApprovedAction(ctx context.Context, input conversation.ApprovedProblemCreateInput) (*conversation.Problem, error)
+}
+
+// InternalNoteWriter persists a reviewed private note through the canonical
+// conversation service. Unlike draft.reply it never calls a provider.
+type InternalNoteWriter interface {
+	AddMessage(ctx context.Context, input conversation.AddMessageInput) (*conversation.Message, error)
 }
 
 // Publisher emits the post-execution event. *eventing.Publisher satisfies it.
@@ -67,6 +85,9 @@ type AIActionExecutor struct {
 	consumer  *DurableConsumer
 	store     ActionStore
 	tickets   TicketPromoter
+	incidents ApprovedIncidentCreator
+	problems  ApprovedProblemCreator
+	notes     InternalNoteWriter
 	publisher Publisher
 	sender    OutboundSender
 }
@@ -75,13 +96,23 @@ type AIActionExecutor struct {
 // client is configured; in that case draft.reply actions are skipped (never
 // claimed), so the executor never asserts a send it cannot make.
 func NewAIActionExecutor(js nats.JetStreamContext, store ActionStore, tickets TicketPromoter, publisher Publisher, sender OutboundSender) *AIActionExecutor {
-	return &AIActionExecutor{
+	executor := &AIActionExecutor{
 		consumer:  NewDurableConsumer(js, "ai-action-executor"),
 		store:     store,
 		tickets:   tickets,
 		publisher: publisher,
 		sender:    sender,
 	}
+	if notes, ok := tickets.(InternalNoteWriter); ok {
+		executor.notes = notes
+	}
+	if incidents, ok := tickets.(ApprovedIncidentCreator); ok {
+		executor.incidents = incidents
+	}
+	if problems, ok := tickets.(ApprovedProblemCreator); ok {
+		executor.problems = problems
+	}
+	return executor
 }
 
 // Start binds the durable consumer on the reviewed-action subject.
@@ -151,8 +182,8 @@ func (e *AIActionExecutor) process(ctx context.Context, ev conversation.Lifecycl
 		return outcomeAck
 	}
 	reviewerID := strings.TrimSpace(action.ReviewedBy)
-	if action.Kind == kindDraftReply && reviewerID == "" {
-		log.Printf("[cc-go/ai-action-executor] approved draft.reply %s has no durable reviewer; skipping", actionID)
+	if (action.Kind == kindDraftReply || action.Kind == kindInternalNote || action.Kind == kindIncidentCreate || action.Kind == kindProblemCreate) && reviewerID == "" {
+		log.Printf("[cc-go/ai-action-executor] approved %s %s has no durable reviewer; skipping", action.Kind, actionID)
 		return outcomeAck
 	}
 
@@ -162,12 +193,152 @@ func (e *AIActionExecutor) process(ctx context.Context, ev conversation.Lifecycl
 	switch action.Kind {
 	case kindTicketClassification:
 		return e.executeTicketClassification(ctx, orgID, actionID, action, ev)
+	case kindTicketUpdate:
+		return e.executeTicketUpdate(ctx, orgID, actionID, action, ev)
+	case kindIncidentCreate:
+		return e.executeIncidentCreate(ctx, orgID, actionID, action, ev)
+	case kindProblemCreate:
+		return e.executeProblemCreate(ctx, orgID, actionID, action, ev)
 	case kindDraftReply:
 		return e.executeDraftReply(ctx, orgID, actionID, action, ev)
+	case kindInternalNote:
+		return e.executeInternalNote(ctx, orgID, actionID, action, ev)
 	default:
 		// Unknown kind — not executable here. Terminal no-op.
 		return outcomeAck
 	}
+}
+
+// executeIncidentCreate is intentionally idempotent-before-claim: the
+// repository keys the create/link transaction by action ID, so a crash before
+// MarkAIActionExecuted can be retried without duplicating the Incident.
+func (e *AIActionExecutor) executeIncidentCreate(ctx context.Context, orgID, actionID string, action *conversation.AIAction, ev conversation.LifecycleEvent) outcome {
+	if e.incidents == nil {
+		log.Printf("[cc-go/ai-action-executor] incident.create skipped: no approved incident creator configured (action %s)", actionID)
+		return outcomeAck
+	}
+	incident, err := e.incidents.CreateIncidentForApprovedAction(ctx, conversation.ApprovedIncidentCreateInput{
+		OrgID: orgID, ConversationID: action.ConversationID, AIActionID: actionID,
+		TicketID: stringFromData(action.Payload, "ticket_id"), Title: stringFromData(action.Payload, "title"),
+		Severity: stringFromData(action.Payload, "severity"), CustomerImpact: stringFromData(action.Payload, "customer_impact"),
+		ActorUserID: action.ReviewedBy,
+	})
+	if errors.Is(err, conversation.ErrNotFound) || errors.Is(err, conversation.ErrInvalidInput) {
+		return outcomeAck
+	}
+	if err != nil {
+		log.Printf("[cc-go/ai-action-executor] incident.create %s: %v", actionID, err)
+		return outcomeRetry
+	}
+	if incident == nil || strings.TrimSpace(incident.ID) == "" {
+		return outcomeRetry
+	}
+	claimed, err := e.store.MarkAIActionExecuted(ctx, orgID, actionID)
+	if err != nil {
+		return outcomeRetry
+	}
+	if !claimed {
+		return outcomeAck
+	}
+	_ = e.publisher.Publish(ctx, conversation.SubjectAIActionExecuted, conversation.LifecycleEvent{Type: "ai_action.executed", OrgID: orgID, ConversationID: action.ConversationID, ActorUserID: ev.ActorUserID, Data: map[string]any{"ai_action_id": actionID, "kind": action.Kind, "incident_id": incident.ID, "ticket_id": stringFromData(action.Payload, "ticket_id")}, OccurredAt: time.Now().UTC()})
+	return outcomeAck
+}
+
+// executeProblemCreate is idempotent-before-claim for the same reason as the
+// Incident path: a crash after the database commit must retry to the same
+// canonical Problem rather than leave an unrecorded side effect or duplicate it.
+func (e *AIActionExecutor) executeProblemCreate(ctx context.Context, orgID, actionID string, action *conversation.AIAction, ev conversation.LifecycleEvent) outcome {
+	if e.problems == nil {
+		log.Printf("[cc-go/ai-action-executor] problem.create skipped: no approved problem creator configured (action %s)", actionID)
+		return outcomeAck
+	}
+	problem, err := e.problems.CreateProblemForApprovedAction(ctx, conversation.ApprovedProblemCreateInput{
+		OrgID: orgID, ConversationID: action.ConversationID, AIActionID: actionID,
+		Title: stringFromData(action.Payload, "title"), Summary: stringFromData(action.Payload, "summary"),
+		RootCause: stringFromData(action.Payload, "root_cause"), ActorUserID: action.ReviewedBy,
+	})
+	if errors.Is(err, conversation.ErrNotFound) || errors.Is(err, conversation.ErrInvalidInput) {
+		return outcomeAck
+	}
+	if err != nil || problem == nil || strings.TrimSpace(problem.ID) == "" {
+		if err != nil {
+			log.Printf("[cc-go/ai-action-executor] problem.create %s: %v", actionID, err)
+		}
+		return outcomeRetry
+	}
+	claimed, err := e.store.MarkAIActionExecuted(ctx, orgID, actionID)
+	if err != nil {
+		return outcomeRetry
+	}
+	if !claimed {
+		return outcomeAck
+	}
+	_ = e.publisher.Publish(ctx, conversation.SubjectAIActionExecuted, conversation.LifecycleEvent{Type: "ai_action.executed", OrgID: orgID, ConversationID: action.ConversationID, ActorUserID: ev.ActorUserID, Data: map[string]any{"ai_action_id": actionID, "kind": action.Kind, "problem_id": problem.ID}, OccurredAt: time.Now().UTC()})
+	return outcomeAck
+}
+
+// executeTicketUpdate applies a reviewed, bounded classification update to the
+// already-canonical ticket for this conversation. It intentionally has no
+// status input: AI may propose taxonomy/urgency, never silently move work
+// through its lifecycle.
+func (e *AIActionExecutor) executeTicketUpdate(ctx context.Context, orgID, actionID string, action *conversation.AIAction, ev conversation.LifecycleEvent) outcome {
+	ticket, err := e.store.GetTicketByConversation(ctx, orgID, action.ConversationID)
+	if errors.Is(err, conversation.ErrNotFound) {
+		return outcomeAck
+	}
+	if err != nil {
+		return outcomeRetry
+	}
+	if proposedID := stringFromData(action.Payload, "ticket_id"); proposedID == "" || proposedID != ticket.ID {
+		log.Printf("[cc-go/ai-action-executor] ticket.update %s has stale or missing ticket reference", actionID)
+		return outcomeAck
+	}
+	claimed, err := e.store.MarkAIActionExecuted(ctx, orgID, actionID)
+	if err != nil {
+		return outcomeRetry
+	}
+	if !claimed {
+		return outcomeAck
+	}
+	if err := e.applyTicketUpdate(ctx, orgID, ticket, action.Payload); err != nil {
+		_ = e.store.UnmarkAIActionExecuted(ctx, orgID, actionID)
+		return outcomeRetry
+	}
+	_ = e.publisher.Publish(ctx, conversation.SubjectAIActionExecuted, conversation.LifecycleEvent{
+		Type: "ai_action.executed", OrgID: orgID, ConversationID: action.ConversationID, ActorUserID: ev.ActorUserID,
+		Data: map[string]any{"ai_action_id": actionID, "kind": action.Kind, "ticket_id": ticket.ID}, OccurredAt: time.Now().UTC(),
+	})
+	return outcomeAck
+}
+
+func (e *AIActionExecutor) executeInternalNote(ctx context.Context, orgID, actionID string, action *conversation.AIAction, ev conversation.LifecycleEvent) outcome {
+	if e.notes == nil {
+		log.Printf("[cc-go/ai-action-executor] internal.note skipped: no canonical note writer configured (action %s)", actionID)
+		return outcomeAck
+	}
+	claimed, err := e.store.MarkAIActionExecuted(ctx, orgID, actionID)
+	if err != nil {
+		return outcomeRetry
+	}
+	if !claimed {
+		return outcomeAck
+	}
+	message, err := e.notes.AddMessage(ctx, conversation.AddMessageInput{
+		OrgID: orgID, ConversationID: action.ConversationID, ActorUserID: action.ReviewedBy,
+		BodyText: stringFromData(action.Payload, "body_text"), Internal: true, Direction: conversation.DirectionOutbound,
+	})
+	if err != nil {
+		_ = e.store.UnmarkAIActionExecuted(ctx, orgID, actionID)
+		log.Printf("[cc-go/ai-action-executor] persist internal.note %s: %v", actionID, err)
+		return outcomeRetry
+	}
+	if message == nil || strings.TrimSpace(message.ID) == "" {
+		_ = e.store.UnmarkAIActionExecuted(ctx, orgID, actionID)
+		log.Printf("[cc-go/ai-action-executor] persist internal.note %s returned no canonical receipt", actionID)
+		return outcomeRetry
+	}
+	_ = e.publisher.Publish(ctx, conversation.SubjectAIActionExecuted, conversation.LifecycleEvent{Type: "ai_action.executed", OrgID: orgID, ConversationID: action.ConversationID, ActorUserID: action.ReviewedBy, Data: map[string]any{"ai_action_id": actionID, "kind": action.Kind, "message_id": message.ID}, OccurredAt: time.Now().UTC()})
+	return outcomeAck
 }
 
 // executeTicketClassification promotes the suggested ticket and applies routing.
@@ -389,20 +560,23 @@ func (e *AIActionExecutor) publishSendOutcome(ctx context.Context, subject, stat
 // into an integration send request.
 func buildSendRequest(orgID, reviewerID, actionID, intentID string, ref *conversation.ChannelThreadRef, payload map[string]any) integration.SendRequest {
 	return integration.SendRequest{
-		OrgID:             orgID,
-		ActorUserID:       reviewerID,
-		Provider:          ref.Provider,
-		ConnectionID:      ref.ConnectionID,
-		ProviderThreadID:  ref.ProviderThreadID,
-		BodyText:          stringFromData(payload, "body_text"),
-		BodyHTML:          stringFromData(payload, "body_html"),
-		Subject:           stringFromData(payload, "subject"),
-		To:                stringSliceFromData(payload, "to"),
-		AuthorizationKind: "human_approved_ai_action",
-		AuthorizationID:   intentID,
-		ApprovalID:        actionID,
-		ActionID:          actionID,
-		IdempotencyKey:    "conversation-ai:" + actionID,
+		OrgID:                 orgID,
+		ActorUserID:           reviewerID,
+		Provider:              ref.Provider,
+		ConnectionID:          ref.ConnectionID,
+		ProviderThreadID:      ref.ProviderThreadID,
+		InReplyTo:             ref.ReplyToMessageID,
+		References:            ref.ReferencesHeader,
+		OutboundCorrelationID: intentID,
+		BodyText:              stringFromData(payload, "body_text"),
+		BodyHTML:              stringFromData(payload, "body_html"),
+		Subject:               stringFromData(payload, "subject"),
+		To:                    stringSliceFromData(payload, "to"),
+		AuthorizationKind:     "human_approved_ai_action",
+		AuthorizationID:       intentID,
+		ApprovalID:            actionID,
+		ActionID:              actionID,
+		IdempotencyKey:        "conversation-ai:" + actionID,
 	}
 }
 
@@ -445,6 +619,22 @@ func (e *AIActionExecutor) promote(ctx context.Context, orgID string, ticket *co
 	applyStringField(fields, "priority", &input.Priority)
 	applyStringField(fields, "severity", &input.Severity)
 	applyStringField(fields, "intent", &input.Intent)
+	applyStringField(fields, "work_type", &input.WorkType)
+	applyStringField(fields, "team_id", &input.TeamID)
+	applyStringField(fields, "team_name", &input.TeamName)
+	_, err := e.tickets.UpdateTicket(ctx, input)
+	return err
+}
+
+func (e *AIActionExecutor) applyTicketUpdate(ctx context.Context, orgID string, ticket *conversation.Ticket, payload map[string]any) error {
+	input := conversation.UpdateTicketInput{OrgID: orgID, TicketID: ticket.ID, ActorUserID: executorActor}
+	fields := mapFromData(payload, "suggested_fields")
+	applyStringField(fields, "category", &input.Category)
+	applyStringField(fields, "priority", &input.Priority)
+	applyStringField(fields, "severity", &input.Severity)
+	applyStringField(fields, "intent", &input.Intent)
+	applyStringField(fields, "work_type", &input.WorkType)
+	applyStringField(fields, "status", &input.Status)
 	applyStringField(fields, "team_id", &input.TeamID)
 	applyStringField(fields, "team_name", &input.TeamName)
 	_, err := e.tickets.UpdateTicket(ctx, input)

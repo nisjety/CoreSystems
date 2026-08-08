@@ -7,8 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -19,48 +22,355 @@ import (
 )
 
 type fakeRepository struct {
-	mu                      sync.Mutex
-	inboxes                 []Inbox
-	conversations           []ConversationSummary
-	details                 map[string]*ConversationDetail
-	stored                  map[string]*StoredEventResult
-	lastMessage             AddMessageInput
-	addMessageCalls         int
-	addMessageErr           error
-	threadRefs              map[string]*ChannelThreadRef
-	threadRefErr            error
-	statusUpdate            StatusUpdate
-	tickets                 map[string]*Ticket
-	macros                  map[string]*TicketMacro
-	checklists              map[string]*TicketChecklist
-	rules                   []TicketAutomationRule
-	classifications         []TicketClassificationInput
-	aiActions               []AIAction
-	lastReview              AIActionReview
-	reviewCalls             int
-	reviewErr               error
-	outboundIntents         map[string]*OutboundIntent
-	outboundMessages        map[string]*Message
-	reconcileResult         []OutboundIntent
-	reconcileErr            error
-	reconcileCalls          []time.Duration
-	hardPurgeCalls          []string
-	hardPurgeErr            error
-	storeInboundCalls       int
-	supportRecurrenceCorpus []SupportRecurrenceCorpusEntry
+	mu                             sync.Mutex
+	inboxes                        []Inbox
+	conversations                  []ConversationSummary
+	details                        map[string]*ConversationDetail
+	stored                         map[string]*StoredEventResult
+	lastMessage                    AddMessageInput
+	addMessageCalls                int
+	addMessageErr                  error
+	threadRefs                     map[string]*ChannelThreadRef
+	threadRefErr                   error
+	statusUpdate                   StatusUpdate
+	tickets                        map[string]*Ticket
+	ticketActivity                 []TicketActivity
+	conversationActivity           []ConversationActivity
+	teams                          map[string]*TicketTeam
+	macros                         map[string]*TicketMacro
+	checklists                     map[string]*TicketChecklist
+	incidents                      map[string]*Incident
+	problems                       map[string]*Problem
+	incidentTicketLinks            map[string][]IncidentTicketLink
+	rules                          []TicketAutomationRule
+	classifications                []TicketClassificationInput
+	aiActions                      []AIAction
+	lastReview                     AIActionReview
+	reviewCalls                    int
+	reviewErr                      error
+	outboundIntents                map[string]*OutboundIntent
+	outboundMessages               map[string]*Message
+	reconcileResult                []OutboundIntent
+	reconcileErr                   error
+	reconcileCalls                 []time.Duration
+	hardPurgeCalls                 []string
+	hardPurgeErr                   error
+	interactiveRetentionPurgeCalls []string
+	interactiveRetentionPurgeErr   error
+	draftLeases                    map[string]*DraftLease
+	drafts                         map[string]*ConversationDraft
+	follows                        map[string]*ConversationFollow
+	csatPreferences                map[string]*CSATPreference
+	csatOutcomes                   map[string]*TicketCSATOutcome
+	sideConversations              map[string]*TicketSideConversation
+	chatHandoffCalls               []TicketChatHandoffInput
+	storeInboundCalls              int
+	emailDeliveryFailures          []EmailDeliveryFailureInput
+	emailDeliveryFailureErr        error
+	supportRecurrenceCorpus        []SupportRecurrenceCorpusEntry
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
-		details:          make(map[string]*ConversationDetail),
-		stored:           make(map[string]*StoredEventResult),
-		threadRefs:       make(map[string]*ChannelThreadRef),
-		tickets:          make(map[string]*Ticket),
-		macros:           make(map[string]*TicketMacro),
-		checklists:       make(map[string]*TicketChecklist),
-		outboundIntents:  make(map[string]*OutboundIntent),
-		outboundMessages: make(map[string]*Message),
+		details:             make(map[string]*ConversationDetail),
+		stored:              make(map[string]*StoredEventResult),
+		threadRefs:          make(map[string]*ChannelThreadRef),
+		tickets:             make(map[string]*Ticket),
+		teams:               make(map[string]*TicketTeam),
+		macros:              make(map[string]*TicketMacro),
+		checklists:          make(map[string]*TicketChecklist),
+		incidents:           make(map[string]*Incident),
+		problems:            make(map[string]*Problem),
+		incidentTicketLinks: make(map[string][]IncidentTicketLink),
+		outboundIntents:     make(map[string]*OutboundIntent),
+		outboundMessages:    make(map[string]*Message),
+		draftLeases:         make(map[string]*DraftLease),
+		drafts:              make(map[string]*ConversationDraft),
+		follows:             make(map[string]*ConversationFollow),
+		csatPreferences:     make(map[string]*CSATPreference),
+		csatOutcomes:        make(map[string]*TicketCSATOutcome),
+		sideConversations:   make(map[string]*TicketSideConversation),
 	}
+}
+
+func (f *fakeRepository) GetTicketCSATOutcome(_ context.Context, orgID, ticketID string) (*TicketCSATOutcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	outcome := f.csatOutcomes[orgID+":"+ticketID]
+	if outcome == nil {
+		return nil, ErrNotFound
+	}
+	copy := *outcome
+	return &copy, nil
+}
+
+func (f *fakeRepository) UpsertTicketCSATOutcome(_ context.Context, input TicketCSATOutcomeInput) (*TicketCSATOutcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ticket := f.tickets[input.TicketID]
+	if ticket == nil || ticket.OrgID != input.OrgID {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	outcome := &TicketCSATOutcome{OrgID: input.OrgID, TicketID: input.TicketID, ConversationID: ticket.ConversationID, Score: input.Score, RecordedBy: input.RecordedBy, RecordedAt: &now}
+	f.csatOutcomes[input.OrgID+":"+input.TicketID] = outcome
+	copy := *outcome
+	return &copy, nil
+}
+
+func (f *fakeRepository) GetCSATScorecard(_ context.Context, orgID string) (*CSATScorecard, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var total, positive, sum int
+	for _, outcome := range f.csatOutcomes {
+		if outcome.OrgID != orgID {
+			continue
+		}
+		total++
+		sum += outcome.Score
+		if outcome.Score >= 4 {
+			positive++
+		}
+	}
+	scorecard := &CSATScorecard{RatedTickets: total, PositiveRatings: positive}
+	if total > 0 {
+		average, positiveRate := float64(sum)/float64(total), float64(positive)/float64(total)
+		scorecard.AverageScore, scorecard.PositiveRate = &average, &positiveRate
+	}
+	return scorecard, nil
+}
+
+func (f *fakeRepository) GetConversationFollow(_ context.Context, orgID, conversationID, userID string) (*ConversationFollow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	follow := f.follows[orgID+":"+conversationID+":"+userID]
+	if follow == nil {
+		return nil, ErrNotFound
+	}
+	copy := *follow
+	return &copy, nil
+}
+
+func (f *fakeRepository) FollowConversation(_ context.Context, input ConversationFollowInput) (*ConversationFollow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	follow := &ConversationFollow{OrgID: input.OrgID, ConversationID: input.ConversationID, UserID: input.UserID, CreatedAt: time.Now().UTC()}
+	f.follows[input.OrgID+":"+input.ConversationID+":"+input.UserID] = follow
+	copy := *follow
+	return &copy, nil
+}
+
+func (f *fakeRepository) UnfollowConversation(_ context.Context, orgID, conversationID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.follows, orgID+":"+conversationID+":"+userID)
+	return nil
+}
+
+func (f *fakeRepository) ListConversationFollowerIDs(_ context.Context, orgID, conversationID string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ids := make([]string, 0)
+	for _, follow := range f.follows {
+		if follow.OrgID == orgID && follow.ConversationID == conversationID {
+			ids = append(ids, follow.UserID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+func (f *fakeRepository) GetConversationCSATPreference(_ context.Context, orgID, conversationID string) (*CSATPreference, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	preference := f.csatPreferences[orgID+":"+conversationID]
+	if preference == nil {
+		return nil, ErrNotFound
+	}
+	copy := *preference
+	return &copy, nil
+}
+
+func (f *fakeRepository) SetConversationCSATPreference(_ context.Context, input CSATPreferenceInput) (*CSATPreference, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.details[input.ConversationID] == nil {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	preference := &CSATPreference{OrgID: input.OrgID, ConversationID: input.ConversationID, ContactID: "contact_" + input.ConversationID, OptedIn: input.OptedIn, UpdatedBy: input.ActorUserID, UpdatedAt: &now}
+	f.csatPreferences[input.OrgID+":"+input.ConversationID] = preference
+	copy := *preference
+	return &copy, nil
+}
+
+func TestConversationFollowIsPersonalAndTenantScoped(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, nil)
+
+	follow, err := service.FollowConversation(t.Context(), "org_1", "conversation_1", "agent_1")
+	if err != nil {
+		t.Fatalf("FollowConversation() error = %v", err)
+	}
+	if follow.OrgID != "org_1" || follow.ConversationID != "conversation_1" || follow.UserID != "agent_1" {
+		t.Fatalf("FollowConversation() = %#v, want canonical org, conversation, and user", follow)
+	}
+
+	if _, err := service.GetConversationFollow(t.Context(), "org_1", "conversation_1", "agent_2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetConversationFollow() for another user error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.GetConversationFollow(t.Context(), "org_2", "conversation_1", "agent_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetConversationFollow() for another org error = %v, want ErrNotFound", err)
+	}
+
+	if err := service.UnfollowConversation(t.Context(), "org_1", "conversation_1", "agent_1"); err != nil {
+		t.Fatalf("UnfollowConversation() error = %v", err)
+	}
+	if _, err := service.GetConversationFollow(t.Context(), "org_1", "conversation_1", "agent_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetConversationFollow() after unfollow error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestCSATPreferenceIsExplicitAndScopedToTheConversationContact(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conversation_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conversation_1", OrgID: "org_1"}}
+	service := NewService(repository, nil)
+
+	preference, err := service.SetConversationCSATPreference(t.Context(), CSATPreferenceInput{OrgID: "org_1", ConversationID: "conversation_1", ActorUserID: "agent_1", OptedIn: true})
+	if err != nil {
+		t.Fatalf("SetConversationCSATPreference() error = %v", err)
+	}
+	if !preference.OptedIn || preference.ContactID != "contact_conversation_1" || preference.UpdatedBy != "agent_1" {
+		t.Fatalf("preference = %#v", preference)
+	}
+	if _, err := service.GetConversationCSATPreference(t.Context(), "org_2", "conversation_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-org preference error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRecordTicketCSATOutcomeRequiresResolvedConsentedCase(t *testing.T) {
+	repository := newFakeRepository()
+	resolvedAt := time.Now().UTC()
+	repository.details["conversation_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conversation_1", OrgID: "org_1"}}
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", ConversationID: "conversation_1", Status: "resolved", ResolvedAt: &resolvedAt}
+	repository.csatPreferences["org_1:conversation_1"] = &CSATPreference{OrgID: "org_1", ConversationID: "conversation_1", ContactID: "contact_1", OptedIn: true}
+	service := NewService(repository, nil)
+
+	outcome, err := service.RecordTicketCSATOutcome(t.Context(), TicketCSATOutcomeInput{OrgID: "org_1", TicketID: "ticket_1", Score: 5, RecordedBy: "agent_1"})
+	if err != nil {
+		t.Fatalf("RecordTicketCSATOutcome() error = %v", err)
+	}
+	if outcome.Score != 5 || outcome.ConversationID != "conversation_1" {
+		t.Fatalf("outcome = %#v, want a recorded score for the resolved conversation", outcome)
+	}
+	loaded, err := service.GetTicketCSATOutcome(t.Context(), "org_1", "ticket_1")
+	if err != nil || loaded.Score != 5 {
+		t.Fatalf("GetTicketCSATOutcome() = %#v/%v, want the canonical recorded score", loaded, err)
+	}
+	scorecard, err := service.GetCSATScorecard(t.Context(), "org_1")
+	if err != nil || scorecard.RatedTickets != 1 || scorecard.PositiveRatings != 1 || scorecard.AverageScore == nil || *scorecard.AverageScore != 5 {
+		t.Fatalf("GetCSATScorecard() = %#v/%v, want one positive 5/5 rating", scorecard, err)
+	}
+
+	repository.csatPreferences["org_1:conversation_1"].OptedIn = false
+	if _, err := service.RecordTicketCSATOutcome(t.Context(), TicketCSATOutcomeInput{OrgID: "org_1", TicketID: "ticket_1", Score: 4, RecordedBy: "agent_1"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("record without consent error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := service.RecordTicketCSATOutcome(t.Context(), TicketCSATOutcomeInput{OrgID: "org_1", TicketID: "ticket_1", Score: 6, RecordedBy: "agent_1"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("out-of-range score error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func (f *fakeRepository) GetDraftLease(_ context.Context, orgID, conversationID string) (*DraftLease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lease := f.draftLeases[orgID+":"+conversationID]
+	if lease == nil || !lease.ExpiresAt.After(time.Now()) {
+		return nil, ErrNotFound
+	}
+	copy := *lease
+	return &copy, nil
+}
+
+func (f *fakeRepository) ClaimDraftLease(_ context.Context, input DraftLeaseClaimInput) (*DraftLease, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := input.OrgID + ":" + input.ConversationID
+	if current := f.draftLeases[key]; current != nil && current.ExpiresAt.After(time.Now()) && current.UserID != input.UserID {
+		return nil, ErrConflict
+	}
+	lease := &DraftLease{OrgID: input.OrgID, ConversationID: input.ConversationID, UserID: input.UserID, ExpiresAt: input.ExpiresAt, UpdatedAt: time.Now().UTC()}
+	f.draftLeases[key] = lease
+	copy := *lease
+	return &copy, nil
+}
+
+func (f *fakeRepository) ReleaseDraftLease(_ context.Context, orgID, conversationID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := orgID + ":" + conversationID
+	if lease := f.draftLeases[key]; lease != nil && lease.UserID == userID {
+		delete(f.draftLeases, key)
+	}
+	return nil
+}
+
+func (f *fakeRepository) GetConversationDraft(_ context.Context, orgID, conversationID, userID string) (*ConversationDraft, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	draft := f.drafts[orgID+":"+conversationID+":"+userID]
+	if draft == nil {
+		return nil, ErrNotFound
+	}
+	copy := *draft
+	return &copy, nil
+}
+
+func (f *fakeRepository) UpsertConversationDraft(_ context.Context, input ConversationDraftInput) (*ConversationDraft, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.details[input.ConversationID]; !ok {
+		return nil, ErrNotFound
+	}
+	draft := &ConversationDraft{OrgID: input.OrgID, ConversationID: input.ConversationID, UserID: input.UserID, BodyText: input.BodyText, Internal: input.Internal, UpdatedAt: time.Now().UTC()}
+	f.drafts[input.OrgID+":"+input.ConversationID+":"+input.UserID] = draft
+	copy := *draft
+	return &copy, nil
+}
+
+func (f *fakeRepository) DeleteConversationDraft(_ context.Context, orgID, conversationID, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.drafts, orgID+":"+conversationID+":"+userID)
+	return nil
+}
+
+func (f *fakeRepository) ListOutboundIntents(_ context.Context, orgID, conversationID string) ([]OutboundIntent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	intents := make([]OutboundIntent, 0)
+	for _, intent := range f.outboundIntents {
+		if intent.OrgID == orgID && intent.ConversationID == conversationID {
+			intents = append(intents, *intent)
+		}
+	}
+	return intents, nil
+}
+
+func (f *fakeRepository) ListOrganizationOutboundIntents(_ context.Context, filter OutboundIntentListFilter) ([]OutboundIntent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	intents := make([]OutboundIntent, 0)
+	for _, intent := range f.outboundIntents {
+		if intent.OrgID != filter.OrgID || (filter.Status != "" && intent.Status != filter.Status) || (filter.Provider != "" && intent.Provider != filter.Provider) || (filter.DeliveryStatus != "" && intent.ProviderDeliveryStatus != filter.DeliveryStatus) {
+			continue
+		}
+		intents = append(intents, *intent)
+		if len(intents) == filter.Limit {
+			break
+		}
+	}
+	return intents, nil
 }
 
 // fakeSender records outbound send attempts so tests can assert whether a reply
@@ -101,9 +411,9 @@ func (f *fakeRepository) ListConversations(_ context.Context, _ ListFilter) ([]C
 	return f.conversations, nil
 }
 
-func (f *fakeRepository) GetConversation(_ context.Context, _ string, conversationID string) (*ConversationDetail, error) {
+func (f *fakeRepository) GetConversation(_ context.Context, orgID string, conversationID string) (*ConversationDetail, error) {
 	detail, ok := f.details[conversationID]
-	if !ok {
+	if !ok || (detail.OrgID != "" && detail.OrgID != orgID) {
 		return nil, ErrNotFound
 	}
 	return detail, nil
@@ -126,6 +436,13 @@ func (f *fakeRepository) StoreInboundEvent(_ context.Context, event InboundEvent
 			BodyText:       event.BodyText,
 			OccurredAt:     event.OccurredAt,
 			CreatedAt:      event.OccurredAt,
+			Attachments: func() []MessageAttachment {
+				attachments := make([]MessageAttachment, 0, len(event.Attachments))
+				for index, attachment := range event.Attachments {
+					attachments = append(attachments, MessageAttachment{ID: fmt.Sprintf("att_%d", index+1), Filename: attachment.Filename, MimeType: attachment.MimeType, SizeBytes: attachment.SizeBytes})
+				}
+				return attachments
+			}(),
 		}},
 	}
 	result := &StoredEventResult{Detail: detail, Message: &detail.Messages[0], Created: true}
@@ -227,6 +544,31 @@ func (f *fakeRepository) MarkOutboundIntentOutcome(_ context.Context, input Outb
 	return nil
 }
 
+func (f *fakeRepository) RecordProviderDeliveryReceipt(_ context.Context, input ProviderDeliveryReceiptInput) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, intent := range f.outboundIntents {
+		if intent.OrgID == input.OrgID && intent.Provider == input.Provider && intent.ProviderMessageID == input.ProviderMessageID && intent.Status == OutboundIntentSubmitted {
+			intent.ProviderDeliveryStatus = input.Status
+			occurredAt := input.OccurredAt
+			intent.ProviderDeliveryOccurredAt = &occurredAt
+			intent.ProviderDeliveryErrorCode = input.ErrorCode
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeRepository) RecordEmailDeliveryFailure(_ context.Context, input EmailDeliveryFailureInput) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.emailDeliveryFailureErr != nil {
+		return false, f.emailDeliveryFailureErr
+	}
+	f.emailDeliveryFailures = append(f.emailDeliveryFailures, input)
+	return true, nil
+}
+
 func (f *fakeRepository) ReconcileStaleOutboundIntents(_ context.Context, staleAfter time.Duration) ([]OutboundIntent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -294,16 +636,110 @@ func (f *fakeRepository) ReviewAIAction(_ context.Context, input AIActionReview)
 
 func (f *fakeRepository) CreateAIAction(_ context.Context, input CreateAIActionInput) (*AIAction, error) {
 	action := AIAction{
-		ID:             "act-test",
-		OrgID:          input.OrgID,
-		ConversationID: input.ConversationID,
-		Kind:           input.Kind,
-		Status:         "suggested",
-		Payload:        input.Payload,
-		CreatedBy:      input.CreatedBy,
+		ID:              "act-test",
+		OrgID:           input.OrgID,
+		ConversationID:  input.ConversationID,
+		ProposalGroupID: input.ProposalGroupID,
+		Kind:            input.Kind,
+		Status:          "suggested",
+		Payload:         input.Payload,
+		CreatedBy:       input.CreatedBy,
 	}
 	f.aiActions = append(f.aiActions, action)
 	return &action, nil
+}
+
+func TestCreateAIActionRequiresAnExistingConversationAndExactReplyBody(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, nil)
+
+	_, err := service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "missing", Kind: "draft.reply", Payload: map[string]any{"body_text": "Hello"}, CreatedBy: "agent_1",
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected missing conversation to be rejected, got %v", err)
+	}
+
+	repository.details["conv_1"] = &ConversationDetail{}
+	_, err = service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", Kind: "draft.reply", Payload: map[string]any{"body_text": " \n "}, CreatedBy: "agent_1",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected blank reply body to be rejected, got %v", err)
+	}
+
+	action, err := service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", Kind: "draft.reply", Payload: map[string]any{"body_text": "  Reply with the verified update.  ", "ignored": true}, CreatedBy: "agent_1",
+	})
+	if err != nil {
+		t.Fatalf("create action: %v", err)
+	}
+	if got, want := action.Payload, map[string]any{"body_text": "Reply with the verified update."}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %#v, want %#v", got, want)
+	}
+}
+
+func TestCreateAIActionPreservesOnlyAValidOpaqueProposalGroupID(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{}
+	service := NewService(repository, nil)
+
+	action, err := service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", ProposalGroupID: "resolution_20260802-a", Kind: "draft.reply", Payload: map[string]any{"body_text": "Reply"}, CreatedBy: "agent_1",
+	})
+	if err != nil || action.ProposalGroupID != "resolution_20260802-a" {
+		t.Fatalf("grouped action = %#v, %v", action, err)
+	}
+	_, err = service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", ProposalGroupID: "invalid group", Kind: "draft.reply", Payload: map[string]any{"body_text": "Reply"}, CreatedBy: "agent_1",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid group id error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateAIActionTicketUpdateRequiresTheConversationTicketAndBoundsFields(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", ConversationID: "conv_1", Status: "open"}
+	repository.teams["org_1:team_delivery"] = &TicketTeam{ID: "team_delivery", OrgID: "org_1", Name: "Delivery", Active: true}
+	service := NewService(repository, nil)
+
+	action, err := service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", Kind: "ticket.update", CreatedBy: "agent_1",
+		Payload: map[string]any{
+			"ticket_id": "ticket_1", "confidence": 0.91, "reason": "The customer needs an immediate update.", "evidence_message_ids": []any{"msg_1"},
+			"suggested_fields": map[string]any{"priority": "urgent", "severity": "high", "status": "waiting_customer", "team_id": "team_delivery", "team_name": "Delivery"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateAIAction(ticket.update) error = %v", err)
+	}
+	if got := action.Payload["suggested_fields"].(map[string]any)["status"]; got != "waiting_customer" {
+		t.Fatalf("ticket.update status = %#v, want waiting_customer", got)
+	}
+	if got, want := action.Payload, map[string]any{
+		"ticket_id": "ticket_1", "confidence": 0.91, "reason": "The customer needs an immediate update.", "evidence_message_ids": []string{"msg_1"},
+		"suggested_fields": map[string]any{"priority": "urgent", "severity": "high", "status": "waiting_customer", "team_id": "team_delivery", "team_name": "Delivery"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload = %#v, want %#v", got, want)
+	}
+
+	_, err = service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", Kind: "ticket.update", CreatedBy: "agent_1",
+		Payload: map[string]any{"ticket_id": "ticket_1", "confidence": 0.8, "reason": "Terminal state requires a human decision.", "evidence_message_ids": []any{}, "suggested_fields": map[string]any{"status": "resolved"}},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("status proposal error = %v, want ErrInvalidInput", err)
+	}
+
+	_, err = service.CreateAIAction(t.Context(), CreateAIActionInput{
+		OrgID: "org_1", ConversationID: "conv_1", Kind: "ticket.update", CreatedBy: "agent_1",
+		Payload: map[string]any{"ticket_id": "ticket_1", "confidence": 0.8, "reason": "A route requires both canonical fields.", "evidence_message_ids": []any{}, "suggested_fields": map[string]any{"team_id": "team_delivery"}},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("partial team proposal error = %v, want ErrInvalidInput", err)
+	}
 }
 
 func (f *fakeRepository) ListAIActions(_ context.Context, filter AIActionListFilter) ([]AIAction, error) {
@@ -312,7 +748,10 @@ func (f *fakeRepository) ListAIActions(_ context.Context, filter AIActionListFil
 		if action.OrgID != filter.OrgID {
 			continue
 		}
-		if filter.Status != "" && action.Status != filter.Status {
+		if filter.Status == "review" && action.Status != "suggested" && action.Status != "suggest_ticket" {
+			continue
+		}
+		if filter.Status != "" && filter.Status != "review" && action.Status != filter.Status {
 			continue
 		}
 		if filter.ConversationID != "" && action.ConversationID != filter.ConversationID {
@@ -329,6 +768,14 @@ func (f *fakeRepository) ListTickets(_ context.Context, _ TicketListFilter) ([]T
 		tickets = append(tickets, *ticket)
 	}
 	return tickets, nil
+}
+
+func (f *fakeRepository) ListTicketActivity(_ context.Context, _ string, _ string, _ int) ([]TicketActivity, error) {
+	return append([]TicketActivity(nil), f.ticketActivity...), nil
+}
+
+func (f *fakeRepository) ListConversationActivity(_ context.Context, _ string, _ string, _ int) ([]ConversationActivity, error) {
+	return append([]ConversationActivity(nil), f.conversationActivity...), nil
 }
 
 func (f *fakeRepository) GetTicket(_ context.Context, _ string, ticketID string) (*Ticket, error) {
@@ -361,10 +808,13 @@ func (f *fakeRepository) CreateTicket(_ context.Context, input CreateTicketInput
 		ConversationID: input.ConversationID,
 		TicketKey:      "TCK-FAKE",
 		Status:         input.Status,
+		WorkType:       input.WorkType,
 		Priority:       input.Priority,
 		Severity:       input.Severity,
 		Category:       input.Category,
 		Intent:         input.Intent,
+		TeamID:         input.TeamID,
+		TeamName:       input.TeamName,
 		Source:         input.Source,
 		AIConfidence:   input.AIConfidence,
 		AIReason:       input.AIReason,
@@ -388,17 +838,26 @@ func (f *fakeRepository) UpdateTicket(_ context.Context, input UpdateTicketInput
 	if input.Status != nil {
 		ticket.Status = *input.Status
 	}
+	if input.WorkType != nil {
+		ticket.WorkType = *input.WorkType
+	}
 	if input.Priority != nil {
 		ticket.Priority = *input.Priority
 	}
 	if input.TeamID != nil {
 		ticket.TeamID = *input.TeamID
 	}
+	if input.TeamName != nil {
+		ticket.TeamName = *input.TeamName
+	}
 	if input.Labels != nil {
 		ticket.Labels = *input.Labels
 	}
 	if input.SnoozedUntil != nil {
 		ticket.SnoozedUntil = input.SnoozedUntil
+	}
+	if input.FollowUpAt != nil {
+		ticket.FollowUpAt = input.FollowUpAt
 	}
 	return ticket, nil
 }
@@ -421,8 +880,179 @@ func (f *fakeRepository) LinkTicketResource(_ context.Context, input LinkTicketR
 	}, nil
 }
 
+func (f *fakeRepository) ListIncidents(_ context.Context, orgID string) ([]Incident, error) {
+	items := []Incident{}
+	for _, incident := range f.incidents {
+		if incident.OrgID == orgID {
+			copy := *incident
+			copy.TicketLinks = append([]IncidentTicketLink(nil), f.incidentTicketLinks[incident.ID]...)
+			items = append(items, copy)
+		}
+	}
+	return items, nil
+}
+
+func (f *fakeRepository) GetIncident(_ context.Context, orgID, incidentID string) (*Incident, error) {
+	incident := f.incidents[incidentID]
+	if incident == nil || incident.OrgID != orgID {
+		return nil, ErrNotFound
+	}
+	copy := *incident
+	copy.TicketLinks = append([]IncidentTicketLink(nil), f.incidentTicketLinks[incidentID]...)
+	return &copy, nil
+}
+
+func (f *fakeRepository) CreateIncident(_ context.Context, input CreateIncidentInput) (*Incident, error) {
+	id := "incident_" + strings.ReplaceAll(input.Title, " ", "_")
+	item := &Incident{ID: id, OrgID: input.OrgID, IncidentKey: "INC-TEST", Title: input.Title, Status: input.Status, Severity: input.Severity, OwnerUserID: input.OwnerUserID, OwnerName: input.OwnerName, CustomerImpact: input.CustomerImpact, ProblemID: input.ProblemID, DeclaredByUserID: input.DeclaredByUserID, DeclaredAt: time.Now().UTC(), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(), TicketLinks: []IncidentTicketLink{}}
+	f.incidents[id] = item
+	copy := *item
+	return &copy, nil
+}
+
+func (f *fakeRepository) UpdateIncident(_ context.Context, input UpdateIncidentInput) (*Incident, error) {
+	item, err := f.GetIncident(context.Background(), input.OrgID, input.IncidentID)
+	if err != nil {
+		return nil, err
+	}
+	if input.Title != nil {
+		item.Title = *input.Title
+	}
+	if input.Status != nil {
+		item.Status = *input.Status
+	}
+	if input.Severity != nil {
+		item.Severity = *input.Severity
+	}
+	if input.OwnerUserID != nil {
+		item.OwnerUserID = *input.OwnerUserID
+	}
+	if input.OwnerName != nil {
+		item.OwnerName = *input.OwnerName
+	}
+	if input.CustomerImpact != nil {
+		item.CustomerImpact = *input.CustomerImpact
+	}
+	if input.ProblemID != nil {
+		item.ProblemID = *input.ProblemID
+	}
+	item.UpdatedAt = time.Now().UTC()
+	f.incidents[input.IncidentID] = item
+	return f.GetIncident(context.Background(), input.OrgID, input.IncidentID)
+}
+
+func (f *fakeRepository) LinkIncidentTicket(_ context.Context, input LinkIncidentTicketInput) (*IncidentTicketLink, error) {
+	ticket := f.tickets[input.TicketID]
+	if ticket == nil || ticket.OrgID != input.OrgID {
+		return nil, ErrNotFound
+	}
+	link := IncidentTicketLink{ID: "incident_link_" + input.TicketID, OrgID: input.OrgID, IncidentID: input.IncidentID, TicketID: input.TicketID, TicketKey: ticket.TicketKey, TicketStatus: ticket.Status, Relationship: input.Relationship, CreatedByUserID: input.CreatedByUserID, CreatedAt: time.Now().UTC()}
+	f.incidentTicketLinks[input.IncidentID] = append(f.incidentTicketLinks[input.IncidentID], link)
+	return &link, nil
+}
+
+func (f *fakeRepository) ListProblems(_ context.Context, orgID string) ([]Problem, error) {
+	items := []Problem{}
+	for _, problem := range f.problems {
+		if problem.OrgID == orgID {
+			items = append(items, *problem)
+		}
+	}
+	return items, nil
+}
+
+func (f *fakeRepository) GetProblem(_ context.Context, orgID, problemID string) (*Problem, error) {
+	item := f.problems[problemID]
+	if item == nil || item.OrgID != orgID {
+		return nil, ErrNotFound
+	}
+	copy := *item
+	return &copy, nil
+}
+
+func (f *fakeRepository) CreateProblem(_ context.Context, input CreateProblemInput) (*Problem, error) {
+	id := "problem_" + strings.ReplaceAll(input.Title, " ", "_")
+	item := &Problem{ID: id, OrgID: input.OrgID, ProblemKey: "PRB-TEST", Title: input.Title, Status: input.Status, OwnerUserID: input.OwnerUserID, OwnerName: input.OwnerName, Summary: input.Summary, RootCause: input.RootCause, CreatedByUserID: input.CreatedByUserID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	f.problems[id] = item
+	copy := *item
+	return &copy, nil
+}
+
+func (f *fakeRepository) UpdateProblem(_ context.Context, input UpdateProblemInput) (*Problem, error) {
+	item, err := f.GetProblem(context.Background(), input.OrgID, input.ProblemID)
+	if err != nil {
+		return nil, err
+	}
+	if input.Title != nil {
+		item.Title = *input.Title
+	}
+	if input.Status != nil {
+		item.Status = *input.Status
+	}
+	if input.OwnerUserID != nil {
+		item.OwnerUserID = *input.OwnerUserID
+	}
+	if input.OwnerName != nil {
+		item.OwnerName = *input.OwnerName
+	}
+	if input.Summary != nil {
+		item.Summary = *input.Summary
+	}
+	if input.RootCause != nil {
+		item.RootCause = *input.RootCause
+	}
+	item.UpdatedAt = time.Now().UTC()
+	f.problems[input.ProblemID] = item
+	return f.GetProblem(context.Background(), input.OrgID, input.ProblemID)
+}
+
 func (f *fakeRepository) ListTicketViews(_ context.Context, _ string) ([]TicketView, error) {
 	return []TicketView{}, nil
+}
+
+func (f *fakeRepository) ListTicketTeams(_ context.Context, orgID string) ([]TicketTeam, error) {
+	items := []TicketTeam{}
+	for _, team := range f.teams {
+		if team.OrgID == orgID {
+			items = append(items, *team)
+		}
+	}
+	return items, nil
+}
+
+func (f *fakeRepository) GetTicketTeam(_ context.Context, orgID, teamID string) (*TicketTeam, error) {
+	team, ok := f.teams[orgID+":"+teamID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := *team
+	return &copy, nil
+}
+
+func (f *fakeRepository) CreateTicketTeam(_ context.Context, input CreateTicketTeamInput) (*TicketTeam, error) {
+	id := "team_" + strings.ToLower(strings.ReplaceAll(input.Name, " ", "_"))
+	team := &TicketTeam{ID: id, OrgID: input.OrgID, Name: input.Name, Description: input.Description, Active: input.Active}
+	f.teams[input.OrgID+":"+id] = team
+	copy := *team
+	return &copy, nil
+}
+
+func (f *fakeRepository) UpdateTicketTeam(_ context.Context, input UpdateTicketTeamInput) (*TicketTeam, error) {
+	team, err := f.GetTicketTeam(context.Background(), input.OrgID, input.ID)
+	if err != nil {
+		return nil, err
+	}
+	if input.Name != nil {
+		team.Name = *input.Name
+	}
+	if input.Description != nil {
+		team.Description = *input.Description
+	}
+	if input.Active != nil {
+		team.Active = *input.Active
+	}
+	f.teams[input.OrgID+":"+input.ID] = team
+	return team, nil
 }
 
 func (f *fakeRepository) CreateTicketView(_ context.Context, input CreateTicketViewInput) (*TicketView, error) {
@@ -534,6 +1164,71 @@ func (f *fakeRepository) UpdateTicketChecklistItem(_ context.Context, input Upda
 	return checklist, nil
 }
 
+func (f *fakeRepository) CreateTicketSideConversation(_ context.Context, input CreateTicketSideConversationInput) (*TicketSideConversation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ticket := f.tickets[input.TicketID]
+	if ticket == nil || ticket.OrgID != input.OrgID {
+		return nil, ErrNotFound
+	}
+	item := &TicketSideConversation{
+		ID: "side_" + input.TicketID, OrgID: input.OrgID, TicketID: input.TicketID,
+		Subject: input.Subject, Status: TicketSideConversationOpen, CreatedByUserID: input.ActorUserID,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Messages: []TicketSideConversationMessage{{
+			ID: "side_message_1", OrgID: input.OrgID, SideConversationID: "side_" + input.TicketID,
+			BodyText: input.BodyText, CreatedByUserID: input.ActorUserID, CreatedAt: time.Now().UTC(),
+		}},
+	}
+	f.sideConversations[item.ID] = item
+	copy := *item
+	copy.Messages = append([]TicketSideConversationMessage(nil), item.Messages...)
+	return &copy, nil
+}
+
+func (f *fakeRepository) AddTicketSideConversationMessage(_ context.Context, input AddTicketSideConversationMessageInput) (*TicketSideConversation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	item := f.sideConversations[input.SideConversationID]
+	if item == nil || item.OrgID != input.OrgID || item.TicketID != input.TicketID || item.Status != TicketSideConversationOpen {
+		return nil, ErrNotFound
+	}
+	item.Messages = append(item.Messages, TicketSideConversationMessage{
+		ID: "side_message_" + string(rune(len(item.Messages)+1)), OrgID: input.OrgID, SideConversationID: item.ID,
+		BodyText: input.BodyText, CreatedByUserID: input.ActorUserID, CreatedAt: time.Now().UTC(),
+	})
+	item.UpdatedAt = time.Now().UTC()
+	copy := *item
+	copy.Messages = append([]TicketSideConversationMessage(nil), item.Messages...)
+	return &copy, nil
+}
+
+func (f *fakeRepository) UpdateTicketSideConversation(_ context.Context, input UpdateTicketSideConversationInput) (*TicketSideConversation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	item := f.sideConversations[input.SideConversationID]
+	if item == nil || item.OrgID != input.OrgID || item.TicketID != input.TicketID {
+		return nil, ErrNotFound
+	}
+	item.Status = input.Status
+	item.UpdatedAt = time.Now().UTC()
+	copy := *item
+	copy.Messages = append([]TicketSideConversationMessage(nil), item.Messages...)
+	return &copy, nil
+}
+
+func (f *fakeRepository) RecordTicketChatHandoff(_ context.Context, input TicketChatHandoffInput) (*Ticket, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chatHandoffCalls = append(f.chatHandoffCalls, input)
+	ticket := f.tickets[input.TicketID]
+	if ticket == nil || ticket.OrgID != input.OrgID {
+		return nil, ErrNotFound
+	}
+	copy := *ticket
+	return &copy, nil
+}
+
 func (f *fakeRepository) HardPurgeByOrg(_ context.Context, orgID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -541,6 +1236,16 @@ func (f *fakeRepository) HardPurgeByOrg(_ context.Context, orgID string) error {
 		return f.hardPurgeErr
 	}
 	f.hardPurgeCalls = append(f.hardPurgeCalls, orgID)
+	return nil
+}
+
+func (f *fakeRepository) PurgeConversationDraftsByOrg(_ context.Context, orgID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.interactiveRetentionPurgeErr != nil {
+		return f.interactiveRetentionPurgeErr
+	}
+	f.interactiveRetentionPurgeCalls = append(f.interactiveRetentionPurgeCalls, orgID)
 	return nil
 }
 
@@ -595,6 +1300,117 @@ func (f *fakePublisher) Publish(_ context.Context, subject string, payload any) 
 	return nil
 }
 
+func TestDraftLeasePreventsConcurrentComposersAndAllowsOwnerRelease(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, nil)
+
+	first, err := service.ClaimDraftLease(t.Context(), "org_1", "conv_1", "agent_1")
+	if err != nil {
+		t.Fatalf("first ClaimDraftLease() error = %v", err)
+	}
+	if first.UserID != "agent_1" || first.ExpiresAt.Before(time.Now().UTC().Add(50*time.Second)) {
+		t.Fatalf("first lease = %#v, want agent_1 with a short-lived expiry", first)
+	}
+
+	if _, err := service.ClaimDraftLease(t.Context(), "org_1", "conv_1", "agent_2"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("concurrent ClaimDraftLease() error = %v, want ErrConflict", err)
+	}
+
+	renewed, err := service.ClaimDraftLease(t.Context(), "org_1", "conv_1", "agent_1")
+	if err != nil {
+		t.Fatalf("owner renewal ClaimDraftLease() error = %v", err)
+	}
+	if renewed.UserID != "agent_1" {
+		t.Fatalf("renewed lease owner = %q, want agent_1", renewed.UserID)
+	}
+
+	if err := service.ReleaseDraftLease(t.Context(), "org_1", "conv_1", "agent_2"); err != nil {
+		t.Fatalf("non-owner ReleaseDraftLease() error = %v", err)
+	}
+	if lease, err := service.GetDraftLease(t.Context(), "org_1", "conv_1"); err != nil || lease.UserID != "agent_1" {
+		t.Fatalf("lease after non-owner release = %#v, %v; want agent_1 lease", lease, err)
+	}
+
+	if err := service.ReleaseDraftLease(t.Context(), "org_1", "conv_1", "agent_1"); err != nil {
+		t.Fatalf("owner ReleaseDraftLease() error = %v", err)
+	}
+	if _, err := service.GetDraftLease(t.Context(), "org_1", "conv_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetDraftLease() after owner release error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.ClaimDraftLease(t.Context(), "org_1", "conv_1", "agent_2"); err != nil {
+		t.Fatalf("ClaimDraftLease() after owner release error = %v", err)
+	}
+}
+
+func TestConversationDraftIsPrivateToTheAuthorAndRecoverable(t *testing.T) {
+	repo := newFakeRepository()
+	repo.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	service := NewService(repo, nil)
+
+	saved, err := service.UpsertConversationDraft(t.Context(), ConversationDraftInput{
+		OrgID: " org_1 ", ConversationID: " conv_1 ", UserID: " agent_1 ",
+		BodyText: "  I can help with that.  ", Internal: true,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConversationDraft() error = %v", err)
+	}
+	if saved.BodyText != "I can help with that." || !saved.Internal {
+		t.Fatalf("saved draft = %#v", saved)
+	}
+
+	loaded, err := service.GetConversationDraft(t.Context(), "org_1", "conv_1", "agent_1")
+	if err != nil || loaded.BodyText != saved.BodyText {
+		t.Fatalf("GetConversationDraft() = %#v, %v", loaded, err)
+	}
+	if _, err := service.GetConversationDraft(t.Context(), "org_1", "conv_1", "agent_2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other agent GetConversationDraft() error = %v, want ErrNotFound", err)
+	}
+
+	if err := service.DeleteConversationDraft(t.Context(), "org_1", "conv_1", "agent_1"); err != nil {
+		t.Fatalf("DeleteConversationDraft() error = %v", err)
+	}
+	if _, err := service.GetConversationDraft(t.Context(), "org_1", "conv_1", "agent_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetConversationDraft() after delete error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListOutboundIntentsIsScopedToAnExistingConversation(t *testing.T) {
+	repo := newFakeRepository()
+	repo.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	repo.outboundIntents["intent_1"] = &OutboundIntent{
+		ID: "intent_1", OrgID: "org_1", ConversationID: "conv_1", Status: OutboundIntentUnknown,
+		Provider: "microsoft", ErrorCode: OutboundIntentErrorStaleSendingTimeout,
+	}
+	repo.outboundIntents["intent_2"] = &OutboundIntent{
+		ID: "intent_2", OrgID: "org_1", ConversationID: "conv_2", Status: OutboundIntentSubmitted,
+	}
+	service := NewService(repo, nil)
+
+	intents, err := service.ListOutboundIntents(t.Context(), "org_1", "conv_1")
+	if err != nil || len(intents) != 1 || intents[0].ID != "intent_1" {
+		t.Fatalf("ListOutboundIntents() = %#v, %v", intents, err)
+	}
+	if _, err := service.ListOutboundIntents(t.Context(), "other_org", "conv_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-org ListOutboundIntents() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListOrganizationOutboundIntentsUsesOnlyCanonicalStoredStates(t *testing.T) {
+	repository := newFakeRepository()
+	repository.outboundIntents["submitted"] = &OutboundIntent{ID: "submitted", OrgID: "org_1", Status: OutboundIntentSubmitted, Provider: "whatsapp", ProviderDeliveryStatus: ProviderDeliveryUnconfirmed}
+	repository.outboundIntents["failed"] = &OutboundIntent{ID: "failed", OrgID: "org_1", Status: OutboundIntentFailed, Provider: "whatsapp", ProviderDeliveryStatus: ProviderDeliveryFailed}
+	repository.outboundIntents["foreign"] = &OutboundIntent{ID: "foreign", OrgID: "org_2", Status: OutboundIntentSubmitted}
+	service := NewService(repository, nil)
+
+	intents, err := service.ListOrganizationOutboundIntents(t.Context(), OutboundIntentListFilter{OrgID: "org_1", Status: OutboundIntentSubmitted, Limit: 50})
+	if err != nil || len(intents) != 1 || intents[0].ID != "submitted" {
+		t.Fatalf("ListOrganizationOutboundIntents() = %#v, %v; want one org-scoped submitted intent", intents, err)
+	}
+	if _, err := service.ListOrganizationOutboundIntents(t.Context(), OutboundIntentListFilter{OrgID: "org_1", Status: "sent"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("synthetic sent filter error = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestIngestEventNormalizesAndPublishesOnce(t *testing.T) {
 	repository := newFakeRepository()
 	publisher := &fakePublisher{}
@@ -639,6 +1455,28 @@ func TestIngestEventNormalizesAndPublishesOnce(t *testing.T) {
 	}
 	if len(publisher.subjects) != 1 {
 		t.Fatalf("subjects after duplicate = %#v, want unchanged", publisher.subjects)
+	}
+}
+
+func TestIngestInboundEventPublishesOnlyFollowerIDsForNotificationFanout(t *testing.T) {
+	repository := newFakeRepository()
+	repository.follows["org_1:conv_1:agent_1"] = &ConversationFollow{OrgID: "org_1", ConversationID: "conv_1", UserID: "agent_1"}
+	repository.follows["org_1:conv_1:agent_2"] = &ConversationFollow{OrgID: "org_1", ConversationID: "conv_1", UserID: "agent_2"}
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher)
+
+	if _, err := service.IngestEvent(t.Context(), InboundEvent{
+		OrgID: "org_1", Provider: "email", ProviderEventID: "event_1", ProviderMessageID: "message_1", ProviderThreadID: "thread_1",
+		Subject: "Support request", From: ParticipantInput{Name: "Customer", Email: "customer@example.test"}, BodyText: "Private customer text",
+	}); err != nil {
+		t.Fatalf("IngestEvent() error = %v", err)
+	}
+	if len(publisher.events) != 1 {
+		t.Fatalf("published events = %d, want 1", len(publisher.events))
+	}
+	followers, ok := publisher.events[0].Data["follower_user_ids"].([]string)
+	if !ok || !reflect.DeepEqual(followers, []string{"agent_1", "agent_2"}) {
+		t.Fatalf("follower_user_ids = %#v, want only canonical follower ids", publisher.events[0].Data["follower_user_ids"])
 	}
 }
 
@@ -692,6 +1530,33 @@ func TestIngestEventStripsControlBytesFromBody(t *testing.T) {
 	}
 }
 
+func TestIngestEventNormalizesBoundedAttachmentMetadata(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	result, err := service.IngestEvent(context.Background(), InboundEvent{
+		OrgID: "org_1", Provider: "microsoft", ProviderEventID: "evt_attachment", ProviderMessageID: "msg_attachment",
+		Subject: "Document", From: ParticipantInput{Email: "ada@example.com"}, BodyText: "See attachment.",
+		Attachments: []AttachmentInput{{Filename: " report\x00.pdf ", MimeType: " Application/PDF ", SizeBytes: 42_000, ProviderRef: " provider-file-1 "}},
+	})
+	if err != nil {
+		t.Fatalf("IngestEvent() error = %v", err)
+	}
+	if got, want := result.Message.Attachments, []MessageAttachment{{ID: "att_1", Filename: "report.pdf", MimeType: "application/pdf", SizeBytes: 42_000}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("attachments = %#v, want %#v", got, want)
+	}
+}
+
+func TestIngestEventRejectsOversizedAttachmentMetadata(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	_, err := service.IngestEvent(context.Background(), InboundEvent{
+		OrgID: "org_1", Provider: "microsoft", ProviderEventID: "evt_attachment_limit", ProviderMessageID: "msg_attachment_limit",
+		Subject: "Document", From: ParticipantInput{Email: "ada@example.com"}, BodyText: "See attachment.",
+		Attachments: []AttachmentInput{{Filename: strings.Repeat("x", 256), MimeType: "application/pdf", SizeBytes: 42_000}},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("IngestEvent() error = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestIngestEventRejectsMissingBody(t *testing.T) {
 	service := NewService(newFakeRepository(), nil)
 	_, err := service.IngestEvent(context.Background(), InboundEvent{
@@ -731,7 +1596,7 @@ func TestIngestEventAcceptsSyncedTeamsOutboundDirection(t *testing.T) {
 		ProviderThreadID:  "teams-chat-1",
 		Direction:         DirectionOutbound,
 		Subject:           "Robert Røsten",
-		From:              ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@aquatiq.com"},
+		From:              ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@coresystem.com"},
 		To:                []ParticipantInput{{Name: "Robert Røsten", Email: "robert@example.com"}},
 		BodyText:          "My synced Teams reply",
 	})
@@ -1018,6 +1883,79 @@ func TestAddMessageDefaultsOutboundAndPublishes(t *testing.T) {
 	}
 	if len(publisher.subjects) != 1 || publisher.subjects[0] != SubjectMessageSent {
 		t.Fatalf("subjects = %#v, want message.sent", publisher.subjects)
+	}
+}
+
+func TestMachineDeliveryFailureReportRequiresReportShapeAndOpaqueIntent(t *testing.T) {
+	base := InboundEvent{
+		Provider: "google", AutoSubmitted: "auto-replied", ContentType: "multipart/report; report-type=delivery-status",
+		OutboundCorrelationID: "outintent_123",
+	}
+	if !isMachineDeliveryFailureReport(base) {
+		t.Fatal("machine delivery-status report was not recognized")
+	}
+	for _, mutate := range []func(*InboundEvent){
+		func(event *InboundEvent) { event.AutoSubmitted = "" },
+		func(event *InboundEvent) { event.ContentType = "text/plain" },
+		func(event *InboundEvent) { event.OutboundCorrelationID = "outintent_123\r\nX-Injected: true" },
+		func(event *InboundEvent) { event.Provider = "whatsapp" },
+	} {
+		candidate := base
+		mutate(&candidate)
+		if isMachineDeliveryFailureReport(candidate) {
+			t.Fatalf("non-report candidate was accepted: %#v", candidate)
+		}
+	}
+}
+
+func TestIngestEventRecordsOnlyVerifiedMachineDeliveryFailure(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+	event := InboundEvent{
+		OrgID: "org_1", Provider: "google", ProviderEventID: "dsn-1", ProviderMessageID: "dsn-1",
+		Subject: "Delivery report", From: ParticipantInput{Email: "mailer-daemon@example.com"}, BodyText: "Delivery failed",
+		AutoSubmitted: "auto-replied", ContentType: "multipart/report; report-type=delivery-status",
+		OutboundCorrelationID: "outintent_123", OccurredAt: time.Date(2026, time.August, 3, 0, 25, 0, 0, time.UTC),
+	}
+	if _, err := service.IngestEvent(t.Context(), event); err != nil {
+		t.Fatalf("IngestEvent error: %v", err)
+	}
+	if len(repository.emailDeliveryFailures) != 1 || repository.emailDeliveryFailures[0].OutboundIntentID != "outintent_123" {
+		t.Fatalf("email delivery failures = %#v", repository.emailDeliveryFailures)
+	}
+
+	event.ProviderEventID = "ordinary-1"
+	event.ProviderMessageID = "ordinary-1"
+	event.AutoSubmitted = ""
+	if _, err := service.IngestEvent(t.Context(), event); err != nil {
+		t.Fatalf("ordinary email IngestEvent error: %v", err)
+	}
+	if len(repository.emailDeliveryFailures) != 1 {
+		t.Fatalf("ordinary email must not alter delivery ledger: %#v", repository.emailDeliveryFailures)
+	}
+}
+
+func TestAddMessagePassesOnlyDurableEmailThreadProvenanceToSender(t *testing.T) {
+	repository := newFakeRepository()
+	repository.threadRefs["conv_email"] = &ChannelThreadRef{
+		OrgID: "org_1", ConversationID: "conv_email", Provider: "google", ConnectionID: "conn_google",
+		ProviderThreadID: "gmail-thread-1", ReplyToMessageID: "<customer-message@example.com>",
+		ReferencesHeader: "<root@example.com> <customer-message@example.com>",
+	}
+	sender := &fakeSender{result: &integration.SendResult{ProviderMessageID: "gmail-message-1"}}
+	service := NewService(repository, &fakePublisher{}, WithSender(sender))
+
+	if _, err := service.AddMessage(t.Context(), AddMessageInput{
+		OrgID: "org_1", ConversationID: "conv_email", ActorUserID: "user_1", BodyText: "Reply",
+		IdempotencyKey: "human-reply-email-thread-0001",
+	}); err != nil {
+		t.Fatalf("AddMessage error: %v", err)
+	}
+	if sender.lastReq.InReplyTo != "<customer-message@example.com>" || sender.lastReq.References != "<root@example.com> <customer-message@example.com>" {
+		t.Fatalf("email provenance = %#v", sender.lastReq)
+	}
+	if sender.lastReq.OutboundCorrelationID != OutboundIntentID("org_1", "human-reply-email-thread-0001") {
+		t.Fatalf("outbound correlation id = %q", sender.lastReq.OutboundCorrelationID)
 	}
 }
 
@@ -1483,8 +2421,9 @@ func TestRecordTicketClassificationCreatesSuggestedTicket(t *testing.T) {
 		Confidence:     0.82,
 		Reason:         "Customer asks for a refund and needs owner follow-up.",
 		SuggestedFields: map[string]any{
-			"category": "refund",
-			"priority": "high",
+			"category":  "refund",
+			"priority":  "high",
+			"work_type": "incident",
 		},
 		EvidenceMessageIDs: []string{"msg_1"},
 	})
@@ -1497,8 +2436,48 @@ func TestRecordTicketClassificationCreatesSuggestedTicket(t *testing.T) {
 	if classification.Ticket == nil || classification.Ticket.Status != "suggested" {
 		t.Fatalf("ticket = %#v, want suggested ticket", classification.Ticket)
 	}
+	if classification.Ticket.WorkType != "incident" {
+		t.Fatalf("ticket work type = %q, want incident", classification.Ticket.WorkType)
+	}
+	if _, err := service.RecordTicketClassification(context.Background(), TicketClassificationInput{
+		OrgID: "org_1", ConversationID: "conv_1", Outcome: "suggest_ticket", Confidence: 0.7,
+		Reason: "Invalid work type must not enter the review ledger.", SuggestedFields: map[string]any{"work_type": "project"},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("RecordTicketClassification(invalid work type) error = %v, want ErrInvalidInput", err)
+	}
 	if len(publisher.subjects) != 1 || publisher.subjects[0] != SubjectTicketSuggested {
 		t.Fatalf("subjects = %#v, want ticket suggested", publisher.subjects)
+	}
+}
+
+func TestTicketRoutingUsesAnActiveCanonicalTeam(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	repository.teams["org_1:team_billing"] = &TicketTeam{ID: "team_billing", OrgID: "org_1", Name: "Billing", Active: true}
+	service := NewService(repository, nil)
+
+	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
+		OrgID: "org_1", ConversationID: "conv_1", TeamID: "team_billing", TeamName: "Untrusted provider group",
+	})
+	if err != nil {
+		t.Fatalf("CreateTicket() error = %v", err)
+	}
+	if ticket.TeamID != "team_billing" || ticket.TeamName != "Billing" {
+		t.Fatalf("ticket routing = %#v, want canonical Billing team", ticket)
+	}
+}
+
+func TestTicketRoutingRejectsUnknownOrInactiveTeams(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	repository.teams["org_1:team_inactive"] = &TicketTeam{ID: "team_inactive", OrgID: "org_1", Name: "Inactive", Active: false}
+	service := NewService(repository, nil)
+
+	if _, err := service.CreateTicket(context.Background(), CreateTicketInput{OrgID: "org_1", ConversationID: "conv_1", TeamID: "missing"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown team error = %v, want ErrNotFound", err)
+	}
+	if _, err := service.CreateTicket(context.Background(), CreateTicketInput{OrgID: "org_1", ConversationID: "conv_1", TeamID: "team_inactive"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("inactive team error = %v, want ErrInvalidInput", err)
 	}
 }
 
@@ -1532,6 +2511,7 @@ func TestRecordTicketClassificationDoesNotAutoCreateSensitiveCategory(t *testing
 
 func TestRunTicketMacroAppliesOperationalActions(t *testing.T) {
 	repository := newFakeRepository()
+	repository.teams["org_1:billing"] = &TicketTeam{ID: "billing", OrgID: "org_1", Name: "Billing", Active: true}
 	repository.tickets["ticket_1"] = &Ticket{
 		ID:             "ticket_1",
 		OrgID:          "org_1",
@@ -1614,6 +2594,96 @@ func TestCreateTicketEvaluatesAutomationRule(t *testing.T) {
 	}
 }
 
+func TestCreateTicketAutomationRuleMatchesCanonicalWorkType(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	repository.rules = []TicketAutomationRule{{
+		ID: "rule_1", OrgID: "org_1", Name: "Route incidents", EventName: "ticket.created", Active: true,
+		Conditions: map[string]any{"work_type": "incident"},
+		Actions:    map[string]any{"priority": "urgent"},
+	}}
+	service := NewService(repository, nil)
+
+	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
+		OrgID: "org_1", ConversationID: "conv_1", WorkType: "incident", ActorUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("CreateTicket() error = %v", err)
+	}
+	if ticket.Priority != "urgent" || ticket.WorkType != "incident" {
+		t.Fatalf("ticket = %#v, want incident rule to set urgent priority", ticket)
+	}
+
+	_, err = service.CreateTicketAutomationRule(context.Background(), CreateTicketAutomationRuleInput{
+		OrgID: "org_1", Name: "Invalid work type", EventName: "ticket.created", Active: true,
+		Conditions: map[string]any{"work_type": "project"}, Actions: map[string]any{"priority": "high"},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateTicketAutomationRule() error = %v, want invalid input", err)
+	}
+}
+
+func TestCreateTicketAutomationRuleRejectsUnboundedRuleShapes(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	_, err := service.CreateTicketAutomationRule(context.Background(), CreateTicketAutomationRuleInput{
+		OrgID: "org_1", Name: "Unsafe rule", EventName: "ticket.created", Active: true,
+		Conditions: map[string]any{"customer_email": "customer@example.com"},
+		Actions:    map[string]any{"assignee_user_id": "user_1"},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateTicketAutomationRule() error = %v, want invalid input", err)
+	}
+}
+
+func TestCreateTicketAutomationRuleRejectsInvalidScopedActionValues(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	_, err := service.CreateTicketAutomationRule(context.Background(), CreateTicketAutomationRuleInput{
+		OrgID: "org_1", Name: "Invalid priority", EventName: "ticket.created", Active: true,
+		Conditions: map[string]any{"category": "refund"},
+		Actions:    map[string]any{"priority": "immediately"},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateTicketAutomationRule() error = %v, want invalid input", err)
+	}
+}
+
+func TestCreateTicketAutomationRuleRequiresLabelActionsToUseAList(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	_, err := service.CreateTicketAutomationRule(context.Background(), CreateTicketAutomationRuleInput{
+		OrgID: "org_1", Name: "Invalid labels", EventName: "ticket.created", Active: true,
+		Conditions: map[string]any{"category": "refund"},
+		Actions:    map[string]any{"labels": "refund"},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateTicketAutomationRule() error = %v, want invalid input", err)
+	}
+}
+
+func TestTicketAutomationRuleChangesPublishAccountableEvents(t *testing.T) {
+	publisher := &fakePublisher{}
+	service := NewService(newFakeRepository(), publisher)
+	rule, err := service.CreateTicketAutomationRule(context.Background(), CreateTicketAutomationRuleInput{
+		OrgID: "org_1", Name: "Route refunds", EventName: "ticket.created", Active: true,
+		Conditions: map[string]any{"category": "refund"}, Actions: map[string]any{"priority": "high"}, ActorUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("CreateTicketAutomationRule() error = %v", err)
+	}
+	active := false
+	if _, err := service.UpdateTicketAutomationRule(context.Background(), UpdateTicketAutomationRuleInput{OrgID: "org_1", ID: rule.ID, Active: &active, ActorUserID: "user_1"}); err != nil {
+		t.Fatalf("UpdateTicketAutomationRule() error = %v", err)
+	}
+	if len(publisher.subjects) != 2 || publisher.subjects[0] != SubjectTicketAutomationRuleCreated || publisher.subjects[1] != SubjectTicketAutomationRuleUpdated {
+		t.Fatalf("subjects = %#v, want automation rule create/update", publisher.subjects)
+	}
+	if len(publisher.events) != 2 || publisher.events[0].OrgID != "org_1" || publisher.events[0].ActorUserID != "user_1" || publisher.events[0].Data["ticket_automation_rule"] == nil {
+		t.Fatalf("create event = %#v, want scoped accountable rule payload", publisher.events)
+	}
+	if publisher.events[1].OrgID != "org_1" || publisher.events[1].ActorUserID != "user_1" || publisher.events[1].Data["ticket_automation_rule"] == nil {
+		t.Fatalf("update event = %#v, want scoped accountable rule payload", publisher.events[1])
+	}
+}
+
 func TestUpdateTicketPublishesAssignedAndResolvedLifecycleEvents(t *testing.T) {
 	repository := newFakeRepository()
 	repository.tickets["ticket_1"] = &Ticket{
@@ -1653,6 +2723,178 @@ func TestUpdateTicketPublishesAssignedAndResolvedLifecycleEvents(t *testing.T) {
 	}
 	if publisher.subjects[0] != SubjectTicketAssigned || publisher.subjects[1] != SubjectTicketResolved {
 		t.Fatalf("subjects = %#v, want assigned then resolved", publisher.subjects)
+	}
+}
+
+func TestUpdateTicketDoesNotRepublishResolvedForAnAlreadyTerminalTicket(t *testing.T) {
+	repository := newFakeRepository()
+	repository.tickets["ticket_1"] = &Ticket{
+		ID: "ticket_1", OrgID: "org_1", ConversationID: "conv_1", TicketKey: "TCK-FAKE",
+		Status: "resolved", Priority: "normal", Severity: "medium",
+	}
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher)
+
+	resolved := "resolved"
+	if _, err := service.UpdateTicket(context.Background(), UpdateTicketInput{
+		OrgID: "org_1", TicketID: "ticket_1", ActorUserID: "user_1", Status: &resolved,
+	}); err != nil {
+		t.Fatalf("UpdateTicket() error = %v", err)
+	}
+	if len(publisher.subjects) != 1 || publisher.subjects[0] != SubjectTicketUpdated {
+		t.Fatalf("subjects = %#v, want only ordinary ticket update", publisher.subjects)
+	}
+}
+
+func TestTicketWorkTypeDefaultsNormalizesAndRejectsUnknownValues(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	service := NewService(repository, nil)
+
+	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
+		OrgID: "org_1", ConversationID: "conv_1", ActorUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("CreateTicket() error = %v", err)
+	}
+	if ticket.WorkType != "customer_case" {
+		t.Fatalf("default work type = %q, want customer_case", ticket.WorkType)
+	}
+
+	incident := " INCIDENT "
+	updated, err := service.UpdateTicket(context.Background(), UpdateTicketInput{
+		OrgID: "org_1", TicketID: ticket.ID, ActorUserID: "user_1", WorkType: &incident,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTicket(work type) error = %v", err)
+	}
+	if updated.WorkType != "incident" {
+		t.Fatalf("updated work type = %q, want incident", updated.WorkType)
+	}
+
+	unknown := "project"
+	if _, err := service.UpdateTicket(context.Background(), UpdateTicketInput{
+		OrgID: "org_1", TicketID: ticket.ID, ActorUserID: "user_1", WorkType: &unknown,
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("UpdateTicket(unknown work type) error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestListTicketsRejectsUnknownWorkTypeFilter(t *testing.T) {
+	service := NewService(newFakeRepository(), nil)
+	if _, err := service.ListTickets(context.Background(), TicketListFilter{
+		OrgID: "org_1", WorkType: "project",
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ListTickets(unknown work type) error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestListTicketActivityReturnsBoundedDisplaySafeHistory(t *testing.T) {
+	repository := newFakeRepository()
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", ConversationID: "conv_1"}
+	repository.ticketActivity = []TicketActivity{{ID: "audit_1", Action: "ticket.updated", ResourceKind: "", CreatedAt: time.Date(2026, time.June, 3, 12, 0, 0, 0, time.UTC)}}
+	service := NewService(repository, nil)
+
+	items, err := service.ListTicketActivity(context.Background(), " org_1 ", " ticket_1 ", 999)
+	if err != nil {
+		t.Fatalf("ListTicketActivity() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Action != "ticket.updated" {
+		t.Fatalf("ListTicketActivity() = %#v", items)
+	}
+	if _, err := service.ListTicketActivity(context.Background(), "org_1", "", 20); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ListTicketActivity(empty ticket) error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestListConversationActivityReturnsBoundedDisplaySafeHistory(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	repository.conversationActivity = []ConversationActivity{{
+		ID: "audit_1", Action: "status.changed", ActorUserID: "user_1", CreatedAt: time.Date(2026, time.June, 3, 12, 0, 0, 0, time.UTC),
+	}}
+	service := NewService(repository, nil)
+
+	items, err := service.ListConversationActivity(context.Background(), " org_1 ", " conv_1 ", 999)
+	if err != nil {
+		t.Fatalf("ListConversationActivity() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Action != "status.changed" || items[0].ActorUserID != "user_1" {
+		t.Fatalf("ListConversationActivity() = %#v", items)
+	}
+	if _, err := service.ListConversationActivity(context.Background(), "org_1", "", 20); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("ListConversationActivity(empty conversation) error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestLinkTicketResourceValidatesTicketDependenciesWithinTenant(t *testing.T) {
+	repository := newFakeRepository()
+	repository.tickets["ticket_source"] = &Ticket{ID: "ticket_source", OrgID: "org_1", ConversationID: "conv_source"}
+	repository.tickets["ticket_target"] = &Ticket{ID: "ticket_target", OrgID: "org_1", ConversationID: "conv_target"}
+	repository.tickets["ticket_foreign"] = &Ticket{ID: "ticket_foreign", OrgID: "org_2", ConversationID: "conv_foreign"}
+	service := NewService(repository, nil)
+
+	link, err := service.LinkTicketResource(context.Background(), LinkTicketResourceInput{
+		OrgID: "org_1", TicketID: "ticket_source", LinkType: "child",
+		ResourceKind: "ticket", ResourceID: "ticket_target", CreatedByUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("LinkTicketResource() error = %v", err)
+	}
+	if link.ResourceKind != "ticket" || link.ResourceID != "ticket_target" || link.LinkType != "child" {
+		t.Fatalf("link = %#v, want durable child ticket dependency", link)
+	}
+
+	for _, input := range []LinkTicketResourceInput{
+		{OrgID: "org_1", TicketID: "ticket_source", ResourceKind: "ticket", ResourceID: "ticket_source"},
+		{OrgID: "org_1", TicketID: "ticket_source", ResourceKind: "ticket"},
+	} {
+		if _, err := service.LinkTicketResource(context.Background(), input); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("LinkTicketResource(%#v) error = %v, want ErrInvalidInput", input, err)
+		}
+	}
+
+	if _, err := service.LinkTicketResource(context.Background(), LinkTicketResourceInput{
+		OrgID: "org_1", TicketID: "ticket_source", ResourceKind: "ticket", ResourceID: "ticket_foreign",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign target error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLinkTicketResourceValidatesConversationSourceAttachmentsWithinTenant(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_attach"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_attach", OrgID: "org_1"}}
+	repository.details["conv_primary"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_primary", OrgID: "org_1"}}
+	repository.details["conv_foreign"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_foreign", OrgID: "org_2"}}
+	repository.tickets["ticket_target"] = &Ticket{ID: "ticket_target", OrgID: "org_1", ConversationID: "conv_primary"}
+	service := NewService(repository, nil)
+
+	link, err := service.LinkTicketResource(t.Context(), LinkTicketResourceInput{
+		OrgID: "org_1", TicketID: "ticket_target", ResourceKind: "conversation_source", ResourceID: "conv_attach", CreatedByUserID: "user_1",
+	})
+	if err != nil || link.ResourceKind != "conversation_source" || link.ResourceID != "conv_attach" {
+		t.Fatalf("conversation attachment = %#v / %v", link, err)
+	}
+	repository.tickets["ticket_already_attached"] = &Ticket{ID: "ticket_already_attached", OrgID: "org_1", ConversationID: "conv_attach"}
+	if _, err := service.LinkTicketResource(t.Context(), LinkTicketResourceInput{
+		OrgID: "org_1", TicketID: "ticket_target", ResourceKind: "conversation_source", ResourceID: "conv_attach",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second conversation attachment error = %v, want ErrConflict", err)
+	}
+	delete(repository.tickets, "ticket_already_attached")
+
+	for _, input := range []LinkTicketResourceInput{
+		{OrgID: "org_1", TicketID: "ticket_target", ResourceKind: "conversation_source"},
+		{OrgID: "org_1", TicketID: "ticket_target", ResourceKind: "conversation_source", ResourceID: "conv_primary"},
+		{OrgID: "org_1", TicketID: "ticket_target", ResourceKind: "conversation_source", ResourceID: "conv_foreign"},
+	} {
+		want := ErrInvalidInput
+		if input.ResourceID == "conv_foreign" {
+			want = ErrNotFound
+		}
+		if _, err := service.LinkTicketResource(t.Context(), input); !errors.Is(err, want) {
+			t.Fatalf("LinkTicketResource(%#v) error = %v, want %v", input, err, want)
+		}
 	}
 }
 
@@ -1802,15 +3044,16 @@ func TestReviewAIActionThreadsWhitelistedEditedFieldsOnApprove(t *testing.T) {
 		ReviewerID: "user_1",
 		Decision:   "approved",
 		EditedFields: map[string]string{
-			"category": "  sales  ",
-			"priority": "",
-			"intent":   "refund",
+			"category":  "  sales  ",
+			"body_text": "  Human-reviewed reply.  ",
+			"priority":  "",
+			"intent":    "refund",
 		},
 	})
 	if err != nil {
 		t.Fatalf("ReviewAIAction() error = %v, want nil", err)
 	}
-	want := map[string]string{"category": "sales", "intent": "refund"}
+	want := map[string]string{"category": "sales", "intent": "refund", "body_text": "Human-reviewed reply."}
 	if len(repository.lastReview.EditedFields) != len(want) {
 		t.Fatalf("lastReview.EditedFields = %#v, want %#v", repository.lastReview.EditedFields, want)
 	}
@@ -1821,8 +3064,30 @@ func TestReviewAIActionThreadsWhitelistedEditedFieldsOnApprove(t *testing.T) {
 	}
 }
 
+func TestReviewAIActionRejectsInvalidEditedBodyTextBeforeRepository(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+
+	err := service.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:      "org_1",
+		AIActionID: "aiact_1",
+		ReviewerID: "user_1",
+		Decision:   "approved",
+		EditedFields: map[string]string{
+			"body_text": strings.Repeat("x", maxConversationDraftRunes+1),
+		},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if repository.reviewCalls != 0 {
+		t.Fatalf("repository.ReviewAIAction called %d times, want 0", repository.reviewCalls)
+	}
+}
+
 // A non-whitelisted key in edited fields (anything outside promote()'s actual
-// reads: category, priority, severity, intent, team_id, team_name) must be
+// reads: body_text, category, priority, severity, intent, team_id, team_name)
+// must be
 // silently dropped -- never applied, but never failing the whole request --
 // mirroring the JSON-decode posture where an unrecognized field is simply not
 // bound.
@@ -1928,13 +3193,23 @@ func TestListAIActionsDefaultsToSuggestedAndScopesByOrg(t *testing.T) {
 		}
 	}
 
-	// status=all ⇒ every status for org_1 (a1 + a2), still org-scoped.
+	// status=review ⇒ both pending-review variants for org_1, still org-scoped.
+	repository.aiActions = append(repository.aiActions, AIAction{ID: "a4", OrgID: "org_1", Status: "suggest_ticket", ConversationID: "conv_1"})
+	review, err := service.ListAIActions(context.Background(), AIActionListFilter{OrgID: "org_1", Status: "review"})
+	if err != nil {
+		t.Fatalf("ListAIActions(review) error = %v", err)
+	}
+	if len(review) != 2 {
+		t.Fatalf("status=review list = %#v, want both pending-review actions", review)
+	}
+
+	// status=all ⇒ every status for org_1, still org-scoped.
 	all, err := service.ListAIActions(context.Background(), AIActionListFilter{OrgID: "org_1", Status: "all"})
 	if err != nil {
 		t.Fatalf("ListAIActions(all) error = %v", err)
 	}
-	if len(all) != 2 {
-		t.Fatalf("status=all list = %#v, want both org_1 actions", all)
+	if len(all) != 3 {
+		t.Fatalf("status=all list = %#v, want every org_1 action", all)
 	}
 }
 
@@ -2062,5 +3337,178 @@ func TestHardPurgeByOrgPropagatesRepositoryError(t *testing.T) {
 
 	if err := service.HardPurgeByOrg(context.Background(), "org-1"); err == nil || !strings.Contains(err.Error(), "db unavailable") {
 		t.Fatalf("error = %v, want db unavailable", err)
+	}
+}
+
+func TestPurgeConversationDraftsByOrgDelegatesOnlyTheTrimmedOrganization(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+
+	if err := service.PurgeConversationDraftsByOrg(context.Background(), "  org-1  "); err != nil {
+		t.Fatalf("PurgeConversationDraftsByOrg() error = %v", err)
+	}
+	if got := repository.interactiveRetentionPurgeCalls; !reflect.DeepEqual(got, []string{"org-1"}) {
+		t.Fatalf("draft purge calls = %#v, want exactly one trimmed org", got)
+	}
+}
+
+func TestPurgeConversationDraftsByOrgRejectsBlankOrganizationWithoutCallingRepository(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+
+	if err := service.PurgeConversationDraftsByOrg(context.Background(), "  "); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
+	}
+	if len(repository.interactiveRetentionPurgeCalls) != 0 {
+		t.Fatalf("draft purge calls = %#v, want none", repository.interactiveRetentionPurgeCalls)
+	}
+}
+
+func TestTicketSideConversationIsInternalBoundedAndNeverMutatesTheCustomerThread(t *testing.T) {
+	repository := newFakeRepository()
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", ConversationID: "conversation_1", Status: "open"}
+	service := NewService(repository, &fakePublisher{})
+
+	thread, err := service.CreateTicketSideConversation(t.Context(), CreateTicketSideConversationInput{
+		OrgID: "org_1", TicketID: "ticket_1", Subject: "Confirm refund exception", BodyText: "Can billing confirm the approved exception?", ActorUserID: "agent_1",
+	})
+	if err != nil {
+		t.Fatalf("CreateTicketSideConversation() error = %v", err)
+	}
+	if thread.Status != TicketSideConversationOpen || len(thread.Messages) != 1 || thread.Messages[0].BodyText != "Can billing confirm the approved exception?" {
+		t.Fatalf("side conversation = %#v, want one open internal thread", thread)
+	}
+	if repository.tickets["ticket_1"].ConversationID != "conversation_1" || repository.tickets["ticket_1"].Status != "open" {
+		t.Fatalf("customer conversation/ticket state was mutated: %#v", repository.tickets["ticket_1"])
+	}
+
+	updated, err := service.AddTicketSideConversationMessage(t.Context(), AddTicketSideConversationMessageInput{
+		OrgID: "org_1", TicketID: "ticket_1", SideConversationID: thread.ID, BodyText: "Confirmed; proceed with the manual refund.", ActorUserID: "billing_1",
+	})
+	if err != nil || len(updated.Messages) != 2 {
+		t.Fatalf("AddTicketSideConversationMessage() = %#v, %v; want a second internal message", updated, err)
+	}
+	closed, err := service.UpdateTicketSideConversation(t.Context(), UpdateTicketSideConversationInput{
+		OrgID: "org_1", TicketID: "ticket_1", SideConversationID: thread.ID, Status: TicketSideConversationClosed, ActorUserID: "agent_1",
+	})
+	if err != nil || closed.Status != TicketSideConversationClosed {
+		t.Fatalf("UpdateTicketSideConversation() = %#v, %v; want closed", closed, err)
+	}
+}
+
+func TestTicketSideConversationRejectsEmptyOrCrossTicketMutations(t *testing.T) {
+	repository := newFakeRepository()
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", ConversationID: "conversation_1", Status: "open"}
+	service := NewService(repository, &fakePublisher{})
+
+	if _, err := service.CreateTicketSideConversation(t.Context(), CreateTicketSideConversationInput{OrgID: "org_1", TicketID: "ticket_1", Subject: "  ", BodyText: "message", ActorUserID: "agent_1"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("empty subject error = %v, want ErrInvalidInput", err)
+	}
+	if _, err := service.AddTicketSideConversationMessage(t.Context(), AddTicketSideConversationMessageInput{OrgID: "org_1", TicketID: "ticket_2", SideConversationID: "side_ticket_1", BodyText: "message", ActorUserID: "agent_1"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-ticket reply error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTicketChatHandoffRecordsOnlyTheCanonicalTicketRequest(t *testing.T) {
+	repository := newFakeRepository()
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", ConversationID: "conversation_1", Status: "open"}
+	service := NewService(repository, &fakePublisher{})
+
+	ticket, err := service.RecordTicketChatHandoff(t.Context(), TicketChatHandoffInput{
+		OrgID: " org_1 ", TicketID: " ticket_1 ", ActorUserID: " agent_1 ",
+	})
+	if err != nil || ticket.ID != "ticket_1" {
+		t.Fatalf("RecordTicketChatHandoff() = %#v, %v; want the canonical ticket", ticket, err)
+	}
+	if !reflect.DeepEqual(repository.chatHandoffCalls, []TicketChatHandoffInput{{OrgID: "org_1", TicketID: "ticket_1", ActorUserID: "agent_1"}}) {
+		t.Fatalf("handoff calls = %#v, want only the trimmed ticket handoff input", repository.chatHandoffCalls)
+	}
+	if _, err := service.RecordTicketChatHandoff(t.Context(), TicketChatHandoffInput{OrgID: "org_1"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("missing ticket handoff error = %v, want ErrInvalidInput", err)
+	}
+	if len(repository.chatHandoffCalls) != 1 {
+		t.Fatalf("handoff calls = %#v, invalid request must not reach repository", repository.chatHandoffCalls)
+	}
+}
+
+func TestIncidentProblemLifecycleIsExplicitAndNeverResolvesLinkedTickets(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{}, WithNow(func() time.Time {
+		return time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	}))
+	problem, err := service.CreateProblem(context.Background(), CreateProblemInput{
+		OrgID: "org_1", Title: "Webhook retries duplicate orders", Status: "known_error", CreatedByUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("CreateProblem() error = %v", err)
+	}
+	incident, err := service.CreateIncident(context.Background(), CreateIncidentInput{
+		OrgID: "org_1", Title: "Order webhooks duplicated", Severity: "critical", ProblemID: problem.ID, DeclaredByUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("CreateIncident() error = %v", err)
+	}
+	if incident.Status != "declared" || incident.ProblemID != problem.ID {
+		t.Fatalf("incident = %#v, want declared incident linked to the explicit problem", incident)
+	}
+	repository.tickets["ticket_1"] = &Ticket{ID: "ticket_1", OrgID: "org_1", TicketKey: "TCK-1", Status: "open", ConversationID: "conv_1"}
+	link, err := service.LinkIncidentTicket(context.Background(), LinkIncidentTicketInput{
+		OrgID: "org_1", IncidentID: incident.ID, TicketID: "ticket_1", Relationship: "affected", CreatedByUserID: "user_1",
+	})
+	if err != nil {
+		t.Fatalf("LinkIncidentTicket() error = %v", err)
+	}
+	if link.Relationship != "affected" || link.TicketKey != "TCK-1" {
+		t.Fatalf("link = %#v, want explicit affected relationship", link)
+	}
+	resolved := "resolved"
+	updated, err := service.UpdateIncident(context.Background(), UpdateIncidentInput{OrgID: "org_1", IncidentID: incident.ID, Status: &resolved, ActorUserID: "user_1"})
+	if err != nil {
+		t.Fatalf("UpdateIncident() error = %v", err)
+	}
+	if updated.Status != "resolved" {
+		t.Fatalf("updated status = %q, want resolved", updated.Status)
+	}
+	if repository.tickets["ticket_1"].Status != "open" {
+		t.Fatalf("linked ticket status = %q, resolving an incident must not propagate lifecycle", repository.tickets["ticket_1"].Status)
+	}
+}
+
+func TestIncidentProblemValidationRejectsUnknownLinksAndStates(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository, &fakePublisher{})
+	if _, err := service.CreateIncident(context.Background(), CreateIncidentInput{OrgID: "org_1", Title: "Event", Severity: "emergency"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateIncident() error = %v, want ErrInvalidInput for severity", err)
+	}
+	if _, err := service.CreateProblem(context.Background(), CreateProblemInput{OrgID: "org_1", Title: "Cause", Status: "ignored"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateProblem() error = %v, want ErrInvalidInput for status", err)
+	}
+	if _, err := service.LinkIncidentTicket(context.Background(), LinkIncidentTicketInput{OrgID: "org_1", IncidentID: "incident_1", TicketID: "ticket_1", Relationship: "parent"}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("LinkIncidentTicket() error = %v, want ErrInvalidInput for relationship", err)
+	}
+}
+
+func TestNormalizeProblemCreatePayloadAcceptsBoundedEvidenceWithoutOperationalControls(t *testing.T) {
+	payload, err := normalizeProblemCreatePayload(map[string]any{
+		"title":                " Checkout dependency instability ",
+		"summary":              " Several checkout failures share a timeout. ",
+		"root_cause":           " Gateway timeout observed. ",
+		"confidence":           0.91,
+		"reason":               "Three messages describe the same checkout failure.",
+		"evidence_message_ids": []any{"message-1", "message-2"},
+	})
+	if err != nil {
+		t.Fatalf("normalizeProblemCreatePayload() error = %v", err)
+	}
+	if payload["title"] != "Checkout dependency instability" || payload["summary"] != "Several checkout failures share a timeout." {
+		t.Fatalf("payload = %#v, want trimmed Problem candidate", payload)
+	}
+	if _, ok := payload["status"]; ok {
+		t.Fatalf("payload = %#v, must not accept an AI lifecycle control", payload)
+	}
+	if _, err := normalizeProblemCreatePayload(map[string]any{
+		"title": "Problem", "summary": "Summary", "confidence": 0.5, "reason": "Evidence", "evidence_message_ids": []any{" "},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("invalid evidence error = %v, want ErrInvalidInput", err)
 	}
 }

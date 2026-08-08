@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -57,6 +58,22 @@ type fakeIngester struct {
 	invalid bool
 }
 
+type fakeDeliveryReceiptRecorder struct {
+	mu       sync.Mutex
+	receipts []conversation.ProviderDeliveryReceiptInput
+	err      error
+}
+
+func (f *fakeDeliveryReceiptRecorder) RecordProviderDeliveryReceipt(_ context.Context, receipt conversation.ProviderDeliveryReceiptInput) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return false, f.err
+	}
+	f.receipts = append(f.receipts, receipt)
+	return true, nil
+}
+
 func (f *fakeIngester) IngestEvent(_ context.Context, event conversation.InboundEvent) (*conversation.StoredEventResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -106,7 +123,26 @@ const whatsAppStatusPayload = `{
 			"field": "messages",
 			"value": {
 				"metadata": {"phone_number_id": "PHONE_NUMBER_ID"},
-				"statuses": [{"id": "wamid.ABC", "status": "delivered", "recipient_id": "4790000001"}]
+			"statuses": [{"id": "wamid.ABC", "status": "delivered", "timestamp": "1700000000", "recipient_id": "4790000001"}]
+			}
+		}]
+	}]
+}`
+
+const whatsAppFailedStatusPayload = `{
+	"object": "whatsapp_business_account",
+	"entry": [{
+		"id": "WABA_ID",
+		"changes": [{
+			"field": "messages",
+			"value": {
+				"metadata": {"phone_number_id": "PHONE_NUMBER_ID"},
+				"statuses": [{
+					"id": "wamid.FAILED",
+					"status": "failed",
+					"timestamp": "1700000001",
+					"errors": [{"code": 131026, "title": "Message Undeliverable", "error_data": {"details": "Customer-specific provider detail must not enter the audit code."}}]
+				}]
 			}
 		}]
 	}]
@@ -251,6 +287,91 @@ func TestWebhookReceived_StatusOnlyPayload_AcksWithoutStoring(t *testing.T) {
 	}
 	if ingester.count() != 0 {
 		t.Errorf("a delivery-status-only webhook stored %d events, want 0", ingester.count())
+	}
+}
+
+func TestWebhookReceived_WhatsAppDeliveryReceiptUpdatesOnlyTheMatchingOutboundEvidence(t *testing.T) {
+	fetcher := &fakeWebhookFetcher{payloads: map[string]map[string]any{"wh-delivery": decodePayload(t, whatsAppStatusPayload)}}
+	ingester := &fakeIngester{}
+	recorder := &fakeDeliveryReceiptRecorder{}
+	c := &WebhookReceivedConsumer{fetcher: fetcher, ingester: ingester, receipts: recorder}
+
+	if got := c.process(context.Background(), whatsAppWebhookEvent("org-1", "wh-delivery")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if ingester.count() != 0 {
+		t.Fatalf("delivery callback stored %d inbound events, want 0", ingester.count())
+	}
+	if len(recorder.receipts) != 1 {
+		t.Fatalf("delivery receipts = %#v, want one", recorder.receipts)
+	}
+	got := recorder.receipts[0]
+	if got.OrgID != "org-1" || got.Provider != "whatsapp" || got.ProviderMessageID != "wamid.ABC" || got.Status != conversation.ProviderDeliveryDelivered {
+		t.Fatalf("receipt = %#v", got)
+	}
+	if got.OccurredAt.IsZero() {
+		t.Fatal("receipt timestamp is missing")
+	}
+}
+
+func TestWebhookReceived_WhatsAppFailedReceiptPreservesOnlyTheProviderErrorCode(t *testing.T) {
+	fetcher := &fakeWebhookFetcher{payloads: map[string]map[string]any{"wh-failed": decodePayload(t, whatsAppFailedStatusPayload)}}
+	ingester := &fakeIngester{}
+	recorder := &fakeDeliveryReceiptRecorder{}
+	c := &WebhookReceivedConsumer{fetcher: fetcher, ingester: ingester, receipts: recorder}
+
+	if got := c.process(context.Background(), whatsAppWebhookEvent("org-1", "wh-failed")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if ingester.count() != 0 || len(recorder.receipts) != 1 {
+		t.Fatalf("inbound=%d receipts=%#v, want no inbound and one receipt", ingester.count(), recorder.receipts)
+	}
+	receipt := recorder.receipts[0]
+	if receipt.ProviderMessageID != "wamid.FAILED" || receipt.Status != conversation.ProviderDeliveryFailed {
+		t.Fatalf("receipt = %#v", receipt)
+	}
+	if receipt.ErrorCode != "131026" {
+		t.Fatalf("error code = %q, want exact provider code", receipt.ErrorCode)
+	}
+	if strings.Contains(receipt.ErrorCode, "Customer-specific") || strings.Contains(receipt.ErrorCode, "Undeliverable") {
+		t.Fatalf("receipt error code leaked provider detail: %q", receipt.ErrorCode)
+	}
+}
+
+func TestNumericProviderErrorCodeKeepsOnlyBoundedDecimalCodes(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "webhook JSON number", value: float64(131026), want: "131026"},
+		{name: "string-backed code", value: "131026", want: "131026"},
+		{name: "provider title", value: "Message Undeliverable", want: ""},
+		{name: "nested diagnostic", value: map[string]any{"details": "customer material"}, want: ""},
+		{name: "decimal", value: float64(131026.5), want: ""},
+		{name: "oversized", value: "12345678901234567", want: ""},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := numericProviderErrorCode(test.value); got != test.want {
+				t.Fatalf("numericProviderErrorCode(%#v) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestWebhookReceived_UncorrelatableReadWatermarkDoesNotCreateDeliveryEvidence(t *testing.T) {
+	fetcher := &fakeWebhookFetcher{payloads: map[string]map[string]any{"wh-read": decodePayload(t, messengerReadReceiptPayload)}}
+	ingester := &fakeIngester{}
+	recorder := &fakeDeliveryReceiptRecorder{}
+	c := &WebhookReceivedConsumer{fetcher: fetcher, ingester: ingester, receipts: recorder}
+
+	ev := ingestionEvent{OrganizationID: "org-1", ProviderKey: "facebook", Data: map[string]any{"webhookEventId": "wh-read"}}
+	if got := c.process(context.Background(), ev); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if len(recorder.receipts) != 0 {
+		t.Fatalf("read watermark created receipts = %#v", recorder.receipts)
 	}
 }
 

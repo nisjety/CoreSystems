@@ -10,7 +10,13 @@ ENV GOSUMDB=sum.golang.org
 COPY go.mod go.sum* ./
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     set -e; \
-    if [ -f go.sum ]; then go mod download; else go mod download && go mod tidy; fi
+    for i in 1 2 3 4 5; do \
+        if [ -f go.sum ]; then go mod download && exit 0; \
+        else go mod download && go mod tidy && exit 0; fi; \
+        echo "go mod download retry $i"; \
+        sleep 8; \
+    done; \
+    exit 1
 
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
@@ -33,6 +39,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,t
     chown -R appuser:appuser /app
 
 COPY --from=build /out/conversation-core-go /usr/local/bin/conversation-core-go
+COPY internal/database/migrations /app/migrations
 
 USER appuser
 EXPOSE 3160

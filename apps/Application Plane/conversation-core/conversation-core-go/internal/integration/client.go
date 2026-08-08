@@ -107,9 +107,18 @@ type SendRequest struct {
 	Provider         string
 	ConnectionID     string
 	ProviderThreadID string
-	BodyText         string
-	BodyHTML         string
-	Subject          string
+	// InReplyTo and References come only from the durable, signed inbound email
+	// provenance stored with the resolved channel reference. Gmail requires
+	// them alongside threadId to group an API-sent reply correctly.
+	InReplyTo  string
+	References string
+	// OutboundCorrelationID is the opaque, durable intent id transmitted only
+	// as a provider message header. A later machine-readable DSN can use it to
+	// identify one exact intent without content or sender/subject heuristics.
+	OutboundCorrelationID string
+	BodyText              string
+	BodyHTML              string
+	Subject               string
 	// The authorization fields are copied from the content-free outbound intent
 	// claimed before this call. Send recomputes PayloadSHA256 and refuses to sign
 	// if any effect differs from the durable binding.
@@ -351,11 +360,13 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (*SendResult, error)
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		trimmed := bytes.TrimSpace(respBytes)
 		if len(trimmed) == 0 {
-			// Microsoft Graph and Gmail may acknowledge mail submission with an
-			// empty 202. This is the only empty-success shape permitted by the
-			// integration contract; arbitrary empty/malformed 2xx must not create
-			// a false sent row.
-			if resp.StatusCode == http.StatusAccepted && (prepared.Operation == "mail.send" || prepared.Operation == "gmail.send") {
+			// Microsoft Graph sendMail documents a bodyless 202 Accepted. Gmail's
+			// users.messages.send instead returns a Message resource, whose id is
+			// our durable provider correlation key. Do not accept an empty Gmail
+			// success: it would create an uncorrelatable "submitted" row and make
+			// later bounce/delivery reconciliation impossible. Arbitrary empty or
+			// malformed 2xx responses must likewise never create a false sent row.
+			if resp.StatusCode == http.StatusAccepted && prepared.Operation == "mail.send" {
 				return &SendResult{Operation: prepared.Operation}, nil
 			}
 			return nil, invalidSendResponse(resp.StatusCode)
@@ -365,7 +376,10 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (*SendResult, error)
 			return nil, invalidSendResponse(resp.StatusCode)
 		}
 		providerMessageID := extractProviderMessageID(decoded.Data.Action.Result)
-		if providerMessageID == "" && prepared.Operation != "mail.send" && prepared.Operation != "gmail.send" {
+		// Graph's accepted-send response has no provider message identifier by
+		// contract. Every other provider send, including Gmail, must return one
+		// before the core may record a correlatable submitted receipt.
+		if providerMessageID == "" && prepared.Operation != "mail.send" {
 			return nil, invalidSendResponse(resp.StatusCode)
 		}
 		return &SendResult{ProviderMessageID: providerMessageID, Operation: prepared.Operation}, nil
@@ -718,6 +732,9 @@ func buildSendOperation(req SendRequest) (operation string, params, body map[str
 			"bodyHtml": req.BodyHTML,
 			"to":       req.To,
 		}
+		if req.OutboundCorrelationID != "" {
+			body["correlationId"] = req.OutboundCorrelationID
+		}
 		params = map[string]any{}
 		if req.ProviderThreadID != "" {
 			params["threadId"] = req.ProviderThreadID
@@ -757,10 +774,19 @@ func buildSendOperation(req SendRequest) (operation string, params, body map[str
 			"bodyHtml": req.BodyHTML,
 			"to":       req.To,
 		}
+		if req.OutboundCorrelationID != "" {
+			body["correlationId"] = req.OutboundCorrelationID
+		}
 		params = map[string]any{}
 		if req.ProviderThreadID != "" {
 			params["threadId"] = req.ProviderThreadID
 			body["threadId"] = req.ProviderThreadID
+		}
+		if req.InReplyTo != "" {
+			body["inReplyTo"] = req.InReplyTo
+		}
+		if req.References != "" {
+			body["references"] = req.References
 		}
 		return operation, params, body, nil
 	case "whatsapp":

@@ -57,14 +57,33 @@ type reviewBody struct {
 }
 
 type createAIActionBody struct {
-	ConversationID string         `json:"conversation_id"`
-	Kind           string         `json:"kind"`
-	Payload        map[string]any `json:"payload"`
+	ConversationID  string         `json:"conversation_id"`
+	ProposalGroupID string         `json:"proposal_group_id"`
+	Kind            string         `json:"kind"`
+	Payload         map[string]any `json:"payload"`
+}
+
+// outboundIntentResponse is intentionally narrower than conversation.OutboundIntent.
+// The browser needs only an outcome receipt; idempotency keys, actor IDs,
+// approval/action identifiers, provider thread IDs, and hashes remain internal.
+type outboundIntentResponse struct {
+	ID                 string     `json:"id"`
+	ConversationID     string     `json:"conversation_id"`
+	Status             string     `json:"status"`
+	Provider           string     `json:"provider,omitempty"`
+	ProviderMessageID  string     `json:"provider_message_id,omitempty"`
+	DeliveryStatus     string     `json:"delivery_status,omitempty"`
+	DeliveryOccurredAt *time.Time `json:"delivery_occurred_at,omitempty"`
+	DeliveryErrorCode  string     `json:"delivery_error_code,omitempty"`
+	ErrorCode          string     `json:"error_code,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type createTicketBody struct {
 	ConversationID      string   `json:"conversation_id"`
 	Status              string   `json:"status"`
+	WorkType            string   `json:"work_type"`
 	Priority            string   `json:"priority"`
 	Severity            string   `json:"severity"`
 	Category            string   `json:"category"`
@@ -90,6 +109,7 @@ type createTicketBody struct {
 
 type patchTicketBody struct {
 	Status              *string   `json:"status"`
+	WorkType            *string   `json:"work_type"`
 	Priority            *string   `json:"priority"`
 	Severity            *string   `json:"severity"`
 	Category            *string   `json:"category"`
@@ -99,6 +119,7 @@ type patchTicketBody struct {
 	TeamID              *string   `json:"team_id"`
 	TeamName            *string   `json:"team_name"`
 	DueAt               *string   `json:"due_at"`
+	FollowUpAt          *string   `json:"follow_up_at"`
 	Source              *string   `json:"source"`
 	AIConfidence        *float64  `json:"ai_confidence"`
 	AIReason            *string   `json:"ai_reason"`
@@ -121,6 +142,30 @@ type linkTicketResourceBody struct {
 	Metadata     map[string]any `json:"metadata"`
 }
 
+type incidentBody struct {
+	Title          *string `json:"title"`
+	Status         *string `json:"status"`
+	Severity       *string `json:"severity"`
+	OwnerUserID    *string `json:"owner_user_id"`
+	OwnerName      *string `json:"owner_name"`
+	CustomerImpact *string `json:"customer_impact"`
+	ProblemID      *string `json:"problem_id"`
+}
+
+type linkIncidentTicketBody struct {
+	TicketID     string `json:"ticket_id"`
+	Relationship string `json:"relationship"`
+}
+
+type problemBody struct {
+	Title       *string `json:"title"`
+	Status      *string `json:"status"`
+	OwnerUserID *string `json:"owner_user_id"`
+	OwnerName   *string `json:"owner_name"`
+	Summary     *string `json:"summary"`
+	RootCause   *string `json:"root_cause"`
+}
+
 type ticketClassificationBody struct {
 	Outcome            string         `json:"outcome"`
 	Confidence         float64        `json:"confidence"`
@@ -139,6 +184,12 @@ type ticketViewBody struct {
 	Sort         *map[string]any `json:"sort"`
 	GroupBy      *string         `json:"group_by"`
 	SidebarOrder *int            `json:"sidebar_order"`
+}
+
+type ticketTeamBody struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	Active      *bool   `json:"active"`
 }
 
 type ticketMacroBody struct {
@@ -177,6 +228,34 @@ type createTicketChecklistBody struct {
 
 type patchTicketChecklistItemBody struct {
 	Completed bool `json:"completed"`
+}
+
+type createTicketSideConversationBody struct {
+	Subject  string `json:"subject"`
+	BodyText string `json:"body_text"`
+}
+
+type addTicketSideConversationMessageBody struct {
+	BodyText string `json:"body_text"`
+}
+
+type patchTicketSideConversationBody struct {
+	Status string `json:"status"`
+}
+
+func (h *Handler) RecordTicketChatHandoff(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	ticket, err := h.service.RecordTicketChatHandoff(c.Request.Context(), conversation.TicketChatHandoffInput{
+		OrgID: orgID, TicketID: c.Param("id"), ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": ticket})
 }
 
 func (h *Handler) Health(c *gin.Context) {
@@ -254,6 +333,92 @@ func (h *Handler) GetConversation(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": detail})
 }
 
+func (h *Handler) ListConversationActivity(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	items, err := h.service.ListConversationActivity(c.Request.Context(), orgID, c.Param("id"), limit)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items, "meta": gin.H{"limit": limit, "has_next": false, "next_cursor": nil}})
+}
+
+func (h *Handler) ListOutboundIntents(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	intents, err := h.service.ListOutboundIntents(c.Request.Context(), orgID, c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	response := make([]outboundIntentResponse, 0, len(intents))
+	for _, intent := range intents {
+		response = append(response, outboundIntentResponse{
+			ID:                 intent.ID,
+			ConversationID:     intent.ConversationID,
+			Status:             intent.Status,
+			Provider:           intent.Provider,
+			ProviderMessageID:  intent.ProviderMessageID,
+			DeliveryStatus:     intent.ProviderDeliveryStatus,
+			DeliveryOccurredAt: intent.ProviderDeliveryOccurredAt,
+			DeliveryErrorCode:  intent.ProviderDeliveryErrorCode,
+			ErrorCode:          intent.ErrorCode,
+			CreatedAt:          intent.CreatedAt,
+			UpdatedAt:          intent.UpdatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"data": response})
+}
+
+// ListOrganizationOutboundIntents is the Support Outbound read model. It
+// exposes receipt metadata only; recipients and message content remain on the
+// conversation-scoped reads that already authorize them separately.
+func (h *Handler) ListOrganizationOutboundIntents(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if err != nil {
+		writeServiceError(c, conversation.ErrInvalidInput)
+		return
+	}
+	intents, err := h.service.ListOrganizationOutboundIntents(c.Request.Context(), conversation.OutboundIntentListFilter{
+		OrgID:          orgID,
+		Status:         c.Query("status"),
+		Provider:       c.Query("provider"),
+		DeliveryStatus: c.Query("delivery_status"),
+		Limit:          limit,
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	response := make([]outboundIntentResponse, 0, len(intents))
+	for _, intent := range intents {
+		response = append(response, outboundIntentResponse{
+			ID:                 intent.ID,
+			ConversationID:     intent.ConversationID,
+			Status:             intent.Status,
+			Provider:           intent.Provider,
+			ProviderMessageID:  intent.ProviderMessageID,
+			DeliveryStatus:     intent.ProviderDeliveryStatus,
+			DeliveryOccurredAt: intent.ProviderDeliveryOccurredAt,
+			DeliveryErrorCode:  intent.ProviderDeliveryErrorCode,
+			ErrorCode:          intent.ErrorCode,
+			CreatedAt:          intent.CreatedAt,
+			UpdatedAt:          intent.UpdatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"data": response, "meta": gin.H{"limit": limit}})
+}
+
 func (h *Handler) ListTickets(c *gin.Context) {
 	orgID := requireOrgID(c)
 	if orgID == "" {
@@ -264,6 +429,7 @@ func (h *Handler) ListTickets(c *gin.Context) {
 		OrgID:    orgID,
 		Queue:    c.Query("queue"),
 		Status:   c.Query("status"),
+		WorkType: c.Query("work_type"),
 		Assigned: c.Query("assigned"),
 		TeamID:   c.Query("team"),
 		Label:    c.Query("label"),
@@ -329,6 +495,7 @@ func (h *Handler) CreateTicket(c *gin.Context) {
 		OrgID:               orgID,
 		ConversationID:      body.ConversationID,
 		Status:              body.Status,
+		WorkType:            body.WorkType,
 		Priority:            body.Priority,
 		Severity:            body.Severity,
 		Category:            body.Category,
@@ -372,6 +539,204 @@ func (h *Handler) GetTicket(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": ticket})
 }
 
+func (h *Handler) ListTicketActivity(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	items, err := h.service.ListTicketActivity(c.Request.Context(), orgID, c.Param("id"), limit)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items, "meta": gin.H{"limit": limit, "has_next": false, "next_cursor": nil}})
+}
+
+func (h *Handler) ListIncidents(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListIncidents(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) GetIncident(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	item, err := h.service.GetIncident(c.Request.Context(), orgID, c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) CreateIncident(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body incidentBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	title := ""
+	if body.Title != nil {
+		title = *body.Title
+	}
+	status, severity, ownerUserID, ownerName, impact, problemID := "", "", "", "", "", ""
+	if body.Status != nil {
+		status = *body.Status
+	}
+	if body.Severity != nil {
+		severity = *body.Severity
+	}
+	if body.OwnerUserID != nil {
+		ownerUserID = *body.OwnerUserID
+	}
+	if body.OwnerName != nil {
+		ownerName = *body.OwnerName
+	}
+	if body.CustomerImpact != nil {
+		impact = *body.CustomerImpact
+	}
+	if body.ProblemID != nil {
+		problemID = *body.ProblemID
+	}
+	item, err := h.service.CreateIncident(c.Request.Context(), conversation.CreateIncidentInput{OrgID: orgID, Title: title, Status: status, Severity: severity, OwnerUserID: ownerUserID, OwnerName: ownerName, CustomerImpact: impact, ProblemID: problemID, DeclaredByUserID: actorUserID(c)})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchIncident(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body incidentBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateIncident(c.Request.Context(), conversation.UpdateIncidentInput{OrgID: orgID, IncidentID: c.Param("id"), Title: body.Title, Status: body.Status, Severity: body.Severity, OwnerUserID: body.OwnerUserID, OwnerName: body.OwnerName, CustomerImpact: body.CustomerImpact, ProblemID: body.ProblemID, ActorUserID: actorUserID(c)})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) LinkIncidentTicket(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body linkIncidentTicketBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.LinkIncidentTicket(c.Request.Context(), conversation.LinkIncidentTicketInput{OrgID: orgID, IncidentID: c.Param("id"), TicketID: body.TicketID, Relationship: body.Relationship, CreatedByUserID: actorUserID(c)})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) ListProblems(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListProblems(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) GetProblem(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	item, err := h.service.GetProblem(c.Request.Context(), orgID, c.Param("id"))
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+func (h *Handler) CreateProblem(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body problemBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	title, status, ownerUserID, ownerName, summary, rootCause := "", "", "", "", "", ""
+	if body.Title != nil {
+		title = *body.Title
+	}
+	if body.Status != nil {
+		status = *body.Status
+	}
+	if body.OwnerUserID != nil {
+		ownerUserID = *body.OwnerUserID
+	}
+	if body.OwnerName != nil {
+		ownerName = *body.OwnerName
+	}
+	if body.Summary != nil {
+		summary = *body.Summary
+	}
+	if body.RootCause != nil {
+		rootCause = *body.RootCause
+	}
+	item, err := h.service.CreateProblem(c.Request.Context(), conversation.CreateProblemInput{OrgID: orgID, Title: title, Status: status, OwnerUserID: ownerUserID, OwnerName: ownerName, Summary: summary, RootCause: rootCause, CreatedByUserID: actorUserID(c)})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchProblem(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body problemBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateProblem(c.Request.Context(), conversation.UpdateProblemInput{OrgID: orgID, ProblemID: c.Param("id"), Title: body.Title, Status: body.Status, OwnerUserID: body.OwnerUserID, OwnerName: body.OwnerName, Summary: body.Summary, RootCause: body.RootCause, ActorUserID: actorUserID(c)})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
 func (h *Handler) PatchTicket(c *gin.Context) {
 	orgID := requireOrgID(c)
 	if orgID == "" {
@@ -385,6 +750,11 @@ func (h *Handler) PatchTicket(c *gin.Context) {
 	dueAt, err := parseOptionalTimePtr(body.DueAt)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "due_at must be RFC3339 when provided."))
+		return
+	}
+	followUpAt, err := parseOptionalTimePtr(body.FollowUpAt)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "follow_up_at must be RFC3339 when provided."))
 		return
 	}
 	waitingSince, err := parseOptionalTimePtr(body.WaitingSince)
@@ -421,6 +791,7 @@ func (h *Handler) PatchTicket(c *gin.Context) {
 		OrgID:               orgID,
 		TicketID:            c.Param("id"),
 		Status:              body.Status,
+		WorkType:            body.WorkType,
 		Priority:            body.Priority,
 		Severity:            body.Severity,
 		Category:            body.Category,
@@ -430,6 +801,7 @@ func (h *Handler) PatchTicket(c *gin.Context) {
 		TeamID:              body.TeamID,
 		TeamName:            body.TeamName,
 		DueAt:               dueAt,
+		FollowUpAt:          followUpAt,
 		Source:              nil,
 		AIConfidence:        nil,
 		AIReason:            nil,
@@ -516,6 +888,72 @@ func (h *Handler) ListTicketViews(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) ListTicketTeams(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	items, err := h.service.ListTicketTeams(c.Request.Context(), orgID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+func (h *Handler) CreateTicketTeam(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketTeamBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	active := true
+	if body.Active != nil {
+		active = *body.Active
+	}
+	item, err := h.service.CreateTicketTeam(c.Request.Context(), conversation.CreateTicketTeamInput{
+		OrgID:       orgID,
+		Name:        stringValue(body.Name),
+		Description: stringValue(body.Description),
+		Active:      active,
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": item})
+}
+
+func (h *Handler) PatchTicketTeam(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body ticketTeamBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	item, err := h.service.UpdateTicketTeam(c.Request.Context(), conversation.UpdateTicketTeamInput{
+		OrgID:       orgID,
+		ID:          c.Param("id"),
+		Name:        body.Name,
+		Description: body.Description,
+		Active:      body.Active,
+		ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": item})
 }
 
 func (h *Handler) CreateTicketView(c *gin.Context) {
@@ -658,11 +1096,21 @@ func (h *Handler) RunTicketMacro(c *gin.Context) {
 	if orgID == "" {
 		return
 	}
+	var body struct {
+		ExpectedUpdatedAt string `json:"expected_updated_at"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+			return
+		}
+	}
 	result, err := h.service.RunTicketMacro(c.Request.Context(), conversation.TicketMacroRunInput{
-		OrgID:       orgID,
-		TicketID:    c.Param("id"),
-		MacroID:     c.Param("macro_id"),
-		ActorUserID: actorUserID(c),
+		OrgID:                  orgID,
+		TicketID:               c.Param("id"),
+		MacroID:                c.Param("macro_id"),
+		ActorUserID:            actorUserID(c),
+		ExpectedMacroUpdatedAt: body.ExpectedUpdatedAt,
 	})
 	if err != nil {
 		writeServiceError(c, err)
@@ -863,6 +1311,66 @@ func (h *Handler) PatchTicketChecklistItem(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": checklist})
+}
+
+func (h *Handler) CreateTicketSideConversation(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body createTicketSideConversationBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	thread, err := h.service.CreateTicketSideConversation(c.Request.Context(), conversation.CreateTicketSideConversationInput{
+		OrgID: orgID, TicketID: c.Param("id"), Subject: body.Subject, BodyText: body.BodyText, ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": thread})
+}
+
+func (h *Handler) AddTicketSideConversationMessage(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body addTicketSideConversationMessageBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	thread, err := h.service.AddTicketSideConversationMessage(c.Request.Context(), conversation.AddTicketSideConversationMessageInput{
+		OrgID: orgID, TicketID: c.Param("id"), SideConversationID: c.Param("side_conversation_id"), BodyText: body.BodyText, ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": thread})
+}
+
+func (h *Handler) PatchTicketSideConversation(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	var body patchTicketSideConversationBody
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
+		return
+	}
+	thread, err := h.service.UpdateTicketSideConversation(c.Request.Context(), conversation.UpdateTicketSideConversationInput{
+		OrgID: orgID, TicketID: c.Param("id"), SideConversationID: c.Param("side_conversation_id"), Status: body.Status, ActorUserID: actorUserID(c),
+	})
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": thread})
 }
 
 type submitFeedbackBody struct {
@@ -1090,11 +1598,12 @@ func (h *Handler) CreateAIAction(c *gin.Context) {
 		return
 	}
 	action, err := h.service.CreateAIAction(c.Request.Context(), conversation.CreateAIActionInput{
-		OrgID:          orgID,
-		ConversationID: body.ConversationID,
-		Kind:           body.Kind,
-		Payload:        body.Payload,
-		CreatedBy:      actorUserID(c),
+		OrgID:           orgID,
+		ConversationID:  body.ConversationID,
+		ProposalGroupID: body.ProposalGroupID,
+		Kind:            body.Kind,
+		Payload:         body.Payload,
+		CreatedBy:       actorUserID(c),
 	})
 	if err != nil {
 		writeServiceError(c, err)
@@ -1166,12 +1675,13 @@ func (h *Handler) reviewAIAction(c *gin.Context, forcedDecision string) {
 func listFilterFromRequest(c *gin.Context, orgID string) conversation.ListFilter {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	filter := conversation.ListFilter{
-		OrgID:    orgID,
-		Status:   c.Query("status"),
-		Assigned: c.Query("assigned"),
-		Channel:  c.Query("channel"),
-		Query:    c.Query("q"),
-		Limit:    limit,
+		OrgID:        orgID,
+		ConnectionID: strings.TrimSpace(c.Query("connection_id")),
+		Status:       c.Query("status"),
+		Assigned:     c.Query("assigned"),
+		Channel:      c.Query("channel"),
+		Query:        c.Query("q"),
+		Limit:        limit,
 	}
 	if state := c.Query("state"); filter.Status == "" && state != "" {
 		filter.Status = statusFromTab(state)

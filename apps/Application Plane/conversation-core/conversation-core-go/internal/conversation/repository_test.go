@@ -61,7 +61,7 @@ func TestReconcileTeamsConversationMetadataUsesCounterpart(t *testing.T) {
 		Provider:  "teams",
 		Direction: DirectionOutbound,
 		Subject:   "Robert Røsten",
-		From:      ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@aquatiq.com"},
+		From:      ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@coresystem.com"},
 		To:        []ParticipantInput{{Name: "Robert Røsten", Email: "robert@example.com"}},
 	}
 
@@ -88,7 +88,7 @@ func TestReconcileTeamsMessageMetadataMarksSelfAsAgent(t *testing.T) {
 		OrgID:     "org_1",
 		Provider:  "teams",
 		Direction: DirectionOutbound,
-		From:      ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@aquatiq.com"},
+		From:      ParticipantInput{Name: "Ima Fernandes Da Costa", Email: "ima@coresystem.com"},
 	}
 
 	if err := reconcileTeamsMessageMetadata(t.Context(), tx, event, "msg_1"); err != nil {
@@ -114,6 +114,87 @@ func TestStoredEventAuditTypeUsesMessageSentForOutboundHistory(t *testing.T) {
 	}
 	if got := storedEventAuditType(InboundEvent{Direction: DirectionOutbound}, true); got != "conversation.created" {
 		t.Fatalf("created audit type = %q, want conversation.created", got)
+	}
+}
+
+func TestLoadMessageAttachmentsReturnsOnlyTenantScopedDisplayMetadata(t *testing.T) {
+	pool := &fakePool{multiQueryRows: &fakeRows{values: []fakeRow{{values: []any{"att_1", "msg_1", "report.pdf", "application/pdf", int64(42_000)}}}}}
+	messages, err := loadMessageAttachments(t.Context(), pool, "org_1", []Message{{ID: "msg_1"}, {ID: "msg_2"}})
+	if err != nil {
+		t.Fatalf("loadMessageAttachments() error = %v", err)
+	}
+	if !strings.Contains(pool.multiQuerySQL, "WHERE org_id = $1 AND message_id = ANY($2::text[])") {
+		t.Fatalf("attachment query is not tenant-scoped: %s", pool.multiQuerySQL)
+	}
+	if got, want := messages[0].Attachments, []MessageAttachment{{ID: "att_1", Filename: "report.pdf", MimeType: "application/pdf", SizeBytes: 42_000}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("first message attachments = %#v, want %#v", got, want)
+	}
+	if len(messages[1].Attachments) != 0 {
+		t.Fatalf("second message attachments = %#v, want none", messages[1].Attachments)
+	}
+}
+
+func TestListTicketActivityIsTenantScopedAndDoesNotSelectRawAuditPayload(t *testing.T) {
+	createdAt := time.Date(2026, time.June, 3, 12, 0, 0, 0, time.UTC)
+	pool := &fakePool{multiQueryRows: &fakeRows{values: []fakeRow{{values: []any{"audit_1", "ticket.linked", "user_1", "order", createdAt}}}}}
+	repository := &PGRepository{pool: pool}
+
+	items, err := repository.ListTicketActivity(t.Context(), "org_1", "ticket_1", 20)
+	if err != nil {
+		t.Fatalf("ListTicketActivity() error = %v", err)
+	}
+	if len(items) != 1 || items[0].ResourceKind != "order" || !items[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("ListTicketActivity() = %#v", items)
+	}
+	if !strings.Contains(pool.multiQuerySQL, "WHERE org_id = $1") || !strings.Contains(pool.multiQuerySQL, "payload ->> 'ticket_id' = $2") {
+		t.Fatalf("ticket activity query is not tenant-and-ticket scoped: %s", pool.multiQuerySQL)
+	}
+	for _, action := range []string{"ticket.macro_run", "ticket.checklist_created", "ticket.checklist_item_updated"} {
+		if !strings.Contains(pool.multiQuerySQL, action) {
+			t.Fatalf("ticket activity query does not include %q: %s", action, pool.multiQuerySQL)
+		}
+	}
+	if strings.Contains(pool.multiQuerySQL, "SELECT payload") {
+		t.Fatalf("ticket activity query exposes raw audit payload: %s", pool.multiQuerySQL)
+	}
+	if got, want := pool.multiQueryArgs, []any{"org_1", "ticket_1", 20}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("activity query args = %#v, want %#v", got, want)
+	}
+}
+
+func TestListConversationActivityIsTenantScopedAndDoesNotSelectRawAuditPayload(t *testing.T) {
+	createdAt := time.Date(2026, time.June, 3, 12, 0, 0, 0, time.UTC)
+	pool := &fakePool{multiQueryRows: &fakeRows{values: []fakeRow{{values: []any{"audit_1", "status.changed", "user_1", "", createdAt}}}}}
+	repository := &PGRepository{pool: pool}
+
+	items, err := repository.ListConversationActivity(t.Context(), "org_1", "conv_1", 20)
+	if err != nil {
+		t.Fatalf("ListConversationActivity() error = %v", err)
+	}
+	if len(items) != 1 || items[0].Action != "status.changed" || !items[0].CreatedAt.Equal(createdAt) {
+		t.Fatalf("ListConversationActivity() = %#v", items)
+	}
+	if !strings.Contains(pool.multiQuerySQL, "WHERE org_id = $1") || !strings.Contains(pool.multiQuerySQL, "conversation_id = $2") {
+		t.Fatalf("conversation activity query is not tenant-and-conversation scoped: %s", pool.multiQuerySQL)
+	}
+	if strings.Contains(pool.multiQuerySQL, "payload::text") || strings.Contains(pool.multiQuerySQL, "payload ->>") && strings.Contains(pool.multiQuerySQL, "SELECT *") {
+		t.Fatalf("conversation activity query exposes raw audit payload: %s", pool.multiQuerySQL)
+	}
+}
+
+func TestInsertInboundAttachmentsKeepsStorageReferencesOutOfMessageModel(t *testing.T) {
+	tx := &fakeTx{}
+	err := insertInboundAttachments(t.Context(), tx, "org_1", "msg_1", []AttachmentInput{{
+		Filename: "report.pdf", MimeType: "application/pdf", SizeBytes: 42_000, StorageRef: "private-storage-key", ProviderRef: "provider-file-1",
+	}})
+	if err != nil {
+		t.Fatalf("insertInboundAttachments() error = %v", err)
+	}
+	if len(tx.execSQL) != 1 || !strings.Contains(tx.execSQL[0], "INSERT INTO conversation_attachments") {
+		t.Fatalf("attachment insert SQL = %#v", tx.execSQL)
+	}
+	if got := tx.execArgs[0][6]; got != "private-storage-key" {
+		t.Fatalf("storage reference was not persisted for provider-side retrieval: %#v", got)
 	}
 }
 
@@ -204,10 +285,18 @@ func (r *fakeRows) Conn() *pgx.Conn        { panic("unused") }
 // fakePool implements PgxPool. Only Begin is exercised by ReviewAIAction; the
 // other methods panic to prove they are not reached on this path.
 type fakePool struct {
-	tx         *fakeTx
-	beginErr   error
-	queryRows  []pgx.Row
-	queryCalls int
+	tx             *fakeTx
+	beginErr       error
+	queryRows      []pgx.Row
+	queryCalls     int
+	multiQueryRows pgx.Rows
+	multiQueryErr  error
+	multiQuerySQL  string
+	multiQueryArgs []any
+	execResult     pgconn.CommandTag
+	execErr        error
+	execSQL        string
+	execArgs       []any
 }
 
 func (p *fakePool) Begin(_ context.Context) (pgx.Tx, error) {
@@ -216,7 +305,17 @@ func (p *fakePool) Begin(_ context.Context) (pgx.Tx, error) {
 	}
 	return p.tx, nil
 }
-func (p *fakePool) Query(context.Context, string, ...any) (pgx.Rows, error) { panic("unused") }
+func (p *fakePool) Query(_ context.Context, sql string, args ...any) (pgx.Rows, error) {
+	p.multiQuerySQL = sql
+	p.multiQueryArgs = args
+	if p.multiQueryErr != nil {
+		return nil, p.multiQueryErr
+	}
+	if p.multiQueryRows != nil {
+		return p.multiQueryRows, nil
+	}
+	return &fakeRows{}, nil
+}
 func (p *fakePool) QueryRow(context.Context, string, ...any) pgx.Row {
 	i := p.queryCalls
 	p.queryCalls++
@@ -225,8 +324,10 @@ func (p *fakePool) QueryRow(context.Context, string, ...any) pgx.Row {
 	}
 	return fakeRow{err: pgx.ErrNoRows}
 }
-func (p *fakePool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	panic("unused")
+func (p *fakePool) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	p.execSQL = sql
+	p.execArgs = args
+	return p.execResult, p.execErr
 }
 
 func TestStoreInboundEventOnlyPromotesChronologicallyNewerMessages(t *testing.T) {
@@ -308,9 +409,9 @@ func TestReviewAIActionReturnsNotFoundWithoutPhantomReview(t *testing.T) {
 	}
 }
 
-// Once an action has left suggested state, a second human decision must fail
-// closed. This prevents a rejected or already executed action from being
-// re-approved and published again through a retry or alternate endpoint.
+// Once an action has left either pending-review state, a second human decision
+// must fail closed. This prevents a rejected or already executed action from
+// being re-approved and published again through a retry or alternate endpoint.
 func TestReviewAIActionReturnsConflictForTerminalAction(t *testing.T) {
 	tx := &fakeTx{
 		execResults: []pgconn.CommandTag{pgconn.NewCommandTag("UPDATE 0")},
@@ -335,8 +436,8 @@ func TestReviewAIActionReturnsConflictForTerminalAction(t *testing.T) {
 	if tx.queryCalls != 1 {
 		t.Fatalf("QueryRow called %d times, want terminal-state lookup", tx.queryCalls)
 	}
-	if !strings.Contains(tx.execSQL[0], "status = 'suggested'") {
-		t.Fatalf("UPDATE is not a compare-and-set from suggested state:\n%s", tx.execSQL[0])
+	if !strings.Contains(tx.execSQL[0], "status IN ('suggested', 'suggest_ticket')") {
+		t.Fatalf("UPDATE is not a compare-and-set from a pending-review state:\n%s", tx.execSQL[0])
 	}
 	if tx.committed || !tx.rolledBack {
 		t.Fatalf("terminal review transaction state = committed:%v rolledBack:%v, want rollback", tx.committed, tx.rolledBack)
@@ -371,10 +472,11 @@ func TestReviewAIActionCommitsWhenActionExists(t *testing.T) {
 	}
 }
 
-// Approving with edited fields must merge only the caller-provided keys into
+// Approving ticket-field edits must merge only the caller-provided keys into
 // payload.suggested_fields, atomically with the status UPDATE (same Exec, same
 // transaction), so the executor's later fresh GetAIAction read observes the
-// reviewer's overrides.
+// reviewer's overrides. body_text remains top-level for draft.reply and
+// internal.note actions.
 func TestReviewAIActionMergesEditedFieldsIntoSuggestedFieldsOnApprove(t *testing.T) {
 	tx := &fakeTx{execResults: []pgconn.CommandTag{
 		pgconn.NewCommandTag("UPDATE 1"),
@@ -400,8 +502,11 @@ func TestReviewAIActionMergesEditedFieldsIntoSuggestedFieldsOnApprove(t *testing
 	if !strings.Contains(tx.execSQL[0], "jsonb_set(payload, '{suggested_fields}'") {
 		t.Fatalf("UPDATE does not merge edited fields into suggested_fields:\n%s", tx.execSQL[0])
 	}
-	if !strings.Contains(tx.execSQL[0], "status = 'suggested'") {
-		t.Fatalf("UPDATE is no longer a compare-and-set from suggested state:\n%s", tx.execSQL[0])
+	if !strings.Contains(tx.execSQL[0], "$6::jsonb - 'body_text'") {
+		t.Fatalf("ticket-field merge does not exclude a draft-only body_text override:\n%s", tx.execSQL[0])
+	}
+	if !strings.Contains(tx.execSQL[0], "status IN ('suggested', 'suggest_ticket')") {
+		t.Fatalf("UPDATE is no longer a compare-and-set from a pending-review state:\n%s", tx.execSQL[0])
 	}
 	editedFieldsArg, ok := tx.execArgs[0][5].(string)
 	if !ok {
@@ -412,6 +517,33 @@ func TestReviewAIActionMergesEditedFieldsIntoSuggestedFieldsOnApprove(t *testing
 	}
 	if !tx.committed {
 		t.Fatal("transaction not committed for an approve with edited fields")
+	}
+}
+
+func TestReviewAIActionReplacesDraftBodyTextOnApprove(t *testing.T) {
+	tx := &fakeTx{execResults: []pgconn.CommandTag{
+		pgconn.NewCommandTag("UPDATE 1"),
+		pgconn.NewCommandTag("INSERT 0 1"),
+	}}
+	repo := &PGRepository{pool: &fakePool{tx: tx}}
+
+	err := repo.ReviewAIAction(context.Background(), AIActionReview{
+		OrgID:        "org_1",
+		AIActionID:   "aiact_reply_1",
+		ReviewerID:   "user_1",
+		Decision:     "approved",
+		EditedFields: map[string]string{"body_text": "Human-reviewed reply."},
+		OccurredAt:   time.Date(2026, time.August, 3, 8, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("ReviewAIAction() error = %v, want nil", err)
+	}
+	if !strings.Contains(tx.execSQL[0], "kind IN ('draft.reply', 'internal.note')") || !strings.Contains(tx.execSQL[0], "jsonb_set(payload, '{body_text}'") {
+		t.Fatalf("UPDATE does not atomically replace the reviewable draft/note body:\n%s", tx.execSQL[0])
+	}
+	editedFieldsArg, ok := tx.execArgs[0][5].(string)
+	if !ok || !strings.Contains(editedFieldsArg, `"body_text":"Human-reviewed reply."`) {
+		t.Fatalf("edited-fields JSON = %#v, want reviewed body_text", tx.execArgs[0][5])
 	}
 }
 
@@ -483,7 +615,7 @@ func outboundIntentRow(status, fingerprint, messageID string) pgx.Row {
 		"outintent_1", "org_1", "human-reply-0001", "conv_1", "",
 		fingerprint, status, "whatsapp", "conn_1", "recipient_1",
 		"human_intent", "user_1", "", "outintent_1", "whatsapp.messages.send", strings.Repeat("a", 64),
-		"wamid.1", messageID, "", now, now,
+		"wamid.1", ProviderDeliveryUnconfirmed, (*time.Time)(nil), "", messageID, "", now, now,
 	}}
 }
 
@@ -496,8 +628,47 @@ func outboundIntentValueRow(intent OutboundIntent) pgx.Row {
 		intent.ID, intent.OrgID, intent.IdempotencyKey, intent.ConversationID, intent.AIActionID,
 		intent.RequestFingerprint, intent.Status, intent.Provider, intent.ConnectionID, intent.ProviderThreadID,
 		intent.AuthorizationKind, intent.ActorUserID, intent.ApprovalID, intent.ActionID, intent.Operation, intent.PayloadSHA256,
-		intent.ProviderMessageID, intent.MessageID, intent.ErrorCode, intent.CreatedAt, intent.UpdatedAt,
+		intent.ProviderMessageID, intent.ProviderDeliveryStatus, intent.ProviderDeliveryOccurredAt, intent.ProviderDeliveryErrorCode,
+		intent.MessageID, intent.ErrorCode, intent.CreatedAt, intent.UpdatedAt,
 	}}
+}
+
+func TestListOutboundIntentsReadsCanonicalReceiptLedger(t *testing.T) {
+	pool := &fakePool{multiQueryRows: &fakeRows{values: []fakeRow{
+		outboundIntentRow(OutboundIntentSubmitted, "fingerprint-1", "wamid.1").(fakeRow),
+	}}}
+
+	intents, err := (&PGRepository{pool: pool}).ListOutboundIntents(t.Context(), "org_1", "conv_1")
+	if err != nil {
+		t.Fatalf("ListOutboundIntents() error = %v", err)
+	}
+	if len(intents) != 1 || intents[0].ProviderDeliveryStatus != ProviderDeliveryUnconfirmed {
+		t.Fatalf("ListOutboundIntents() = %#v, want one unconfirmed receipt", intents)
+	}
+	if !strings.Contains(pool.multiQuerySQL, "FROM conversation_outbound_intents") {
+		t.Fatalf("receipt ledger must read the canonical table:\n%s", pool.multiQuerySQL)
+	}
+	if len(pool.multiQueryArgs) != 2 || pool.multiQueryArgs[0] != "org_1" || pool.multiQueryArgs[1] != "conv_1" {
+		t.Fatalf("query args = %#v, want org and conversation scope", pool.multiQueryArgs)
+	}
+}
+
+func TestListOrganizationOutboundIntentsKeepsContentOutOfTheQuery(t *testing.T) {
+	pool := &fakePool{multiQueryRows: &fakeRows{values: []fakeRow{
+		outboundIntentRow(OutboundIntentSubmitted, "fingerprint-1", "wamid.1").(fakeRow),
+	}}}
+	intents, err := (&PGRepository{pool: pool}).ListOrganizationOutboundIntents(t.Context(), OutboundIntentListFilter{
+		OrgID: "org_1", Status: OutboundIntentSubmitted, Provider: "whatsapp", DeliveryStatus: ProviderDeliveryUnconfirmed, Limit: 25,
+	})
+	if err != nil || len(intents) != 1 {
+		t.Fatalf("ListOrganizationOutboundIntents() = %#v, %v", intents, err)
+	}
+	if !strings.Contains(pool.multiQuerySQL, "FROM conversation_outbound_intents") || strings.Contains(pool.multiQuerySQL, "body_text") {
+		t.Fatalf("organization ledger query must be canonical and content-free:\n%s", pool.multiQuerySQL)
+	}
+	if got := pool.multiQueryArgs; len(got) != 5 || got[0] != "org_1" || got[1] != OutboundIntentSubmitted || got[2] != "whatsapp" || got[3] != ProviderDeliveryUnconfirmed || got[4] != 25 {
+		t.Fatalf("query args = %#v, want scoped canonical filter", got)
+	}
 }
 
 func boundHumanClaimInput() OutboundIntentClaimInput {
@@ -933,6 +1104,94 @@ func TestMarkOutboundIntentOutcomeValidatesAndResolvesTransitionRaces(t *testing
 	})
 }
 
+func TestRecordProviderDeliveryReceiptRequiresExactSubmittedMessageEvidence(t *testing.T) {
+	occurredAt := time.Date(2026, time.August, 3, 0, 10, 0, 0, time.UTC)
+	tx := &fakeTx{queryRows: []pgx.Row{fakeRow{values: []any{"outintent_1", "conv_1"}}}}
+	pool := &fakePool{tx: tx}
+	applied, err := (&PGRepository{pool: pool}).RecordProviderDeliveryReceipt(t.Context(), ProviderDeliveryReceiptInput{
+		OrgID: "org_1", Provider: "whatsapp", ProviderMessageID: "wamid.1",
+		Status: ProviderDeliveryRead, OccurredAt: occurredAt,
+	})
+	if err != nil || !applied {
+		t.Fatalf("RecordProviderDeliveryReceipt() = %v/%v, want true/nil", applied, err)
+	}
+	if !strings.Contains(tx.querySQL[0], "provider_message_id = $3") ||
+		!strings.Contains(tx.querySQL[0], "status = 'submitted'") ||
+		!strings.Contains(tx.querySQL[0], "provider_delivery_status <> 'read'") {
+		t.Fatalf("delivery receipt SQL lost exact submitted-message guard:\n%s", tx.querySQL[0])
+	}
+	if got := tx.execArgs; len(got) != 1 || len(got[0]) != 4 || got[0][1] != "org_1" || got[0][2] != "conv_1" {
+		t.Fatalf("delivery receipt audit args = %#v", got)
+	}
+	if !strings.Contains(tx.execSQL[0], "outbound.delivery_recorded") || !tx.committed {
+		t.Fatalf("delivery receipt audit/commit = %#v committed=%v", tx.execSQL, tx.committed)
+	}
+	if got := tx.querySQL; len(got) != 1 {
+		t.Fatalf("delivery receipt query calls = %#v", got)
+	}
+	if got := tx.queryCalls; got != 1 {
+		t.Fatalf("delivery receipt query calls = %d", got)
+	}
+	if got := tx.queryRows; len(got) != 1 {
+		t.Fatalf("delivery receipt query rows = %#v", got)
+	}
+	if got := tx.execCalls; got != 1 {
+		t.Fatalf("delivery receipt audit calls = %d", got)
+	}
+	if got := tx.querySQL[0]; !strings.Contains(got, "RETURNING id, conversation_id") {
+		t.Fatalf("delivery receipt must return provenance binding:\n%s", got)
+	}
+	if got := tx.querySQL[0]; !strings.Contains(got, "provider_delivery_occurred_at") {
+		t.Fatalf("delivery receipt timestamp guard missing:\n%s", got)
+	}
+	if got := tx.querySQL[0]; strings.Contains(got, "body_text") {
+		t.Fatalf("delivery receipt query must remain content-free:\n%s", got)
+	}
+	if got := tx.querySQL; len(got) != 1 {
+		t.Fatalf("delivery receipt query = %#v", got)
+	}
+	if got := tx.execArgs[0]; len(got) != 4 {
+		t.Fatalf("delivery receipt args = %#v", got)
+	}
+
+	for _, input := range []ProviderDeliveryReceiptInput{
+		{OrgID: "org_1", Provider: "whatsapp", ProviderMessageID: "wamid.1", Status: "unconfirmed", OccurredAt: occurredAt},
+		{OrgID: "org_1", Provider: "whatsapp", ProviderMessageID: "", Status: ProviderDeliveryDelivered, OccurredAt: occurredAt},
+		{OrgID: "org_1", Provider: "whatsapp", ProviderMessageID: "wamid.1", Status: ProviderDeliveryDelivered},
+	} {
+		if _, invalidErr := (&PGRepository{pool: &fakePool{}}).RecordProviderDeliveryReceipt(t.Context(), input); !errors.Is(invalidErr, ErrInvalidInput) {
+			t.Fatalf("invalid receipt %#v error = %v, want ErrInvalidInput", input, invalidErr)
+		}
+	}
+}
+
+func TestRecordEmailDeliveryFailureRequiresExactSubmittedIntent(t *testing.T) {
+	occurredAt := time.Date(2026, time.August, 3, 0, 20, 0, 0, time.UTC)
+	tx := &fakeTx{queryRows: []pgx.Row{fakeRow{values: []any{"outintent_123", "conv_1"}}}}
+	applied, err := (&PGRepository{pool: &fakePool{tx: tx}}).RecordEmailDeliveryFailure(t.Context(), EmailDeliveryFailureInput{
+		OrgID: "org_1", Provider: "google", OutboundIntentID: "outintent_123", OccurredAt: occurredAt,
+	})
+	if err != nil || !applied {
+		t.Fatalf("RecordEmailDeliveryFailure() = %v/%v, want true/nil", applied, err)
+	}
+	if !strings.Contains(tx.querySQL[0], "id = $3") || !strings.Contains(tx.querySQL[0], "status = 'submitted'") || !strings.Contains(tx.querySQL[0], "provider_delivery_status = 'failed'") {
+		t.Fatalf("email failure update lost exact intent guards:\n%s", tx.querySQL[0])
+	}
+	if len(tx.execSQL) != 1 || !strings.Contains(tx.execSQL[0], "outbound.delivery_recorded") || !tx.committed {
+		t.Fatalf("email failure audit/commit = %#v committed=%v", tx.execSQL, tx.committed)
+	}
+
+	for _, input := range []EmailDeliveryFailureInput{
+		{OrgID: "org_1", Provider: "google", OutboundIntentID: "bad value", OccurredAt: occurredAt},
+		{OrgID: "org_1", Provider: "whatsapp", OutboundIntentID: "outintent_123", OccurredAt: occurredAt},
+		{OrgID: "org_1", Provider: "google", OutboundIntentID: "outintent_123"},
+	} {
+		if _, invalidErr := (&PGRepository{pool: &fakePool{}}).RecordEmailDeliveryFailure(t.Context(), input); !errors.Is(invalidErr, ErrInvalidInput) {
+			t.Fatalf("invalid email failure %#v error = %v, want ErrInvalidInput", input, invalidErr)
+		}
+	}
+}
+
 // staleOutboundIntentRow builds a fake RETURNING row shaped like a
 // conversation_outbound_intents record already flipped to `unknown` by
 // ReconcileStaleOutboundIntents's UPDATE — id/conversation/ai_action_id vary
@@ -942,7 +1201,7 @@ func staleOutboundIntentRow(id, conversationID, aiActionID string) fakeRow {
 	row.values[0] = id
 	row.values[3] = conversationID
 	row.values[4] = aiActionID
-	row.values[18] = OutboundIntentErrorStaleSendingTimeout
+	row.values[21] = OutboundIntentErrorStaleSendingTimeout
 	return row
 }
 
@@ -1087,6 +1346,27 @@ func TestHardPurgeByOrgRollsBackAllStatementsOnFailure(t *testing.T) {
 	}
 	if tx.committed || !tx.rolledBack {
 		t.Fatalf("committed=%v rolledBack=%v, want rollback on failure", tx.committed, tx.rolledBack)
+	}
+}
+
+func TestPurgeConversationDraftsByOrgDeletesOnlyScopedDrafts(t *testing.T) {
+	pool := &fakePool{}
+	repo := &PGRepository{pool: pool}
+
+	if err := repo.PurgeConversationDraftsByOrg(t.Context(), "org_A"); err != nil {
+		t.Fatalf("PurgeConversationDraftsByOrg() = %v, want nil", err)
+	}
+	if !strings.Contains(pool.execSQL, "DELETE FROM conversation_drafts WHERE org_id = $1") {
+		t.Fatalf("draft purge SQL = %q, want an org-scoped draft-only delete", pool.execSQL)
+	}
+	if len(pool.execArgs) != 1 || pool.execArgs[0] != "org_A" {
+		t.Fatalf("draft purge args = %#v, want exactly [org_A]", pool.execArgs)
+	}
+}
+
+func TestPurgeConversationDraftsByOrgRejectsBlankOrganization(t *testing.T) {
+	if err := (&PGRepository{pool: &fakePool{}}).PurgeConversationDraftsByOrg(t.Context(), "  "); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("error = %v, want ErrInvalidInput", err)
 	}
 }
 

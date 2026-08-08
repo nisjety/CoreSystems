@@ -192,9 +192,51 @@ func (f *fakeStore) MarkOutboundIntentOutcome(_ context.Context, input conversat
 }
 
 type fakeTickets struct {
-	mu      sync.Mutex
-	updates []conversation.UpdateTicketInput
-	err     error
+	mu        sync.Mutex
+	updates   []conversation.UpdateTicketInput
+	notes     []conversation.AddMessageInput
+	incidents map[string]*conversation.Incident
+	problems  map[string]*conversation.Problem
+	nilNote   bool
+	err       error
+}
+
+func (f *fakeTickets) CreateIncidentForApprovedAction(_ context.Context, input conversation.ApprovedIncidentCreateInput) (*conversation.Incident, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.incidents == nil {
+		f.incidents = map[string]*conversation.Incident{}
+	}
+	if existing := f.incidents[input.AIActionID]; existing != nil {
+		copy := *existing
+		return &copy, nil
+	}
+	item := &conversation.Incident{ID: "incident_" + input.AIActionID, OrgID: input.OrgID, IncidentKey: "INC-TEST", Title: input.Title, Status: "declared", Severity: input.Severity, OwnerUserID: input.ActorUserID, TicketLinks: []conversation.IncidentTicketLink{{TicketID: input.TicketID, Relationship: "affected"}}}
+	f.incidents[input.AIActionID] = item
+	copy := *item
+	return &copy, nil
+}
+
+func (f *fakeTickets) CreateProblemForApprovedAction(_ context.Context, input conversation.ApprovedProblemCreateInput) (*conversation.Problem, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.problems == nil {
+		f.problems = map[string]*conversation.Problem{}
+	}
+	if existing := f.problems[input.AIActionID]; existing != nil {
+		copy := *existing
+		return &copy, nil
+	}
+	item := &conversation.Problem{ID: "problem_" + input.AIActionID, OrgID: input.OrgID, ProblemKey: "PRB-TEST", Title: input.Title, Status: "investigating", OwnerUserID: input.ActorUserID, Summary: input.Summary, RootCause: input.RootCause, CreatedByUserID: input.ActorUserID}
+	f.problems[input.AIActionID] = item
+	copy := *item
+	return &copy, nil
 }
 
 func (f *fakeTickets) UpdateTicket(_ context.Context, input conversation.UpdateTicketInput) (*conversation.Ticket, error) {
@@ -211,6 +253,19 @@ func (f *fakeTickets) count() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.updates)
+}
+
+func (f *fakeTickets) AddMessage(_ context.Context, input conversation.AddMessageInput) (*conversation.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.notes = append(f.notes, input)
+	if f.nilNote {
+		return nil, nil
+	}
+	return &conversation.Message{ID: "internal-note-1", OrgID: input.OrgID, ConversationID: input.ConversationID, BodyText: input.BodyText, Internal: input.Internal}, nil
 }
 
 type fakePublisher struct {
@@ -380,6 +435,66 @@ func TestProcess_ApprovedTicketClassification_PromotesRoutesAndEmits(t *testing.
 	}
 }
 
+func TestProcess_ApprovedIncidentCreateUsesActionIdempotencyAndNeverMutatesTicketLifecycle(t *testing.T) {
+	store := &fakeStore{action: &conversation.AIAction{ID: "act-incident-1", OrgID: "org-1", ConversationID: "conv-1", Kind: kindIncidentCreate, Status: "approved", ReviewedBy: "reviewer-1", Payload: map[string]any{"ticket_id": "tkt-1", "title": "Checkout errors", "severity": "critical", "customer_impact": "Checkout unavailable"}}}
+	tickets := &fakeTickets{}
+	pub := &fakePublisher{}
+	exec := &AIActionExecutor{store: store, tickets: tickets, incidents: tickets, publisher: pub}
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-incident-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if len(tickets.incidents) != 1 {
+		t.Fatalf("incidents = %#v, want exactly one", tickets.incidents)
+	}
+	if tickets.count() != 0 {
+		t.Fatalf("ticket lifecycle updates = %d, want none", tickets.count())
+	}
+	if pub.countExecuted() != 1 {
+		t.Fatalf("executed events = %d, want one", pub.countExecuted())
+	}
+	// Redelivery observes the action as executed. The durable operation is also
+	// keyed by action id, so neither route can duplicate the Incident.
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-incident-1", "approved")); got != outcomeAck {
+		t.Fatalf("retry outcome = %v, want ack", got)
+	}
+	if len(tickets.incidents) != 1 {
+		t.Fatalf("incidents after retry = %#v, want one", tickets.incidents)
+	}
+}
+
+func TestProcess_IncidentCreateRejectsUnreviewedActionWithoutDurableEffect(t *testing.T) {
+	store := &fakeStore{action: &conversation.AIAction{ID: "act-incident-2", OrgID: "org-1", ConversationID: "conv-1", Kind: kindIncidentCreate, Status: "suggested", ReviewedBy: "", Payload: map[string]any{"ticket_id": "tkt-1", "title": "Checkout errors", "severity": "critical"}}}
+	tickets := &fakeTickets{}
+	exec := &AIActionExecutor{store: store, tickets: tickets, incidents: tickets, publisher: &fakePublisher{}}
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-incident-2", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if len(tickets.incidents) != 0 {
+		t.Fatalf("incidents = %#v, want none for unapproved action", tickets.incidents)
+	}
+}
+
+func TestProcess_ApprovedProblemCreateUsesActionIdempotencyAndNeverMutatesTicketOrIncident(t *testing.T) {
+	store := &fakeStore{action: &conversation.AIAction{ID: "act-problem-1", OrgID: "org-1", ConversationID: "conv-1", Kind: kindProblemCreate, Status: "approved", ReviewedBy: "reviewer-1", Payload: map[string]any{"title": "Checkout dependency instability", "summary": "Several checkout failures share a dependency timeout.", "root_cause": "Gateway timeout observed."}}}
+	tickets := &fakeTickets{}
+	pub := &fakePublisher{}
+	exec := &AIActionExecutor{store: store, tickets: tickets, problems: tickets, publisher: pub}
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-problem-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if len(tickets.problems) != 1 || len(tickets.incidents) != 0 || tickets.count() != 0 {
+		t.Fatalf("effects = problems:%d incidents:%d ticket updates:%d, want one independent problem only", len(tickets.problems), len(tickets.incidents), tickets.count())
+	}
+	if pub.countExecuted() != 1 || store.action.Status != "executed" {
+		t.Fatalf("execution = events:%d status:%q, want one / executed", pub.countExecuted(), store.action.Status)
+	}
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-problem-1", "approved")); got != outcomeAck || len(tickets.problems) != 1 {
+		t.Fatalf("redelivery must not duplicate the Problem: outcome=%v problems=%d", got, len(tickets.problems))
+	}
+}
+
 // TestProcess_ApprovedTicketClassification_PromotesReviewerEditedFields proves
 // the read side of the edited-fields fix: repository.ReviewAIAction merges a
 // reviewer's overrides into payload.suggested_fields atomically with the
@@ -414,6 +529,49 @@ func TestProcess_ApprovedTicketClassification_PromotesReviewerEditedFields(t *te
 	}
 	if upd.TeamID == nil || *upd.TeamID != "team-fin" {
 		t.Errorf("untouched routing field changed unexpectedly: %+v", upd.TeamID)
+	}
+}
+
+func TestProcess_ApprovedTicketUpdate_AppliesOnlyReviewedFieldsAndEmitsReceipt(t *testing.T) {
+	exec, store, tickets, pub := fixture()
+	store.action.Kind = "ticket.update"
+	store.action.Payload = map[string]any{
+		"ticket_id": "tkt-1",
+		"suggested_fields": map[string]any{
+			"priority":  "urgent",
+			"severity":  "high",
+			"work_type": "incident",
+			"status":    "waiting_team",
+			"team_id":   "team-delivery",
+			"team_name": "Delivery",
+		},
+	}
+	store.ticket.Status = "waiting_customer"
+
+	if got := exec.process(context.Background(), reviewedEvent("org-1", "act-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want outcomeAck", got)
+	}
+	if tickets.count() != 1 {
+		t.Fatalf("UpdateTicket called %d times, want 1", tickets.count())
+	}
+	update := tickets.updates[0]
+	if update.Status == nil || *update.Status != "waiting_team" {
+		t.Fatalf("ticket.update status = %v, want waiting_team", update.Status)
+	}
+	if update.Priority == nil || *update.Priority != "urgent" {
+		t.Errorf("priority = %v, want urgent", update.Priority)
+	}
+	if update.Severity == nil || *update.Severity != "high" {
+		t.Errorf("severity = %v, want high", update.Severity)
+	}
+	if update.WorkType == nil || *update.WorkType != "incident" {
+		t.Errorf("work type = %v, want incident", update.WorkType)
+	}
+	if update.TeamID == nil || *update.TeamID != "team-delivery" || update.TeamName == nil || *update.TeamName != "Delivery" {
+		t.Errorf("team routing = %v / %v, want team-delivery / Delivery", update.TeamID, update.TeamName)
+	}
+	if pub.countExecuted() != 1 || store.action.Status != "executed" {
+		t.Errorf("verified execution missing: events=%d status=%q", pub.countExecuted(), store.action.Status)
 	}
 }
 
@@ -920,5 +1078,37 @@ func TestProcess_DraftReply_NoSenderConfigured_SkipsWithoutClaiming(t *testing.T
 	}
 	if pub.countExecuted() != 0 {
 		t.Errorf("emitted executed despite no sender configured")
+	}
+}
+
+func TestProcess_InternalNote_PersistsPrivateCanonicalMessage(t *testing.T) {
+	store := &fakeStore{action: &conversation.AIAction{
+		ID: "note-1", OrgID: "org-1", ConversationID: "conv-1", Kind: kindInternalNote,
+		Status: "approved", ReviewedBy: "user-1", Payload: map[string]any{"body_text": "Check entitlement before replying."},
+	}}
+	writer := &fakeTickets{}
+	pub := &fakePublisher{}
+	exec := &AIActionExecutor{store: store, notes: writer, publisher: pub}
+	if got := exec.process(t.Context(), reviewedEvent("org-1", "note-1", "approved")); got != outcomeAck {
+		t.Fatalf("outcome = %v, want ack", got)
+	}
+	if len(writer.notes) != 1 || !writer.notes[0].Internal || writer.notes[0].BodyText != "Check entitlement before replying." {
+		t.Fatalf("note writer input = %#v, want one internal canonical note", writer.notes)
+	}
+	if store.claimWins != 1 || pub.countExecuted() != 1 {
+		t.Fatalf("claim/execution = %d/%d, want 1/1", store.claimWins, pub.countExecuted())
+	}
+}
+
+func TestProcess_InternalNote_MissingReceiptRetriesWithoutExecutionEvent(t *testing.T) {
+	store := &fakeStore{action: &conversation.AIAction{ID: "note-2", OrgID: "org-1", ConversationID: "conv-1", Kind: kindInternalNote, Status: "approved", ReviewedBy: "user-1", Payload: map[string]any{"body_text": "private"}}}
+	writer := &fakeTickets{nilNote: true}
+	pub := &fakePublisher{}
+	exec := &AIActionExecutor{store: store, notes: writer, publisher: pub}
+	if got := exec.process(t.Context(), reviewedEvent("org-1", "note-2", "approved")); got != outcomeRetry {
+		t.Fatalf("outcome = %v, want retry", got)
+	}
+	if store.action.Status != "approved" || pub.countExecuted() != 0 {
+		t.Fatalf("missing receipt left status=%q, executed=%d", store.action.Status, pub.countExecuted())
 	}
 }
