@@ -100,7 +100,7 @@ func Load() (*Config, error) {
 			Port:           getEnvAsInt("DB_PORT", 5432),
 			User:           getEnv("DB_USER", "postgres"),
 			Password:       getEnv("DB_PASSWORD", ""),
-			Name:           getEnv("DB_NAME", "aquatiq_users"),
+			Name:           getEnv("DB_NAME", "coresystem_users"),
 			SSLMode:        getEnv("DB_SSL_MODE", "disable"),
 			MaxConnections: getEnvAsInt("DB_MAX_OPEN_CONNS", 25),
 			MinConnections: getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
@@ -120,7 +120,7 @@ func Load() (*Config, error) {
 			SharedPass:  getEnv("NATS_SHARED_PASSWORD", ""),
 			SharedToken: getEnv("NATS_SHARED_TOKEN", ""),
 			SharedAllowTokenFallback: getEnvAsBool("NATS_SHARED_ALLOW_TOKEN_FALLBACK", false),
-			ClusterID:   getEnv("NATS_CLUSTER_ID", "aquatiq-cluster"),
+			ClusterID:   getEnv("NATS_CLUSTER_ID", "coresystem-cluster"),
 			ClientID:    getEnv("NATS_CLIENT_ID", "user-service"),
 		},
 		Auth: AuthConfig{

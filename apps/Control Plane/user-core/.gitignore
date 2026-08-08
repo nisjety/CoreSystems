@@ -5,7 +5,7 @@ tmp/
 *.dll
 *.so
 *.dylib
-aquatiq-user-service*
+coresystem-user-service*
 
 # Test coverage
 *.out

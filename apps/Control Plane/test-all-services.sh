@@ -141,7 +141,7 @@ echo ""
 echo -e "${YELLOW}[TEST 4] Database Persistence Verification${NC}"
 echo ""
 
-DB_RESULT=$(docker exec controlplane-postgres psql -U aquatiq -d org_core -t -c \
+DB_RESULT=$(docker exec controlplane-postgres psql -U coresystem -d org_core -t -c \
   "SELECT id, name, slug, status FROM organizations WHERE id = '$ORG_ID' LIMIT 1;" 2>/dev/null)
 
 if [ -z "$DB_RESULT" ]; then

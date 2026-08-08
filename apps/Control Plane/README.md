@@ -179,13 +179,13 @@ Each service has its own database in the shared PostgreSQL instance:
 
 ```sql
 -- List all databases
-docker exec -it controlplane-postgres psql -U aquatiq -c "\l"
+docker exec -it controlplane-postgres psql -U coresystem -c "\l"
 
 -- Connect to a specific database
-docker exec -it controlplane-postgres psql -U aquatiq -d controlplane
+docker exec -it controlplane-postgres psql -U coresystem -d controlplane
 
 -- Check pgvector extension
-docker exec -it controlplane-postgres psql -U aquatiq -d controlplane -c "\dx"
+docker exec -it controlplane-postgres psql -U coresystem -d controlplane -c "\dx"
 ```
 
 ## Environment Variables
@@ -194,7 +194,7 @@ Each service has its own `.env.local` file. Common variables:
 
 ```env
 # Database (each service uses its own database)
-POSTGRES_DSN=postgres://aquatiq:postgres@postgres:5432/{service_db}?sslmode=disable
+POSTGRES_DSN=postgres://coresystem:postgres@postgres:5432/{service_db}?sslmode=disable
 
 # Redis (each service uses its own DB number)
 REDIS_URL=redis://:redis@redis:6379/{db_number}
@@ -241,7 +241,7 @@ JWT_SECRET=dev-jwt-secret-change-in-production
 
 ```bash
 # Set environment variables for localhost connections
-export POSTGRES_DSN="postgres://aquatiq:postgres@localhost:5432/aquatiq_dev?sslmode=disable"
+export POSTGRES_DSN="postgres://coresystem:postgres@localhost:5432/coresystem_dev?sslmode=disable"
 export REDIS_URL="redis://:redis@localhost:6379/0"
 export NATS_URL="nats://localhost:4222"
 export NATS_TOKEN="nats"
@@ -259,7 +259,7 @@ make build
 ```bash
 # Check Aquatiq Root Container
 cd Org-core
-./check-aquatiq.sh
+./check-coresystem.sh
 
 # Check Docker
 docker ps
@@ -273,13 +273,13 @@ docker ps
 
 ```bash
 # Test PostgreSQL
-docker exec -it controlplane-postgres psql -U aquatiq -c "SELECT 1"
+docker exec -it controlplane-postgres psql -U coresystem -c "SELECT 1"
 
 # List databases
-docker exec -it controlplane-postgres psql -U aquatiq -c "\l"
+docker exec -it controlplane-postgres psql -U coresystem -c "\l"
 
 # Create missing database
-docker exec -it controlplane-postgres psql -U aquatiq -c "CREATE DATABASE {db_name};"
+docker exec -it controlplane-postgres psql -U coresystem -c "CREATE DATABASE {db_name};"
 ```
 
 ### NATS not working
@@ -330,10 +330,10 @@ nats sub test --server=nats://localhost:4223
 
 Access shared infrastructure tools:
 
-- **pgAdmin**: http://localhost:5050 (admin@aquatiq.com / admin)
+- **pgAdmin**: http://localhost:5050 (admin@coresystem.com / admin)
 - **RedisInsight**: http://localhost:5540
 - **NATS Monitor**: http://localhost:8222
-- **MinIO Console**: http://localhost:9011 (admin / aquatiq-minio-2024)
+- **MinIO Console**: http://localhost:9011 (admin / coresystem-minio-2024)
 
 ## Production Deployment
 
@@ -357,6 +357,6 @@ See individual service documentation for details.
 
 ## Support
 
-- [Aquatiq Root Container Docs](https://github.com/Aquatiq/aquatiq-root-container)
+- [Aquatiq Root Container Docs](https://github.com/Aquatiq/coresystem-root-container)
 - [Org Core Integration](./Org-core/AQUATIQ_INTEGRATION.md)
 - [Admin Service Integration](./admin/AQUATIQ_INTEGRATION.md)

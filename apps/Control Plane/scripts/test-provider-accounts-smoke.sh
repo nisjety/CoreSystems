@@ -12,7 +12,7 @@ AUTH_URL="${AUTH_URL:-http://localhost:3011}"
 AUTH_CONTAINER="${AUTH_CONTAINER:-auth-service}"
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-controlplane-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-user_service}"
-POSTGRES_USER="${POSTGRES_USER:-aquatiq}"
+POSTGRES_USER="${POSTGRES_USER:-coresystem}"
 PROVIDER="${PROVIDER:-microsoft}"
 
 if ! command -v curl >/dev/null 2>&1; then

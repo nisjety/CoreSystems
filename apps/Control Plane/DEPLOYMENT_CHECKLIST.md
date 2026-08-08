@@ -102,7 +102,7 @@ curl http://localhost:3011/api/auth/get-session
 curl http://localhost:8080/health
 
 # 2. Database connectivity
-psql -h localhost -p 5433 -U aquatiq -d auth_service -c "SELECT version();"
+psql -h localhost -p 5433 -U coresystem -d auth_service -c "SELECT version();"
 
 # 3. NATS stream check
 docker exec controlplane-nats nats stream list -s nats://localhost:4222
@@ -148,7 +148,7 @@ No Data Plane | No Reasoning | No Orchestration | No Realtime
 ### Key Environment Variables
 ```env
 # Database
-DB_USER=aquatiq
+DB_USER=coresystem
 DB_PASSWORD=<your-secure-password>
 
 # Dragonfly

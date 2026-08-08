@@ -373,8 +373,8 @@ services:
             GIN_MODE: release
             # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
             # user-core needs both its own DB and a secondary auth_service connection.
-            DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
-            AUTH_DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/auth_service?sslmode=disable
+            DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/user_service?sslmode=disable
+            AUTH_DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/auth_service?sslmode=disable
             # Self-scoped gateway/session calls carry an HMAC signature over caller,
             # audience, timestamp, method, URI, verified subject/profile claims, and
             # request-body digest. Plain X-User-* headers remain unauthorized.
@@ -473,7 +473,7 @@ services:
             # Single-source the DB password: assembled here from ${DB_PASSWORD} in .env
             # (compose `environment:` overrides env_file), so the credential lives in
             # exactly ONE place. No per-service .env.docker copy to drift out of sync.
-            DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
+            DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/org_core?sslmode=disable
             USER_CORE_SERVICE_TOKEN: ${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}
             ORG_CORE_SERVICE_CREDENTIALS: >-
                 [{"principal":"verevon-gateway","audience":"org-core","token":"${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self","org:brreg:read","org:erase:self","org:deletion:self"]},{"principal":"auth-core","audience":"org-core","token":"${AUTH_ORG_CORE_SERVICE_TOKEN:?AUTH_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:projection:write:any","org:projection:delete:any"]},{"principal":"billing-core","audience":"org-core","token":"${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"session-core","audience":"org-core","token":"${SESSION_ORG_CORE_SERVICE_TOKEN:?SESSION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"integration-corev2","audience":"org-core","token":"${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]},{"principal":"execution-core","audience":"org-core","token":"${EXECUTION_ORG_CORE_SERVICE_TOKEN:?EXECUTION_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:read:any"]}]
@@ -555,7 +555,7 @@ services:
             # G26: silence gin's debug-mode banner + enable release-mode perf paths.
             GIN_MODE: release
             # Single-source the DB password from ${DB_PASSWORD} in .env (see org-core).
-            DATABASE_URL: postgres://${DB_USER:-aquatiq}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
+            DATABASE_URL: postgres://${DB_USER:-coresystem}:${DB_PASSWORD:?DB_PASSWORD must be set in Control Plane .env}@controlplane-postgres:5432/billing_service?sslmode=disable
             ORG_CORE_SERVICE_TOKEN: ${BILLING_ORG_CORE_SERVICE_TOKEN:?BILLING_ORG_CORE_SERVICE_TOKEN is required}
             BILLING_CORE_SERVICE_CREDENTIALS: >-
                 [{"principal":"verevon-gateway","audience":"billing-core","token":"${GATEWAY_BILLING_CORE_SERVICE_TOKEN:?GATEWAY_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"${AUTH_BILLING_CORE_SERVICE_TOKEN:?AUTH_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:organization:deactivate:any"]},{"principal":"session-core","audience":"billing-core","token":"${SESSION_BILLING_CORE_SERVICE_TOKEN:?SESSION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:account:read:any"]},{"principal":"integration-corev2","audience":"billing-core","token":"${INTEGRATION_BILLING_CORE_SERVICE_TOKEN:?INTEGRATION_BILLING_CORE_SERVICE_TOKEN is required}","scopes":["billing:usage:write:any"]}]

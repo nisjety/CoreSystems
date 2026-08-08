@@ -32,6 +32,9 @@ func (p *sharedPlanChangeTestPublisher) PublishPlanChanged(_ context.Context, or
 	p.eventID = fmt.Sprintf("organization-plan:%s:%d", orgID, revision)
 	return p.err
 }
+func (p *sharedPlanChangeTestPublisher) PublishInteractiveRetentionEnabled(context.Context, string, int64) error {
+	return p.err
+}
 func (p *sharedPlanChangeTestPublisher) PublishMemberAdded(context.Context, string, string, string, string, string) {
 }
 func (p *sharedPlanChangeTestPublisher) PublishMemberRemoved(context.Context, string, string) {}

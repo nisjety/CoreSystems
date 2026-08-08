@@ -29,7 +29,7 @@ echo ""
 
 echo -e "${YELLOW}Step 2: Checking database connections...${NC}"
 # Check if Aquatiq PostgreSQL is running
-if docker exec aquatiq-postgres psql -U aquatiq -c "SELECT 1" > /dev/null 2>&1; then
+if docker exec coresystem-postgres psql -U coresystem -c "SELECT 1" > /dev/null 2>&1; then
     echo -e "${GREEN}✅ Aquatiq PostgreSQL connected${NC}"
 else
     echo -e "${RED}❌ Error: Aquatiq PostgreSQL not accessible${NC}"
@@ -39,7 +39,7 @@ fi
 
 # Create Letta database
 echo -e "${YELLOW}   Creating letta_db database...${NC}"
-docker exec aquatiq-postgres psql -U aquatiq -c "CREATE DATABASE letta_db;" 2>/dev/null || echo "   Database already exists"
+docker exec coresystem-postgres psql -U coresystem -c "CREATE DATABASE letta_db;" 2>/dev/null || echo "   Database already exists"
 echo -e "${GREEN}✅ letta_db ready${NC}"
 echo ""
 

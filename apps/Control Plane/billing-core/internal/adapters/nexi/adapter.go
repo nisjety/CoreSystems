@@ -160,7 +160,14 @@ func (a *Adapter) CreateCheckoutSession(
 	req.Checkout.URL = params.SuccessURL
 	req.Checkout.TermsURL = deriveTermsURL(a.cfg.TermsURL, params.SuccessURL)
 	req.Checkout.MerchantHandlesConsumerData = true
-	req.MyReference = params.OrgID + ":" + billablePlanReference(params.Plan)
+	// Nexi caps myReference at 36 characters. The previous
+	// "<orgID>:<planReference>" format was 43-50 chars with 32-char org ids,
+	// so Nexi rejected EVERY create with a bare 400 — paid checkout had never
+	// once succeeded. The org id is not lost: it already travels in
+	// order.reference (set above), which RetrieveCheckoutSession falls back
+	// to. myReference therefore carries only the plan ("verevon-<plan>",
+	// ≤18 chars), the one value with no other home in Nexi's record.
+	req.MyReference = billablePlanReference(params.Plan)
 
 	// Register the two events that authoritatively confirm payment. Only add
 	// webhooks when both a public URL and a shared secret are configured, so a
@@ -333,16 +340,33 @@ func deriveTermsURL(configured, successURL string) string {
 	return su
 }
 
+// parseMyReference recovers org/plan hints from a payment's myReference.
+// Three formats exist in the wild:
+//   - "verevon-<plan>"       current: plan only; org comes from order.reference
+//   - "<orgID>:<planref>"    legacy: both, though only short org ids ever fit
+//   - "<orgID>"              oldest: org only
+//
+// The plan is returned in canonical form ("hobby", not "verevon-hobby") —
+// billablePlan() treats any unknown string as "free", so returning the raw
+// prefixed reference would silently downgrade a paid activation to a no-op.
 func parseMyReference(ref string) (orgID, plan string) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", ""
 	}
-	parts := strings.SplitN(ref, ":", 2)
-	if len(parts) == 2 {
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	if parts := strings.SplitN(ref, ":", 2); len(parts) == 2 {
+		return strings.TrimSpace(parts[0]), canonicalPlanFromReference(parts[1])
 	}
-	return strings.TrimSpace(parts[0]), ""
+	if strings.HasPrefix(ref, "verevon-") {
+		return "", canonicalPlanFromReference(ref)
+	}
+	return ref, ""
+}
+
+// canonicalPlanFromReference maps a billable plan reference back to the plan
+// id billablePlan()/normalizePlan() understand.
+func canonicalPlanFromReference(ref string) string {
+	return strings.TrimPrefix(strings.TrimSpace(ref), "verevon-")
 }
 
 // checkoutPlanAmount returns the monthly price in minor units (øre), matching

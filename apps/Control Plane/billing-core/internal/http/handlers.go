@@ -260,6 +260,12 @@ func (s *Server) createCheckoutSession(c *gin.Context) {
 			strings.Contains(message, "invalid"):
 			c.JSON(http.StatusBadRequest, gin.H{"error": message})
 		default:
+			// The client is deliberately told nothing beyond "failed" — the
+			// provider error can carry account detail. But discarding it
+			// server-side too left a 502 with no cause anywhere in the fleet,
+			// which is unowned-diagnosis by construction. Log it here; the
+			// response body is unchanged.
+			log.Printf("checkout-session create failed org=%s plan=%s: %v", orgID, req.Plan, err)
 			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to create checkout session"})
 		}
 		return

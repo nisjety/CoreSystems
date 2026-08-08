@@ -1,7 +1,7 @@
 .PHONY: help proto-generate build build-grpc build-dual run run-grpc run-dual test clean tidy
 
 # Variables
-BINARY_NAME=aquatiq-user-service
+BINARY_NAME=coresystem-user-service
 BINARY_DIR=tmp
 PROTO_DIR=proto
 INTERNAL_DIR=internal
@@ -98,9 +98,9 @@ migrate-down: ## Run database migrations down
 
 docker-build: ## Build Docker image
 	@echo "Building Docker image..."
-	@docker build -t aquatiq-user-service:latest .
+	@docker build -t coresystem-user-service:latest .
 	@echo "Docker image built"
 
 docker-run: ## Run Docker container
 	@echo "Running Docker container..."
-	@docker run -p 50052:50052 --env-file .env aquatiq-user-service:latest
+	@docker run -p 50052:50052 --env-file .env coresystem-user-service:latest

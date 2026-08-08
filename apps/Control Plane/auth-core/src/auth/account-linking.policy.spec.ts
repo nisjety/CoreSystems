@@ -5,8 +5,8 @@ import {
 
 describe('account linking policy', () => {
   it('normalizes only case and surrounding whitespace', () => {
-    expect(normalizeIdentityEmail(' Ima.DaCosta+work@Aquatiq.com ')).toBe(
-      'ima.dacosta+work@aquatiq.com',
+    expect(normalizeIdentityEmail(' Ima.DaCosta+work@Coresystem.com ')).toBe(
+      'ima.dacosta+work@coresystem.com',
     );
   });
 
@@ -16,9 +16,9 @@ describe('account linking policy', () => {
       expect(
         canImplicitlyLinkProviderIdentity({
           provider,
-          providerEmail: 'Ima.DaCosta@Aquatiq.com',
+          providerEmail: 'Ima.DaCosta@Coresystem.com',
           providerEmailVerified: true,
-          canonicalEmail: 'ima.dacosta@aquatiq.com',
+          canonicalEmail: 'ima.dacosta@coresystem.com',
         }),
       ).toBe(true);
     },
@@ -28,9 +28,9 @@ describe('account linking policy', () => {
     expect(
       canImplicitlyLinkProviderIdentity({
         provider: 'microsoft',
-        providerEmail: 'ima.dacosta@aquatiq.com',
+        providerEmail: 'ima.dacosta@coresystem.com',
         providerEmailVerified: false,
-        canonicalEmail: 'ima.dacosta@aquatiq.com',
+        canonicalEmail: 'ima.dacosta@coresystem.com',
       }),
     ).toBe(false);
   });
@@ -41,9 +41,9 @@ describe('account linking policy', () => {
       expect(
         canImplicitlyLinkProviderIdentity({
           provider,
-          providerEmail: 'ima.dacosta@aquatiq.com',
+          providerEmail: 'ima.dacosta@coresystem.com',
           providerEmailVerified: true,
-          canonicalEmail: 'ima.dacosta@aquatiq.com',
+          canonicalEmail: 'ima.dacosta@coresystem.com',
         }),
       ).toBe(true);
     },
@@ -55,7 +55,7 @@ describe('account linking policy', () => {
         provider: 'apple',
         providerEmail: 'random@privaterelay.appleid.com',
         providerEmailVerified: true,
-        canonicalEmail: 'ima.dacosta@aquatiq.com',
+        canonicalEmail: 'ima.dacosta@coresystem.com',
       }),
     ).toBe(false);
   });

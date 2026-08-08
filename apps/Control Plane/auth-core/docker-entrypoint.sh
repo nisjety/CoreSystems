@@ -59,7 +59,7 @@ if [ -n "$PG_URL" ]; then
 fi
 : ${DB_NAME:=auth_service}
 : ${DB_HOST:=controlplane-postgres}
-: ${DB_USER:=aquatiq}
+: ${DB_USER:=coresystem}
 : ${POSTGRES_READY_MAX_ATTEMPTS:=90}
 
 case "$POSTGRES_READY_MAX_ATTEMPTS" in

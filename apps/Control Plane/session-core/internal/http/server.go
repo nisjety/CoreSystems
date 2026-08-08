@@ -149,7 +149,7 @@ func corsMiddleware() gin.HandlerFunc {
 func isAllowedOrigin(origin string) bool {
 	allowed := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
 	if allowed == "" {
-		allowed = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,https://tools.aquatiq.com"
+		allowed = "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,https://tools.coresystem.com"
 	}
 	for _, value := range strings.Split(allowed, ",") {
 		if strings.TrimSpace(value) == origin {
@@ -283,6 +283,7 @@ func resolveIdentityFromBearer(ctx context.Context, token, authServiceURL string
 
 func authContextMiddleware() gin.HandlerFunc {
 	serviceCredentials := loadServiceCredentials()
+	delegationNonces := newSessionDelegationNonceCache(sessionDelegationNonceLimit)
 	authServiceURL := strings.TrimRight(os.Getenv("AUTH_SERVICE_URL"), "/")
 	if authServiceURL == "" {
 		authServiceURL = "http://auth-service:3011"
@@ -308,7 +309,7 @@ func authContextMiddleware() gin.HandlerFunc {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "service scope denied"})
 				return
 			}
-			delegation, ok := verifySessionServiceDelegation(c.Request, credential, time.Now())
+			delegation, ok := verifySessionServiceDelegation(c.Request, credential, delegationNonces, time.Now())
 			if !ok {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "signed service delegation required"})
 				return

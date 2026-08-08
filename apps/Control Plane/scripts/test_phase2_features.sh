@@ -64,7 +64,7 @@ echo -e "${YELLOW}Test 2: Audit Logging${NC}"
 echo "Checking if audit logs were created..."
 
 # Query audit logs from database
-AUDIT_COUNT=$(docker exec aquatiq-postgres-local psql -U postgres -d org_core -t -c \
+AUDIT_COUNT=$(docker exec coresystem-postgres-local psql -U postgres -d org_core -t -c \
     "SELECT COUNT(*) FROM audit_logs WHERE timestamp > NOW() - INTERVAL '5 minutes';" 2>/dev/null | xargs)
 
 if [ "$AUDIT_COUNT" -gt 0 ]; then
@@ -72,7 +72,7 @@ if [ "$AUDIT_COUNT" -gt 0 ]; then
     
     # Show sample audit log
     echo "Sample audit log:"
-    docker exec aquatiq-postgres-local psql -U postgres -d org_core -c \
+    docker exec coresystem-postgres-local psql -U postgres -d org_core -c \
         "SELECT id, org_id, action, resource, request_method, request_path, response_status, timestamp 
          FROM audit_logs 
          ORDER BY timestamp DESC 
@@ -134,7 +134,7 @@ echo -e "${YELLOW}Test 4: Database Schema Verification${NC}"
 
 # Check Org Core tables
 echo "Org Core tables:"
-ORG_TABLES=$(docker exec aquatiq-postgres-local psql -U postgres -d org_core -t -c \
+ORG_TABLES=$(docker exec coresystem-postgres-local psql -U postgres -d org_core -t -c \
     "SELECT table_name FROM information_schema.tables 
      WHERE table_schema = 'public' AND table_name IN ('audit_logs', 'jobs', 'sessions') 
      ORDER BY table_name;" 2>/dev/null | xargs)
@@ -149,7 +149,7 @@ fi
 # Check AI Core tables
 echo ""
 echo "AI Core tables:"
-AI_TABLES=$(docker exec aquatiq-postgres-local psql -U postgres -d ai_core -t -c \
+AI_TABLES=$(docker exec coresystem-postgres-local psql -U postgres -d ai_core -t -c \
     "SELECT table_name FROM information_schema.tables 
      WHERE table_schema = 'public' AND table_name LIKE 'prompt%' OR table_name LIKE 'template%' 
      ORDER BY table_name;" 2>/dev/null | xargs)

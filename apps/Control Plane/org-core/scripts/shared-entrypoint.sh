@@ -16,7 +16,7 @@ fi
 
 # Apply defaults — caller should set DB_NAME before sourcing
 : ${DB_HOST:=controlplane-postgres}
-: ${DB_USER:=aquatiq}
+: ${DB_USER:=coresystem}
 
 echo "⏳ Waiting for Postgres at ${DB_HOST} (db=${DB_NAME})..."
 until pg_isready -h "$DB_HOST" -U "$DB_USER" -q; do sleep 1; done

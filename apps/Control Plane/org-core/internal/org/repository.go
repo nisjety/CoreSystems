@@ -337,16 +337,28 @@ ON CONFLICT (id) DO NOTHING`,
 // managed, attested retention policy in auth-core; this writer never grants a
 // per-request override. The write is a targeted jsonb_set so it never clobbers
 // unrelated metadata keys, and it is RLS-scoped to the organization.
-func (r *Repository) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) error {
+func (r *Repository) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) (bool, error) {
 	payload, err := json.Marshal(map[string]any{
 		"zdr":       zdr,
 		"updatedBy": changedBy,
 		"updatedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal interactive retention: %w", err)
+		return false, fmt.Errorf("marshal interactive retention: %w", err)
 	}
-	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+	enqueued := false
+	err = r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		var wasEnabled bool
+		if err := tx.QueryRow(ctx, `
+SELECT COALESCE((metadata -> 'interactiveRetention' ->> 'zdr')::boolean, false)
+FROM organizations
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE`, orgID).Scan(&wasEnabled); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock interactive retention: %w", err)
+		}
 		tag, err := tx.Exec(ctx, `
 UPDATE organizations
 SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{interactiveRetention}', $2::jsonb, true),
@@ -354,6 +366,35 @@ SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{interactiveRetention
 WHERE id = $1 AND deleted_at IS NULL`, orgID, payload)
 		if err != nil {
 			return fmt.Errorf("update interactive retention: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		if zdr && !wasEnabled {
+			if _, err := tx.Exec(ctx, `INSERT INTO organization_interactive_retention_outbox (org_id) VALUES ($1)`, orgID); err != nil {
+				return fmt.Errorf("record interactive retention outbox: %w", err)
+			}
+			enqueued = true
+		}
+		return nil
+	})
+	return enqueued, err
+}
+
+// SetSupportAIMode stores the organization-owned support operating mode without
+// touching retention metadata. Only policy modes that the support runtime can
+// truthfully honor are accepted by the service.
+func (r *Repository) SetSupportAIMode(ctx context.Context, orgID, mode, changedBy string) error {
+	payload, err := json.Marshal(map[string]any{
+		"mode": mode, "updatedBy": changedBy, "updatedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal support AI mode: %w", err)
+	}
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE organizations SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{supportAi}', $2::jsonb, true), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, orgID, payload)
+		if err != nil {
+			return fmt.Errorf("update support AI mode: %w", err)
 		}
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound

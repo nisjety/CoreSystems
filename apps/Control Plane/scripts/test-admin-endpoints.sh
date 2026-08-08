@@ -11,7 +11,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 AUTH_URL="http://localhost:3001"
-ADMIN_EMAIL="admin@aquatiq.com"
+ADMIN_EMAIL="admin@coresystem.com"
 ADMIN_PASSWORD="AdminPass123!"
 
 echo -e "${BLUE}=========================================${NC}"
@@ -21,10 +21,10 @@ echo
 
 # Step 1: Ensure admin user has admin role
 echo -e "${YELLOW}Step 1: Setting up admin user${NC}"
-docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -c \
+docker exec coresystem-postgres-local psql -U coresystem -d auth_service -c \
   "UPDATE \"user\" SET role = 'admin' WHERE email = '$ADMIN_EMAIL'" > /dev/null 2>&1 || true
 
-ADMIN_ROLE=$(docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -t -c \
+ADMIN_ROLE=$(docker exec coresystem-postgres-local psql -U coresystem -d auth_service -t -c \
   "SELECT role FROM \"user\" WHERE email = '$ADMIN_EMAIL' LIMIT 1" | xargs)
 
 if [ "$ADMIN_ROLE" = "admin" ]; then

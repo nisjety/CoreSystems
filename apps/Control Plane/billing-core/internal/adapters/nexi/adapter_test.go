@@ -60,8 +60,11 @@ func TestCreateCheckoutSessionBuildsNexiPayment(t *testing.T) {
 	if amt, _ := order["amount"].(float64); int64(amt) != 99900 {
 		t.Fatalf("order.amount = %v, want 99900 (standard)", order["amount"])
 	}
-	if body["myReference"] != "org_abc:verevon-standard" {
-		t.Fatalf("myReference = %v", body["myReference"])
+	// Plan only — the org id travels in order.reference. Nexi hard-caps
+	// myReference at 36 chars, and the old "<orgID>:<planref>" format
+	// exceeded it for every real 32-char org id, 400-ing every checkout.
+	if body["myReference"] != "verevon-standard" {
+		t.Fatalf("myReference = %v, want verevon-standard", body["myReference"])
 	}
 	// Nexi requires termsUrl for EmbeddedCheckout; with none configured it must
 	// be derived from the return URL's origin (never sent empty/omitted).
@@ -113,8 +116,12 @@ func TestRetrieveCheckoutSessionMapsStatus(t *testing.T) {
 	if status.Status != "charged" {
 		t.Fatalf("status = %q, want charged", status.Status)
 	}
-	if status.OrgID != "org_abc" || status.Plan != "verevon-standard" {
-		t.Fatalf("org/plan = %q/%q", status.OrgID, status.Plan)
+	// Plan must come back CANONICAL ("standard"), never the raw
+	// "verevon-standard" reference: billablePlan() maps unknown strings to
+	// "free", so a raw reference here silently turns webhook activation of a
+	// paid plan into "payment missing org/plan reference".
+	if status.OrgID != "org_abc" || status.Plan != "standard" {
+		t.Fatalf("org/plan = %q/%q, want org_abc/standard", status.OrgID, status.Plan)
 	}
 	if status.AmountCents != 99900 || status.Provider != "nexi" {
 		t.Fatalf("amount/provider wrong: %+v", status)
@@ -159,14 +166,54 @@ func TestProviderErrorDoesNotExposeResponseBody(t *testing.T) {
 
 func TestParseMyReference(t *testing.T) {
 	cases := map[string][2]string{
-		"org_1:verevon-pro": {"org_1", "verevon-pro"},
-		"org_2":            {"org_2", ""},
-		"":                 {"", ""},
+		// Current format: plan only, canonicalized; org resolves via
+		// order.reference upstream of this helper.
+		"verevon-hobby": {"", "hobby"},
+		"verevon-pro":   {"", "pro"},
+		// Legacy in-flight payments: org:planref, plan still canonicalized.
+		"org_1:verevon-pro": {"org_1", "pro"},
+		// Oldest format: bare org id.
+		"org_2": {"org_2", ""},
+		"":      {"", ""},
 	}
 	for in, want := range cases {
 		org, plan := parseMyReference(in)
 		if org != want[0] || plan != want[1] {
 			t.Errorf("parseMyReference(%q) = %q,%q want %q,%q", in, org, plan, want[0], want[1])
+		}
+	}
+}
+
+// Nexi rejects any create whose myReference exceeds 36 characters with a bare
+// 400 — no field name in the error the adapter surfaces. This pin covers every
+// billable plan against the longest real-world org id shape (32 chars, the
+// Better Auth default) so the cap can never be silently re-broken by a format
+// change.
+func TestCreateCheckoutSessionMyReferenceFitsNexiCap(t *testing.T) {
+	const nexiMyReferenceMax = 36
+	longOrgID := strings.Repeat("x", 32)
+
+	for _, plan := range []string{"hobby", "standard", "pro", "enterprise"} {
+		var got string
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ := io.ReadAll(r.Body)
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			got, _ = body["myReference"].(string)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"paymentId":"pay_len","hostedPaymentPageUrl":"https://pay.example/r"}`))
+		}))
+
+		_, err := NewAdapter(Config{BaseURL: srv.URL, SecretKey: "k"}).CreateCheckoutSession(
+			context.Background(),
+			billing.CheckoutParams{OrgID: longOrgID, Plan: plan, SuccessURL: "https://app.verevon/onboarding"},
+		)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("plan %s: %v", plan, err)
+		}
+		if got == "" || len(got) > nexiMyReferenceMax {
+			t.Errorf("plan %s: myReference %q is %d chars, must be 1..%d", plan, got, len(got), nexiMyReferenceMax)
 		}
 	}
 }

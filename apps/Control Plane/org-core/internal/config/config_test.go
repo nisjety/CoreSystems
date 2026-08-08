@@ -64,7 +64,7 @@ func TestLoad_NATSURLNoDeadHostname(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() returned error: %v", err)
 	}
-	const dead = "aquatiq-nats-local"
+	const dead = "coresystem-nats-local"
 	if containsStr(cfg.NATSURL, dead) {
 		t.Errorf("NATSURL contains dead hostname %q: %s", dead, cfg.NATSURL)
 	}
@@ -241,7 +241,7 @@ func TestApplySSLMode(t *testing.T) {
 		},
 		{
 			name: "docker service name defaults to disable",
-			dsn:  "postgres://aquatiq:pw@controlplane-postgres:5432/postgres",
+			dsn:  "postgres://coresystem:pw@controlplane-postgres:5432/postgres",
 			want: "sslmode=disable",
 		},
 		{
@@ -306,7 +306,7 @@ func TestLoad_AppliesSSLModeToDatabaseURL(t *testing.T) {
 func TestLoad_RespectsExplicitLocalDisable(t *testing.T) {
 	clearEnv(t)
 	// Local docker DSN already opts out of TLS — Load must not override it.
-	const dsn = "postgres://aquatiq:pw@controlplane-postgres:5432/postgres?sslmode=disable"
+	const dsn = "postgres://coresystem:pw@controlplane-postgres:5432/postgres?sslmode=disable"
 	t.Setenv("DATABASE_URL", dsn)
 
 	cfg, err := Load()

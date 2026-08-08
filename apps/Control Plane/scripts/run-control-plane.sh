@@ -125,7 +125,7 @@ random_value() {
 
 # Keep local database URLs internally consistent with the generated database
 # password. Existing non-empty service-local values always win.
-db_user=$(lookup_value DB_USER || database_value_from_urls user || printf 'aquatiq')
+db_user=$(lookup_value DB_USER || database_value_from_urls user || printf 'coresystem')
 db_password=$(lookup_value DB_PASSWORD || database_value_from_urls password || random_value)
 dragonfly_password=$(lookup_value DRAGONFLY_PASSWORD || random_value)
 persist_if_missing DB_USER "$db_user"
@@ -165,7 +165,7 @@ required_credentials=(
   CONTROL_SHARED_NATS_PROVISIONER_PASSWORD DOCUMENTS_GDPR_NATS_PASSWORD
   CONVERSATION_CORE_GDPR_NATS_PASSWORD COST_CORE_GDPR_NATS_PASSWORD
   DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD DATA_QUALITY_GDPR_NATS_PASSWORD
-  EMBEDDING_ENGINE_GDPR_NATS_PASSWORD
+  EMBEDDING_ENGINE_GDPR_NATS_PASSWORD EXECUTION_ORG_CORE_SERVICE_TOKEN
   GRAPH_INDEX_GDPR_NATS_PASSWORD INDEX_ENGINE_GDPR_NATS_PASSWORD
   NOTIFICATION_CORE_GDPR_NATS_PASSWORD QUARRY_CONTROL_GDPR_NATS_PASSWORD
   QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD

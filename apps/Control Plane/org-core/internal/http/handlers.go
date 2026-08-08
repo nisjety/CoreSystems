@@ -320,14 +320,21 @@ func (s *Server) updatePlan(c *gin.Context) {
 func (s *Server) updateOrgSettings(c *gin.Context) {
 	orgID := c.Param("id")
 	var req struct {
-		ZeroDataRetention *bool `json:"zeroDataRetention"`
+		ZeroDataRetention *bool   `json:"zeroDataRetention"`
+		SupportAIMode     *string `json:"supportAiMode"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.ZeroDataRetention == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "zeroDataRetention (boolean) is required"})
+	if err := c.ShouldBindJSON(&req); err != nil || (req.ZeroDataRetention == nil && req.SupportAIMode == nil) || (req.ZeroDataRetention != nil && req.SupportAIMode != nil) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provide exactly one of zeroDataRetention (boolean) or supportAiMode"})
 		return
 	}
 	changedBy := c.GetHeader("x-user-id")
-	orgData, err := s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
+	var orgData *org.Organization
+	var err error
+	if req.SupportAIMode != nil {
+		orgData, err = s.orgService.SetSupportAIMode(c.Request.Context(), orgID, *req.SupportAIMode, changedBy)
+	} else {
+		orgData, err = s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
+	}
 	if err != nil {
 		switch {
 		case err == org.ErrNotFound:
@@ -480,6 +487,55 @@ func (s *Server) getOrganizationByTenant(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, orgData)
+}
+
+// listOrganizationsInternal enumerates every non-deleted organization for a
+// verified internal caller (org:read:any). Used by background services that
+// must service every tenant rather than one at a time (e.g. execution-core's
+// approval-delivery worker) — there is no acting end user to scope a request
+// to, so this is deliberately distinct from getUserOrganizations, which
+// requires x-user-id and only ever returns that user's own orgs.
+// GET /internal/orgs?limit=&offset=
+func (s *Server) listOrganizationsInternal(c *gin.Context) {
+	limit := 100
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = parsed
+	}
+	offset := 0
+	if raw := strings.TrimSpace(c.Query("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "offset must be a non-negative integer"})
+			return
+		}
+		offset = parsed
+	}
+
+	orgs, err := s.orgService.ListOrganizations(c.Request.Context(), limit, offset)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list organizations"})
+		return
+	}
+	// Repository.ListOrganizations clamps limit to [1, 500] internally, so a
+	// full page at the CLAMPED size (not necessarily the requested one) is
+	// the honest "there may be more" signal.
+	clampedLimit := limit
+	if clampedLimit <= 0 {
+		clampedLimit = 100
+	}
+	if clampedLimit > 500 {
+		clampedLimit = 500
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"organizations": orgs,
+		"count":         len(orgs),
+		"hasMore":       len(orgs) == clampedLimit,
+	})
 }
 
 // ensureOrganizationFromTenant resolves an organization by provider+tenant, creating one if missing.

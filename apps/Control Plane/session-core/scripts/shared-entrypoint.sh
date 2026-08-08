@@ -13,7 +13,7 @@ if [ -n "$DATABASE_URL" ]; then
 fi
 
 : ${DB_HOST:=controlplane-postgres}
-: ${DB_USER:=aquatiq}
+: ${DB_USER:=coresystem}
 
 case "$DB_NAME" in
   ''|*[!A-Za-z0-9_-]*)

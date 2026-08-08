@@ -107,12 +107,12 @@ sleep 3
 
 # Verify in org-core database
 echo -e "${YELLOW}🔍 Verifying organization in org-core database...${NC}"
-ORG_IN_DB=$(docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -t -c \
+ORG_IN_DB=$(docker exec coresystem-postgres-local psql -U coresystem -d org_core -t -c \
   "SELECT COUNT(*) FROM organizations WHERE created_at > NOW() - INTERVAL '30 seconds';")
 
 if [ "$(echo $ORG_IN_DB | tr -d ' ')" -gt "0" ]; then
   echo -e "${GREEN}✅ Organization persisted to org-core database${NC}"
-  docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+  docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
     "SELECT id, name, status, created_at FROM organizations ORDER BY created_at DESC LIMIT 1;"
 else
   echo -e "${RED}❌ Organization not found in org-core database${NC}"
@@ -219,12 +219,12 @@ echo -e "${YELLOW}💾 Step 7: Verifying complete database state...${NC}"
 echo ""
 
 echo -e "${BLUE}Organizations:${NC}"
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
   "SELECT id, name, status, plan, created_at FROM organizations ORDER BY created_at DESC LIMIT 3;"
 echo ""
 
 echo -e "${BLUE}Entitlements:${NC}"
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
   "SELECT org_id, entitlement_key, enabled, updated_at FROM org_entitlements WHERE org_id = (SELECT id FROM organizations ORDER BY created_at DESC LIMIT 1) LIMIT 5;"
 echo ""
 

@@ -31,7 +31,7 @@ controlplane-nats       xxxxx          Up 15s (healthy)           127.0.0.1:4223
 Verify health:
 ```bash
 # PostgreSQL
-psql -h localhost -U aquatiq -d postgres -c "SELECT version();"
+psql -h localhost -U coresystem -d postgres -c "SELECT version();"
 
 # Dragonfly (Redis protocol)
 redis-cli -p 6380 PING
@@ -181,7 +181,7 @@ curl -X POST http://localhost:8080/api/organizations \
 
 ```bash
 # Connect to postgres
-psql -h localhost -U aquatiq -d postgres -c "
+psql -h localhost -U coresystem -d postgres -c "
   SELECT datname 
   FROM pg_database 
   WHERE datname IN ('auth_service', 'user_service', 'org_core')
@@ -200,7 +200,7 @@ psql -h localhost -U aquatiq -d postgres -c "
 ### 11. Check Auth Service Schema
 
 ```bash
-psql -h localhost -U aquatiq -d auth_service -c "
+psql -h localhost -U coresystem -d auth_service -c "
   SELECT tablename 
   FROM pg_tables 
   WHERE schemaname='public' 

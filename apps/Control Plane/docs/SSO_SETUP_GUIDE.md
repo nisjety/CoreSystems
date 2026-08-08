@@ -262,7 +262,7 @@ console.log('User role:', membership.role); // Should be 'admin' or 'member'
 
 ```bash
 # Subscribe to organization creation events
-docker exec -it backend-aquatiq-nats-local-1 nats sub "organization.created"
+docker exec -it backend-coresystem-nats-local-1 nats sub "organization.created"
 ```
 
 Expected output:
@@ -291,7 +291,7 @@ Error: The redirect URI 'https://localhost:3001/...' is not registered
 # Solution:
 1. Update provider redirect URIs to match your domain
 2. For development: https://localhost:3001/api/auth/callback/microsoft
-3. For production: https://tools.aquatiq.com/api/auth/callback/microsoft
+3. For production: https://tools.coresystem.com/api/auth/callback/microsoft
 ```
 
 #### ❌ "Organization not created"

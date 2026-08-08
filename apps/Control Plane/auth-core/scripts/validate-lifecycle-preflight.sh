@@ -28,7 +28,7 @@ run_psql() {
     psql --dbname="$DATABASE_URL" "$@"
   else
     psql -h "${DB_HOST:-controlplane-postgres}" \
-      -U "${DB_USER:-aquatiq}" -d "${DB_NAME:-auth_service}" "$@"
+      -U "${DB_USER:-coresystem}" -d "${DB_NAME:-auth_service}" "$@"
   fi
 }
 

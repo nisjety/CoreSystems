@@ -4,7 +4,7 @@
  * Create Service Account Script
  * 
  * Creates a service account user in Better Auth with:
- * - Email: service@internal.aquatiq.com
+ * - Email: service@internal.coresystem.com
  * - Role: admin
  * - No password (cannot be used for regular login)
  * - Long-lived session token for internal services
@@ -17,14 +17,14 @@ import * as schema from '../src/db/schema';
 import { randomBytes } from 'crypto';
 
 async function createServiceAccount() {
-  const databaseUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/aquatiq_auth';
+  const databaseUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/coresystem_auth';
   
   console.log('🔌 Connecting to database...');
   const client = postgres(databaseUrl);
   const db = drizzle(client, { schema });
 
   try {
-    const serviceEmail = 'service@internal.aquatiq.com';
+    const serviceEmail = 'service@internal.coresystem.com';
     const serviceName = 'Internal Service Account';
     const serviceUserId = 'service-account-' + randomBytes(16).toString('hex');
     const sessionToken = randomBytes(32).toString('hex');

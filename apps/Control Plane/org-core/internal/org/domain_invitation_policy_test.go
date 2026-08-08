@@ -12,22 +12,22 @@ func TestDomainInvitationEligibility(t *testing.T) {
 	}{
 		{
 			name:          "verified exact company domain",
-			email:         "Ima.DaCosta@Aquatiq.com",
+			email:         "Ima.DaCosta@Coresystem.com",
 			emailVerified: true,
-			domain:        OrganizationDomain{NormalizedDomain: "aquatiq.com", Status: "verified", AutoInviteEnabled: true},
+			domain:        OrganizationDomain{NormalizedDomain: "coresystem.com", Status: "verified", AutoInviteEnabled: true},
 			want:          true,
 		},
 		{
 			name:          "unverified user email",
-			email:         "ima.dacosta@aquatiq.com",
+			email:         "ima.dacosta@coresystem.com",
 			emailVerified: false,
-			domain:        OrganizationDomain{NormalizedDomain: "aquatiq.com", Status: "verified", AutoInviteEnabled: true},
+			domain:        OrganizationDomain{NormalizedDomain: "coresystem.com", Status: "verified", AutoInviteEnabled: true},
 		},
 		{
 			name:          "pending domain proof",
-			email:         "ima.dacosta@aquatiq.com",
+			email:         "ima.dacosta@coresystem.com",
 			emailVerified: true,
-			domain:        OrganizationDomain{NormalizedDomain: "aquatiq.com", Status: "pending", AutoInviteEnabled: true},
+			domain:        OrganizationDomain{NormalizedDomain: "coresystem.com", Status: "pending", AutoInviteEnabled: true},
 		},
 		{
 			name:          "public mail domain",
@@ -45,7 +45,7 @@ func TestDomainInvitationEligibility(t *testing.T) {
 			name:          "different domain",
 			email:         "ima@other.example",
 			emailVerified: true,
-			domain:        OrganizationDomain{NormalizedDomain: "aquatiq.com", Status: "verified", AutoInviteEnabled: true},
+			domain:        OrganizationDomain{NormalizedDomain: "coresystem.com", Status: "verified", AutoInviteEnabled: true},
 		},
 	}
 

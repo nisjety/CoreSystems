@@ -117,7 +117,7 @@ echo ""
 
 # Test PostgreSQL
 echo -e "${YELLOW}Testing PostgreSQL${NC}"
-if docker exec aquatiq-postgres-local psql -U aquatiq -c "SELECT 1" > /dev/null 2>&1; then
+if docker exec coresystem-postgres-local psql -U coresystem -c "SELECT 1" > /dev/null 2>&1; then
     echo -e "${GREEN}✅ PostgreSQL is accessible${NC}"
     ((passed++))
 else
@@ -127,7 +127,7 @@ fi
 
 # Test Redis
 echo -e "${YELLOW}Testing Redis${NC}"
-if docker exec aquatiq-redis-local redis-cli -a redis ping | grep -q PONG; then
+if docker exec coresystem-redis-local redis-cli -a redis ping | grep -q PONG; then
     echo -e "${GREEN}✅ Redis is accessible${NC}"
     ((passed++))
 else
@@ -143,10 +143,10 @@ echo -e "${BLUE}=== Database Tests ===${NC}"
 echo ""
 
 # Check databases exist
-databases=("aquatiq_dev" "user_service" "admin_service" "auth_service" "ai_core")
+databases=("coresystem_dev" "user_service" "admin_service" "auth_service" "ai_core")
 for db in "${databases[@]}"; do
     echo -e "${YELLOW}Checking database $db${NC}"
-    if docker exec aquatiq-postgres-local psql -U aquatiq -lqt | cut -d \| -f 1 | grep -qw "$db"; then
+    if docker exec coresystem-postgres-local psql -U coresystem -lqt | cut -d \| -f 1 | grep -qw "$db"; then
         echo -e "${GREEN}✅ Database $db exists${NC}"
         ((passed++))
     else
@@ -157,7 +157,7 @@ done
 
 # Check pgvector extension
 echo -e "${YELLOW}Checking pgvector extension${NC}"
-if docker exec aquatiq-postgres-local psql -U aquatiq -d aquatiq_dev -c "\dx" | grep -q vector; then
+if docker exec coresystem-postgres-local psql -U coresystem -d coresystem_dev -c "\dx" | grep -q vector; then
     echo -e "${GREEN}✅ pgvector extension is installed${NC}"
     ((passed++))
 else

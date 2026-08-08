@@ -10,7 +10,7 @@
 --
 -- ENFORCEMENT MODEL — why a SET ROLE, not a connection swap
 -- --------------------------------------------------------
--- org-core connects to its database as a role (aquatiq) that is SUPERUSER and
+-- org-core connects to its database as a role (coresystem) that is SUPERUSER and
 -- owns these tables, and PostgreSQL superusers/owners-with-BYPASSRLS bypass RLS
 -- unconditionally. Enabling RLS alone would therefore be inert against the live
 -- connection. Rather than introduce a new login role + password (secret-mgmt

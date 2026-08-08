@@ -69,14 +69,14 @@ echo "Sent 3 requests"
 echo ""
 
 echo "b) Querying audit logs from database..."
-AUDIT_COUNT=$(docker exec aquatiq-postgres-local psql -U postgres -d aquatiq_dev -t -c \
+AUDIT_COUNT=$(docker exec coresystem-postgres-local psql -U postgres -d coresystem_dev -t -c \
     "SELECT COUNT(*) FROM audit_logs WHERE created_at > NOW() - INTERVAL '2 minutes';" 2>&1 | xargs)
 echo "Audit logs in last 2 minutes: $AUDIT_COUNT"
 
 if [ "$AUDIT_COUNT" -gt 0 ]; then
     echo ""
     echo "Sample audit log entries:"
-    docker exec aquatiq-postgres-local psql -U postgres -d aquatiq_dev -c \
+    docker exec coresystem-postgres-local psql -U postgres -d coresystem_dev -c \
         "SELECT org_id, action, resource_type, created_at 
          FROM audit_logs 
          WHERE created_at > NOW() - INTERVAL '2 minutes'
@@ -97,7 +97,7 @@ echo "========================================="
 echo ""
 
 echo "a) Checking templates in database..."
-docker exec aquatiq-postgres-local psql -U postgres -d ai_core -c \
+docker exec coresystem-postgres-local psql -U postgres -d ai_core -c \
     "SELECT name, category, version FROM prompt_templates ORDER BY name LIMIT 6;" 2>&1
 echo ""
 

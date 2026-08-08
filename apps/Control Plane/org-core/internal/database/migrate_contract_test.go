@@ -105,3 +105,27 @@ func TestGDPRAuditOutboxMigrationPinsDurabilityRetryAndDeadLetterState(t *testin
 		}
 	}
 }
+
+func TestInteractiveRetentionOutboxMigrationPinsMinimalDurableEventState(t *testing.T) {
+	path := filepath.Join("..", "..", "migrations", "019_interactive_retention_outbox.up.sql")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"organization_interactive_retention_outbox",
+		"event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY",
+		"org_id TEXT NOT NULL",
+		"published_at TIMESTAMPTZ",
+		"processing_at TIMESTAMPTZ",
+		"attempts INTEGER NOT NULL DEFAULT 0",
+		"app.current_org",
+		"GRANT SELECT, INSERT (org_id), UPDATE (attempts, processing_at, published_at, last_error, updated_at)",
+		"GRANT USAGE, SELECT ON SEQUENCE organization_interactive_retention_outbox_event_id_seq TO org_core_app",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("interactive retention outbox migration missing %q", required)
+		}
+	}
+}

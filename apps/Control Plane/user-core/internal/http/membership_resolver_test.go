@@ -83,6 +83,34 @@ func TestResolveMembershipUsesExactCanonicalAuthRole(t *testing.T) {
 	}
 }
 
+func TestResolveMembershipRetriesOneTransientAuthorityTransportFailure(t *testing.T) {
+	attempts := 0
+	server := membershipServer(t, func(w stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		attempts++
+		if attempts == 1 {
+			connection, _, err := w.(stdhttp.Hijacker).Hijack()
+			if err != nil {
+				t.Fatalf("hijack transient authority connection: %v", err)
+			}
+			_ = connection.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"v1","member":true,"role":"member"}`))
+	})
+
+	orgID, role, err := server.resolveMembershipFromAuthCore(context.Background(), "user-1", "org-1")
+	if err != nil {
+		t.Fatalf("resolveMembershipFromAuthCore() error = %v", err)
+	}
+	if orgID != "org-1" || role != "member" {
+		t.Fatalf("membership = (%q, %q), want (org-1, member)", orgID, role)
+	}
+	if attempts != 2 {
+		t.Fatalf("authority attempts = %d, want exactly 2", attempts)
+	}
+}
+
 func TestResolveMembershipRequiresExplicitOrganization(t *testing.T) {
 	server := membershipServer(t, func(stdhttp.ResponseWriter, *stdhttp.Request) {
 		t.Fatal("canonical authority must not be called without an explicit active organization")

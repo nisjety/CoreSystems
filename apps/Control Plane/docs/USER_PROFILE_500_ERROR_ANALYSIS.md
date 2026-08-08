@@ -4,7 +4,7 @@
 
 User profileendpoint returning 500 error:
 ```
-GET /api/user/users/me/profile?email=testbruker@aquatiq.com → 500 Internal Server Error
+GET /api/user/users/me/profile?email=testbruker@coresystem.com → 500 Internal Server Error
 ```
 
 ## Root Causes Identified
@@ -70,7 +70,7 @@ FATAL: database "user_service" does not exist (SQLSTATE 3D000)
 ```
 
 **PostgreSQL Containers**:
-- `aquatiq-postgres-local`: Port 5432
+- `coresystem-postgres-local`: Port 5432
 - `controlplane-postgres`: Port 5433
 
 **Database Exists On**: controlplane-postgres  
@@ -86,7 +86,7 @@ FATAL: database "user_service" does not exist (SQLSTATE 3D000)
 2. **Apply UUID → TEXT migration**:
    ```bash
    # Once service connects, run:
-   docker exec controlplane-postgres psql -U aquatiq -d user_service < migrations/003_change_uuid_to_text.up.sql
+   docker exec controlplane-postgres psql -U coresystem -d user_service < migrations/003_change_uuid_to_text.up.sql
    ```
 
 3. **Restart user-service** to pick up schema changes
@@ -94,7 +94,7 @@ FATAL: database "user_service" does not exist (SQLSTATE 3D000)
 4. **Test user profile endpoint**:
    ```bash
    curl -H "x-internal-api-key: dev-super-secret-internal-api-key" \
-        "http://localhost:3012/api/v1/users/me?email=testbruker@aquatiq.com"
+        "http://localhost:3012/api/v1/users/me?email=testbruker@coresystem.com"
    ```
 
 ## Alternative Solution (If Migration Fails)

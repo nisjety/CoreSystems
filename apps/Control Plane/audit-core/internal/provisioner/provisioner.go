@@ -107,6 +107,14 @@ const (
 	// Delete this block and the legacy subjects below from
 	// ProvisionControlSharedRuntime's `subjects` slice in the same commit that
 	// confirms the last consumer/publisher on this bus has moved to verevon.*.
+	// DO NOT RENAME THESE VALUES. They are the pre-rename `velion.*` wire
+	// subjects, kept verbatim so the stream still captures messages from
+	// publishers running pre-rename source. A blanket velion->verevon
+	// find-replace rewrote them on 2026-08-06 and made every one of them
+	// identical to its modern counterpart in ProvisionControlSharedRuntime's
+	// subject slice — NATS then rejected the whole stream with "duplicate
+	// subjects detected", which hard-failed audit-nats-provisioner and blocked
+	// the entire Control Plane from starting on a fresh volume.
 	LegacyGDPRErasureRequestedSubject     = "velion.gdpr.erasure.requested"
 	LegacyGDPRErasureDLQSubject           = "velion.gdpr.erasure.dlq.documents-api"
 	LegacyGDPROwnershipTransferredSubject = "velion.gdpr.ownership.transferred"

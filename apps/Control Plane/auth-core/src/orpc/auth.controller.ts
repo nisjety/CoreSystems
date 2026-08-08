@@ -1677,14 +1677,14 @@ export class ConsolidatedAuthController {
 
             // Add deletion cookies for all old sessions
             oldMultiSessionCookies.forEach((cookieName) => {
-              const deletionCookie = `${cookieName}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax; Domain=${process.env.COOKIE_DOMAIN || '.aquatiq.com'}`;
+              const deletionCookie = `${cookieName}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax; Domain=${process.env.COOKIE_DOMAIN || '.coresystem.com'}`;
               response.append('set-cookie', deletionCookie);
               this.logger.log(`🗑️  Deleting old cookie: ${cookieName}`);
             });
 
             // CRITICAL: Also delete the cached session data cookie (__Secure-sdata)
             // This cookie caches session data and can be out of sync with the actual session
-            const sdataDeletion = `__Secure-sdata=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax; Domain=${process.env.COOKIE_DOMAIN || '.aquatiq.com'}`;
+            const sdataDeletion = `__Secure-sdata=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax; Domain=${process.env.COOKIE_DOMAIN || '.coresystem.com'}`;
             response.append('set-cookie', sdataDeletion);
             this.logger.log(
               `🗑️  Deleting cached sdata cookie (will be regenerated)`,

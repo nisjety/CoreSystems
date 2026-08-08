@@ -86,21 +86,9 @@ func (s *Server) resolveMembershipFromAuthCore(
 	if err != nil {
 		return "", "", fmt.Errorf("encode canonical membership request: %w", err)
 	}
-	request, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodPost,
-		s.authMembershipService+"/api/v1/internal/membership/decision",
-		bytes.NewReader(body),
-	)
+	response, err := s.callCanonicalMembershipAuthority(ctx, body)
 	if err != nil {
-		return "", "", fmt.Errorf("build canonical membership request: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-User-Core-Membership-Token", s.authMembershipToken)
-
-	response, err := s.httpClient.Do(request)
-	if err != nil {
-		return "", "", fmt.Errorf("call canonical membership authority: %w", err)
+		return "", "", err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -134,6 +122,43 @@ func (s *Server) resolveMembershipFromAuthCore(
 		return "", "", fmt.Errorf("canonical membership authority returned unsupported role")
 	}
 	return requestedOrgID, role, nil
+}
+
+// callCanonicalMembershipAuthority retries one transport-level failure only.
+// The request is an idempotent read of an exact user/org pair; a retry avoids
+// converting a stale keep-alive socket reset into a visible 503, while a
+// non-200 decision remains fail-closed and is never retried.
+func (s *Server) callCanonicalMembershipAuthority(ctx context.Context, body []byte) (*http.Response, error) {
+	const attempts = 2
+	const retryDelay = 50 * time.Millisecond
+	url := s.authMembershipService + "/api/v1/internal/membership/decision"
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("build canonical membership request: %w", err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-User-Core-Membership-Token", s.authMembershipToken)
+
+		response, err := s.httpClient.Do(request)
+		if err == nil {
+			return response, nil
+		}
+		if attempt == attempts-1 {
+			return nil, fmt.Errorf("call canonical membership authority: %w", err)
+		}
+
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return nil, fmt.Errorf("call canonical membership authority: retry attempts exhausted")
 }
 
 func (s *Server) handleMembershipResolutionError(

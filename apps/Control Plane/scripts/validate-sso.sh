@@ -117,7 +117,7 @@ echo "${BLUE}📋 Database Schema Check${NC}"
 echo "-------------------------"
 
 # Check if Better Auth tables exist
-AUTH_DB_CHECK=$(docker exec backend-aquatiq-postgres-local-1 psql -U aquatiq -d auth_service -c "\\dt" 2>/dev/null | grep -c "public")
+AUTH_DB_CHECK=$(docker exec backend-coresystem-postgres-local-1 psql -U coresystem -d auth_service -c "\\dt" 2>/dev/null | grep -c "public")
 
 if [ "$AUTH_DB_CHECK" -gt "10" ]; then
     echo "✅ Better Auth Tables: Created ($AUTH_DB_CHECK tables)"
@@ -129,7 +129,7 @@ fi
 # Check specific SSO-related tables
 TABLES=("account" "session" "organization" "member" "invitation")
 for table in "${TABLES[@]}"; do
-    if docker exec backend-aquatiq-postgres-local-1 psql -U aquatiq -d auth_service -c "\\d $table" &>/dev/null; then
+    if docker exec backend-coresystem-postgres-local-1 psql -U coresystem -d auth_service -c "\\d $table" &>/dev/null; then
         echo "✅ Table '$table': Exists"
     else
         echo "❌ Table '$table': Missing"
@@ -169,7 +169,7 @@ echo "   • Access: http://localhost:3001/api/auth/sign-in/google"
 echo ""
 echo "3. Monitor organization creation:"
 echo "   • Watch logs: docker logs -f backend-auth-service-1"
-echo "   • Monitor NATS: docker exec -it backend-aquatiq-nats-local-1 nats sub organization.created"
+echo "   • Monitor NATS: docker exec -it backend-coresystem-nats-local-1 nats sub organization.created"
 
 echo ""
 echo "${GREEN}🎉 SSO Infrastructure: Ready for Provider Configuration!${NC}"

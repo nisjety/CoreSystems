@@ -20,7 +20,7 @@ async function createAdminUser() {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        email: 'ima.dacosta@aquatiq.com',
+        email: 'ima.dacosta@coresystem.com',
         password: 'AdminTempPassword123!',
         name: 'Ima DaCosta'
       })
@@ -38,7 +38,7 @@ async function createAdminUser() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          email: 'ima.dacosta@aquatiq.com',
+          email: 'ima.dacosta@coresystem.com',
           password: 'AdminTempPassword123!'
         })
       });
@@ -48,7 +48,7 @@ async function createAdminUser() {
       
       if (signInResult.success) {
         console.log('✅ Admin user created and authenticated successfully!');
-        console.log('📧 Email: ima.dacosta@aquatiq.com');
+        console.log('📧 Email: ima.dacosta@coresystem.com');
         console.log('🔑 Can now use Microsoft OAuth for future sign-ins');
         console.log('👑 Admin role will be automatically assigned');
       } else {

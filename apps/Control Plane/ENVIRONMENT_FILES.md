@@ -4,7 +4,7 @@
 > credentials, and the
 > auth-core/user-core port numbers below were re-checked against `docker-compose.yml`
 > and live containers and are accurate. The "Infrastructure Services" hostnames
-> (`aquatiq-postgres-local` / `aquatiq-redis-local` / `aquatiq-nats-local`) were stale —
+> (`coresystem-postgres-local` / `coresystem-redis-local` / `coresystem-nats-local`) were stale —
 > those names only survive in historical comments and unused files, not in
 > `docker-compose.yml`. The service list and port table include all six active
 > cores. The Control Plane root `.env` and `.env.example` are intentionally absent.
@@ -194,11 +194,11 @@ npm start  # or `go run main.go` depending on service
 
 Used by all control-plane services when running Docker Compose. These are the
 actual Docker network hostnames from `docker-compose.yml` (the older
-`aquatiq-*-local` names below only survive in `.env.example` comments/unused files
+`coresystem-*-local` names below only survive in `.env.example` comments/unused files
 and are not what compose or any live `.env.docker` actually points at):
 
 - **PostgreSQL**: `controlplane-postgres:5432` (container `controlplane-postgres`)
-  - User: `aquatiq`
+  - User: `coresystem`
   - Password: derived by the local runner from the service-local database URL;
     production uses an external secret-manager value.
 

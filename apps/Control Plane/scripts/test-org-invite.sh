@@ -31,7 +31,7 @@ if [ -z "$1" ]; then
   echo "  $0 org_123abc new@example.com    # Invite specific email"
   echo ""
   echo -e "${BLUE}Available organizations:${NC}"
-  docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -t -c \
+  docker exec coresystem-postgres-local psql -U coresystem -d auth_service -t -c \
     "SELECT id, name FROM organization ORDER BY created_at DESC LIMIT 5;"
   exit 1
 fi
@@ -79,7 +79,7 @@ if [ "$(echo "$INVITE_RESULT" | jq -r '.success')" = "true" ]; then
   echo ""
   echo -e "${BLUE}Next steps:${NC}"
   echo "1. Check invitation in database:"
-  echo "   docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -c \\"
+  echo "   docker exec coresystem-postgres-local psql -U coresystem -d auth_service -c \\"
   echo "     \"SELECT id, email, role, status, expires_at FROM organization_invitation WHERE organization_id = '$ORG_ID' ORDER BY created_at DESC LIMIT 5;\""
   echo ""
   echo "2. Accept invitation (if user exists):"

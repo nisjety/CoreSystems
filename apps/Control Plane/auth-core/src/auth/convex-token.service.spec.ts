@@ -409,9 +409,11 @@ describe('ConvexTokenService production key and principal posture', () => {
   it('publishes only the trusted RS256 verification key', () => {
     process.env.NODE_ENV = 'test';
     for (const name of keyEnvNames) delete process.env[name];
+    process.env.PLANE_TOKEN_ISSUER = 'https://plane-issuer.test/convex-auth';
     const service = new ConvexTokenService();
 
     expect(service.getJwks()).toMatchObject({
+      planeTokenIssuer: 'https://plane-issuer.test/convex-auth',
       keys: [{ alg: 'RS256', use: 'sig', kid: 'convex-auth-rs256' }],
     });
   });

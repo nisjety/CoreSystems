@@ -17,7 +17,7 @@ E2E_EMAIL="${E2E_EMAIL:-e2e@verevon.dev}"
 E2E_PASSWORD="${E2E_PASSWORD:-e2e-Verevon-Pass-123}"
 E2E_NAME="${E2E_NAME:-Verevon E2E}"
 PG_CONTAINER="${PG_CONTAINER:-controlplane-postgres}"
-PG_USER="${PG_USER:-aquatiq}"
+PG_USER="${PG_USER:-coresystem}"
 PG_DATABASE="${PG_DATABASE:-auth_service}"
 
 signup_body=$(mktemp)
