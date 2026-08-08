@@ -242,6 +242,25 @@ pub struct PlanConfig {
     /// first step (e.g. existing unit tests, or a caller that genuinely has
     /// no starting point).
     pub start_url: Option<String>,
+    /// Independent success condition for the Verified Outcome Foundation
+    /// (verevon-roadmap.md §3b P1 item 3, see `crate::postcondition`).
+    ///
+    /// **Must not be the same string as `stop_criteria`.** `stop_criteria` is
+    /// what makes the loop stop, so checking the final page for it again
+    /// would test the agent against its own stop decision and always pass —
+    /// a confirmation that proves nothing.
+    /// `postcondition::judge_browser_procedure` detects that case and refuses
+    /// to confirm, so a caller that sets them equal gets an honest
+    /// "inconclusive", not a failure.
+    ///
+    /// Empty (the default) means the procedure can be **refuted but never
+    /// confirmed** — a failed/blocked/timed-out final observation is still
+    /// caught, but success cannot be independently established.
+    ///
+    /// Good values name something only the *completed* effect would put on
+    /// the page and that the agent was not steering toward: an order number
+    /// pattern, a confirmation-page heading, a receipt id.
+    pub postcondition: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1031,6 +1050,7 @@ mod tests {
             zdr: false,
             profile_id: None,
             start_url: None,
+            postcondition: String::new(),
         }
     }
 

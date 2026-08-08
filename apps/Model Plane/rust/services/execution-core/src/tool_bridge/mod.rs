@@ -202,6 +202,14 @@ pub(crate) async fn execute_browser_agent(
                 }
             };
             let planner = crate::llm_planner::LlmPlanner::from_env(inference_bearer);
+            // Captured before the loop consumes the config — the postcondition
+            // judgment below needs all three, and the loop result carries
+            // none of them.
+            let verification_inputs = BrowserVerificationInputs {
+                postcondition: plan_config.postcondition.clone(),
+                stop_criteria: plan_config.stop_criteria.clone(),
+                zdr: plan_config.zdr,
+            };
             let result = browser_agent::run_browser_agent_loop(
                 plan_config,
                 client.as_ref(),
@@ -210,12 +218,21 @@ pub(crate) async fn execute_browser_agent(
                 state,
             )
             .await;
-            browser_execution_from_loop_result(result)
+            browser_execution_from_loop_result(result, &verification_inputs)
         }
         Err(e) => BrowserAgentExecution::Failed {
             reason: format!("invalid browser_agent input: {e}"),
         },
     }
+}
+
+/// The plan fields the postcondition judgment needs, captured before the
+/// browser loop consumes the config.
+#[derive(Default)]
+pub(crate) struct BrowserVerificationInputs {
+    pub(crate) postcondition: String,
+    pub(crate) stop_criteria: String,
+    pub(crate) zdr: bool,
 }
 
 /// Judge a completed browser loop against its own final observation and
@@ -228,11 +245,10 @@ pub(crate) async fn execute_browser_agent(
 /// been established. Surfacing the verdict makes the mismatch visible to the
 /// model, the run console, and any operator reading the step — without
 /// silently altering behavior.
-///
-/// Browser procedures can currently be refuted but never confirmed; see
-/// [`crate::postcondition::judge_browser_procedure`] for why (no
-/// postcondition is declared independently of the loop's own stop criteria).
-fn browser_verification_note(observations: &[browser_agent::BrowserObservation]) -> String {
+fn browser_verification_note(
+    observations: &[browser_agent::BrowserObservation],
+    inputs: &BrowserVerificationInputs,
+) -> String {
     let final_observation = observations.last();
     let evidence = crate::postcondition::BrowserProcedureEvidence {
         aborted: false,
@@ -242,13 +258,12 @@ fn browser_verification_note(observations: &[browser_agent::BrowserObservation])
         has_durable_evidence: final_observation.is_some_and(|o| {
             !o.screenshot_ref.trim().is_empty() || !o.dom_snapshot_ref.trim().is_empty()
         }),
-        // The loop result carries no ZDR flag; a ZDR run simply arrives with
-        // empty page content, which the judgment already treats as
-        // unmatchable rather than as a failure.
-        zdr: false,
-        stop_criteria: "",
-        // PlanConfig carries no independently-declared postcondition yet.
-        declared_postcondition: None,
+        zdr: inputs.zdr,
+        stop_criteria: &inputs.stop_criteria,
+        // Empty means the caller declared none. The judgment then refuses to
+        // confirm rather than falling back to the (circular) stop criteria.
+        declared_postcondition: Some(inputs.postcondition.as_str())
+            .filter(|value| !value.trim().is_empty()),
     };
     let outcome = crate::postcondition::judge_browser_procedure(&evidence);
     format!(
@@ -260,6 +275,7 @@ fn browser_verification_note(observations: &[browser_agent::BrowserObservation])
 
 fn browser_execution_from_loop_result(
     result: browser_agent::BrowserAgentLoopResult,
+    verification: &BrowserVerificationInputs,
 ) -> BrowserAgentExecution {
     use browser_agent::{BrowserAbortReason, BrowserResourceLimit, PlanStatus};
 
@@ -279,7 +295,7 @@ fn browser_execution_from_loop_result(
             output: format!(
                 "status=completed summary={} verification={}",
                 result.summary,
-                browser_verification_note(&result.observations)
+                browser_verification_note(&result.observations, verification)
             ),
         },
         PlanStatus::Failed => BrowserAgentExecution::Failed {
@@ -330,6 +346,11 @@ struct BrowserAgentInput {
     profile_id: Option<String>,
     /// Where to navigate first (Phase 2) — see `PlanConfig::start_url`.
     start_url: Option<String>,
+    /// Independent success condition for postcondition verification — see
+    /// `PlanConfig::postcondition`. Must differ from `stop_criteria` to be
+    /// worth anything; omitting it means the procedure can be refuted but
+    /// never confirmed.
+    postcondition: Option<String>,
 }
 
 fn browser_plan_config(
@@ -360,6 +381,7 @@ fn browser_plan_config(
         zdr: verified_zdr,
         profile_id: input.profile_id,
         start_url: input.start_url,
+        postcondition: input.postcondition.unwrap_or_default(),
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)
@@ -500,7 +522,10 @@ mod tests {
                 resource_limit: None,
             };
 
-            assert_eq!(browser_execution_from_loop_result(result), expected);
+            assert_eq!(
+                browser_execution_from_loop_result(result, &BrowserVerificationInputs::default()),
+                expected
+            );
         }
     }
 
@@ -535,7 +560,106 @@ mod tests {
                 resource_limit: Some(resource_limit),
             };
 
-            assert_eq!(browser_execution_from_loop_result(result), expected);
+            assert_eq!(
+                browser_execution_from_loop_result(result, &BrowserVerificationInputs::default()),
+                expected
+            );
         }
+    }
+
+    // --- Browser postcondition threading (roadmap P1 item 3) ----------------
+
+    fn observation(
+        status: browser_agent::ObservationStatus,
+        text: &str,
+    ) -> browser_agent::BrowserObservation {
+        browser_agent::BrowserObservation {
+            observation_id: "obs_1".to_owned(),
+            action_id: "act_1".to_owned(),
+            grant_id: "grant_1".to_owned(),
+            status,
+            page_url: "https://example.test/done".to_owned(),
+            page_title: "Done".to_owned(),
+            extracted_text: text.to_owned(),
+            screenshot_ref: "shot_1".to_owned(),
+            dom_snapshot_ref: String::new(),
+            error_message: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_declared_postcondition_reaches_the_judgment_and_confirms() {
+        let observations = vec![observation(
+            browser_agent::ObservationStatus::Success,
+            "Your order 12345 is confirmed.",
+        )];
+        let inputs = BrowserVerificationInputs {
+            postcondition: "order 12345".to_owned(),
+            stop_criteria: "confirmed".to_owned(),
+            zdr: false,
+        };
+        let note = browser_verification_note(&observations, &inputs);
+        assert!(
+            note.starts_with("postcondition:"),
+            "a declared postcondition must produce a postcondition-method verdict, got: {note}"
+        );
+        assert!(note.contains("order 12345"));
+    }
+
+    #[test]
+    fn omitting_the_postcondition_still_refuses_to_confirm() {
+        let observations = vec![observation(
+            browser_agent::ObservationStatus::Success,
+            "Your order 12345 is confirmed.",
+        )];
+        let note = browser_verification_note(&observations, &BrowserVerificationInputs::default());
+        assert!(
+            note.starts_with("none:"),
+            "no declared postcondition must stay unverified, got: {note}"
+        );
+    }
+
+    #[test]
+    fn a_postcondition_equal_to_the_stop_criteria_is_refused_as_circular() {
+        let observations = vec![observation(
+            browser_agent::ObservationStatus::Success,
+            "Your order is confirmed.",
+        )];
+        let inputs = BrowserVerificationInputs {
+            postcondition: "confirmed".to_owned(),
+            stop_criteria: "confirmed".to_owned(),
+            zdr: false,
+        };
+        let note = browser_verification_note(&observations, &inputs);
+        assert!(note.starts_with("none:"), "got: {note}");
+        assert!(note.contains("stop decision"));
+    }
+
+    #[test]
+    fn a_failed_final_observation_is_refuted_even_with_a_good_postcondition() {
+        let observations = vec![observation(
+            browser_agent::ObservationStatus::Failed,
+            "Your order 12345 is confirmed.",
+        )];
+        let inputs = BrowserVerificationInputs {
+            postcondition: "order 12345".to_owned(),
+            stop_criteria: "confirmed".to_owned(),
+            zdr: false,
+        };
+        let note = browser_verification_note(&observations, &inputs);
+        assert!(note.starts_with("postcondition:"), "got: {note}");
+        assert!(note.contains("failed"));
+    }
+
+    #[test]
+    fn a_zdr_run_reaches_the_judgment_as_zdr() {
+        let observations = vec![observation(browser_agent::ObservationStatus::Success, "")];
+        let inputs = BrowserVerificationInputs {
+            postcondition: "order 12345".to_owned(),
+            stop_criteria: "confirmed".to_owned(),
+            zdr: true,
+        };
+        let note = browser_verification_note(&observations, &inputs);
+        assert!(note.contains("Zero Data Retention"), "got: {note}");
     }
 }

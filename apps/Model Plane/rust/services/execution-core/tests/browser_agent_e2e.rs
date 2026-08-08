@@ -57,6 +57,7 @@ async fn browser_agent_drives_real_quarry_loop() {
         // Phase 2, found live: a freshly `start_run`'d Quarry lease has no
         // page loaded, so the first action needs an explicit destination.
         start_url: Some("https://example.com".to_owned()),
+        postcondition: String::new(),
     };
 
     let result = run_browser_agent_loop(config, Some(&client), planner.as_ref(), None, None).await;

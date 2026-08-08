@@ -466,12 +466,12 @@ mod tests {
         AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
         AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest,
         ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse,
-        DecideApprovalRequest, DecideApprovalResponse, GetApprovalRequest, GetApprovalResponse,
-        GetApprovalContinuationRequest, GetApprovalContinuationResponse,
-        GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse,
-        GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse,
-        ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse,
-        OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordOrchestrationEventRequest,
+        DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest,
+        GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest,
+        GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest,
+        GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest,
+        ListPlansResponse, ListTodosRequest, ListTodosResponse, OrgPendingApprovalsRequest,
+        OrgPendingApprovalsResponse, RecordOrchestrationEventRequest,
         RecordOrchestrationEventResponse, StreamRunEventsRequest, TransitionPlanRequest,
         TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
     };
@@ -726,6 +726,7 @@ mod tests {
             zdr: false,
             profile_id: None,
             start_url: None,
+            postcondition: String::new(),
         }
     }
 
