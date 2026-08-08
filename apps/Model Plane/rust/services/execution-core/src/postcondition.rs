@@ -216,8 +216,27 @@ pub struct ProviderReadBack {
 ///   the dispatcher never even reaches a `Completed` disposition for it (the
 ///   receipt heuristic finds nothing and it fails closed as
 ///   `invalid_continuation`). There is nothing to match a read-back against.
+/// - GitHub `issues.create` is the same class for a less obvious reason: it
+///   answers with `id` and `number` as JSON **numbers**, and both
+///   integration-corev2's `actionProviderMessageIDAtDepth` and its Rust port
+///   in `integration_tools` match only string values. No receipt is extracted,
+///   so `issues.create` never reaches `Completed` either — a read-back against
+///   the `issues` listing would be unreachable code, not a missing verifier.
+/// - **Mutations of an existing object cannot be verified by finding that
+///   object.** `issues.update`, `events.update`, `ads.campaign.update`,
+///   `user.suspend`, `user.activate` and `catalog.product.upsert` all have a
+///   perfectly good read on the frozen surface, and pairing them with it would
+///   be wrong: the object existed *before* the write, so its presence afterward
+///   is evidence of nothing. Confirming a mutation needs the read-back to carry
+///   the mutated field, which is a different judgment than identifier presence
+///   and is deliberately not attempted here.
 #[must_use]
-pub fn plan_provider_read_back(operation: &str, body: &Value) -> Option<ProviderReadBack> {
+pub fn plan_provider_read_back(
+    operation: &str,
+    body: &Value,
+    receipt_id: &str,
+) -> Option<ProviderReadBack> {
+    let receipt_id = receipt_id.trim();
     match operation.trim() {
         // Slack chat.postMessage returns the message `ts`; conversations.history
         // lists a bounded window of the same channel's messages.
@@ -238,6 +257,60 @@ pub fn plan_provider_read_back(operation: &str, body: &Value) -> Option<Provider
             operation: "gmail.messages",
             params: serde_json::json!({ "maxResults": 100 }),
             strength: ReadBackStrength::BoundedList,
+        }),
+        // LinkedIn creates answer with an empty body plus an `x-restli-id`
+        // header, which integration-corev2's `doJSON` materializes as
+        // `result.id` — so these do produce a receipt to match against.
+        //
+        // An event is fetchable by its own id, which makes this the first
+        // authoritative provider read-back: a 200 means the provider itself
+        // found the event, because a bad id answers non-2xx (and therefore
+        // reads as inconclusive, not as a refutation — see below).
+        "events.create" | "linkedin.events.create" if !receipt_id.is_empty() => {
+            Some(ProviderReadBack {
+                operation: "events.get",
+                params: serde_json::json!({ "eventId": receipt_id }),
+                strength: ReadBackStrength::AuthoritativeById,
+            })
+        }
+        // Posts have no by-id read on the frozen surface, only an author-scoped
+        // listing — bounded, so presence confirms and absence proves nothing.
+        // The author URN comes from the write's own body (the Posts API
+        // requires it), not from anything the caller could redirect.
+        "posts.create" | "linkedin.posts.create" => {
+            let author = body.get("author").and_then(Value::as_str)?.trim();
+            if author.is_empty() {
+                return None;
+            }
+            Some(ProviderReadBack {
+                operation: "posts.list",
+                params: serde_json::json!({ "author": author, "count": 100 }),
+                strength: ReadBackStrength::BoundedList,
+            })
+        }
+        // The Meta family returns Graph node ids as JSON strings, and each of
+        // these creates has a matching node fetch keyed on exactly that id.
+        // None of them need a param from the write — the receipt is the whole
+        // lookup key — so a verifier here cannot be pointed anywhere the write
+        // did not already go.
+        "live.create" | "facebook.live.create" if !receipt_id.is_empty() => {
+            Some(ProviderReadBack {
+                operation: "live.get",
+                params: serde_json::json!({ "liveVideoId": receipt_id }),
+                strength: ReadBackStrength::AuthoritativeById,
+            })
+        }
+        // Confirms the *container* exists, which is what this write creates —
+        // publishing it is a separate approved action with its own receipt.
+        "instagram.media.create" if !receipt_id.is_empty() => Some(ProviderReadBack {
+            operation: "instagram.media.status",
+            params: serde_json::json!({ "creationId": receipt_id }),
+            strength: ReadBackStrength::AuthoritativeById,
+        }),
+        "threads.container.create" if !receipt_id.is_empty() => Some(ProviderReadBack {
+            operation: "threads.container.status",
+            params: serde_json::json!({ "creationId": receipt_id }),
+            strength: ReadBackStrength::AuthoritativeById,
         }),
         _ => None,
     }
@@ -323,6 +396,21 @@ fn response_contains_identifier(value: &Value, identifier: &str, depth: u8) -> b
 ///
 /// Returns `Inconclusive` — leaving the structural judgment intact — when no
 /// verifier exists for the operation or the read itself fails.
+///
+/// Note what a failed read costs an authoritative by-id lookup. integration-corev2
+/// surfaces a provider 404 as `502 action_failed` carrying the upstream status
+/// inside a message string, so a genuine "it does not exist" is indistinguishable
+/// here from an outage without parsing that prose. It is therefore treated as an
+/// outage: `AuthoritativeById` confirms in practice and refutes only in the
+/// narrow case of a 200 whose body lacks the id. Deciding a refutation by
+/// string-matching an error message would be exactly the weak evidence this
+/// module exists to refuse.
+///
+/// The read-back is also subject to the connection's own capabilities: a
+/// connection granted `social.post.write` but not `social.post.read` will fail
+/// the listing and stay inconclusive. That is the safe direction, but it means
+/// a verifier can be silently unexercised in production — the connection needs
+/// the *read* capability for verification to be worth anything.
 pub async fn verify_provider_action(
     client: &crate::integration_tools::IntegrationActionsClient,
     org_id: &str,
@@ -331,7 +419,12 @@ pub async fn verify_provider_action(
     body: &Value,
     receipt_id: &str,
 ) -> PostconditionOutcome {
-    let Some(plan) = plan_provider_read_back(operation, body) else {
+    if receipt_id.trim().is_empty() {
+        return PostconditionOutcome::Inconclusive {
+            detail: "no provider receipt id to verify against".to_owned(),
+        };
+    }
+    let Some(plan) = plan_provider_read_back(operation, body, receipt_id) else {
         return PostconditionOutcome::Inconclusive {
             detail: format!("no postcondition verifier is defined for {operation}"),
         };
@@ -376,10 +469,9 @@ pub struct BrowserProcedureEvidence<'a> {
     pub stop_criteria: &'a str,
     /// A success condition declared independently of `stop_criteria`.
     ///
-    /// `None` today: `PlanConfig` carries no such field yet, so browser
-    /// procedures can currently be **refuted but never confirmed** — see
-    /// [`judge_browser_procedure`]. Adding that field is the one change that
-    /// unlocks confirmation, and the path is already implemented and tested.
+    /// Carried from `browser_agent::PlanConfig::postcondition`. `None` when the
+    /// caller declared none, which leaves that procedure **refutable but never
+    /// confirmable** — see [`judge_browser_procedure`].
     pub declared_postcondition: Option<&'a str>,
 }
 
@@ -578,6 +670,7 @@ mod tests {
         let plan = plan_provider_read_back(
             "slack.message.send",
             &json!({ "channel": "C123", "text": "hello" }),
+            "1700000000.000200",
         )
         .expect("slack message.send has a verifier");
         assert_eq!(plan.operation, "messages.list");
@@ -587,25 +680,141 @@ mod tests {
 
     #[test]
     fn slack_send_without_a_channel_has_no_plan() {
-        assert!(plan_provider_read_back("slack.message.send", &json!({ "text": "hi" })).is_none());
         assert!(
-            plan_provider_read_back("slack.message.send", &json!({ "channel": "  " })).is_none()
+            plan_provider_read_back("slack.message.send", &json!({ "text": "hi" }), "ts-1")
+                .is_none()
+        );
+        assert!(
+            plan_provider_read_back("slack.message.send", &json!({ "channel": "  " }), "ts-1")
+                .is_none()
         );
     }
 
     #[test]
     fn an_operation_with_no_verifier_plans_nothing() {
-        // Including a write that genuinely cannot be verified: Microsoft
-        // mail.send returns no id at all.
+        // Including writes that genuinely cannot be verified: Microsoft
+        // mail.send returns no id at all, and GitHub issues.create returns its
+        // id as a JSON number, which the receipt extractor (string-only, on
+        // both sides of the boundary) never picks up.
         for operation in [
             "mail.send",
             "microsoft.mail.send",
             "issues.create",
+            "github.issues.create",
+            "issues.comment.create",
             "whatever",
         ] {
             assert!(
-                plan_provider_read_back(operation, &json!({})).is_none(),
+                plan_provider_read_back(operation, &json!({}), "receipt-1").is_none(),
                 "{operation} must not claim a verifier it does not have"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mutation_is_never_paired_with_a_read_that_would_find_it_anyway() {
+        // Each of these has a usable read on the frozen surface, and pairing
+        // them with it would be the subtlest false confirmation available here:
+        // the object existed before the write, so finding it says nothing about
+        // whether the mutation applied.
+        for (operation, body) in [
+            ("issues.update", json!({})),
+            ("github.issues.update", json!({})),
+            ("events.update", json!({})),
+            ("linkedin.events.update", json!({})),
+            ("ads.campaign.update", json!({})),
+            ("user.suspend", json!({})),
+            ("okta.user.activate", json!({})),
+            ("catalog.product.upsert", json!({})),
+        ] {
+            assert!(
+                plan_provider_read_back(operation, &body, "receipt-1").is_none(),
+                "{operation} mutates an existing object; its presence in a read-back \
+                 is not evidence the mutation happened"
+            );
+        }
+    }
+
+    #[test]
+    fn linkedin_event_create_plans_an_authoritative_by_id_lookup() {
+        let plan = plan_provider_read_back("linkedin.events.create", &json!({}), "  7212345  ")
+            .expect("events.create has a verifier");
+        assert_eq!(plan.operation, "events.get");
+        assert_eq!(
+            plan.params["eventId"],
+            json!("7212345"),
+            "the receipt is the whole lookup key, trimmed"
+        );
+        assert_eq!(plan.strength, ReadBackStrength::AuthoritativeById);
+    }
+
+    #[test]
+    fn linkedin_post_create_plans_an_author_scoped_listing_from_its_own_body() {
+        let plan = plan_provider_read_back(
+            "posts.create",
+            &json!({ "author": "urn:li:organization:42", "commentary": "hi" }),
+            "urn:li:share:999",
+        )
+        .expect("posts.create has a verifier");
+        assert_eq!(plan.operation, "posts.list");
+        assert_eq!(plan.params["author"], json!("urn:li:organization:42"));
+        assert_eq!(
+            plan.strength,
+            ReadBackStrength::BoundedList,
+            "an author listing is a window, so absence must stay inconclusive"
+        );
+    }
+
+    #[test]
+    fn linkedin_post_create_without_an_author_has_no_plan() {
+        assert!(plan_provider_read_back("posts.create", &json!({}), "urn:li:share:9").is_none());
+        assert!(plan_provider_read_back(
+            "posts.create",
+            &json!({ "author": " " }),
+            "urn:li:share:9"
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn meta_creates_plan_a_node_fetch_keyed_only_on_the_receipt() {
+        for (operation, read, key) in [
+            ("live.create", "live.get", "liveVideoId"),
+            (
+                "instagram.media.create",
+                "instagram.media.status",
+                "creationId",
+            ),
+            (
+                "threads.container.create",
+                "threads.container.status",
+                "creationId",
+            ),
+        ] {
+            let plan = plan_provider_read_back(operation, &json!({}), "17900000000000000")
+                .unwrap_or_else(|| panic!("{operation} has a verifier"));
+            assert_eq!(plan.operation, read);
+            assert_eq!(plan.params[key], json!("17900000000000000"));
+            assert_eq!(plan.strength, ReadBackStrength::AuthoritativeById);
+            assert_eq!(
+                plan.params.as_object().map(serde_json::Map::len),
+                Some(1),
+                "{operation}'s read-back must not take any input the write did not produce"
+            );
+        }
+    }
+
+    #[test]
+    fn a_by_id_read_back_is_not_planned_without_a_receipt() {
+        for operation in [
+            "linkedin.events.create",
+            "live.create",
+            "instagram.media.create",
+            "threads.container.create",
+        ] {
+            assert!(
+                plan_provider_read_back(operation, &json!({}), "   ").is_none(),
+                "{operation} cannot look anything up without an id to look up"
             );
         }
     }
@@ -686,7 +895,7 @@ mod tests {
 
     #[test]
     fn gmail_send_plans_a_bounded_message_list() {
-        let plan = plan_provider_read_back("gmail.send", &json!({ "raw": "…" }))
+        let plan = plan_provider_read_back("gmail.send", &json!({ "raw": "…" }), "msg-1")
             .expect("gmail.send has a verifier");
         assert_eq!(plan.operation, "gmail.messages");
         assert_eq!(plan.strength, ReadBackStrength::BoundedList);
