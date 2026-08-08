@@ -37,6 +37,10 @@ const ALLOWED_FAILURE_CODES: &[&str] = &[
     "approval_not_granted",
     "max_attempts_exhausted",
     "cancelled",
+    // The provider accepted the write and its own read then contradicted it.
+    // Distinct from `invalid_continuation`, which says the attempt could not
+    // be judged at all — this one says it was judged and found false.
+    "postcondition_refuted",
 ];
 
 /// Verified Outcome Foundation (verevon-roadmap.md §3b) status strings, kept
@@ -932,6 +936,7 @@ mod tests {
             "run_not_resumable",
             "max_attempts_exhausted",
             "cancelled",
+            "postcondition_refuted",
         ] {
             assert!(validate_failure_code(accepted).is_ok());
         }
