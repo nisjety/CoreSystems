@@ -13,6 +13,8 @@ mp-telemetry = { path = "../../crates/mp-telemetry" }
 
 tokio = { workspace = true }
 tonic = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -26,7 +28,11 @@ regex = "1"
 reqwest = { workspace = true }
 jsonwebtoken = { workspace = true }
 base64 = "0.22"
+blake3 = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
+ed25519-dalek = "2"
+sha2 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -34,4 +40,3 @@ futures = { workspace = true }
 mp-slo = { path = "../../crates/mp-slo" }
 wiremock = "0.6"
 rsa = { version = "0.9", features = ["pem"] }
-rand = "0.8"
