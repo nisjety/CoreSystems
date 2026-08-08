@@ -34,9 +34,12 @@
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+
+use crate::attestation;
 
 /// Default integration-corev2 address. execution-core sits on
 /// model-plane-network only, so cross-plane services are dialled via the
@@ -151,11 +154,28 @@ pub struct IntegrationActionsClient {
     service_id: String,
     service_credential: String,
     http: reqwest::Client,
+    /// Signs the provider-write attestation integration-corev2 requires for
+    /// write operations (see the module doc's `execute_action`). `None` when
+    /// `EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY`/`_KEY_ID` are
+    /// unset — a write then fails closed with an honest tool error instead of
+    /// reaching integration-corev2 unattested.
+    write_attestor: Option<Arc<attestation::Signer>>,
 }
 
 #[derive(serde::Deserialize)]
 struct PlaneTokenResponse {
     token: String,
+}
+
+/// Result of a successful `execute_action` call: text for the model, plus
+/// (when extractable) the provider's own receipt — the only thing that may
+/// ever be forwarded as an authoritative `provider_receipt_id` to a durable
+/// approval-continuation outcome (see `approval_delivery_worker`). A `None`
+/// here means the response genuinely carried no id-like field, not that the
+/// action failed.
+pub struct ActionOutcome {
+    pub rendered: String,
+    pub provider_receipt_id: Option<String>,
 }
 
 /// A connection as surfaced to the model — the fields relevant to picking one
@@ -201,6 +221,7 @@ impl IntegrationActionsClient {
             service_id,
             service_credential,
             http,
+            write_attestor: attestation::Signer::from_env().map(Arc::new),
         })
     }
 
@@ -237,10 +258,61 @@ impl IntegrationActionsClient {
         Ok(render_provider_actions(&parse_connections(&value)))
     }
 
+    /// GET /api/v1/connections/{id} — the connection's own `providerKey`,
+    /// needed to sign a provider-write attestation (see `execute_action`):
+    /// the attestation binds `provider_key`, and only integration-corev2's
+    /// own connection record is authoritative for it — the model only ever
+    /// supplies `connection_id`.
+    async fn provider_key_for_connection(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+    ) -> Result<String, String> {
+        let token = self
+            .mint_ingestion_token(org_id, "integration:read")
+            .await?;
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/v1/connections/{}",
+                self.base_url, connection_id
+            ))
+            .bearer_auth(token)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("integration-corev2 connection lookup failed: {e}"))?;
+        let status = resp.status();
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("integration-corev2 connection lookup decode failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "integration-corev2 connection lookup returned {status}: {}",
+                truncate(&value.to_string())
+            ));
+        }
+        value
+            .pointer("/data/connection/providerKey")
+            .and_then(Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                "integration-corev2 connection lookup did not return a providerKey".to_owned()
+            })
+    }
+
     /// POST /api/v1/connections/{id}/actions with `{operation, params, body}`.
     /// `approval_ref`, when present (post-HITL-approval), is injected into the
     /// body as `approvalId` so integration-corev2's write-approval check
-    /// (`requireActionCapability`) passes for write operations.
+    /// (`requireActionCapability`) passes for write operations, and the
+    /// request is additionally signed as a provider-write attestation
+    /// (`writeAttestation` + `idempotencyKey` fields) — integration-corev2
+    /// rejects a write with neither. `actor_id` is the human whose approval
+    /// authorized this specific action; it is embedded in the attestation,
+    /// never trusted from the model's tool-call input.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub async fn execute_action(
         &self,
         org_id: &str,
@@ -248,8 +320,9 @@ impl IntegrationActionsClient {
         operation: &str,
         params: Value,
         mut body: Value,
+        actor_id: &str,
         approval_ref: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<ActionOutcome, String> {
         if connection_id.trim().is_empty() {
             return Err("execute_provider_action requires connection_id".to_owned());
         }
@@ -266,11 +339,53 @@ impl IntegrationActionsClient {
                 }
             }
         }
-        let request = serde_json::json!({
+        let mut request = serde_json::json!({
             "operation": operation,
             "params": params,
             "body": body,
         });
+        let approval = approval_ref
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(approval) = approval {
+            let provider_key = self
+                .provider_key_for_connection(org_id, connection_id)
+                .await?;
+            let payload_sha256 = attestation::payload_sha256(
+                org_id,
+                connection_id,
+                &provider_key,
+                operation,
+                &request["params"],
+                &request["body"],
+            )?;
+            let attestor = self.write_attestor.as_ref().ok_or_else(|| {
+                "execute_provider_action unavailable: provider-write attestation signer is not configured".to_owned()
+            })?;
+            let write_attestation = attestor.sign(attestation::Authorization {
+                authorization_kind: attestation::AUTHORIZATION_HUMAN_APPROVED_AI_ACTION.to_owned(),
+                authorization_id: approval.to_owned(),
+                approval_id: approval.to_owned(),
+                action_id: approval.to_owned(),
+                org_id: org_id.to_owned(),
+                connection_id: connection_id.to_owned(),
+                provider_key,
+                operation: operation.to_owned(),
+                actor_id: actor_id.to_owned(),
+                payload_sha256,
+                idempotency_key: approval.to_owned(),
+            })?;
+            if let Some(map) = request.as_object_mut() {
+                map.insert(
+                    "idempotencyKey".to_owned(),
+                    Value::String(approval.to_owned()),
+                );
+                map.insert(
+                    "writeAttestation".to_owned(),
+                    Value::String(write_attestation),
+                );
+            }
+        }
         let scope = if approval_ref.is_some() {
             "integration:write"
         } else {
@@ -286,8 +401,8 @@ impl IntegrationActionsClient {
             .bearer_auth(token)
             .header("content-type", "application/json")
             .json(&request);
-        if let Some(approval) = approval_ref.filter(|value| !value.trim().is_empty()) {
-            outbound = outbound.header("idempotency-key", approval.trim());
+        if let Some(approval) = approval {
+            outbound = outbound.header("idempotency-key", approval);
         }
         let resp = outbound
             .send()
@@ -314,7 +429,72 @@ impl IntegrationActionsClient {
                 }
             ));
         }
-        Ok(render_action_result(operation, &value))
+        Ok(ActionOutcome {
+            rendered: render_action_result(operation, &value),
+            provider_receipt_id: value
+                .pointer("/data/action/result")
+                .and_then(extract_provider_receipt_id),
+        })
+    }
+
+    /// Run a **read** operation and return integration-corev2's raw JSON.
+    ///
+    /// Deliberately separate from [`Self::execute_action`], which renders
+    /// prose for a model and only surfaces a heuristic receipt id. The
+    /// postcondition verifier (`crate::postcondition`) must match an exact
+    /// identifier inside a structured response — matching against rendered
+    /// prose would risk a false `Confirmed`, the one outcome that must never
+    /// be produced on weak evidence.
+    ///
+    /// No `approval_ref` and therefore no write attestation: this path mints
+    /// only an `integration:read` token, so it cannot be used to perform a
+    /// write even if handed a write operation — integration-corev2 rejects
+    /// the scope.
+    pub async fn read_action_json(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+        operation: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        if connection_id.trim().is_empty() {
+            return Err("read_action_json requires connection_id".to_owned());
+        }
+        if operation.trim().is_empty() {
+            return Err("read_action_json requires operation".to_owned());
+        }
+        let request = serde_json::json!({
+            "operation": operation,
+            "params": params,
+            "body": serde_json::json!({}),
+        });
+        let token = self
+            .mint_ingestion_token(org_id, "integration:read")
+            .await?;
+        let resp = self
+            .http
+            .post(format!(
+                "{}/api/v1/connections/{}/actions",
+                self.base_url, connection_id
+            ))
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| format!("integration-corev2 read request failed: {e}"))?;
+        let status = resp.status();
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("integration-corev2 read decode failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "integration-corev2 read returned {status}: {}",
+                truncate(&value.to_string())
+            ));
+        }
+        Ok(value)
     }
 
     async fn mint_ingestion_token(&self, org_id: &str, scope: &str) -> Result<String, String> {
@@ -489,6 +669,54 @@ fn render_action_result(operation: &str, value: &Value) -> String {
         .unwrap_or_else(|| value.clone());
     let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     format!("Executed {operation}. Result:\n{}", truncate(&pretty))
+}
+
+/// Rust port of integration-corev2's own `actionProviderMessageIDAtDepth`
+/// (`internal/api/server.go`) — kept byte-for-byte equivalent so a receipt
+/// this client extracts client-side always agrees with what integration-corev2
+/// itself would have stored server-side (`store.ActionReceipt.ProviderMessageID`)
+/// for the same response. Depth-bounded, tries a fixed key set at each level,
+/// then recurses into a fixed set of envelope/container keys.
+fn extract_provider_receipt_id(value: &Value) -> Option<String> {
+    provider_message_id_at_depth(value, 0)
+}
+
+fn provider_message_id_at_depth(value: &Value, depth: u8) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    match value {
+        Value::Object(map) => {
+            for key in [
+                "provider_message_id",
+                "providerMessageId",
+                "message_id",
+                "messageId",
+                "id",
+                "ts",
+            ] {
+                if let Some(candidate) = map.get(key).and_then(Value::as_str) {
+                    let trimmed = candidate.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_owned());
+                    }
+                }
+            }
+            for key in ["message", "messages", "data", "result"] {
+                if let Some(candidate) = map
+                    .get(key)
+                    .and_then(|nested| provider_message_id_at_depth(nested, depth + 1))
+                {
+                    return Some(candidate);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| provider_message_id_at_depth(item, depth + 1)),
+        _ => None,
+    }
 }
 
 fn truncate(s: &str) -> String {

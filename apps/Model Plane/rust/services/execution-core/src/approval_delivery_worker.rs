@@ -73,8 +73,11 @@
 //!   back an authoritative id, **not** that the effect exists. Do not read a
 //!   structural `VERIFIED_SUCCESS` as stronger proof than it is.
 //! - `"postcondition"` — an independent re-read of the system of record
-//!   (§3b P1 item 3, see [`crate::postcondition`]). Implemented today for
-//!   `book_shipment`, which is re-read from shipping-core after booking.
+//!   (§3b P1 item 3, see [`crate::postcondition`]). Implemented for
+//!   `book_shipment` (re-read from shipping-core) and for the
+//!   `execute_provider_action` operations that have a matching read on the
+//!   frozen actions surface (Slack `message.send`, Gmail `gmail.send`).
+//!   Operations without a verifier stay structural rather than guess.
 //!
 //! The precedence is enforced in `verification_result_with_postcondition`: a
 //! confirmation upgrades the method, a refutation **overrides a structural
@@ -352,6 +355,19 @@ struct ProviderActionInput {
 enum ResumableAction {
     ProviderAction(ProviderActionInput),
     ShipmentBooking(Box<crate::shipping_tools::BookInput>),
+}
+
+/// What the postcondition step needs to know, captured before the execution
+/// match consumes the action. Carries the provider-action fields a read-back
+/// requires (`crate::postcondition::verify_provider_action`) rather than
+/// re-parsing the descriptor a second time.
+enum VerifierTarget {
+    ShipmentBooking,
+    ProviderAction {
+        connection_id: String,
+        operation: String,
+        body: Value,
+    },
 }
 
 /// What this pass decided to do with one claimed delivery, independent of
@@ -784,8 +800,15 @@ async fn process_delivery(
     }
 
     // Captured before the match consumes `action`, so the postcondition step
-    // below can still tell which verifier (if any) applies.
-    let is_shipment_booking = matches!(action, ResumableAction::ShipmentBooking(_));
+    // below still knows which verifier applies and what it needs to call.
+    let verifier_target = match &action {
+        ResumableAction::ShipmentBooking(_) => VerifierTarget::ShipmentBooking,
+        ResumableAction::ProviderAction(input) => VerifierTarget::ProviderAction {
+            connection_id: input.connection_id.clone(),
+            operation: input.operation.clone(),
+            body: input.body.clone(),
+        },
+    };
     let disposition = match action {
         ResumableAction::ProviderAction(input) => {
             let execution_result = integration_client
@@ -829,27 +852,47 @@ async fn process_delivery(
     // shipment booking has a verifier today; everything else stays on the
     // structural judgment. A failure to reach shipping-core is inconclusive,
     // never a refutation — see `crate::postcondition`'s module doc.
-    let postcondition = match (&disposition, is_shipment_booking, shipping_client) {
-        (
-            Disposition::Completed {
-                provider_receipt_id,
-            },
-            true,
-            Some(client),
-        ) => {
-            let outcome = crate::postcondition::verify_shipment_booking(
-                client,
-                provider_receipt_id,
-                &descriptor.org_id,
-            )
-            .await;
-            info!(
-                delivery_id = %delivery.delivery_id,
-                booking_id = %provider_receipt_id,
-                verdict = ?outcome,
-                "approval_delivery_worker: postcondition check complete"
-            );
-            Some(outcome)
+    let postcondition = match &disposition {
+        Disposition::Completed {
+            provider_receipt_id,
+        } => {
+            let outcome = match &verifier_target {
+                VerifierTarget::ShipmentBooking => match shipping_client {
+                    Some(client) => Some(
+                        crate::postcondition::verify_shipment_booking(
+                            client,
+                            provider_receipt_id,
+                            &descriptor.org_id,
+                        )
+                        .await,
+                    ),
+                    None => None,
+                },
+                VerifierTarget::ProviderAction {
+                    connection_id,
+                    operation,
+                    body,
+                } => Some(
+                    crate::postcondition::verify_provider_action(
+                        integration_client,
+                        &descriptor.org_id,
+                        connection_id,
+                        operation,
+                        body,
+                        provider_receipt_id,
+                    )
+                    .await,
+                ),
+            };
+            if let Some(outcome) = &outcome {
+                info!(
+                    delivery_id = %delivery.delivery_id,
+                    receipt = %provider_receipt_id,
+                    verdict = ?outcome,
+                    "approval_delivery_worker: postcondition check complete"
+                );
+            }
+            outcome
         }
         _ => None,
     };
