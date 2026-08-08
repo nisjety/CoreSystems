@@ -824,6 +824,67 @@ pub async fn verify_provider_action(
     }
 }
 
+/// Verify a write that integration-corev2 durably completed but answered with
+/// no receipt id, and return the effect id its success would be recorded under.
+///
+/// This is what makes a mutation verifiable at all. A create has nothing to
+/// stand on without a receipt — its object's identity is exactly what the
+/// missing id would have told us — so an [`ReadBackJudgment::IdentifierPresence`]
+/// plan is refused here rather than being fed an empty id. A mutation is the
+/// opposite case: the object's id came from the write's own params, was known
+/// before the call, and the read-back either shows the requested values or
+/// does not.
+///
+/// The returned effect id is the object the write targeted. It is only ever
+/// forwarded as an authoritative identifier when the accompanying outcome is
+/// [`PostconditionOutcome::Confirmed`] — the caller enforces that, because
+/// "the id we asked about" becomes "the id of a real effect" only once the
+/// provider's own read agrees.
+///
+/// `None` means no field-level verifier applies, and the caller must keep the
+/// receipt-less write's existing terminal judgment.
+pub async fn verify_unreceipted_mutation(
+    client: &crate::integration_tools::IntegrationActionsClient,
+    org_id: &str,
+    connection_id: &str,
+    operation: &str,
+    params: &Value,
+    body: &Value,
+) -> Option<(String, PostconditionOutcome)> {
+    let (effect_id, plan) = plan_unreceipted_mutation(operation, params, body)?;
+    let outcome = match client
+        .read_action_json(org_id, connection_id, plan.operation, plan.params.clone())
+        .await
+    {
+        Ok(result) => judge_provider_read_back(&plan, "", &result),
+        Err(error) => PostconditionOutcome::Inconclusive {
+            detail: format!("could not read {} back: {error}", plan.operation),
+        },
+    };
+    Some((effect_id, outcome))
+}
+
+/// The pure half of [`verify_unreceipted_mutation`]: which read to run, and
+/// under which effect id a success would be recorded.
+///
+/// Split out so the guard that matters can be tested without a live provider:
+/// a plan judged on identifier presence — every create — must never reach the
+/// receipt-less path, because the identity it would be recorded under is
+/// precisely what the missing receipt failed to supply.
+#[must_use]
+pub fn plan_unreceipted_mutation(
+    operation: &str,
+    params: &Value,
+    body: &Value,
+) -> Option<(String, ProviderReadBack)> {
+    let plan = plan_provider_read_back(operation, params, body, "")?;
+    let ReadBackJudgment::FieldValues { locator, .. } = &plan.judgment else {
+        return None;
+    };
+    let effect_id = locator.clone();
+    Some((effect_id, plan))
+}
+
 // ---------------------------------------------------------------------------
 // Browser procedures
 // ---------------------------------------------------------------------------
@@ -1508,6 +1569,41 @@ mod tests {
             matches!(outcome, PostconditionOutcome::Confirmed { .. }),
             "a sibling record's field must not decide this object's verdict"
         );
+    }
+
+    #[test]
+    fn only_a_mutation_may_be_verified_without_a_receipt() {
+        // Lifting the receipt gate must not let a create through it. A create's
+        // identity is exactly what the missing receipt failed to supply, so
+        // there is nothing to record its success under.
+        for (operation, params, body) in [
+            ("slack.message.send", json!({}), json!({ "channel": "C1" })),
+            ("gmail.send", json!({}), json!({ "raw": "…" })),
+            (
+                "posts.create",
+                json!({}),
+                json!({ "author": "urn:li:organization:42" }),
+            ),
+            ("linkedin.events.create", json!({}), json!({})),
+            ("threads.container.create", json!({}), json!({})),
+        ] {
+            assert!(
+                plan_unreceipted_mutation(operation, &params, &body).is_none(),
+                "{operation} creates its object, so a missing receipt is fatal to it"
+            );
+        }
+
+        let (effect_id, plan) = plan_unreceipted_mutation(
+            "linkedin.events.update",
+            &json!({ "eventId": "7212345" }),
+            &json!({ "patch": { "$set": { "name": "Autumn launch" } } }),
+        )
+        .expect("a mutation carries its own identity and can still be verified");
+        assert_eq!(
+            effect_id, "7212345",
+            "the effect is recorded under the id the write targeted"
+        );
+        assert_eq!(plan.operation, "events.get");
     }
 
     #[test]

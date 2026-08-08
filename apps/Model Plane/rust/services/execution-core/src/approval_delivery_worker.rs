@@ -120,6 +120,11 @@ const SHIPMENT_BOOKING_TOOL_NAME: &str = "book_shipment";
 const FAILURE_CONTINUATION_UNAVAILABLE: &str = "continuation_unavailable";
 const FAILURE_INVALID_CONTINUATION: &str = "invalid_continuation";
 const FAILURE_TRANSIENT_DEPENDENCY: &str = "transient_dependency";
+/// The provider's own read contradicted a write it had accepted. Must stay in
+/// sync with session-core's `ALLOWED_FAILURE_CODES` — session-core rejects any
+/// code outside that list, so it has to accept this one before a worker
+/// carrying it is deployed.
+const FAILURE_POSTCONDITION_REFUTED: &str = "postcondition_refuted";
 
 // ---------------------------------------------------------------------
 // Token provider — mints session-core `approval:deliver` tokens, one per
@@ -388,6 +393,27 @@ enum Disposition {
     /// Started, executed, got an authoritative provider receipt: record
     /// Completed, then acknowledge Settled with the same receipt id.
     Completed { provider_receipt_id: String },
+    /// Started, executed, and integration-corev2 durably completed the write —
+    /// but its response carried no id-like field.
+    ///
+    /// **Never a final answer.** The postcondition step resolves it into
+    /// [`Disposition::CompletedByPostcondition`] or
+    /// [`Disposition::FailedTerminal`]. If it survives unresolved (no verifier
+    /// applies, or the read could not be reached) it finalizes as a terminal
+    /// `invalid_continuation`, which is what this case did before a read-back
+    /// could speak for it. It must never finalize as a success: nothing has
+    /// established one.
+    UnreceiptedWrite,
+    /// Started, executed without a receipt, and the provider's **own read**
+    /// confirms the effect. `effect_id` is the object the write targeted — an
+    /// identifier that becomes authoritative precisely because the read-back
+    /// agreed, never on its own.
+    CompletedByPostcondition { effect_id: String },
+    /// Started and executed, but terminally failed: recorded as Failed, and
+    /// acknowledged Terminal because retrying would deterministically repeat
+    /// it (integration-corev2 replays the same cached outcome for the same
+    /// idempotency key).
+    FailedTerminal { failure_code: &'static str },
     /// Started, but execution did not produce a usable outcome. Recorded as
     /// Failed with this allowlisted code; acknowledged Retry (the outbox's
     /// own bounded backoff governs how many more attempts happen — see
@@ -442,15 +468,18 @@ fn disposition_for_provider_action_result(
                 provider_receipt_id,
             },
             // integration-corev2 accepted and durably completed the write,
-            // but its response carried no id-like field this heuristic
-            // could find. A retry would replay the SAME cached completed
-            // receipt (integration-corev2's own idempotency key covers this
-            // exact action) and hit the identical extraction gap
-            // deterministically — so Terminal, not Retry, is the honest
-            // choice; looping would never resolve it.
-            None => Disposition::RejectBeforeStart {
-                failure_code: FAILURE_INVALID_CONTINUATION,
-            },
+            // but its response carried no id-like field this heuristic could
+            // find. Retrying would replay the SAME cached completed receipt
+            // (integration-corev2's own idempotency key covers this exact
+            // action) and hit the identical extraction gap deterministically,
+            // so looping never resolves it.
+            //
+            // This used to end here as a terminal failure. It is now handed to
+            // the postcondition step instead: for a mutation, the effect's
+            // identity came from the write's own params and was never the
+            // missing receipt's to supply, so the provider's own read can
+            // still settle whether the effect exists.
+            None => Disposition::UnreceiptedWrite,
         },
         Err(_) => disposition_for_transient_failure(),
     }
@@ -469,6 +498,72 @@ fn disposition_for_shipment_booking_result(
             provider_receipt_id: outcome.booking_id,
         },
         Err(_) => disposition_for_transient_failure(),
+    }
+}
+
+/// Decide what a write that came back without a receipt actually did, by
+/// asking the provider's own read.
+///
+/// This is the receipt gate lifted. A receipt is the natural evidence for a
+/// *create*, whose object had no identity before the call — and for those this
+/// still ends terminally, because nothing else can speak for them. For a
+/// *mutation* the receipt was never the right evidence in the first place: the
+/// object's id came from the write's own params, so the read-back can settle
+/// the question the missing id left open.
+///
+/// The asymmetry is deliberate and load-bearing. Only `Confirmed` produces a
+/// success; `Refuted` produces a terminal failure carrying the refutation; and
+/// anything inconclusive — an unreachable provider, a field the provider does
+/// not report, no verifier at all — leaves the terminal `invalid_continuation`
+/// this case has always had. Silence is never promoted to success.
+async fn resolve_unreceipted_write(
+    integration_client: &IntegrationActionsClient,
+    org_id: &str,
+    verifier_target: &VerifierTarget,
+) -> (
+    Disposition,
+    Option<crate::postcondition::PostconditionOutcome>,
+) {
+    use crate::postcondition::PostconditionOutcome;
+
+    let VerifierTarget::ProviderAction {
+        connection_id,
+        operation,
+        params,
+        body,
+    } = verifier_target
+    else {
+        // Shipping bookings always carry a booking id on success, so they
+        // never reach here.
+        return (Disposition::UnreceiptedWrite, None);
+    };
+    let Some((effect_id, outcome)) = crate::postcondition::verify_unreceipted_mutation(
+        integration_client,
+        org_id,
+        connection_id,
+        operation,
+        params,
+        body,
+    )
+    .await
+    else {
+        return (Disposition::UnreceiptedWrite, None);
+    };
+
+    match outcome {
+        confirmed @ PostconditionOutcome::Confirmed { .. } => (
+            Disposition::CompletedByPostcondition { effect_id },
+            Some(confirmed),
+        ),
+        refuted @ PostconditionOutcome::Refuted { .. } => (
+            Disposition::FailedTerminal {
+                failure_code: FAILURE_POSTCONDITION_REFUTED,
+            },
+            Some(refuted),
+        ),
+        // Recorded on the outcome so the gap is visible, but it changes
+        // nothing: an unverifiable write stays exactly as terminal as it was.
+        inconclusive => (Disposition::UnreceiptedWrite, Some(inconclusive)),
     }
 }
 
@@ -501,10 +596,21 @@ fn acknowledgement_for(disposition: &Disposition) -> (pb::ApprovalDeliveryAcknow
             // fit is "another attempt is in flight, check back."
             FAILURE_TRANSIENT_DEPENDENCY,
         ),
-        Disposition::Completed { .. } => (pb::ApprovalDeliveryAcknowledgement::Settled, ""),
+        Disposition::Completed { .. } | Disposition::CompletedByPostcondition { .. } => {
+            (pb::ApprovalDeliveryAcknowledgement::Settled, "")
+        }
         Disposition::FailedRetryable { failure_code } => {
             (pb::ApprovalDeliveryAcknowledgement::Retry, failure_code)
         }
+        Disposition::FailedTerminal { failure_code } => {
+            (pb::ApprovalDeliveryAcknowledgement::Terminal, failure_code)
+        }
+        // Unresolved: nothing established a success, so this finalizes exactly
+        // as it did before the postcondition step existed.
+        Disposition::UnreceiptedWrite => (
+            pb::ApprovalDeliveryAcknowledgement::Terminal,
+            FAILURE_INVALID_CONTINUATION,
+        ),
     }
 }
 
@@ -614,13 +720,20 @@ fn verification_result_with_postcondition(
             pb::VerificationStatus::VerifiedSuccess,
             format!("provider returned authoritative receipt id {provider_receipt_id}"),
         ),
-        Disposition::FailedRetryable { failure_code } => (
+        Disposition::FailedRetryable { failure_code }
+        | Disposition::FailedTerminal { failure_code } => (
             pb::VerificationStatus::VerifiedFailure,
             (*failure_code).to_owned(),
         ),
-        Disposition::RejectBeforeStart { .. } | Disposition::AlreadyStarted => {
-            (pb::VerificationStatus::Unknown, String::new())
-        }
+        // `CompletedByPostcondition` has no structural evidence *by
+        // definition* — no receipt came back — so it is `Unknown` here and only
+        // becomes a success through the `Confirmed` arm below. If it ever
+        // arrived without one, it would report Unknown rather than claim a
+        // success nothing established.
+        Disposition::CompletedByPostcondition { .. }
+        | Disposition::UnreceiptedWrite
+        | Disposition::RejectBeforeStart { .. }
+        | Disposition::AlreadyStarted => (pb::VerificationStatus::Unknown, String::new()),
     };
 
     match postcondition {
@@ -665,9 +778,24 @@ async fn record_continuation_outcome(
             provider_receipt_id.as_str(),
             "",
         ),
-        Disposition::FailedRetryable { failure_code } => {
+        // The effect id stands in for the receipt the provider never sent. The
+        // schema requires a completed outcome to carry one
+        // (`0018_approval_continuation_receipts.sql`), and the accompanying
+        // verification says in full how it was established.
+        Disposition::CompletedByPostcondition { effect_id } => (
+            pb::ApprovalContinuationOutcome::Completed,
+            effect_id.as_str(),
+            "",
+        ),
+        Disposition::FailedRetryable { failure_code }
+        | Disposition::FailedTerminal { failure_code } => {
             (pb::ApprovalContinuationOutcome::Failed, "", *failure_code)
         }
+        Disposition::UnreceiptedWrite => (
+            pb::ApprovalContinuationOutcome::Failed,
+            "",
+            FAILURE_INVALID_CONTINUATION,
+        ),
         // RejectBeforeStart / AlreadyStarted never call this — see process_delivery.
         Disposition::RejectBeforeStart { .. } | Disposition::AlreadyStarted => {
             return Err(
@@ -712,6 +840,7 @@ async fn acknowledge(
         Disposition::Completed {
             provider_receipt_id,
         } => provider_receipt_id.clone(),
+        Disposition::CompletedByPostcondition { effect_id } => effect_id.clone(),
         _ => String::new(),
     };
     let request = authenticated_request(
@@ -852,11 +981,20 @@ async fn process_delivery(
         }
     };
 
-    // Postcondition verification (roadmap P1 item 3). Only a completed
-    // shipment booking has a verifier today; everything else stays on the
-    // structural judgment. A failure to reach shipping-core is inconclusive,
-    // never a refutation — see `crate::postcondition`'s module doc.
-    let postcondition = match &disposition {
+    // Postcondition verification (roadmap P1 item 3). A failure to reach the
+    // system of record is inconclusive, never a refutation — see
+    // `crate::postcondition`'s module doc.
+    //
+    // Two shapes meet here. A *receipted* write already has a structural
+    // judgment, and the check can only strengthen or overturn it. An
+    // *unreceipted* write has no judgment at all, and for a mutation the check
+    // is the only thing that can produce one — which is why this step can
+    // change the disposition rather than only annotate it.
+    let (disposition, postcondition) = match disposition {
+        Disposition::UnreceiptedWrite => {
+            resolve_unreceipted_write(integration_client, &descriptor.org_id, &verifier_target)
+                .await
+        }
         Disposition::Completed {
             provider_receipt_id,
         } => {
@@ -865,7 +1003,7 @@ async fn process_delivery(
                     Some(client) => Some(
                         crate::postcondition::verify_shipment_booking(
                             client,
-                            provider_receipt_id,
+                            &provider_receipt_id,
                             &descriptor.org_id,
                         )
                         .await,
@@ -885,7 +1023,7 @@ async fn process_delivery(
                         operation,
                         params,
                         body,
-                        provider_receipt_id,
+                        &provider_receipt_id,
                     )
                     .await,
                 ),
@@ -898,9 +1036,14 @@ async fn process_delivery(
                     "approval_delivery_worker: postcondition check complete"
                 );
             }
-            outcome
+            (
+                Disposition::Completed {
+                    provider_receipt_id,
+                },
+                outcome,
+            )
         }
-        _ => None,
+        other => (other, None),
     };
 
     if let Err(error) = record_continuation_outcome(
@@ -928,6 +1071,14 @@ async fn process_delivery(
     match &disposition {
         Disposition::Completed { .. } => {
             info!(delivery_id = %delivery.delivery_id, approval_id = %delivery.approval_id, "approval_delivery_worker: continuation completed");
+        }
+        Disposition::CompletedByPostcondition { effect_id } => {
+            info!(
+                delivery_id = %delivery.delivery_id,
+                approval_id = %delivery.approval_id,
+                effect = %effect_id,
+                "approval_delivery_worker: continuation completed on read-back alone, no provider receipt"
+            );
         }
         _ => {
             warn!(delivery_id = %delivery.delivery_id, approval_id = %delivery.approval_id, "approval_delivery_worker: continuation failed, will retry");
@@ -1287,17 +1438,92 @@ mod tests {
     }
 
     #[test]
-    fn a_successful_provider_action_without_a_receipt_is_terminal_not_retried() {
+    fn a_successful_provider_action_without_a_receipt_awaits_a_read_back() {
         let outcome = crate::integration_tools::ActionOutcome {
             rendered: "Executed op. Result:\n{}".to_owned(),
             provider_receipt_id: None,
         };
         assert_eq!(
             disposition_for_provider_action_result(Ok(outcome)),
-            Disposition::RejectBeforeStart {
-                failure_code: FAILURE_INVALID_CONTINUATION
-            }
+            Disposition::UnreceiptedWrite,
+            "a missing receipt is no longer a verdict on its own"
         );
+    }
+
+    #[test]
+    fn an_unresolved_unreceipted_write_still_finalizes_terminally() {
+        // The safety property behind lifting the receipt gate: if nothing
+        // resolves it, this is exactly as terminal as it always was, and it
+        // never claims a success.
+        assert_eq!(
+            acknowledgement_for(&Disposition::UnreceiptedWrite),
+            (
+                pb::ApprovalDeliveryAcknowledgement::Terminal,
+                FAILURE_INVALID_CONTINUATION
+            )
+        );
+        let verification = verification_result_with_postcondition(
+            "receipt-1",
+            &Disposition::UnreceiptedWrite,
+            None,
+        );
+        assert_eq!(verification.status, pb::VerificationStatus::Unknown as i32);
+    }
+
+    #[test]
+    fn a_postcondition_completed_write_never_claims_success_on_its_own() {
+        // Fail-closed: the disposition carries no structural evidence, so
+        // without a Confirmed outcome it must report Unknown rather than a
+        // success nothing established.
+        let disposition = Disposition::CompletedByPostcondition {
+            effect_id: "ev-1".to_owned(),
+        };
+        let bare = verification_result_with_postcondition("receipt-1", &disposition, None);
+        assert_eq!(bare.status, pb::VerificationStatus::Unknown as i32);
+        assert_eq!(bare.method, "structural");
+
+        let confirmed = verification_result_with_postcondition(
+            "receipt-1",
+            &disposition,
+            Some(&crate::postcondition::PostconditionOutcome::Confirmed {
+                detail: "provider's own events.get read independently reports name".to_owned(),
+            }),
+        );
+        assert_eq!(
+            confirmed.status,
+            pb::VerificationStatus::VerifiedSuccess as i32
+        );
+        assert_eq!(
+            confirmed.method, "postcondition",
+            "the only evidence here is the read-back, so the method must say so"
+        );
+    }
+
+    #[test]
+    fn a_refuted_unreceipted_write_is_a_terminal_verified_failure() {
+        let disposition = Disposition::FailedTerminal {
+            failure_code: FAILURE_POSTCONDITION_REFUTED,
+        };
+        assert_eq!(
+            acknowledgement_for(&disposition),
+            (
+                pb::ApprovalDeliveryAcknowledgement::Terminal,
+                FAILURE_POSTCONDITION_REFUTED
+            ),
+            "retrying would replay the same cached outcome and refute again"
+        );
+        let verification = verification_result_with_postcondition(
+            "receipt-1",
+            &disposition,
+            Some(&crate::postcondition::PostconditionOutcome::Refuted {
+                detail: "name is Old name but the write set it to New name".to_owned(),
+            }),
+        );
+        assert_eq!(
+            verification.status,
+            pb::VerificationStatus::VerifiedFailure as i32
+        );
+        assert_eq!(verification.method, "postcondition");
     }
 
     #[test]
