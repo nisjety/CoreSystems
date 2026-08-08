@@ -218,6 +218,46 @@ pub(crate) async fn execute_browser_agent(
     }
 }
 
+/// Judge a completed browser loop against its own final observation and
+/// render the verdict for the step output (roadmap P1 item 3).
+///
+/// Deliberately **annotates** rather than rewrites the lifecycle status: a
+/// `Completed` plan whose final observation failed is worth stating plainly,
+/// but downgrading it to `Failed` would change execution semantics on an
+/// inference about when those two can legitimately co-occur, which has not
+/// been established. Surfacing the verdict makes the mismatch visible to the
+/// model, the run console, and any operator reading the step — without
+/// silently altering behavior.
+///
+/// Browser procedures can currently be refuted but never confirmed; see
+/// [`crate::postcondition::judge_browser_procedure`] for why (no
+/// postcondition is declared independently of the loop's own stop criteria).
+fn browser_verification_note(observations: &[browser_agent::BrowserObservation]) -> String {
+    let final_observation = observations.last();
+    let evidence = crate::postcondition::BrowserProcedureEvidence {
+        aborted: false,
+        final_status: final_observation.map(|o| o.status.as_str()),
+        final_page_title: final_observation.map_or("", |o| o.page_title.as_str()),
+        final_page_text: final_observation.map_or("", |o| o.extracted_text.as_str()),
+        has_durable_evidence: final_observation.is_some_and(|o| {
+            !o.screenshot_ref.trim().is_empty() || !o.dom_snapshot_ref.trim().is_empty()
+        }),
+        // The loop result carries no ZDR flag; a ZDR run simply arrives with
+        // empty page content, which the judgment already treats as
+        // unmatchable rather than as a failure.
+        zdr: false,
+        stop_criteria: "",
+        // PlanConfig carries no independently-declared postcondition yet.
+        declared_postcondition: None,
+    };
+    let outcome = crate::postcondition::judge_browser_procedure(&evidence);
+    format!(
+        "{}: {}",
+        outcome.method().unwrap_or("none"),
+        outcome.detail()
+    )
+}
+
 fn browser_execution_from_loop_result(
     result: browser_agent::BrowserAgentLoopResult,
 ) -> BrowserAgentExecution {
@@ -236,7 +276,11 @@ fn browser_execution_from_loop_result(
 
     match result.status {
         PlanStatus::Completed => BrowserAgentExecution::Completed {
-            output: format!("status=completed summary={}", result.summary),
+            output: format!(
+                "status=completed summary={} verification={}",
+                result.summary,
+                browser_verification_note(&result.observations)
+            ),
         },
         PlanStatus::Failed => BrowserAgentExecution::Failed {
             reason: result.summary,

@@ -347,6 +347,137 @@ pub async fn verify_provider_action(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Browser procedures
+// ---------------------------------------------------------------------------
+
+/// The independently-checkable facts about a finished browser procedure.
+///
+/// Deliberately excludes the loop's `summary` and `status`: those are the
+/// agent's own account of what happened, and checking a claim against itself
+/// verifies nothing. Only the observation the browser actually produced, and
+/// whether durable evidence for it exists, count here.
+#[derive(Debug, Clone, Copy)]
+pub struct BrowserProcedureEvidence<'a> {
+    /// Whether the loop ended in an abort (cancelled, approval denied, …).
+    pub aborted: bool,
+    /// `status` of the final observation: `success` | `failed` | `timeout` |
+    /// `blocked`. `None` when the procedure produced no observation at all.
+    pub final_status: Option<&'a str>,
+    pub final_page_title: &'a str,
+    pub final_page_text: &'a str,
+    /// True when a screenshot or DOM snapshot was retained, so a human can
+    /// actually inspect the claim.
+    pub has_durable_evidence: bool,
+    /// Zero-data-retention: Quarry retained no page content, so there is
+    /// nothing to inspect and nothing to match against.
+    pub zdr: bool,
+    /// The substring that made the loop stop.
+    pub stop_criteria: &'a str,
+    /// A success condition declared independently of `stop_criteria`.
+    ///
+    /// `None` today: `PlanConfig` carries no such field yet, so browser
+    /// procedures can currently be **refuted but never confirmed** — see
+    /// [`judge_browser_procedure`]. Adding that field is the one change that
+    /// unlocks confirmation, and the path is already implemented and tested.
+    pub declared_postcondition: Option<&'a str>,
+}
+
+/// Judge a finished browser procedure against its own final observation.
+///
+/// # Why this cannot simply re-check `stop_criteria`
+///
+/// `stop_criteria` is the substring that *caused* the loop to stop. Testing
+/// the final page for it would always succeed and would prove nothing — it
+/// checks the agent against its own stop decision. That circularity is the
+/// browser equivalent of trusting a provider's own "success" claim, and it is
+/// refused explicitly below rather than quietly producing a confident-looking
+/// `Confirmed`.
+///
+/// # What it can decide today
+///
+/// - **Refuted** — the final observation is a `failed`/`timeout`/`blocked`
+///   result, or the procedure aborted. This is real value: a loop can report
+///   `Completed` while the last thing that actually happened was a failure,
+///   and that mismatch is exactly the false-success case.
+/// - **Refuted** — a distinct postcondition was declared and the final page
+///   does not contain it.
+/// - **Confirmed** — a distinct postcondition was declared, the final
+///   observation succeeded, the page contains it, and durable evidence was
+///   retained. Implemented and tested, but unreachable until `PlanConfig`
+///   carries a postcondition.
+/// - **Inconclusive** — everything else, each with a specific reason.
+#[must_use]
+pub fn judge_browser_procedure(evidence: &BrowserProcedureEvidence<'_>) -> PostconditionOutcome {
+    if evidence.aborted {
+        return PostconditionOutcome::Refuted {
+            detail: "the browser procedure aborted before reaching its goal".to_owned(),
+        };
+    }
+    let Some(status) = evidence.final_status.map(str::trim) else {
+        return PostconditionOutcome::Inconclusive {
+            detail: "the browser procedure produced no observation to judge".to_owned(),
+        };
+    };
+    if status != "success" {
+        return PostconditionOutcome::Refuted {
+            detail: format!("the browser procedure's final observation was {status}"),
+        };
+    }
+
+    let Some(postcondition) = evidence
+        .declared_postcondition
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return PostconditionOutcome::Inconclusive {
+            detail: "no postcondition was declared independently of the loop's stop criteria, \
+                     so the final page cannot be checked against anything the agent did not \
+                     itself decide"
+                .to_owned(),
+        };
+    };
+    if postcondition == evidence.stop_criteria.trim() {
+        return PostconditionOutcome::Inconclusive {
+            detail: "the declared postcondition is the loop's own stop criteria; re-checking it \
+                     would verify the agent against its own stop decision"
+                .to_owned(),
+        };
+    }
+
+    if evidence.zdr {
+        return PostconditionOutcome::Inconclusive {
+            detail: "Zero Data Retention kept no page content, so the postcondition cannot be \
+                     checked against the final page"
+                .to_owned(),
+        };
+    }
+
+    let matched = evidence.final_page_title.contains(postcondition)
+        || evidence.final_page_text.contains(postcondition);
+    if !matched {
+        return PostconditionOutcome::Refuted {
+            detail: format!(
+                "the final page does not contain the declared postcondition {postcondition:?}"
+            ),
+        };
+    }
+    if !evidence.has_durable_evidence {
+        return PostconditionOutcome::Inconclusive {
+            detail: "the final page matched the declared postcondition, but no screenshot or \
+                     DOM snapshot was retained, so the claim is not inspectable"
+                .to_owned(),
+        };
+    }
+
+    PostconditionOutcome::Confirmed {
+        detail: format!(
+            "the final observation succeeded, contains the declared postcondition \
+             {postcondition:?}, and retained inspectable evidence"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +690,135 @@ mod tests {
             .expect("gmail.send has a verifier");
         assert_eq!(plan.operation, "gmail.messages");
         assert_eq!(plan.strength, ReadBackStrength::BoundedList);
+    }
+
+    // --- Browser procedures -------------------------------------------------
+
+    fn browser_evidence() -> BrowserProcedureEvidence<'static> {
+        BrowserProcedureEvidence {
+            aborted: false,
+            final_status: Some("success"),
+            final_page_title: "Order confirmed",
+            final_page_text: "Your order 12345 is confirmed.",
+            has_durable_evidence: true,
+            zdr: false,
+            stop_criteria: "confirmed",
+            declared_postcondition: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_final_observation_refutes_a_completed_loop() {
+        // The whole point: the loop may report Completed while the last thing
+        // that actually happened was a failure.
+        for status in ["failed", "timeout", "blocked"] {
+            let evidence = BrowserProcedureEvidence {
+                final_status: Some(status),
+                ..browser_evidence()
+            };
+            let outcome = judge_browser_procedure(&evidence);
+            assert!(
+                matches!(outcome, PostconditionOutcome::Refuted { .. }),
+                "final observation {status} must refute"
+            );
+        }
+    }
+
+    #[test]
+    fn an_aborted_procedure_is_refuted() {
+        let evidence = BrowserProcedureEvidence {
+            aborted: true,
+            ..browser_evidence()
+        };
+        assert!(matches!(
+            judge_browser_procedure(&evidence),
+            PostconditionOutcome::Refuted { .. }
+        ));
+    }
+
+    #[test]
+    fn no_observation_is_inconclusive_not_refuted() {
+        let evidence = BrowserProcedureEvidence {
+            final_status: None,
+            ..browser_evidence()
+        };
+        assert!(matches!(
+            judge_browser_procedure(&evidence),
+            PostconditionOutcome::Inconclusive { .. }
+        ));
+    }
+
+    #[test]
+    fn without_a_declared_postcondition_a_browser_procedure_is_never_confirmed() {
+        // Today's real state of the world: PlanConfig carries no postcondition,
+        // so success can only ever be inconclusive. If this test starts
+        // failing, someone added a confirmation path — make sure it is not
+        // circular.
+        let outcome = judge_browser_procedure(&browser_evidence());
+        assert!(matches!(outcome, PostconditionOutcome::Inconclusive { .. }));
+        assert_eq!(outcome.method(), None);
+        assert!(outcome.detail().contains("stop criteria"));
+    }
+
+    #[test]
+    fn reusing_the_stop_criteria_as_the_postcondition_is_refused_as_circular() {
+        let evidence = BrowserProcedureEvidence {
+            stop_criteria: "confirmed",
+            declared_postcondition: Some("confirmed"),
+            ..browser_evidence()
+        };
+        let outcome = judge_browser_procedure(&evidence);
+        assert!(
+            matches!(outcome, PostconditionOutcome::Inconclusive { .. }),
+            "checking the agent against its own stop decision proves nothing"
+        );
+        assert!(outcome.detail().contains("stop decision"));
+    }
+
+    #[test]
+    fn a_distinct_postcondition_present_with_evidence_is_confirmed() {
+        let evidence = BrowserProcedureEvidence {
+            declared_postcondition: Some("order 12345"),
+            ..browser_evidence()
+        };
+        let outcome = judge_browser_procedure(&evidence);
+        assert!(matches!(outcome, PostconditionOutcome::Confirmed { .. }));
+        assert_eq!(outcome.method(), Some("postcondition"));
+    }
+
+    #[test]
+    fn a_distinct_postcondition_absent_from_the_final_page_is_refuted() {
+        let evidence = BrowserProcedureEvidence {
+            declared_postcondition: Some("order 99999"),
+            ..browser_evidence()
+        };
+        assert!(matches!(
+            judge_browser_procedure(&evidence),
+            PostconditionOutcome::Refuted { .. }
+        ));
+    }
+
+    #[test]
+    fn a_match_without_retained_evidence_is_inconclusive() {
+        let evidence = BrowserProcedureEvidence {
+            declared_postcondition: Some("order 12345"),
+            has_durable_evidence: false,
+            ..browser_evidence()
+        };
+        let outcome = judge_browser_procedure(&evidence);
+        assert!(matches!(outcome, PostconditionOutcome::Inconclusive { .. }));
+        assert!(outcome.detail().contains("not inspectable"));
+    }
+
+    #[test]
+    fn a_zdr_run_cannot_be_confirmed_because_no_page_content_was_kept() {
+        let evidence = BrowserProcedureEvidence {
+            declared_postcondition: Some("order 12345"),
+            zdr: true,
+            ..browser_evidence()
+        };
+        let outcome = judge_browser_procedure(&evidence);
+        assert!(matches!(outcome, PostconditionOutcome::Inconclusive { .. }));
+        assert!(outcome.detail().contains("Zero Data Retention"));
     }
 }
