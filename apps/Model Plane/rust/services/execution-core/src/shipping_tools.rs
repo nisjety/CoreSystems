@@ -393,6 +393,57 @@ impl ShippingToolsClient {
 
     /// GET /api/tracking/{tracking_no} — resolve an existing shipment only in
     /// the verified organization and render its current persisted/event state.
+    /// Read one booking back from shipping-core, the system of record.
+    ///
+    /// Unlike [`Self::track_shipment`] this returns the raw record rather
+    /// than rendered text, because its caller is the postcondition verifier
+    /// (see `crate::postcondition`) which must judge specific fields
+    /// (`status`, `tracking_no`) rather than show prose to a model.
+    ///
+    /// `Ok(None)` means shipping-core authoritatively has no such booking for
+    /// this organization (404) — a real answer, not an error. Every other
+    /// failure is `Err` so the verifier can stay inconclusive instead of
+    /// mistaking an outage for a missing booking. The read is org-scoped by
+    /// shipping-core itself from the minted token's principal, so a booking
+    /// id from another tenant cannot resolve here.
+    pub async fn get_booking(
+        &self,
+        booking_id: &str,
+        org_id: &str,
+    ) -> Result<Option<Value>, String> {
+        let booking_id = booking_id.trim();
+        if booking_id.is_empty()
+            || booking_id.len() > 120
+            || !booking_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("get_booking requires a bounded booking id".to_owned());
+        }
+        let token = self.mint_ingestion_token(org_id, "shipping:read").await?;
+        let resp = self
+            .http
+            .get(format!("{}/api/bookings/{}", self.base_url, booking_id))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("shipping-core /api/bookings request failed: {e}"))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("shipping-core /api/bookings decode failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "shipping-core /api/bookings returned {status}: {value}"
+            ));
+        }
+        Ok(Some(value))
+    }
+
     pub async fn track_shipment(&self, tracking_no: &str, org_id: &str) -> Result<String, String> {
         let tracking_no = tracking_no.trim();
         if tracking_no.is_empty()

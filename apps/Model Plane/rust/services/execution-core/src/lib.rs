@@ -21,6 +21,7 @@ pub mod mcp_gateway;
 pub mod org_directory;
 pub mod permission;
 pub mod policy;
+pub mod postcondition;
 pub mod promote_on_use;
 pub mod quarry_agent;
 mod quarry_auth;

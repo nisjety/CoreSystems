@@ -63,14 +63,25 @@
 //!
 //! Every recorded outcome also carries a [`pb::VerificationResult`] — this
 //! worker is the first real producer of that shared cross-domain contract.
-//! Today's judgment is deliberately mechanical (`method: "structural"`):
-//! `Completed` with a non-empty `provider_receipt_id` is
-//! `VERIFIED_SUCCESS`, everything else is `VERIFIED_FAILURE`. This is a
-//! structural check (did the boundary hand back an authoritative id), not an
-//! independent postcondition verification (did the shipment/post/message
-//! actually happen, confirmed against the provider's own state) — that is
-//! separately scoped future work (§3b P1 item 3). Do not read a
-//! `VERIFIED_SUCCESS` here as stronger proof than it is.
+//!
+//! There are now two judgment strengths, distinguished on the wire by
+//! `method`:
+//!
+//! - `"structural"` — the default and the fallback. `Completed` with a
+//!   non-empty `provider_receipt_id` is `VERIFIED_SUCCESS`, everything else
+//!   is `VERIFIED_FAILURE`. This only establishes that the boundary handed
+//!   back an authoritative id, **not** that the effect exists. Do not read a
+//!   structural `VERIFIED_SUCCESS` as stronger proof than it is.
+//! - `"postcondition"` — an independent re-read of the system of record
+//!   (§3b P1 item 3, see [`crate::postcondition`]). Implemented today for
+//!   `book_shipment`, which is re-read from shipping-core after booking.
+//!
+//! The precedence is enforced in `verification_result_with_postcondition`: a
+//! confirmation upgrades the method, a refutation **overrides a structural
+//! success into a failure** (the false-success case this exists to catch),
+//! and anything inconclusive — including an unreachable provider — leaves
+//! the structural judgment exactly as it was. A check that could not run is
+//! never credited as one that ran and passed.
 
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
@@ -408,7 +419,9 @@ fn disposition_for_provider_action_result(
 ) -> Disposition {
     match result {
         Ok(outcome) => match outcome.provider_receipt_id {
-            Some(provider_receipt_id) => Disposition::Completed { provider_receipt_id },
+            Some(provider_receipt_id) => Disposition::Completed {
+                provider_receipt_id,
+            },
             // integration-corev2 accepted and durably completed the write,
             // but its response carried no id-like field this heuristic
             // could find. A retry would replay the SAME cached completed
@@ -549,6 +562,31 @@ async fn record_continuation_started(
 /// verification result is always traceable to the exact execution attempt
 /// it judges.
 fn verification_result_for(effect_id: &str, disposition: &Disposition) -> pb::VerificationResult {
+    verification_result_with_postcondition(effect_id, disposition, None)
+}
+
+/// Build this outcome's verification, optionally strengthened by a real
+/// postcondition check (`crate::postcondition`, roadmap P1 item 3).
+///
+/// The precedence rules are the point of this function:
+///
+/// - `Confirmed` upgrades the judgment to `method: "postcondition"` — the
+///   system of record was independently asked and agreed.
+/// - `Refuted` **overrides a structural success** into `VERIFIED_FAILURE`.
+///   The boundary said yes and the system of record said no; reporting that
+///   as success is exactly the false-success failure mode this layer exists
+///   to catch.
+/// - `Inconclusive` and `None` change nothing. An unreachable provider, an
+///   action with no verifier, or an ambiguous record all leave the existing
+///   structural judgment exactly as it was — a check that could not run must
+///   never be credited as one that ran and passed.
+fn verification_result_with_postcondition(
+    effect_id: &str,
+    disposition: &Disposition,
+    postcondition: Option<&crate::postcondition::PostconditionOutcome>,
+) -> pb::VerificationResult {
+    use crate::postcondition::PostconditionOutcome;
+
     let now = Some(prost_types::Timestamp::from(std::time::SystemTime::now()));
     let (status, reason) = match disposition {
         Disposition::Completed {
@@ -565,12 +603,29 @@ fn verification_result_for(effect_id: &str, disposition: &Disposition) -> pb::Ve
             (pb::VerificationStatus::Unknown, String::new())
         }
     };
-    pb::VerificationResult {
-        effect_id: effect_id.to_owned(),
-        status: status as i32,
-        method: "structural".to_owned(),
-        reason,
-        verified_at: now,
+
+    match postcondition {
+        Some(PostconditionOutcome::Confirmed { detail }) => pb::VerificationResult {
+            effect_id: effect_id.to_owned(),
+            status: pb::VerificationStatus::VerifiedSuccess as i32,
+            method: "postcondition".to_owned(),
+            reason: detail.clone(),
+            verified_at: now,
+        },
+        Some(PostconditionOutcome::Refuted { detail }) => pb::VerificationResult {
+            effect_id: effect_id.to_owned(),
+            status: pb::VerificationStatus::VerifiedFailure as i32,
+            method: "postcondition".to_owned(),
+            reason: detail.clone(),
+            verified_at: now,
+        },
+        Some(PostconditionOutcome::Inconclusive { .. }) | None => pb::VerificationResult {
+            effect_id: effect_id.to_owned(),
+            status: status as i32,
+            method: "structural".to_owned(),
+            reason,
+            verified_at: now,
+        },
     }
 }
 
@@ -581,6 +636,7 @@ async fn record_continuation_outcome(
     delivery: &pb::ApprovalDelivery,
     receipt_id: &str,
     disposition: &Disposition,
+    postcondition: Option<&crate::postcondition::PostconditionOutcome>,
 ) -> Result<(), String> {
     let (outcome, provider_receipt_id, failure_code) = match disposition {
         Disposition::Completed {
@@ -595,7 +651,9 @@ async fn record_continuation_outcome(
         }
         // RejectBeforeStart / AlreadyStarted never call this — see process_delivery.
         Disposition::RejectBeforeStart { .. } | Disposition::AlreadyStarted => {
-            return Err("record_continuation_outcome called for a pre-start disposition".to_owned());
+            return Err(
+                "record_continuation_outcome called for a pre-start disposition".to_owned(),
+            );
         }
     };
     let request = authenticated_request(
@@ -608,7 +666,11 @@ async fn record_continuation_outcome(
             outcome: outcome as i32,
             provider_receipt_id: provider_receipt_id.to_owned(),
             failure_code: failure_code.to_owned(),
-            verification: Some(verification_result_for(receipt_id, disposition)),
+            verification: Some(verification_result_with_postcondition(
+                receipt_id,
+                disposition,
+                postcondition,
+            )),
         },
         bearer,
     )?;
@@ -664,27 +726,27 @@ async fn process_delivery(
     shipping_client: Option<&crate::shipping_tools::ShippingToolsClient>,
     delivery: pb::ApprovalDelivery,
 ) {
-    let descriptor_json = match get_continuation_descriptor(channel, bearer, org_id, &delivery)
-        .await
-    {
-        Ok(Some(raw)) => raw,
-        Ok(None) => {
-            let disposition = disposition_for_missing_descriptor();
-            finalize_before_start(channel, bearer, org_id, &delivery, &disposition).await;
-            return;
-        }
-        Err(error) => {
-            warn!(
-                delivery_id = %delivery.delivery_id,
-                %error,
-                "approval_delivery_worker: continuation lookup failed, leaving lease to expire"
-            );
-            return;
-        }
-    };
+    let descriptor_json =
+        match get_continuation_descriptor(channel, bearer, org_id, &delivery).await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => {
+                let disposition = disposition_for_missing_descriptor();
+                finalize_before_start(channel, bearer, org_id, &delivery, &disposition).await;
+                return;
+            }
+            Err(error) => {
+                warn!(
+                    delivery_id = %delivery.delivery_id,
+                    %error,
+                    "approval_delivery_worker: continuation lookup failed, leaving lease to expire"
+                );
+                return;
+            }
+        };
 
-    let parsed = parse_descriptor(&descriptor_json)
-        .and_then(|descriptor| parse_resumable_action(&descriptor).map(|action| (descriptor, action)));
+    let parsed = parse_descriptor(&descriptor_json).and_then(|descriptor| {
+        parse_resumable_action(&descriptor).map(|action| (descriptor, action))
+    });
     let (descriptor, action) = match parsed {
         Ok(pair) => pair,
         Err(failure_code) => {
@@ -721,6 +783,9 @@ async fn process_delivery(
         return;
     }
 
+    // Captured before the match consumes `action`, so the postcondition step
+    // below can still tell which verifier (if any) applies.
+    let is_shipment_booking = matches!(action, ResumableAction::ShipmentBooking(_));
     let disposition = match action {
         ResumableAction::ProviderAction(input) => {
             let execution_result = integration_client
@@ -760,9 +825,45 @@ async fn process_delivery(
         }
     };
 
-    if let Err(error) =
-        record_continuation_outcome(channel, bearer, org_id, &delivery, &receipt_id, &disposition)
-            .await
+    // Postcondition verification (roadmap P1 item 3). Only a completed
+    // shipment booking has a verifier today; everything else stays on the
+    // structural judgment. A failure to reach shipping-core is inconclusive,
+    // never a refutation — see `crate::postcondition`'s module doc.
+    let postcondition = match (&disposition, is_shipment_booking, shipping_client) {
+        (
+            Disposition::Completed {
+                provider_receipt_id,
+            },
+            true,
+            Some(client),
+        ) => {
+            let outcome = crate::postcondition::verify_shipment_booking(
+                client,
+                provider_receipt_id,
+                &descriptor.org_id,
+            )
+            .await;
+            info!(
+                delivery_id = %delivery.delivery_id,
+                booking_id = %provider_receipt_id,
+                verdict = ?outcome,
+                "approval_delivery_worker: postcondition check complete"
+            );
+            Some(outcome)
+        }
+        _ => None,
+    };
+
+    if let Err(error) = record_continuation_outcome(
+        channel,
+        bearer,
+        org_id,
+        &delivery,
+        &receipt_id,
+        &disposition,
+        postcondition.as_ref(),
+    )
+    .await
     {
         warn!(
             delivery_id = %delivery.delivery_id,
@@ -895,7 +996,8 @@ async fn run_forever(channel: Channel) {
                 }
                 Ok(org_ids) => {
                     if let Some(integration_client) = IntegrationActionsClient::from_env() {
-                        let shipping_client = crate::shipping_tools::ShippingToolsClient::from_env();
+                        let shipping_client =
+                            crate::shipping_tools::ShippingToolsClient::from_env();
                         if shipping_client.is_none() {
                             warn!(
                                 "approval_delivery_worker: shipping-core client unavailable, book_shipment continuations will be rejected as continuation_unavailable"
@@ -1040,7 +1142,10 @@ mod tests {
 
     #[test]
     fn rejects_malformed_json() {
-        assert_eq!(parse_descriptor("not json"), Err(FAILURE_INVALID_CONTINUATION));
+        assert_eq!(
+            parse_descriptor("not json"),
+            Err(FAILURE_INVALID_CONTINUATION)
+        );
     }
 
     #[test]
@@ -1229,10 +1334,7 @@ mod tests {
             Disposition::AlreadyStarted,
         ] {
             let verification = verification_result_for("receipt-000", &disposition);
-            assert_eq!(
-                verification.status,
-                pb::VerificationStatus::Unknown as i32
-            );
+            assert_eq!(verification.status, pb::VerificationStatus::Unknown as i32);
         }
     }
 
@@ -1272,11 +1374,7 @@ mod tests {
         // so this can't race any other test's env var mutation.
         assert_eq!(
             parse_org_ids_override(" org-1, org-2 ,,org-3"),
-            vec![
-                "org-1".to_owned(),
-                "org-2".to_owned(),
-                "org-3".to_owned()
-            ]
+            vec!["org-1".to_owned(), "org-2".to_owned(), "org-3".to_owned()]
         );
     }
 
@@ -1327,5 +1425,112 @@ mod tests {
         assert_eq!(provider.token("org-a").await.unwrap(), "delivery-token");
         // Cached: a second call must not mint again (mock expects exactly 1).
         assert_eq!(provider.token("org-a").await.unwrap(), "delivery-token");
+    }
+
+    // --- Postcondition precedence (roadmap P1 item 3) ------------------------
+
+    #[test]
+    fn a_confirmed_postcondition_upgrades_the_method_to_postcondition() {
+        let disposition = Disposition::Completed {
+            provider_receipt_id: "booking-456".to_owned(),
+        };
+        let outcome = crate::postcondition::PostconditionOutcome::Confirmed {
+            detail: "shipping-core independently reports booking booking-456 as booked".to_owned(),
+        };
+        let verification =
+            verification_result_with_postcondition("receipt-1", &disposition, Some(&outcome));
+
+        assert_eq!(verification.method, "postcondition");
+        assert_eq!(
+            verification.status,
+            pb::VerificationStatus::VerifiedSuccess as i32
+        );
+        assert!(verification.reason.contains("independently reports"));
+    }
+
+    #[test]
+    fn a_refuted_postcondition_overrides_a_structural_success_into_failure() {
+        // The whole reason this layer exists: the boundary handed back a
+        // receipt id, so the structural judgment alone would have said
+        // VERIFIED_SUCCESS.
+        let disposition = Disposition::Completed {
+            provider_receipt_id: "booking-456".to_owned(),
+        };
+        let structural = verification_result_with_postcondition("receipt-1", &disposition, None);
+        assert_eq!(
+            structural.status,
+            pb::VerificationStatus::VerifiedSuccess as i32,
+            "precondition: without a postcondition check this reads as success"
+        );
+
+        let outcome = crate::postcondition::PostconditionOutcome::Refuted {
+            detail: "shipping-core has no booking booking-456 for this organization".to_owned(),
+        };
+        let verification =
+            verification_result_with_postcondition("receipt-1", &disposition, Some(&outcome));
+
+        assert_eq!(
+            verification.status,
+            pb::VerificationStatus::VerifiedFailure as i32,
+            "a refutation must override the boundary's own success claim"
+        );
+        assert_eq!(verification.method, "postcondition");
+    }
+
+    #[test]
+    fn an_inconclusive_postcondition_leaves_the_structural_judgment_untouched() {
+        let disposition = Disposition::Completed {
+            provider_receipt_id: "booking-456".to_owned(),
+        };
+        let baseline = verification_result_with_postcondition("receipt-1", &disposition, None);
+
+        let outcome = crate::postcondition::PostconditionOutcome::Inconclusive {
+            detail: "could not read booking booking-456 back: connection refused".to_owned(),
+        };
+        let verification =
+            verification_result_with_postcondition("receipt-1", &disposition, Some(&outcome));
+
+        assert_eq!(
+            verification.method, "structural",
+            "a check that could not run must never be credited as one that ran"
+        );
+        assert_eq!(verification.status, baseline.status);
+        assert_eq!(verification.reason, baseline.reason);
+    }
+
+    #[test]
+    fn an_unreachable_provider_never_manufactures_a_refutation() {
+        // Same as above but stated as the invariant it protects: an outage
+        // must not look like the effect failing to happen.
+        let disposition = Disposition::Completed {
+            provider_receipt_id: "booking-456".to_owned(),
+        };
+        let outcome = crate::postcondition::PostconditionOutcome::Inconclusive {
+            detail: "shipping-core unreachable".to_owned(),
+        };
+        let verification =
+            verification_result_with_postcondition("receipt-1", &disposition, Some(&outcome));
+
+        assert_ne!(
+            verification.status,
+            pb::VerificationStatus::VerifiedFailure as i32
+        );
+    }
+
+    #[test]
+    fn verification_result_for_still_produces_the_structural_judgment() {
+        // The no-postcondition path must be byte-identical to the old
+        // behavior, so adding this layer changed nothing for actions that
+        // have no verifier.
+        let disposition = Disposition::Completed {
+            provider_receipt_id: "booking-456".to_owned(),
+        };
+        let legacy = verification_result_for("receipt-1", &disposition);
+        let explicit = verification_result_with_postcondition("receipt-1", &disposition, None);
+
+        assert_eq!(legacy.method, explicit.method);
+        assert_eq!(legacy.status, explicit.status);
+        assert_eq!(legacy.reason, explicit.reason);
+        assert_eq!(legacy.effect_id, explicit.effect_id);
     }
 }
