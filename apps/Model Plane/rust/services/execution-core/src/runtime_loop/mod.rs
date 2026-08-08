@@ -1057,8 +1057,8 @@ async fn execute_book_shipment(
         .book_shipment(&input, org_id, &approval_id, &idempotency_key)
         .await
     {
-        Ok(output) => tool_bridge::ToolExecution {
-            output,
+        Ok(outcome) => tool_bridge::ToolExecution {
+            output: outcome.rendered,
             error: None,
         },
         Err(e) => tool_error(e),
@@ -1245,12 +1245,13 @@ async fn execute_provider_action(
             &input.operation,
             input.params,
             input.body,
+            user_id,
             approval_ref.as_deref(),
         )
         .await
     {
-        Ok(output) => tool_bridge::ToolExecution {
-            output,
+        Ok(outcome) => tool_bridge::ToolExecution {
+            output: outcome.rendered,
             error: None,
         },
         Err(e) => tool_error(e),
@@ -1310,6 +1311,7 @@ async fn resolve_write_approval(
                 expires_in_seconds: 3600,
                 client_approval_id: String::new(),
                 idempotency_key: format!("{run_id}:{step_id}"),
+                continuation_descriptor_json: String::new(),
             },
             bearer,
         )?)

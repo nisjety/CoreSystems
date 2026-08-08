@@ -407,6 +407,7 @@ impl ExecutionCore for ExecutionService {
                     // step collapses onto the existing durable approval via the
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
+                    continuation_descriptor_json: String::new(),
                 },
                 session_bearer.as_str(),
             )
