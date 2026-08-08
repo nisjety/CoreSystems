@@ -1,0 +1,30 @@
+[package]
+name = "meilisearch-adapter-rs"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "meilisearch-adapter"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+axum.workspace = true
+futures.workspace = true
+envy = "0.4"
+async-nats.workspace = true
+nats-connection-rs = { path = "../nats-connection-rs" }
+event-envelope-rs = { path = "../event-envelope-rs" }
+pg-org-scope-rs = { path = "../pg-org-scope-rs" }
+
+[dev-dependencies]
+rsa = { version = "0.9", features = ["pem"] }
+uuid.workspace = true

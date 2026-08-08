@@ -313,6 +313,47 @@ services:
       start_period: 20s
       retries: 10
 
+  # Keyword retrieval arm's backing store — typo-tolerant, exact-ID/code
+  # lookup that Postgres BM25 / Quickwit don't serve well (see
+  # `docs/retrieval-quality-and-durability-plan-2026-08-05.md`'s execution
+  # record for this arm). `meilisearch-adapter` keeps this index converged
+  # with the knowledge-unit corpus; `retrieval-engine`'s `search/keyword.rs`
+  # queries it org-scoped via a filter on `org_id` (the sole isolation
+  # boundary — see that module's docs).
+  meilisearch:
+    <<: *infra-observability
+    image: getmeili/meilisearch:v1.12.5
+    restart: unless-stopped
+    init: true
+    environment:
+      # No checked-in default: an admin/master key must be explicitly
+      # provisioned, exactly like POSTGRES_PASSWORD/DATAPLANE_NATS_TOKEN
+      # above. `production` mode additionally refuses to start without one.
+      MEILI_MASTER_KEY: ${MEILISEARCH_MASTER_KEY:?MEILISEARCH_MASTER_KEY is required}
+      MEILI_ENV: production
+      MEILI_NO_ANALYTICS: "true"
+    expose:
+      - "7700"
+    ports:
+      # Loopback-only operational access for local verification/debugging,
+      # same posture as Postgres/Qdrant/Neo4j above.
+      - "127.0.0.1:${MEILISEARCH_HTTP_HOST_PORT:-7701}:7700"
+    networks:
+      - dpv2-net
+    volumes:
+      - dpv2_meilisearch:/meili_data
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:7700/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 10
+
   # ─────────────────────────────────────────────────────────────
   # RUST SERVICES
   # ─────────────────────────────────────────────────────────────
@@ -345,11 +386,15 @@ services:
       SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-true}
       # Smart hybrid — query-adaptive mode-mix (request > agent > smart > static).
       SMART_HYBRID_ENABLED: ${SMART_HYBRID_ENABLED:-true}
-      # Query embedding routes through the Model Plane (gRPC → inference-core),
-      # NOT direct Azure: no-independent-embeddings-outside-Model-Plane, and the
-      # direct-Azure path fails closed on ZDR/restricted content (it is a
-      # retaining provider), so it cannot embed restricted docs at all.
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
+      # D-B (2026-08-08, sovereign-rag-phased-plan.md Phase 3b): query-side
+      # dense embedding must use the SAME provider+dimension+collection as
+      # the indexing side (embedding-engine, above) or retrieval breaks —
+      # Cohere Embed v4, direct (not routed through the Model Plane; mirrors
+      # the visual query embedder in embed/visual.rs). Same ZDR caveat as
+      # the prior model_plane/azure_openai choices: this path fails closed
+      # on restricted content until an EU/ZDR-compliant provider exists.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-cohere}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-dataplane_knowledge_embedv4}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
@@ -358,13 +403,17 @@ services:
       # inference:invoke scope. The bearer—not this shared credential—is sent
       # to inference-core. Missing/invalid issuance fails before gRPC.
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
-      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${CONTROL_POLICY_SERVICE_ID:-retrieval-engine}
       MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${CONTROL_POLICY_SERVICE_API_KEY:-}
+      # Retention posture auth-core mints for this principal's inference-core
+      # audience. Must equal its retentionByAudience entry in
+      # PLANE_SERVICE_PRINCIPALS_JSON, or every mint fails closed.
+      MODEL_PLANE_INFERENCE_RETENTION_POSTURE: ${RETRIEVAL_ENGINE_INFERENCE_RETENTION_POSTURE:-persistent}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
-      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-3072}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       COHERE_API_KEY: ${COHERE_API_KEY:-}
       # Visual RAG — Cohere Embed v4 query embedder + fused visual arm. ON by
       # default (W_VISUAL 0.05); the arm no-op-skips when the Embed v4 endpoint
@@ -394,15 +443,33 @@ services:
       GRAPH_REMOTE_TIMEOUT_MS: ${GRAPH_REMOTE_TIMEOUT_MS:-800}
       GRAPH_REMOTE_MAX_HOPS: ${GRAPH_REMOTE_MAX_HOPS:-3}
       # Text cross-encoder rerank endpoint. Empty = public Cohere (api.cohere.ai,
-      # Bearer). Set to an Azure AI Foundry serverless Cohere rerank URL +
-      # RERANK_USE_API_KEY=true to use the in-EU deployment.
-      RERANK_ENDPOINT: ${RERANK_ENDPOINT:-}
+      # Bearer). Set to an Azure AI Foundry Cohere rerank URL to use the in-EU
+      # deployment; both api-key and Bearer are accepted there.
+      #
+      # COHERE_URL is accepted as a fallback because that is the name the .env has
+      # always used while the code reads RERANK_ENDPOINT. The two never met, so the
+      # Azure key was sent to the public Cohere default URL and every query 401'd
+      # -- silently, because rerank failure is non-fatal by design.
+      RERANK_ENDPOINT: ${RERANK_ENDPOINT:-${COHERE_URL:-}}
       RERANK_USE_API_KEY: ${RERANK_USE_API_KEY:-false}
+      # Must name a deployment that actually exists on the endpoint above, or the
+      # call 404s and degrades just as silently. Live deployments on core-ai-rg:
+      # Cohere-rerank-v4.0-pro and Cohere-rerank-v4.0-fast. v4.0 is multilingual;
+      # the previous rerank-english-v3.0 would have been wrong for Norwegian even
+      # if it had existed.
+      RERANKER_MODEL: ${RERANKER_MODEL:-Cohere-rerank-v4.0-pro}
       HYBRID_ENABLED: "true"
       SPARSE_SEARCH_BACKEND: ${SPARSE_SEARCH_BACKEND:-postgres}
       QUICKWIT_URL: ${QUICKWIT_URL:-http://quickwit:7280}
       QUICKWIT_INDEX_ID: ${QUICKWIT_INDEX_ID:-dataplane-corpus}
       QUICKWIT_SEARCH_TIMEOUT_MS: ${QUICKWIT_SEARCH_TIMEOUT_MS:-1500}
+      # Keyword arm (Meilisearch). Empty MEILISEARCH_API_KEY disables the arm
+      # (search/keyword.rs::MeilisearchQueryClient::from_config -> None) —
+      # fails closed to "arm off", never to an unauthenticated request.
+      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://meilisearch:7700}
+      MEILISEARCH_API_KEY: ${MEILISEARCH_MASTER_KEY:?MEILISEARCH_MASTER_KEY is required}
+      MEILISEARCH_INDEX_UID: ${MEILISEARCH_INDEX_UID:-dataplane-knowledge}
+      W_KEYWORD: ${W_KEYWORD:-0.05}
       # Membership authorization is always strict. Retrieval uses its registered
       # service credential only to mint an org-bound, short-lived
       # aud=control-policy bearer, then calls the versioned decision endpoint.
@@ -428,7 +495,7 @@ services:
       # caller-supplied API keys and identity headers are never an identity.
       JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       JWT_REQUIRED_AUDIENCE: ${JWT_REQUIRED_AUDIENCE:-data-plane}
-      JWT_REQUIRED_ISSUER: ${JWT_REQUIRED_ISSUER:-http://localhost:3011/api/convex-auth}
+      JWT_REQUIRED_ISSUER: ${JWT_REQUIRED_ISSUER:-http://auth-core:3011/api/convex-auth}
       ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       RETRIEVAL_EVENT_PRIVATE_KEY_PATH: /run/event-keys/retrieval-events.pem
@@ -480,6 +547,8 @@ services:
       nats:
         condition: service_healthy
       quickwit:
+        condition: service_healthy
+      meilisearch:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8004/readyz || exit 1"]
@@ -561,16 +630,22 @@ services:
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
       ADMIN_PORT: "9202"
       BATCH_SIZE: "32"
-      QDRANT_COLLECTION: "dataplane_knowledge"
-      EMBEDDING_DIMENSION: "3072"
-      # Index-time embedding routes through the Model Plane (gRPC → inference-core),
-      # matching retrieval-engine. Required so restricted (ZDR) documents have a
-      # compliant embedding path — the direct-Azure backend fails closed on ZDR.
-      # NOTE: a prior gRPC-hop stall (DATAPLANE_KNOWLEDGE stream stuck) drove the
-      # azure_openai fallback; re-smoke-test the hop live after this flip.
-      # Override EMBEDDING_PROVIDER=azure_openai if it regresses (same
-      # text-embedding-3-large@3072 → query/index vectors stay compatible).
-      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-model_plane}
+      # D-B (2026-08-08, sovereign-rag-phased-plan.md Phase 3b): dense text
+      # migrated to Cohere Embed v4 — the real corpus is confirmed
+      # Norwegian-first and text-embedding-3-large is English-tuned. New
+      # collection name (not a resize): Embed v4's 1536-dim output is not
+      # compatible with the old 3072-dim `dataplane_knowledge` collection, so
+      # this points at a fresh collection re-embedded via
+      # `reembed-switch` rather than colliding with the old one.
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-dataplane_knowledge_embedv4}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
+      # Direct Cohere Embed v4 (Azure AI Foundry), not routed through the
+      # Model Plane — mirrors how the visual arm already calls Embed v4
+      # directly below. ZDR content fails closed on this path (Embed v4 here
+      # is a retaining provider); an EU/ZDR-compliant path remains a Phase-4+
+      # prerequisite, same caveat the prior azure_openai/model_plane choices
+      # already carried.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-cohere}
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EMBEDDING_PROVIDER: ${MODEL_PLANE_EMBEDDING_PROVIDER:-azure_openai}
       MODEL_PLANE_EMBEDDING_TIMEOUT_MS: ${MODEL_PLANE_EMBEDDING_TIMEOUT_MS:-30000}
@@ -578,9 +653,12 @@ services:
       # service bearer through Auth Core. A shared x-api-key is never accepted
       # by inference-core and is intentionally not wired here.
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
-      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_ID:-embedding-engine}
       MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY:-}
+      # Must equal this principal's retentionByAudience entry for
+      # inference-core in PLANE_SERVICE_PRINCIPALS_JSON.
+      MODEL_PLANE_INFERENCE_RETENTION_POSTURE: ${MODEL_PLANE_EMBEDDING_INFERENCE_RETENTION_POSTURE:-persistent}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-text-embedding-3-large}
@@ -608,7 +686,26 @@ services:
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       WIKI_EVENT_PUBLIC_KEY_PATH: /run/event-keys/wiki-events.pub
       EMBEDDING_EVENT_PRIVATE_KEY_PATH: /run/event-keys/embedding-events.pem
+      # Verifies dataplane.documents.deleted for the per-document erasure
+      # consumer (document_erasure_consumer.rs). Same key file already
+      # mounted into quickwit-adapter/retrieval-engine/graph-index for the
+      # same producer/subject.
+      DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       EVENT_AUTH_AUDIENCE: dataplane-events
+      # GDPR/DSAR erasure completeness for the visual arm's MinIO CAS objects
+      # (raw page binaries + rendered PNGs) — see cas_store.rs. Unset bucket
+      # disables CAS erasure only; the Qdrant-vector purge this crate already
+      # does still runs. Root credentials, not the CAS_INGESTION_* scoped
+      # writer key minio-init provisions for Ingestion Plane: that key grants
+      # only Get/Put (never Delete — see minio-init's inline policy above),
+      # and this service lives inside Data Plane v2's own trust boundary
+      # (matching the `quickwit` service's identical use of MINIO_ROOT_* below
+      # in this file), not the cross-plane one that credential exists for.
+      CAS_BUCKET: ${CAS_BUCKET:-dataplane-cas}
+      CAS_ENDPOINT_URL: ${CAS_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
       # Cross-plane GDPR organization-erasure purge consumer — a SECOND,
       # narrowly-scoped connection to control-shared-nats (identity
       # "embedding-engine-gdpr"), kept entirely separate from NATS_URL/
@@ -626,6 +723,7 @@ services:
       - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
       - ${WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/wiki-events.pub}:/run/event-keys/wiki-events.pub:ro
       - ${EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/embedding-events.pem}:/run/event-keys/embedding-events.pem:ro
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/documents-events.pub}:/run/event-keys/documents-events.pub:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -640,6 +738,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9202/readyz || exit 1"]
       interval: 10s
@@ -677,12 +777,15 @@ services:
       # Auth Core audited service-principal hop to inference-core. The
       # credential is deployment-owned; never fall back to a shared x-api-key.
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
-      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_INFERENCE_SERVICE_ID:-graph-index}
       MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_INFERENCE_SERVICE_API_KEY:-}
+      # Must equal this principal's retentionByAudience entry for
+      # inference-core in PLANE_SERVICE_PRINCIPALS_JSON.
+      MODEL_PLANE_INFERENCE_RETENTION_POSTURE: ${MODEL_PLANE_INFERENCE_RETENTION_POSTURE:-persistent}
       JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       JWT_REQUIRED_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
-      JWT_REQUIRED_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      JWT_REQUIRED_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_EXTRACTION_DEPLOYMENT: ${AZURE_OPENAI_EXTRACTION_DEPLOYMENT:-gpt-4o}
@@ -777,7 +880,7 @@ services:
       REBUILD_ON_START: ${QUICKWIT_ADAPTER_REBUILD_ON_START:-false}
       AUTH_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
-      AUTH_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
@@ -813,6 +916,64 @@ services:
       start_period: 15s
       retries: 5
 
+  # Keyword arm's write side: keeps the Meilisearch `dataplane-knowledge`
+  # index converged with `knowledge_units`/`documents` off the same
+  # created/indexed/deleted lifecycle events `quickwit-adapter` reads —
+  # mirrors that service's live-update consumer shape (durable JetStream
+  # pull consumers, DLQ on exhaustion), deliberately without its admin
+  # rebuild-from-scratch HTTP surface (no admin JWT verifier needed here; see
+  # `services/meilisearch-adapter-rs/src/stream.rs`'s module docs for the
+  # full scope reasoning).
+  meilisearch-adapter:
+    <<: *hardened-runtime
+    build:
+      context: .
+      dockerfile: services/meilisearch-adapter-rs/Dockerfile
+      args: *build-metadata
+    restart: unless-stopped
+    init: true
+    expose:
+      - "9205"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
+      NATS_URL: nats://data-nats:4222
+      DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
+      MEILISEARCH_URL: ${MEILISEARCH_URL:-http://meilisearch:7700}
+      MEILISEARCH_API_KEY: ${MEILISEARCH_MASTER_KEY:?MEILISEARCH_MASTER_KEY is required}
+      MEILISEARCH_INDEX_UID: ${MEILISEARCH_INDEX_UID:-dataplane-knowledge}
+      ADMIN_PORT: ${MEILISEARCH_ADAPTER_ADMIN_PORT:-9205}
+      ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
+      DOCUMENTS_EVENT_PUBLIC_KEY_PATH: /run/event-keys/documents-events.pub
+      INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
+      EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
+      EVENT_AUTH_AUDIENCE: dataplane-events
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      RUST_LOG: ${RUST_LOG:-warn,meilisearch_adapter_rs=info}
+    volumes:
+      - ${DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/documents-events.pub}:/run/event-keys/documents-events.pub:ro
+      - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
+      - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
+    networks:
+      dpv2-net:
+      inter-plane-bus:
+        aliases:
+          - dpv2-meilisearch-adapter
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9205/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
   # ─────────────────────────────────────────────────────────────
   # GO SERVICES
   # ─────────────────────────────────────────────────────────────
@@ -823,6 +984,13 @@ services:
       context: services/documents-api-go
       dockerfile: Dockerfile
       args: *build-metadata
+    # This optional local secret file is provisioned from the Application Plane's
+    # dedicated publish-only identity. It contains only the three bridge values,
+    # never the broader Application Plane secret store. Missing file = standalone
+    # Data Plane with the mirror safely disabled.
+    env_file:
+      - path: ${KNOWLEDGE_OBSERVABILITY_ENV_FILE:-.secrets/knowledge-observability.env}
+        required: false
     restart: unless-stopped
     init: true
     expose:
@@ -851,6 +1019,9 @@ services:
       AUTHCTX_ENFORCE: "1"
       JWT_PUBLIC_KEY_FILE: ""
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      # JWT issuer is a stable identity string, not the in-cluster JWKS host.
+      # Auth Core's plane-token issuer is configured as localhost for this local
+      # stack, while verification keys remain reachable through auth-core below.
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       EVENT_SIGNING_PRIVATE_KEY_PATH: /run/event-keys/documents-events.pem
       EVENT_SIGNING_KEY_ID: documents-events-v1
@@ -897,7 +1068,7 @@ services:
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
       WIKI_EVENT_PRIVATE_KEY_PATH: /run/event-keys/wiki-events.pem
       DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
       # GDPR cross-plane org-erasure purge consumer — a SECOND, narrowly-scoped
@@ -944,7 +1115,7 @@ services:
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
       HTTP_PORT: "8012"
       DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
       SIGNED_COST_EVENTS_ENABLED: ${SIGNED_COST_EVENTS_ENABLED:-1}
@@ -993,7 +1164,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-dataplane}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-dataplane}
       HTTP_PORT: "8013"
       DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
-      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
+      AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       JWT_PUBLIC_KEY_FILE: ""
       # GDPR org-erasure durable delivery crosses into Control Plane on the
@@ -1096,6 +1267,7 @@ volumes:
   dpv2_nats:
   dpv2_minio:
   dpv2_quickwit_cache:
+  dpv2_meilisearch:
   dpv2_prometheus:
   dpv2_grafana:
 

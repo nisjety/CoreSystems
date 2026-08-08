@@ -353,6 +353,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("deep graph arm disabled (GRAPH_INDEX_URL empty); in-process 1-hop only");
     }
 
+    // Keyword arm — Meilisearch typo-tolerant exact-ID/code lookup. `None`
+    // (arm disabled) when either the URL or the API key is missing; a master
+    // key has no checked-in default, so an unconfigured deployment fails
+    // closed to "arm off" rather than sending unauthenticated requests.
+    let keyword_client = crate::search::keyword::MeilisearchQueryClient::from_config(
+        &cfg.meilisearch_url,
+        &cfg.meilisearch_api_key,
+        &cfg.meilisearch_index_uid,
+    );
+    if keyword_client.is_some() {
+        tracing::info!(url = %cfg.meilisearch_url, index = %cfg.meilisearch_index_uid, "keyword arm (Meilisearch) enabled");
+    } else {
+        tracing::info!("keyword arm disabled (MEILISEARCH_URL/MEILISEARCH_API_KEY not both set)");
+    }
+
     let pipeline = Arc::new(RetrievalPipeline {
         pool: pool.clone(),
         qdrant,
@@ -368,6 +383,7 @@ async fn main() -> anyhow::Result<()> {
         visual_embedder,
         colqwen,
         graph_remote,
+        keyword_client,
     });
 
     // Prometheus metrics

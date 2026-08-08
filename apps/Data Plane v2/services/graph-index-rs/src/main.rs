@@ -130,6 +130,8 @@ async fn main() -> anyhow::Result<()> {
         )?);
         let nats = nats_connection::connect(&cfg.nats_url).await?;
         let js = async_nats::jetstream::new(nats.clone());
+        // D17: idempotent, shared definition in `nats_connection::dlq`.
+        nats_connection::ensure_or_warn(&js).await;
         stream::setup_stream(&js).await?;
         stream::setup_cleanup_stream(&js).await?;
         Some((
@@ -144,6 +146,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("unsigned graph mutation triggers enabled for insecure development");
         let nats = nats_connection::connect(&cfg.nats_url).await?;
         let js = async_nats::jetstream::new(nats.clone());
+        // D17: idempotent, shared definition in `nats_connection::dlq`.
+        nats_connection::ensure_or_warn(&js).await;
         stream::setup_stream(&js).await?;
         stream::setup_cleanup_stream(&js).await?;
         Some((

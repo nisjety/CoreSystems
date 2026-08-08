@@ -147,7 +147,7 @@ def build_query(text: str, corpus_df: Counter, total_docs: int) -> str | None:
     """Pick the chunk's most *distinctive* terms.
 
     Ranks by term frequency in this chunk divided by how many chunks contain the
-    term, so corpus-wide boilerplate ("aquatiq", "tjenester") loses to terms
+    term, so corpus-wide boilerplate ("coresystem", "tjenester") loses to terms
     that actually single this chunk out. Without that weighting most generated
     queries collapse onto the same handful of common words.
     """

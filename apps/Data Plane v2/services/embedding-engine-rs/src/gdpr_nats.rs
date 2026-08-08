@@ -59,6 +59,7 @@ use async_nats::jetstream::{self, consumer::PullConsumer, AckKind};
 use futures::StreamExt;
 use qdrant_client::Qdrant;
 
+use crate::cas_store::CasStore;
 use crate::gdpr::{parse_erasure_event, purge_organization_data, PurgeCollections};
 
 pub const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
@@ -80,12 +81,21 @@ const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 pub async fn run_supervised(
     qdrant: Qdrant,
     collections: Arc<PurgeCollections>,
+    cas: Option<Arc<CasStore>>,
     nats_url: String,
     nats_user: String,
     nats_password: String,
 ) {
     loop {
-        if let Err(e) = run_once(&qdrant, &collections, &nats_url, &nats_user, &nats_password).await
+        if let Err(e) = run_once(
+            &qdrant,
+            &collections,
+            cas.as_deref(),
+            &nats_url,
+            &nats_user,
+            &nats_password,
+        )
+        .await
         {
             tracing::error!(err = %e, "embedding-engine GDPR erasure consumer stopped; retrying");
         }
@@ -96,6 +106,7 @@ pub async fn run_supervised(
 async fn run_once(
     qdrant: &Qdrant,
     collections: &PurgeCollections,
+    cas: Option<&CasStore>,
     nats_url: &str,
     nats_user: &str,
     nats_password: &str,
@@ -137,13 +148,14 @@ async fn run_once(
         };
 
         let started = Instant::now();
-        match handle_message(qdrant, collections, &msg.payload).await {
-            Ok(Outcome::Purged { org_id, points }) => {
+        match handle_message(qdrant, collections, cas, &msg.payload).await {
+            Ok(Outcome::Purged { org_id, summary }) => {
                 tracing::info!(
                     org_id = %org_id,
-                    points,
+                    points = summary.total(),
+                    cas_objects = summary.cas_objects,
                     elapsed_ms = started.elapsed().as_millis() as u64,
-                    "embedding-engine purged organization vectors"
+                    "embedding-engine purged organization vectors and CAS objects"
                 );
                 if let Err(e) = msg.ack().await {
                     tracing::warn!(err = %e, "ack failed after purge");
@@ -168,13 +180,17 @@ async fn run_once(
 }
 
 enum Outcome {
-    Purged { org_id: String, points: u64 },
+    Purged {
+        org_id: String,
+        summary: crate::gdpr::PurgeSummary,
+    },
     Skipped,
 }
 
 async fn handle_message(
     qdrant: &Qdrant,
     collections: &PurgeCollections,
+    cas: Option<&CasStore>,
     payload: &[u8],
 ) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -182,9 +198,9 @@ async fn handle_message(
         return Ok(Outcome::Skipped);
     };
 
-    let summary = purge_organization_data(qdrant, collections, &erasure.org_id).await?;
+    let summary = purge_organization_data(qdrant, collections, cas, &erasure.org_id).await?;
     Ok(Outcome::Purged {
         org_id: erasure.org_id,
-        points: summary.total(),
+        summary,
     })
 }

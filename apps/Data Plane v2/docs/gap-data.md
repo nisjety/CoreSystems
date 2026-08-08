@@ -699,7 +699,7 @@ The 29 numbered gaps are CLOSED, but adjacent items in earlier sections remain N
 | `wiki_block_embeddings` Qdrant collection | D5-1, D5-4 | `embedding-engine-rs` boot now calls `ensure_collection("wiki_block_embeddings", embedding_dim)`. Write-through hook on wiki-store-go `published` event is wave-3 follow-up. |
 | `entity_summary_embeddings` Qdrant collection | D5-2 | Same — collection provisioned at boot; nightly summarizer is wave-3. |
 | JWT auth via JWKS/static public key | spec §10 #5 | `auth_middleware` accepts Bearer JWT verified against `JWT_PUBLIC_KEY_PEM` (RS256) in addition to the shared API key. JWKS endpoint fetch deferred (most internal deployments pin a single key). |
-| gRPC TLS env knobs | spec §10 #5 | `GRPC_TLS_CERT_PATH` + `GRPC_TLS_KEY_PATH` config plumbed; logged-warn when set without `grpc-tls` build feature. Operator can opt in by rebuilding; default plaintext is fine on `aquatiq-local`. |
+| gRPC TLS env knobs | spec §10 #5 | `GRPC_TLS_CERT_PATH` + `GRPC_TLS_KEY_PATH` config plumbed; logged-warn when set without `grpc-tls` build feature. Operator can opt in by rebuilding; default plaintext is fine on `coresystem-local`. |
 | 4-way blend scoring step uses captured weights | D5-5, spec §7 | `mix_for_scoring` resolved BEFORE fusion; renormalized dense+bm25 sub-mix fed into RRF; same `resolved_mix` written to trace — scoring and audit agree. Graph + wiki signals remain on their own endpoints until ANN is populated. |
 | Logseq block-outline parser/serializer | D4-6 | `internal/logseq` package in `wiki-store-go`: ATX bullets, tab indent, inline properties (`key:: value`). Round-trip stable. |
 | Markdown entity extraction (tree-sitter substitute) | D4-5 | `services/index-engine-rs/src/extract/markdown.rs`: regex-based ATX heading + inline link extractor at confidence 0.85 (spec §6 value). API-compatible with future tree-sitter swap-in. 3 unit tests. |
@@ -739,7 +739,7 @@ No items currently rated `high` priority remain open. Wave-3 candidates: `wiki_b
 | data-orchestrator — not specified | `data-orchestrator` `8012` | Job control HTTP. |
 | data-quality — not specified | `data-quality` `8013` | Evals/gates/lint/cost HTTP. |
 
-All v2 services join the `aquatiq-local` docker network so internal callers use container DNS (no host ports needed). Host-port maps exist only for ad-hoc `curl`/`grpcurl` from the dev machine.
+All v2 services join the `coresystem-local` docker network so internal callers use container DNS (no host ports needed). Host-port maps exist only for ad-hoc `curl`/`grpcurl` from the dev machine.
 - **Open (wave 3+, none rated `high`)**: wiki-store-go write-through on `published` → `wiki_block_embeddings`; nightly entity summarizer → `entity_summary_embeddings`; full 4-way scoring with graph + wiki signals folded in; tree-sitter swap-in for code AST; live-traffic measurement against the 800ms gate; JWKS endpoint fetch (currently static PEM only).
 - **D4 + D5 spec closure**: 35 of 35 acceptance rows green at the "wired + provisioned" level. Cross-reference: [`apps/Data Plane/docs/gap-data.md`](../../Data%20Plane/docs/gap-data.md) §13.
 - **CI surface**: cargo workspace + tests build clean; index-engine markdown extractor 3/3 unit tests pass; all 4 Go services and migrator build clean; tenant-isolation static check stays green.
@@ -822,7 +822,7 @@ These edge cases were surfaced during the v2.2 audit. Each one is either accepte
 
 **Context:** Data Plane v2 today scopes data by `org_id` at the SQL layer, but the `X-Org-ID` header is **trusted whatever the caller sends**. Anyone holding `INTERNAL_API_KEY` (or a valid signed JWT — signature only, claims discarded) can claim any `org_id`. There is no per-user ACL, no quota enforcement, no membership check against `user-core` or `org-core`, and no audit log of admin actions. Documented in §14.4 row "`X-Org-ID` header is trusted" — this wave finally closes it.
 
-The Control Plane services already exist on `aquatiq-local` (`auth-service:3011`, `user-service:3012/50012`, `org-core:8080/9090`, `mp-cost-core` in Model Plane). Wave 3 is about *using* them.
+The Control Plane services already exist on `coresystem-local` (`auth-service:3011`, `user-service:3012/50012`, `org-core:8080/9090`, `mp-cost-core` in Model Plane). Wave 3 is about *using* them.
 
 ### 15.1 Current enforcement gap
 

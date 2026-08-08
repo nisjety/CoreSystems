@@ -73,9 +73,7 @@ async fn main() -> anyhow::Result<()> {
     // broker.
     let gdpr_nats_url = std::env::var("NATS_SHARED_URL").unwrap_or_default();
     if gdpr_nats_url.is_empty() {
-        tracing::warn!(
-            "NATS_SHARED_URL not set; quickwit-adapter GDPR erasure consumer disabled"
-        );
+        tracing::warn!("NATS_SHARED_URL not set; quickwit-adapter GDPR erasure consumer disabled");
     } else {
         let gdpr_pool = pool.clone();
         tokio::spawn(async move {

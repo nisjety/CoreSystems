@@ -22,6 +22,12 @@ pub struct Config {
     pub model_plane_inference_token_issuer: String,
     #[serde(default = "default_model_plane_inference_service_id")]
     pub model_plane_inference_service_id: String,
+    /// Retention posture auth-core is configured to mint for this service's
+    /// `inference-core` audience: `persistent` (zdr:false) or `zdr` (zdr:true).
+    /// Must match the principal's `retentionByAudience` entry in
+    /// `PLANE_SERVICE_PRINCIPALS_JSON`, or every mint fails closed.
+    #[serde(default = "default_model_plane_inference_retention_posture")]
+    pub model_plane_inference_retention_posture: String,
     #[serde(default)]
     pub model_plane_inference_service_api_key: String,
 
@@ -75,6 +81,26 @@ pub struct Config {
     pub embedding_event_private_key_path: String,
     #[serde(default = "default_event_auth_audience")]
     pub event_auth_audience: String,
+    /// Verifies `dataplane.documents.deleted`, signed by documents-api-go.
+    /// Required for the per-document erasure consumer
+    /// (`document_erasure_consumer`) — unlike the visual/CAS arm below, this
+    /// has no "unconfigured, disabled" state: the vector-purge half of
+    /// erasure doesn't depend on CAS being configured, so this key is
+    /// required whenever signed event consumers are enabled at all.
+    #[serde(default)]
+    pub documents_event_public_key_path: String,
+
+    // GDPR/DSAR erasure completeness for the visual arm's MinIO CAS objects
+    // (raw page binaries + rendered PNGs). Unset `cas_bucket` → CAS erasure
+    // disabled, matching every other optionally-configured arm in this file
+    // (e.g. `cohere_embed_v4_endpoint`): the Qdrant-vector half of erasure
+    // still runs, only the CAS half no-ops. `cas_endpoint_url` overrides the
+    // standard `AWS_ENDPOINT_URL` env var when set; leave empty to fall back
+    // to the AWS SDK's normal credential/endpoint resolution.
+    #[serde(default)]
+    pub cas_bucket: String,
+    #[serde(default)]
+    pub cas_endpoint_url: String,
 }
 
 fn default_deployment() -> String {
@@ -103,6 +129,13 @@ fn default_model_plane_inference_token_url() -> String {
 }
 fn default_model_plane_inference_token_issuer() -> String {
     "http://localhost:3011/api/convex-auth".into()
+}
+/// Matches the deployed registry, which pins `embedding-engine` ->
+/// `inference-core` to `persistent`. Note this is the opposite of auth-core's
+/// own default for an *unconfigured* audience (`zdr`), so tightening the
+/// registry requires setting this variable too.
+fn default_model_plane_inference_retention_posture() -> String {
+    "persistent".into()
 }
 fn default_model_plane_inference_service_id() -> String {
     "embedding-engine".into()

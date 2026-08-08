@@ -1,6 +1,8 @@
 mod api;
 mod batch;
+mod cas_store;
 mod config;
+mod document_erasure_consumer;
 mod gdpr;
 mod gdpr_nats;
 mod image_consumer;
@@ -84,10 +86,26 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or(""),
     );
+    // Built once, shared by the per-document erasure consumer below AND the
+    // whole-org GDPR purge further down — one CasStore, two erasure triggers.
+    // `None` when `cas_bucket` is unset: erasure of the OTHER stores this
+    // crate owns must still work when CAS erasure hasn't been turned on.
+    let cas_store = if cfg.cas_bucket.trim().is_empty() {
+        tracing::info!("CAS erasure disabled (CAS_BUCKET unset)");
+        None
+    } else {
+        let endpoint =
+            (!cfg.cas_endpoint_url.trim().is_empty()).then(|| cfg.cas_endpoint_url.clone());
+        Some(Arc::new(
+            cas_store::CasStore::new(cfg.cas_bucket.clone(), endpoint).await,
+        ))
+    };
+
     let event_runtime = if signed_events_enabled {
         if cfg.index_event_public_key_path.is_empty()
             || cfg.wiki_event_public_key_path.is_empty()
             || cfg.embedding_event_private_key_path.is_empty()
+            || cfg.documents_event_public_key_path.is_empty()
         {
             anyhow::bail!(
                 "signed event consumers require producer public and local private key paths"
@@ -116,16 +134,41 @@ async fn main() -> anyhow::Result<()> {
             "events:wiki:publish",
             100_000,
         )?);
+        // Verifies `dataplane.documents.deleted` for the per-document erasure
+        // consumer below. Same producer/kid/scope every other consumer of this
+        // subject already uses (`retrieval-engine-rs/src/cache/invalidator.rs`,
+        // `quickwit-adapter-rs`) — see `document_erasure_consumer` module docs.
+        let documents_verifier = Arc::new(EventVerifier::from_rsa_pem(
+            &std::fs::read(&cfg.documents_event_public_key_path)?,
+            "service:documents-api-go",
+            "documents-events-v1",
+            &cfg.event_auth_audience,
+            "events:documents:publish",
+            100_000,
+        )?);
         let nats_client = nats_connection::connect(&cfg.nats_url).await?;
         let js = async_nats::jetstream::new(nats_client.clone());
+        // D17: idempotent, shared definition in `nats_connection::dlq`.
+        nats_connection::ensure_or_warn(&js).await;
         stream::setup_stream(&js).await?;
         let consumer = stream::create_consumer(&js).await?;
         wiki_consumer::spawn(js.clone(), qdrant.clone(), provider.clone(), wiki_verifier).await?;
+        document_erasure_consumer::spawn(
+            js.clone(),
+            qdrant.clone(),
+            cfg.qdrant_visual_collection.clone(),
+            cas_store.clone(),
+            nats_client.clone(),
+            documents_verifier,
+        )
+        .await?;
         Some((consumer, nats_client, Some(verifier), Some(signer)))
     } else if legacy_events_enabled {
         tracing::warn!("unsigned embedding mutation consumers enabled for insecure development");
         let nats_client = nats_connection::connect(&cfg.nats_url).await?;
         let js = async_nats::jetstream::new(nats_client.clone());
+        // D17: idempotent, shared definition in `nats_connection::dlq`.
+        nats_connection::ensure_or_warn(&js).await;
 
         stream::setup_stream(&js).await?;
         let consumer = stream::create_consumer(&js).await?;
@@ -176,6 +219,12 @@ async fn main() -> anyhow::Result<()> {
                 );
                 let nats_client = nats_connection::connect(&cfg.nats_url).await?;
                 let js = async_nats::jetstream::new(nats_client.clone());
+                // D17: the page-image consumer publishes to
+                // `dataplane.dlq.embedding-engine-page-images` and can run on
+                // its own (the visual arm is gated separately from the text
+                // arms), so it ensures the DLQ stream itself rather than
+                // assuming a text-consumer boot already did.
+                nats_connection::ensure_or_warn(&js).await;
                 if let Err(e) = qdrant_writer::ensure_collection(
                     &qdrant,
                     &cfg.qdrant_visual_collection,
@@ -242,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(gdpr_nats::run_supervised(
             qdrant.clone(),
             gdpr_collections,
+            cas_store.clone(),
             gdpr_nats_url,
             gdpr_nats_user,
             gdpr_nats_password,

@@ -31,6 +31,102 @@ pub const SUBJECT_WIKI_PUBLISHED: &str = "dataplane.wiki.version.published";
 pub const WIKI_COLLECTION: &str = "wiki_block_embeddings";
 pub const WIKI_STREAM: &str = "DATAPLANE_WIKI";
 pub const WIKI_CONSUMER: &str = "embedding-engine-wiki";
+const WIKI_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// The desired stream configuration. Split out from [`ensure_wiki_stream`] so
+/// the retention invariant can be asserted in a unit test without a live
+/// broker — see `wiki_retention_is_interest_not_workqueue`.
+fn wiki_stream_config() -> jetstream::stream::Config {
+    jetstream::stream::Config {
+        name: WIKI_STREAM.to_string(),
+        subjects: vec![SUBJECT_WIKI_PUBLISHED.to_string()],
+        // `Interest`, not `WorkQueue`: the published wiki version fans out to
+        // BOTH this embedding consumer and quickwit-adapter's lexical index.
+        // WorkQueue permits exactly one consumer per subject, which silently
+        // refuses the second reader and forces it onto a lossy core-NATS
+        // subscription. `Interest` still removes a message once every
+        // registered durable consumer has acked it.
+        retention: jetstream::stream::RetentionPolicy::Interest,
+        max_age: WIKI_MAX_AGE,
+        ..Default::default()
+    }
+}
+
+/// Create or converge `DATAPLANE_WIKI`. Idempotent and safe to call on every
+/// boot.
+///
+/// `get_or_create_stream` alone is not enough: if the stream already exists —
+/// with ANY retention, including a wrong one — it is returned as-is and the
+/// desired config passed in is silently discarded. That is exactly how this
+/// stream spent a day on `WorkQueue` retention after an unrelated migration
+/// recreated it: nothing here ever looked at what actually came back, so
+/// nothing ever noticed or complained, and quickwit-adapter's second reader
+/// was quietly refused and fell back to a lossy subscription the whole time.
+///
+/// Retention is immutable after creation (attempting `update_stream` with a
+/// changed retention field fails the WHOLE call — see `nats_connection::dlq`,
+/// which hit the same constraint first), so a retention mismatch is reported
+/// loudly via `tracing::error!` rather than "fixed": the only real fix is an
+/// operator deleting and recreating the stream while it is empty, which quite
+/// deliberately makes it visible instead of silent.
+///
+/// Errors here still propagate: unlike the DLQ (ancillary, best-effort), the
+/// wiki embedding path genuinely cannot work without this stream, so a broker
+/// that cannot be reached at all should still fail `spawn`.
+async fn ensure_wiki_stream(js: &JsContext) -> anyhow::Result<()> {
+    let desired = wiki_stream_config();
+    let stream = js
+        .get_or_create_stream(desired)
+        .await
+        .context("create DATAPLANE_WIKI stream")?;
+    let current = stream.cached_info().config.clone();
+
+    if current.retention != jetstream::stream::RetentionPolicy::Interest {
+        tracing::error!(
+            stream = WIKI_STREAM,
+            retention = ?current.retention,
+            "DATAPLANE_WIKI exists with non-Interest retention; a second durable \
+             consumer (quickwit-adapter) will be refused and fall back to a lossy \
+             subscription. Retention is immutable — delete and recreate the stream \
+             (only safe while it holds zero messages) to repair."
+        );
+    }
+
+    if let Some(upgraded) = upgraded_wiki_config(&current) {
+        js.update_stream(upgraded)
+            .await
+            .context("converge DATAPLANE_WIKI stream limits")?;
+        tracing::info!(stream = WIKI_STREAM, "wiki stream limits converged");
+    }
+
+    Ok(())
+}
+
+/// Which of the *mutable* settings need converging on an already-existing
+/// stream. Retention is deliberately absent: it cannot be updated in place,
+/// and attempting it makes `update_stream` fail the whole call.
+fn upgraded_wiki_config(current: &jetstream::stream::Config) -> Option<jetstream::stream::Config> {
+    let mut upgraded = current.clone();
+    let mut changed = false;
+
+    if !upgraded
+        .subjects
+        .iter()
+        .any(|subject| subject == SUBJECT_WIKI_PUBLISHED)
+    {
+        upgraded.subjects.push(SUBJECT_WIKI_PUBLISHED.to_string());
+        changed = true;
+    }
+    // Only ever *lengthen* retention here. An operator who deliberately
+    // widened it on a live broker should not have that undone by the next
+    // deploy.
+    if upgraded.max_age < WIKI_MAX_AGE {
+        upgraded.max_age = WIKI_MAX_AGE;
+        changed = true;
+    }
+
+    changed.then_some(upgraded)
+}
 
 #[derive(Debug, Deserialize)]
 struct WikiPublishedEvent {
@@ -53,21 +149,8 @@ pub async fn spawn(
     verifier: Arc<EventVerifier>,
 ) -> anyhow::Result<()> {
     // Disjoint subject → its own stream (JetStream requires a subject belong
-    // to exactly one stream). `Interest`, not `WorkQueue`: the published wiki
-    // version fans out to BOTH this embedding consumer and quickwit-adapter's
-    // lexical index. WorkQueue permits exactly one consumer per subject, which
-    // silently refused the second reader and forced it onto a lossy core-NATS
-    // subscription. `Interest` still removes a message once every registered
-    // durable consumer has acked it.
-    js.get_or_create_stream(jetstream::stream::Config {
-        name: WIKI_STREAM.to_string(),
-        subjects: vec![SUBJECT_WIKI_PUBLISHED.to_string()],
-        retention: jetstream::stream::RetentionPolicy::Interest,
-        max_age: Duration::from_secs(7 * 24 * 3600),
-        ..Default::default()
-    })
-    .await
-    .context("create DATAPLANE_WIKI stream")?;
+    // to exactly one stream).
+    ensure_wiki_stream(&js).await?;
 
     let stream = js
         .get_stream(WIKI_STREAM)
@@ -216,6 +299,73 @@ async fn handle(
         .await
         .context("qdrant upsert wiki point")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod stream_config_tests {
+    use super::*;
+
+    #[test]
+    fn wiki_retention_is_interest_not_workqueue() {
+        // The single most important assertion in this module. `WorkQueue`
+        // permits exactly one consumer per subject, which is what silently
+        // refused quickwit-adapter's reader for a full day and forced it onto
+        // a lossy fallback.
+        assert_eq!(
+            wiki_stream_config().retention,
+            jetstream::stream::RetentionPolicy::Interest
+        );
+        assert_ne!(
+            wiki_stream_config().retention,
+            jetstream::stream::RetentionPolicy::WorkQueue
+        );
+    }
+
+    #[test]
+    fn upgraded_config_never_touches_retention() {
+        // A stream that already exists with the wrong (immutable) retention
+        // must not have that field carried into an `update_stream` call —
+        // doing so fails the whole call. Construct exactly that drifted state
+        // and prove the returned config, if any, still reports the ORIGINAL
+        // retention untouched.
+        let drifted = jetstream::stream::Config {
+            retention: jetstream::stream::RetentionPolicy::WorkQueue,
+            max_age: Duration::from_secs(1), // also short, so a mutable fix is expected
+            ..wiki_stream_config()
+        };
+
+        let upgraded = upgraded_wiki_config(&drifted).expect("max_age should converge");
+        assert_eq!(
+            upgraded.retention,
+            jetstream::stream::RetentionPolicy::WorkQueue,
+            "upgrade path must never carry a retention change into update_stream"
+        );
+        assert_eq!(upgraded.max_age, WIKI_MAX_AGE);
+    }
+
+    #[test]
+    fn matching_config_needs_no_update() {
+        assert!(upgraded_wiki_config(&wiki_stream_config()).is_none());
+    }
+
+    #[test]
+    fn wider_operator_set_max_age_is_not_shortened() {
+        let widened = jetstream::stream::Config {
+            max_age: WIKI_MAX_AGE * 4,
+            ..wiki_stream_config()
+        };
+        assert!(upgraded_wiki_config(&widened).is_none());
+    }
+
+    #[test]
+    fn missing_subject_is_restored() {
+        let stripped = jetstream::stream::Config {
+            subjects: vec![],
+            ..wiki_stream_config()
+        };
+        let upgraded = upgraded_wiki_config(&stripped).expect("subject should be restored");
+        assert_eq!(upgraded.subjects, vec![SUBJECT_WIKI_PUBLISHED.to_string()]);
+    }
 }
 
 #[cfg(test)]

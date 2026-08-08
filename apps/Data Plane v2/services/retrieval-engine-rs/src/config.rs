@@ -90,6 +90,14 @@ pub struct Config {
     pub w_wiki: f32,
     #[serde(default = "default_w_visual")]
     pub w_visual: f32,
+    // Keyword arm — Meilisearch typo-tolerant exact-ID/code lookup. Small
+    // default (0.05, same calibration as `w_visual` when it launched): a
+    // new, unproven arm should start with a modest, provable contribution
+    // rather than assume it belongs at parity with the established arms.
+    // The arm no-op-skips when `MEILISEARCH_URL`/`MEILISEARCH_API_KEY` aren't
+    // both configured, so a deployment without Meilisearch is unaffected.
+    #[serde(default = "default_w_keyword")]
+    pub w_keyword: f32,
 
     #[serde(default = "default_collection")]
     pub qdrant_collection: String,
@@ -169,6 +177,17 @@ pub struct Config {
     #[serde(default = "default_quickwit_search_timeout_ms")]
     pub quickwit_search_timeout_ms: u64,
 
+    // Keyword arm's Meilisearch endpoint. Empty `meilisearch_api_key` (the
+    // only field with no default — a master key must never have a checked-in
+    // fallback) disables the arm: `search::keyword::MeilisearchQueryClient::
+    // from_config` returns `None` and `arm_keyword` is never constructed.
+    #[serde(default = "default_meilisearch_url")]
+    pub meilisearch_url: String,
+    #[serde(default)]
+    pub meilisearch_api_key: String,
+    #[serde(default = "default_meilisearch_index_uid")]
+    pub meilisearch_index_uid: String,
+
     #[serde(default = "default_grpc_timeout")]
     pub grpc_timeout_secs: u32,
     #[serde(default = "default_grpc_max_concurrent")]
@@ -187,7 +206,7 @@ pub struct Config {
     // gRPC TLS (env-gated). When both paths point to readable PEM files
     // AND the binary was built with the `grpc-tls` feature, the Tonic server
     // serves over TLS. Default (both empty) → plaintext, fine for cross-plane
-    // traffic on the trusted `aquatiq-local` docker network.
+    // traffic on the trusted `coresystem-local` docker network.
     #[serde(default)]
     pub grpc_tls_cert_path: Option<String>,
     #[serde(default)]
@@ -307,6 +326,12 @@ fn default_w_visual() -> f32 {
     // The visual arm no-op-skips when no visual embedder is configured.
     0.05
 }
+fn default_w_keyword() -> f32 {
+    // Same 0.05 calibration `w_visual` shipped with — small but present, so
+    // an unproven new arm can be measured against the P0.5 golden set rather
+    // than assumed. The arm no-op-skips when Meilisearch isn't configured.
+    0.05
+}
 fn default_visual_collection() -> String {
     "dataplane_page_images".into()
 }
@@ -364,6 +389,12 @@ fn default_quickwit_index_id() -> String {
 fn default_quickwit_search_timeout_ms() -> u64 {
     1500
 }
+fn default_meilisearch_url() -> String {
+    "http://meilisearch:7700".into()
+}
+fn default_meilisearch_index_uid() -> String {
+    "dataplane-knowledge".into()
+}
 fn default_grpc_timeout() -> u32 {
     30
 }
@@ -377,5 +408,48 @@ fn default_event_auth_audience() -> String {
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(envy::from_env::<Config>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyword_arm_default_weight_matches_visual_arms_launch_calibration() {
+        // Both are "new, unproven arm" launches; §config docs above record
+        // why 0.05 (not parity with dense/bm25/graph/wiki) is the right
+        // starting point for either.
+        assert_eq!(default_w_keyword(), 0.05);
+        assert_eq!(default_w_keyword(), default_w_visual());
+    }
+
+    #[test]
+    fn meilisearch_defaults_point_at_the_compose_internal_service_with_no_checked_in_key() {
+        assert_eq!(default_meilisearch_url(), "http://meilisearch:7700");
+        assert_eq!(default_meilisearch_index_uid(), "dataplane-knowledge");
+        // No `default_meilisearch_api_key` function exists at all — the field
+        // uses plain `#[serde(default)]` (empty string). A master key must
+        // never have a checked-in fallback value.
+    }
+
+    #[test]
+    fn minimal_env_deserializes_with_the_keyword_arm_defaulted_and_disableable() {
+        let cfg: Config = envy::from_iter(vec![
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://test.invalid/test".to_string(),
+            ),
+            (
+                "QDRANT_URL".to_string(),
+                "http://test.invalid:6334".to_string(),
+            ),
+        ])
+        .expect("minimal env must deserialize using field defaults");
+        assert_eq!(cfg.w_keyword, 0.05);
+        assert_eq!(cfg.meilisearch_url, "http://meilisearch:7700");
+        // Empty by default — this is what makes the arm no-op-skip rather
+        // than send unauthenticated requests when unconfigured.
+        assert!(cfg.meilisearch_api_key.is_empty());
     }
 }

@@ -200,9 +200,16 @@ pub fn smart_mode_mix(query: &str) -> ModeMixWeights {
 
     let mut mix = ModeMixWeights::default();
     if code_like && tokens.len() <= 6 && !question {
-        // Short ID/code lookup — exact lexical match dominates.
+        // Short ID/code lookup — exact lexical match dominates. Also raise
+        // the keyword arm (Meilisearch): typo-tolerant exact-ID/code lookup
+        // is precisely this arm's reason to exist (see its module docs), so
+        // a code-like query should lean on it more than the flat static
+        // default. 0.15 mirrors the ~3x boost `w_graph`/`w_visual` get for
+        // their own trigger conditions below, scaled off `w_keyword`'s own
+        // 0.05 static default.
         mix.w_bm25 = Some(0.45);
         mix.w_dense = Some(0.35);
+        mix.w_keyword = Some(0.15);
     }
     if question && !code_like {
         // Natural-language question — semantic similarity dominates.
@@ -230,14 +237,19 @@ mod tests {
             && m.w_graph.is_none()
             && m.w_wiki.is_none()
             && m.w_visual.is_none()
+            && m.w_keyword.is_none()
     }
 
     #[test]
-    fn id_code_queries_lean_bm25() {
+    fn id_code_queries_lean_bm25_and_raise_the_keyword_arm() {
         for q in ["INV-20394", "order SKU_9931 status", "GDPR ISO 27001"] {
             let m = smart_mode_mix(q);
             assert_eq!(m.w_bm25, Some(0.45), "{q}");
             assert_eq!(m.w_dense, Some(0.35), "{q}");
+            // This is the exact query shape the keyword arm exists for
+            // (typo-tolerant exact-ID/code lookup) — it must be boosted
+            // above its flat static default, not left at `None`.
+            assert_eq!(m.w_keyword, Some(0.15), "{q}");
         }
     }
 
@@ -301,9 +313,29 @@ mod tests {
             0.2,
             0.1,
             0.05,
+            0.05,
             crate::search::fusion::DEFAULT_RRF_K,
         );
-        let sum = r.w_dense + r.w_bm25 + r.w_graph + r.w_wiki + r.w_visual;
+        let sum = r.w_dense + r.w_bm25 + r.w_graph + r.w_wiki + r.w_visual + r.w_keyword;
         assert!((sum - 1.0).abs() < 1e-5, "sum = {sum}");
+    }
+
+    #[test]
+    fn resolve_renormalizes_a_code_like_query_with_the_keyword_boost_applied() {
+        let m = smart_mode_mix("INV-20394");
+        let r = m.resolve(
+            0.45,
+            0.2,
+            0.2,
+            0.1,
+            0.05,
+            0.05,
+            crate::search::fusion::DEFAULT_RRF_K,
+        );
+        let sum = r.w_dense + r.w_bm25 + r.w_graph + r.w_wiki + r.w_visual + r.w_keyword;
+        assert!((sum - 1.0).abs() < 1e-5, "sum = {sum}");
+        // Raw shares: dense .35, bm25 .45, graph .2, wiki .1, visual .05,
+        // keyword .15 → total 1.30; keyword's resolved share is 0.15/1.30.
+        assert!((r.w_keyword - (0.15 / 1.30)).abs() < 1e-4);
     }
 }

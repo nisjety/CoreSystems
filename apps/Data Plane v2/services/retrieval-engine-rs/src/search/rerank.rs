@@ -60,9 +60,17 @@ impl RerankClient {
         Self::with_endpoint(api_key, model, "https://api.cohere.ai/v1/rerank", true)
     }
 
-    /// Build with an explicit endpoint + auth style. `endpoint` empty falls back
-    /// to public Cohere; an `*.azure.com` endpoint auto-selects the `api-key`
-    /// header unless `use_bearer` is forced.
+    /// Build with an explicit endpoint + auth style. An empty `endpoint` falls
+    /// back to public Cohere.
+    ///
+    /// `use_bearer` is honored exactly as given -- there is deliberately NO
+    /// endpoint sniffing here. An earlier version of this doc claimed an
+    /// `*.azure.com` endpoint "auto-selects the api-key header", which the code
+    /// never did; that false promise is why nobody noticed `RERANK_ENDPOINT` was
+    /// unset. Both `api-key` and `Authorization: Bearer` are in fact accepted by
+    /// Azure AI Foundry's Cohere rerank route (verified against the live
+    /// deployment), so the auth style was never the failure -- sending an Azure
+    /// key to the *public Cohere* default URL was, and that returns 401.
     pub fn with_endpoint(api_key: &str, model: &str, endpoint: &str, use_bearer: bool) -> Self {
         let endpoint = if endpoint.trim().is_empty() {
             "https://api.cohere.ai/v1/rerank".to_string()

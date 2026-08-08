@@ -444,7 +444,10 @@ mod tests {
         assert!(p.contains("ONLY the entities listed"));
         assert!(p.contains("too disparate"));
         assert!(p.contains("dominant language"), "corpus is NO+EN mixed");
-        assert!(!p.contains("further related entities"), "nothing omitted at n=3");
+        assert!(
+            !p.contains("further related entities"),
+            "nothing omitted at n=3"
+        );
     }
 
     #[test]

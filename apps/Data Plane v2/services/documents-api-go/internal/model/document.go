@@ -59,6 +59,18 @@ type CreateDocumentInput struct {
 	// requires an admin scope or a system caller — end users get 403.
 	OwnerID    string `json:"owner_id,omitempty"`
 	Visibility string `json:"visibility,omitempty"`
+	// VisibilityFromSource marks Visibility as a verified connector's reading of
+	// the SOURCE system's own ACL, rather than a caller preference. Only the
+	// handler sets it (never the wire — hence `json:"-"`), and only for a
+	// verified service principal that supplied an explicit value.
+	//
+	// It is what lets a re-ingest update visibility. The default is to leave
+	// visibility untouched on re-ingest so a re-POST cannot silently re-open a
+	// private document; but a connector reporting the upstream ACL is the
+	// authority on that ACL, and ignoring it would strand documents at whatever
+	// visibility they first landed with — including keeping a document
+	// org-visible here after it was restricted upstream.
+	VisibilityFromSource bool `json:"-"`
 }
 
 // IngestPolicy mirrors `dataplane.documents.v2.IngestPolicy`. When

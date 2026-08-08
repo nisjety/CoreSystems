@@ -1,0 +1,16 @@
+[package]
+name = "pg-org-scope-rs"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "pg_org_scope"
+path = "src/lib.rs"
+
+[dependencies]
+sqlx.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

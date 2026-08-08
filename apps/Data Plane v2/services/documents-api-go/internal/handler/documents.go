@@ -88,14 +88,14 @@ func lifecycleEventFactory(userID string) repo.OutboxEventFactory {
 			payload, err := json.Marshal(events.DocumentUpdatedEvent{
 				DocumentID: document.DocumentID, OrgID: document.OrgID,
 				Source: document.Source, Type: document.Type, Title: document.Title,
-				UserID: userID, ZDR: false,
+				UserID: userID, Visibility: document.Visibility, ZDR: false,
 			})
 			return events.SubjectDocUpdated, payload, err
 		}
 		payload, err := json.Marshal(events.DocumentCreatedEvent{
 			DocumentID: document.DocumentID, OrgID: document.OrgID,
 			Source: document.Source, Type: document.Type, Title: document.Title,
-			UserID: userID, ZDR: false,
+			UserID: userID, Visibility: document.Visibility, ZDR: false,
 		})
 		return events.SubjectDocCreated, payload, err
 	}
@@ -136,18 +136,34 @@ func callerHasAdminScope(r *http.Request) bool {
 
 // applyVisibilityPolicy resolves the document's visibility and enforces the
 // org-ownership write rules (step 10 + 11):
-//   - Default (empty visibility): an interactive end-user create defaults to
-//     PRIVATE (their data is private until shared); a system/ingest create (no
-//     viewer — Quarry crawls, connectors) defaults to ORG so shared knowledge
-//     stays org-visible and doesn't silently vanish.
-//   - Admin-gate: only an admin (verified scope) or a trusted system caller (no
-//     viewer) may create ORG-visible docs. An end user may create 'private' or
-//     'shared' (and share via grants) but never 'org'/tenant-global.
+//   - Default (empty visibility): a create that carries a viewer defaults to
+//     PRIVATE (an end user's data is private until shared); a create with no
+//     viewer at all defaults to ORG so shared knowledge doesn't silently vanish.
+//     A connector that knows the source ACL should send `visibility` explicitly
+//     rather than lean on either default — see the service rule below.
+//   - Admin-gate: ORG-visible documents may be created by an admin (verified
+//     scope), a caller with no viewer, or a verified SERVICE principal. An
+//     interactive end user may create 'private' or 'shared' (and share via
+//     grants) but never 'org'/tenant-global.
+//
+// The service carve-out exists because `viewerID` only blanks out for holders
+// of `org:data:read_all`. Every other service principal — the SharePoint
+// connector, Quarry — therefore looks exactly like an interactive end user
+// here, so it was silently forced to `private` and forbidden from ever saying
+// otherwise. That is what stranded connector-synced content: invisible to
+// graph extraction and to every human in the org, owned by a service account
+// nobody can act as. `IsService` is the distinction this policy always meant
+// to draw (it requires a *verified* `principal_type == "service"`, i.e. a
+// registered principal, not something a browser can assert).
 //
 // Returns true if the caller is FORBIDDEN from the requested visibility.
 func applyVisibilityPolicy(r *http.Request, input *model.CreateDocumentInput) (forbidden bool) {
 	viewer := viewerID(r)
+	isService := verifiedClaims(r).IsService()
 	v := strings.ToLower(strings.TrimSpace(input.Visibility))
+	// Recorded before the defaulting below, so "the connector told us" stays
+	// distinguishable from "we picked a default".
+	input.VisibilityFromSource = isService && v != ""
 	if v == "" {
 		if viewer != "" {
 			v = "private"
@@ -155,7 +171,7 @@ func applyVisibilityPolicy(r *http.Request, input *model.CreateDocumentInput) (f
 			v = "org"
 		}
 	}
-	if v == "org" && viewer != "" && !callerHasAdminScope(r) {
+	if v == "org" && viewer != "" && !isService && !callerHasAdminScope(r) {
 		return true
 	}
 	input.Visibility = v
@@ -318,6 +334,7 @@ func (h *DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		DocumentID: docID,
 		OrgID:      orgID,
 		UserID:     eventUserID(r),
+		Visibility: document.Visibility,
 		ZDR:        false,
 	}
 	payload, err := json.Marshal(deleteEvent)

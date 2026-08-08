@@ -47,6 +47,10 @@ type DocumentCreatedEvent struct {
 	Type       string `json:"type"`
 	Title      string `json:"title"`
 	UserID     string `json:"user_id,omitempty"`
+	// Visibility is policy metadata needed by the content-free Knowledge
+	// observability projector. It never authorizes access by itself; source
+	// reads remain enforced by documents-api and User Core.
+	Visibility string `json:"visibility"`
 	ZDR        bool   `json:"zdr"`
 }
 
@@ -54,6 +58,7 @@ type DocumentDeletedEvent struct {
 	DocumentID string `json:"document_id"`
 	OrgID      string `json:"org_id"`
 	UserID     string `json:"user_id,omitempty"`
+	Visibility string `json:"visibility"`
 	ZDR        bool   `json:"zdr"`
 }
 
@@ -84,6 +89,7 @@ type DocumentUpdatedEvent struct {
 	Type       string `json:"type"`
 	Title      string `json:"title"`
 	UserID     string `json:"user_id,omitempty"`
+	Visibility string `json:"visibility"`
 	ZDR        bool   `json:"zdr"`
 }
 

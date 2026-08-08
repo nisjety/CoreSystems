@@ -283,7 +283,7 @@ nor persists via the graph arm.
 
 ### 7.1 Neo4j in `docker-compose.yml`
 
-- Service `neo4j` on the `aquatiq-local` network (internal DNS `neo4j`), Bolt `7687`,
+- Service `neo4j` on the `coresystem-local` network (internal DNS `neo4j`), Bolt `7687`,
   optional host-mapped HTTP browser for dev only.
 - **Auth on** (`NEO4J_AUTH=neo4j/<secret>`), secret from env, no default in the
   committed file (fail-closed, mirrors the plane's secret handling).

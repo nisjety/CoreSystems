@@ -107,6 +107,11 @@ pub struct ModeMixWeights {
     /// Visual arm (Cohere Embed v4 page images). Defaults to 0 (shadow) until eval.
     #[serde(default)]
     pub w_visual: Option<f32>,
+    /// Keyword arm (Meilisearch typo-tolerant exact-ID/code lookup). `None`
+    /// defers to `Config::w_keyword` (0.05 by default) exactly like every
+    /// other arm's weight here.
+    #[serde(default)]
+    pub w_keyword: Option<f32>,
     /// `true` = run cross-encoder reranker after blending; `false` = skip.
     #[serde(default)]
     pub rerank: Option<bool>,
@@ -119,6 +124,7 @@ impl ModeMixWeights {
     /// not a blend weight, so it must not participate in the sum-to-1.0
     /// renormalisation below. It travels with the weights so the persisted trace
     /// records the exact `k` that produced a ranking (plan P2-5).
+    #[allow(clippy::too_many_arguments)] // one named default per fused arm; a struct would just move the same count elsewhere
     pub fn resolve(
         &self,
         default_dense: f32,
@@ -126,6 +132,7 @@ impl ModeMixWeights {
         default_graph: f32,
         default_wiki: f32,
         default_visual: f32,
+        default_keyword: f32,
         rrf_k: f32,
     ) -> ResolvedWeights {
         let d = self.w_dense.unwrap_or(default_dense);
@@ -133,13 +140,15 @@ impl ModeMixWeights {
         let g = self.w_graph.unwrap_or(default_graph);
         let w = self.w_wiki.unwrap_or(default_wiki);
         let v = self.w_visual.unwrap_or(default_visual);
-        let sum = (d + b + g + w + v).max(f32::EPSILON);
+        let kw = self.w_keyword.unwrap_or(default_keyword);
+        let sum = (d + b + g + w + v + kw).max(f32::EPSILON);
         ResolvedWeights {
             w_dense: d / sum,
             w_bm25: b / sum,
             w_graph: g / sum,
             w_wiki: w / sum,
             w_visual: v / sum,
+            w_keyword: kw / sum,
             rerank: self.rerank.unwrap_or(true),
             rrf_k,
         }
@@ -153,6 +162,7 @@ pub struct ResolvedWeights {
     pub w_graph: f32,
     pub w_wiki: f32,
     pub w_visual: f32,
+    pub w_keyword: f32,
     pub rerank: bool,
     /// RRF rank constant applied by `fuse_arms` (plan P2-5). Recorded in the
     /// trace so a ranking is reproducible.
@@ -339,6 +349,7 @@ mod tests {
             w_graph: 0.0,
             w_wiki: 0.0,
             w_visual: 0.0,
+            w_keyword: 0.0,
             rerank: true,
             rrf_k: crate::search::fusion::DEFAULT_RRF_K,
         }
@@ -403,5 +414,47 @@ mod tests {
                 sparse: false
             }
         );
+    }
+
+    #[test]
+    fn resolve_includes_keyword_in_the_sum_to_one_renormalization() {
+        let mix = ModeMixWeights::default();
+        let resolved = mix.resolve(
+            0.45,
+            0.2,
+            0.2,
+            0.1,
+            0.05,
+            0.05,
+            crate::search::fusion::DEFAULT_RRF_K,
+        );
+        let sum = resolved.w_dense
+            + resolved.w_bm25
+            + resolved.w_graph
+            + resolved.w_wiki
+            + resolved.w_visual
+            + resolved.w_keyword;
+        assert!((sum - 1.0).abs() < 1e-5, "sum = {sum}");
+        // 0.05 / 1.05 total, same share visual gets from the same input.
+        assert!((resolved.w_keyword - resolved.w_visual).abs() < 1e-6);
+    }
+
+    #[test]
+    fn explicit_request_w_keyword_overrides_the_config_default() {
+        let mix = ModeMixWeights {
+            w_keyword: Some(0.5),
+            ..Default::default()
+        };
+        let resolved = mix.resolve(
+            0.45,
+            0.2,
+            0.2,
+            0.1,
+            0.05,
+            0.05,
+            crate::search::fusion::DEFAULT_RRF_K,
+        );
+        // 0.5 raw share out of (0.45+0.2+0.2+0.1+0.05+0.5)=1.5 total.
+        assert!((resolved.w_keyword - (0.5 / 1.5)).abs() < 1e-6);
     }
 }

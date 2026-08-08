@@ -7,6 +7,10 @@ edition.workspace = true
 name = "embedding-engine"
 path = "src/main.rs"
 
+[[bin]]
+name = "backfill-reannounce"
+path = "src/bin/backfill_reannounce.rs"
+
 [dependencies]
 tokio.workspace = true
 serde.workspace = true
@@ -30,10 +34,17 @@ async-nats.workspace = true
 nats-connection-rs = { path = "../nats-connection-rs" }
 futures = "0.3"
 event-envelope-rs = { path = "../event-envelope-rs" }
+pg-org-scope-rs = { path = "../pg-org-scope-rs" }
 base64 = "0.22"
 # Visual RAG: downscale + recompress rendered page images to fit Embed v4's
 # per-request token budget. PNG decode + JPEG encode only (lean feature set).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# GDPR/DSAR erasure completeness: delete page-image binaries from the MinIO
+# CAS bucket alongside their Qdrant vectors. Matches the version pin and
+# feature set already used by Ingestion Plane's `CasStore`
+# (quarry-runtime/src/cas_store.rs), which this module's delete path mirrors.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest"] }
 
 [build-dependencies]
 tonic-build.workspace = true

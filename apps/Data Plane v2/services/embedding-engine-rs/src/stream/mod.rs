@@ -177,14 +177,26 @@ pub async fn run_consumer(
                     let text = if let Some(t) = payload["text"].as_str().filter(|t| !t.is_empty()) {
                         t.to_string()
                     } else {
+                        // Phase 1 RLS: a single message carries exactly one
+                        // org (from the verified envelope claims), so this
+                        // per-message lookup reads through an org-scoped
+                        // transaction. NOTE the contrast with the batch
+                        // pipeline below: `process_batch` deliberately mixes
+                        // orgs in one buffer (see `embed_items_by_org` /
+                        // `cost_groups`), so its writes must NOT be scoped —
+                        // a single-org transaction there would silently drop
+                        // every other org's rows from the update.
+                        let mut tx =
+                            pg_org_scope::begin_org_scoped(&pool, &event_claims.org_id).await?;
                         let row: Option<(String,)> = sqlx::query_as(
                             "SELECT text FROM knowledge_units WHERE knowledge_id = $1 AND org_id = $2 AND document_id = $3",
                         )
                         .bind(&kid)
                         .bind(&event_claims.org_id)
                         .bind(&doc_id)
-                        .fetch_optional(&pool)
+                        .fetch_optional(&mut *tx)
                         .await?;
+                        tx.commit().await?;
                         match row {
                             Some((t,)) => t,
                             None => {
@@ -211,14 +223,19 @@ pub async fn run_consumer(
                     let (zdr, document_date) = if doc_id.is_empty() {
                         (false, None)
                     } else {
+                        // Phase 1 RLS: single-org per-message lookup, same
+                        // rationale as the chunk-text read above.
+                        let mut tx =
+                            pg_org_scope::begin_org_scoped(&pool, &event_claims.org_id).await?;
                         let row: Option<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
                             sqlx::query_as(
                                 "SELECT zdr_classification, document_date FROM documents WHERE document_id = $1 AND org_id = $2",
                             )
                             .bind(&doc_id)
                             .bind(&event_claims.org_id)
-                            .fetch_optional(&pool)
+                            .fetch_optional(&mut *tx)
                             .await?;
+                        tx.commit().await?;
                         let zdr = event_claims.zdr
                             || matches!(&row, Some((Some(c), _)) if c == "restricted");
                         let document_date = row.and_then(|(_, d)| d);
@@ -305,8 +322,36 @@ pub async fn run_consumer(
                     tracing::error!(err = %e, batch_size = buffer.len(), "batch processing failed");
                     for (msg, item) in &buffer {
                         let num_delivered = msg.info().map(|i| i.delivered).unwrap_or(0) as u32;
-                        if num_delivered >= config.max_delivery_attempts {
+                        if batch::delivery_is_terminal(num_delivered, config.max_delivery_attempts)
+                        {
                             tracing::warn!(knowledge_id = %item.knowledge_id, "max retries reached, sending to DLQ");
+                            // D18: the terminal database write happens HERE and
+                            // only here — the moment the broker's redelivery
+                            // budget is actually spent. `process_batch` used to
+                            // write `'failed'` on the first error, which
+                            // recorded a permanent outcome while retries were
+                            // still in flight. Per-message, not per-batch: a
+                            // sibling chunk on attempt 1 of 5 in the same
+                            // buffer stays retryable and is simply redelivered.
+                            if let Err(error) = batch::mark_units_failed(
+                                &pool,
+                                std::slice::from_ref(&item.knowledge_id),
+                                &e.to_string(),
+                            )
+                            .await
+                            {
+                                // Leave the row retryable rather than acking
+                                // into a state nobody recorded: without the ack
+                                // below the message is redelivered, and
+                                // `delivered` is already past the budget, so the
+                                // next attempt lands straight back here.
+                                tracing::error!(
+                                    knowledge_id = %item.knowledge_id,
+                                    %error,
+                                    "terminal embedding-failure write failed; not acking"
+                                );
+                                continue;
+                            }
                             let dlq = serde_json::json!({
                                 "original_subject": SUBJECT_CREATED,
                                 "knowledge_id": item.knowledge_id,

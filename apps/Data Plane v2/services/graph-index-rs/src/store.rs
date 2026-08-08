@@ -1512,9 +1512,9 @@ mod identity_tests {
 
     #[test]
     fn claim_identity_is_org_scoped_and_normalised() {
-        let a = claim_identity("org1", "Aquatiq uses HACCP");
-        assert_eq!(a, claim_identity("org1", "  aquatiq uses haccp "));
-        assert_ne!(a, claim_identity("org2", "Aquatiq uses HACCP"));
+        let a = claim_identity("org1", "Coresystem uses HACCP");
+        assert_eq!(a, claim_identity("org1", "  coresystem uses haccp "));
+        assert_ne!(a, claim_identity("org2", "Coresystem uses HACCP"));
     }
 
     #[test]
@@ -1539,7 +1539,10 @@ mod identity_tests {
         let b = community_identity("org1", &["e1".into(), "e2".into(), "e3".into()]);
         assert_eq!(a, b, "member order must not affect identity");
         // Duplicates collapse.
-        let c = community_identity("org1", &["e1".into(), "e2".into(), "e2".into(), "e3".into()]);
+        let c = community_identity(
+            "org1",
+            &["e1".into(), "e2".into(), "e2".into(), "e3".into()],
+        );
         assert_eq!(a, c, "duplicate members must not affect identity");
     }
 
@@ -1571,19 +1574,40 @@ mod identity_tests {
                 vec!["Organization", "Company", "Team", "Group", "companies"],
                 "Organization",
             ),
-            (vec!["Chemical", "Chemicals", "Substance", "Gas", "Material"], "Substance"),
-            (vec!["Microorganism", "Pathogen", "Bacteria", "Animal"], "Organism"),
             (
-                vec!["Contact", "Contact Information", "Phone", "Phone Number", "Email"],
+                vec!["Chemical", "Chemicals", "Substance", "Gas", "Material"],
+                "Substance",
+            ),
+            (
+                vec!["Microorganism", "Pathogen", "Bacteria", "Animal"],
+                "Organism",
+            ),
+            (
+                vec![
+                    "Contact",
+                    "Contact Information",
+                    "Phone",
+                    "Phone Number",
+                    "Email",
+                ],
                 "ContactPoint",
             ),
             // `Page` deliberately sits with Document, not Technology: in a
             // web-crawl corpus a page is *content*, while `Website` is the
             // system hosting it.
-            (vec!["Website", "Platform", "Application", "Software"], "Technology"),
-            (vec!["Process", "Procedure", "Method", "Action", "Function"], "Process"),
+            (
+                vec!["Website", "Platform", "Application", "Software"],
+                "Technology",
+            ),
+            (
+                vec!["Process", "Procedure", "Method", "Action", "Function"],
+                "Process",
+            ),
             (vec!["Course", "Training"], "Training"),
-            (vec!["Standard", "Guideline", "Certification", "Membership"], "Standard"),
+            (
+                vec!["Standard", "Guideline", "Certification", "Membership"],
+                "Standard",
+            ),
             (vec!["Document", "File", "Image", "Page"], "Document"),
             (vec!["Date", "Time"], "Date"),
             (vec!["Location", "Country"], "Location"),
@@ -1624,13 +1648,19 @@ mod identity_tests {
 
     #[test]
     fn ontology_lookup_ignores_case_separators_and_punctuation() {
-        for variant in ["Phone Number", "phone_number", "phone-number", "PHONENUMBER", " Phone  Number "] {
+        for variant in [
+            "Phone Number",
+            "phone_number",
+            "phone-number",
+            "PHONENUMBER",
+            " Phone  Number ",
+        ] {
             assert_eq!(canonical_entity_type(variant), "ContactPoint", "{variant}");
         }
     }
 
     #[test]
-    fn canonical_type_merges_the_aquatiq_split() {
+    fn canonical_type_merges_the_coresystem_split() {
         // The concrete live defect: 13 rows as Organization + 9 as Company.
         assert_eq!(
             entity_identity("org1", "Aquatiq", "Organization"),
@@ -1949,7 +1979,10 @@ mod visibility_tests {
                 .fetch_one(&pool)
                 .await
                 .expect("check old id");
-        assert_eq!(old_gone, 0, "stale summary must not survive a membership change");
+        assert_eq!(
+            old_gone, 0,
+            "stale summary must not survive a membership change"
+        );
 
         // Empty detection prunes everything for the org.
         store
@@ -2280,5 +2313,4 @@ mod gdpr_purge_tests {
             .expect("drop isolated graph schema");
         pool.close().await;
     }
-
 }

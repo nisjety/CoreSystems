@@ -12,7 +12,7 @@ use crate::config::Config;
 mod service_auth;
 pub mod visual;
 
-use service_auth::{InferenceBearer, InferenceTokenClient};
+use service_auth::{InferenceBearer, InferenceTokenClient, RetentionPosture};
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 200;
@@ -32,6 +32,7 @@ pub struct EmbeddingClient {
 enum EmbeddingBackend {
     ModelPlane(Box<ModelPlaneEmbeddingClient>),
     AzureOpenAi(AzureOpenAiEmbeddingClient),
+    Cohere(CohereEmbeddingClient),
     DeterministicTest { dimension: usize },
 }
 
@@ -53,6 +54,7 @@ struct ModelPlaneSettings<'a> {
     token_issuer: &'a str,
     service_id: &'a str,
     service_api_key: &'a str,
+    retention_posture: &'a str,
 }
 
 #[derive(Clone)]
@@ -63,10 +65,31 @@ struct AzureOpenAiEmbeddingClient {
     deployment: String,
 }
 
+/// Cohere Embed v4 (Azure AI Foundry) — dense **text** query embeddings.
+/// Mirrors `embedding-engine-rs/src/provider/mod.rs`'s `CohereEmbeddingClient`
+/// exactly, with `input_type: "query"` instead of `"document"` — Embed v4
+/// asymmetrically optimizes each side for retrieval. Shares the deployment
+/// the visual arm already uses (`embed/visual.rs`).
+#[derive(Clone)]
+struct CohereEmbeddingClient {
+    http: Client,
+    endpoint: String,
+    api_key: String,
+    model: String,
+    api_version: String,
+}
+
 #[derive(Serialize)]
 struct EmbedRequest {
     input: Vec<String>,
     model: String,
+}
+
+#[derive(Serialize)]
+struct CohereEmbedRequest<'a> {
+    model: &'a str,
+    input: &'a [String],
+    input_type: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -91,11 +114,18 @@ impl EmbeddingClient {
                 token_issuer: &cfg.model_plane_inference_token_issuer,
                 service_id: &cfg.model_plane_inference_service_id,
                 service_api_key: &cfg.model_plane_inference_service_api_key,
+                retention_posture: &cfg.model_plane_inference_retention_posture,
             }),
             "azure_openai" => Self::azure_openai(
                 &cfg.azure_openai_endpoint,
                 &cfg.azure_openai_api_key,
                 &cfg.azure_openai_embedding_deployment,
+            ),
+            "cohere" => Self::cohere(
+                &cfg.cohere_embed_v4_endpoint,
+                &cfg.cohere_embed_v4_api_key,
+                &cfg.cohere_embed_v4_deployment,
+                &cfg.cohere_embed_v4_api_version,
             ),
             "deterministic_test"
                 if deterministic_test_allowed(
@@ -106,7 +136,7 @@ impl EmbeddingClient {
                 Self::deterministic_test(cfg.embedding_dimension)
             }
             other => anyhow::bail!(
-                "unsupported EMBEDDING_PROVIDER `{other}`; expected `model_plane` or `azure_openai`"
+                "unsupported EMBEDDING_PROVIDER `{other}`; expected `model_plane`, `azure_openai`, or `cohere`"
             ),
         }
     }
@@ -128,6 +158,7 @@ impl EmbeddingClient {
             settings.token_issuer,
             settings.service_id,
             settings.service_api_key,
+            RetentionPosture::parse(settings.retention_posture)?,
         )?;
         Ok(Self {
             inner: EmbeddingBackend::ModelPlane(Box::new(ModelPlaneEmbeddingClient {
@@ -157,6 +188,29 @@ impl EmbeddingClient {
         })
     }
 
+    pub fn cohere(
+        endpoint: &str,
+        api_key: &str,
+        model: &str,
+        api_version: &str,
+    ) -> anyhow::Result<Self> {
+        if endpoint.trim().is_empty() {
+            anyhow::bail!("COHERE_EMBED_V4_ENDPOINT is required when EMBEDDING_PROVIDER=cohere");
+        }
+        if api_key.trim().is_empty() {
+            anyhow::bail!("COHERE_EMBED_V4_API_KEY is required when EMBEDDING_PROVIDER=cohere");
+        }
+        Ok(Self {
+            inner: EmbeddingBackend::Cohere(CohereEmbeddingClient {
+                http: Client::new(),
+                endpoint: endpoint.trim_end_matches('/').to_string(),
+                api_key: api_key.to_string(),
+                model: model.to_string(),
+                api_version: api_version.to_string(),
+            }),
+        })
+    }
+
     fn deterministic_test(dimension: usize) -> anyhow::Result<Self> {
         anyhow::ensure!(
             (1..=65_536).contains(&dimension),
@@ -171,6 +225,7 @@ impl EmbeddingClient {
         match &self.inner {
             EmbeddingBackend::ModelPlane(_) => "model_plane",
             EmbeddingBackend::AzureOpenAi(_) => "azure_openai",
+            EmbeddingBackend::Cohere(_) => "cohere",
             EmbeddingBackend::DeterministicTest { .. } => "deterministic_test",
         }
     }
@@ -179,6 +234,7 @@ impl EmbeddingClient {
         match &self.inner {
             EmbeddingBackend::ModelPlane(client) => &client.model,
             EmbeddingBackend::AzureOpenAi(client) => &client.deployment,
+            EmbeddingBackend::Cohere(client) => &client.model,
             EmbeddingBackend::DeterministicTest { .. } => "deterministic-isolated",
         }
     }
@@ -195,6 +251,9 @@ impl EmbeddingClient {
             }
             EmbeddingBackend::AzureOpenAi(client) => {
                 format!("{}:{}", self.provider_name(), client.deployment)
+            }
+            EmbeddingBackend::Cohere(client) => {
+                format!("{}:{}", self.provider_name(), client.model)
             }
             EmbeddingBackend::DeterministicTest { dimension } => {
                 format!("deterministic_test:{dimension}")
@@ -238,6 +297,7 @@ impl EmbeddingClient {
         match &self.inner {
             EmbeddingBackend::ModelPlane(client) => client.embed_batch(org_id, texts, zdr).await,
             EmbeddingBackend::AzureOpenAi(client) => client.embed_batch(texts, zdr).await,
+            EmbeddingBackend::Cohere(client) => client.embed_batch(texts, zdr).await,
             EmbeddingBackend::DeterministicTest { dimension } => Ok(texts
                 .iter()
                 .map(|text| deterministic_vector(org_id, text, *dimension))
@@ -433,6 +493,79 @@ impl AzureOpenAiEmbeddingClient {
     }
 }
 
+impl CohereEmbeddingClient {
+    async fn embed_batch(&self, texts: &[String], zdr: bool) -> anyhow::Result<Vec<Vec<f32>>> {
+        // ZDR egress guard: Azure Foundry is a *retaining* provider (mirrors
+        // the direct-Azure path and embedding-engine-rs's indexing-side twin).
+        if zdr {
+            anyhow::bail!("ZDR content must not egress to the Cohere Embed v4 text path");
+        }
+
+        let url = format!(
+            "{}/embeddings?api-version={}",
+            self.endpoint, self.api_version
+        );
+        let body = CohereEmbedRequest {
+            model: &self.model,
+            input: texts,
+            // Query side: Embed v4 asymmetrically optimizes query vs document
+            // embeddings for retrieval. The indexing side
+            // (embedding-engine-rs) sends "document".
+            input_type: "query",
+        };
+
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let backoff = Duration::from_millis(INITIAL_BACKOFF_MS * 2u64.pow(attempt - 1));
+                tracing::warn!(attempt, ?backoff, "Cohere text embed retry");
+                tokio::time::sleep(backoff).await;
+            }
+
+            let resp = match self
+                .http
+                .post(&url)
+                .header("api-key", &self.api_key)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err =
+                        Some(anyhow::anyhow!(e).context("Cohere text embedding API call failed"));
+                    continue;
+                }
+            };
+
+            if resp.status().is_server_error() || resp.status().as_u16() == 429 {
+                let status = resp.status();
+                last_err = Some(sanitized_provider_status_error(
+                    "Cohere text embedding API",
+                    status,
+                ));
+                continue;
+            }
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                return Err(sanitized_provider_status_error(
+                    "Cohere text embedding API",
+                    status,
+                ));
+            }
+
+            let embed_resp: EmbedResponse = resp
+                .json()
+                .await
+                .context("parse Cohere text embedding response")?;
+            return Ok(embed_resp.data.into_iter().map(|d| d.embedding).collect());
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Cohere text embed retries exhausted")))
+    }
+}
+
 fn sanitized_provider_status_error(provider: &str, status: reqwest::StatusCode) -> anyhow::Error {
     anyhow::anyhow!("{provider} returned HTTP status {}", status.as_u16())
 }
@@ -442,6 +575,7 @@ fn normalize_provider(provider: &str) -> String {
         "model-plane" | "modelplane" | "inference-core" | "inference_core" | "ai-core"
         | "ai_core" => "model_plane".to_string(),
         "azure" | "azure-openai" => "azure_openai".to_string(),
+        "cohere-embed-v4" | "cohere_embed_v4" | "embed-v4" | "embed_v4" => "cohere".to_string(),
         other => other.to_string(),
     }
 }
@@ -467,6 +601,112 @@ mod tests {
         assert_eq!(normalize_provider("inference_core"), "model_plane");
         assert_eq!(normalize_provider("ai_core"), "model_plane");
         assert_eq!(normalize_provider("azure-openai"), "azure_openai");
+        assert_eq!(normalize_provider("cohere-embed-v4"), "cohere");
+        assert_eq!(normalize_provider("embed_v4"), "cohere");
+        assert_eq!(normalize_provider("cohere"), "cohere");
+    }
+
+    #[test]
+    fn cohere_requires_endpoint_and_key() {
+        let err = match EmbeddingClient::cohere("", "", "Cohere-embed-4", "2024-05-01-preview") {
+            Ok(_) => panic!("empty endpoint should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("COHERE_EMBED_V4_ENDPOINT"),
+            "unexpected error: {err}"
+        );
+
+        let err = match EmbeddingClient::cohere(
+            "https://x.services.ai.azure.com",
+            "",
+            "Cohere-embed-4",
+            "2024-05-01-preview",
+        ) {
+            Ok(_) => panic!("empty api key should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("COHERE_EMBED_V4_API_KEY"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cohere_client_names_cache_by_provider_and_model() {
+        let client = EmbeddingClient::cohere(
+            "https://x.services.ai.azure.com",
+            "k",
+            "Cohere-embed-4",
+            "2024-05-01-preview",
+        )
+        .expect("cohere client");
+        assert_eq!(client.provider_name(), "cohere");
+        assert_eq!(client.model_name(), "Cohere-embed-4");
+        assert_eq!(client.cache_namespace(), "cohere:Cohere-embed-4");
+    }
+
+    /// Pins the query-side request shape: plain string `input` and
+    /// `input_type: "query"` — the asymmetric counterpart to
+    /// embedding-engine-rs's indexing-side `"document"`.
+    #[test]
+    fn cohere_request_serializes_to_foundry_query_embeddings_shape() {
+        let texts = vec!["hva er prisen?".to_string()];
+        let req = CohereEmbedRequest {
+            model: "Cohere-embed-4",
+            input: &texts,
+            input_type: "query",
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["model"], "Cohere-embed-4");
+        assert_eq!(v["input_type"], "query");
+        assert_eq!(v["input"][0], "hva er prisen?");
+    }
+
+    /// ZDR egress guard: a restricted query must fail closed BEFORE any
+    /// network call (the unreachable endpoint would surface a connection
+    /// error if the guard regressed, not the ZDR error asserted here).
+    #[tokio::test]
+    async fn cohere_egress_guard_rejects_zdr() {
+        let client = EmbeddingClient::cohere(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "Cohere-embed-4",
+            "2024-05-01-preview",
+        )
+        .expect("cohere client");
+        let err = client
+            .embed_batch("org-1", &["restricted query".to_string()], true)
+            .await
+            .expect_err("ZDR content must not egress to Cohere Embed v4");
+        assert!(
+            err.to_string()
+                .contains("must not egress to the Cohere Embed v4 text path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Non-ZDR queries still embed (the guard only trips for ZDR=true); the
+    /// unreachable endpoint yields a network/retry error, NOT the egress
+    /// error — proving the guard is not constant-on.
+    #[tokio::test]
+    async fn cohere_allows_non_zdr() {
+        let client = EmbeddingClient::cohere(
+            "http://127.0.0.1:1/unreachable",
+            "fake-key",
+            "Cohere-embed-4",
+            "2024-05-01-preview",
+        )
+        .expect("cohere client");
+        let err = client
+            .embed_batch("org-1", &["public query".to_string()], false)
+            .await
+            .expect_err("unreachable endpoint should error");
+        assert!(
+            !err.to_string()
+                .contains("must not egress to the Cohere Embed v4 text path"),
+            "non-ZDR content must not hit the egress guard: {err}"
+        );
     }
 
     #[test]
@@ -514,6 +754,7 @@ mod tests {
             token_issuer: "http://localhost:3011/api/convex-auth",
             service_id: "retrieval-engine",
             service_api_key: "isolated-test-service-credential",
+            retention_posture: "persistent",
         })
         .expect("model-plane client");
         assert_eq!(client.provider_name(), "model_plane");
@@ -594,6 +835,7 @@ mod tests {
             token_issuer: "http://localhost:3011/api/convex-auth",
             service_id: "retrieval-engine",
             service_api_key: "isolated-test-service-credential",
+            retention_posture: "persistent",
         })
         .expect("model-plane client");
         let EmbeddingBackend::ModelPlane(inner) = &client.inner else {
@@ -620,6 +862,7 @@ mod tests {
             token_issuer: "http://localhost:3011/api/convex-auth",
             service_id: "retrieval-engine",
             service_api_key: "isolated-test-service-credential",
+            retention_posture: "persistent",
         })
         .expect("model-plane client");
         let EmbeddingBackend::ModelPlane(inner) = &client.inner else {

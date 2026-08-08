@@ -42,6 +42,12 @@ pub struct Config {
     pub model_plane_inference_token_issuer: String,
     #[serde(default = "default_model_plane_inference_service_id")]
     pub model_plane_inference_service_id: String,
+    /// Retention posture auth-core is configured to mint for this service's
+    /// `inference-core` audience: `persistent` (zdr:false) or `zdr` (zdr:true).
+    /// Must match the principal's `retentionByAudience` entry in
+    /// `PLANE_SERVICE_PRINCIPALS_JSON`, or every mint fails closed.
+    #[serde(default = "default_model_plane_inference_retention_posture")]
+    pub model_plane_inference_retention_posture: String,
     #[serde(default)]
     pub model_plane_inference_service_api_key: String,
 
@@ -147,6 +153,13 @@ fn default_model_plane_inference_token_issuer() -> String {
     "http://localhost:3011/api/convex-auth".into()
 }
 
+/// Matches the deployed registry, which pins `graph-index` -> `inference-core`
+/// to `persistent`. Note this is the opposite of auth-core's own default for an
+/// *unconfigured* audience (`zdr`), so tightening the registry requires setting
+/// this variable too.
+fn default_model_plane_inference_retention_posture() -> String {
+    "persistent".into()
+}
 fn default_model_plane_inference_service_id() -> String {
     "graph-index".into()
 }

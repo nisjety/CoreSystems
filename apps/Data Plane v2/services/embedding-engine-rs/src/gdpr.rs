@@ -157,32 +157,52 @@ pub struct PurgeSummary {
     pub knowledge_points: u64,
     pub wiki_points: u64,
     pub visual_points: u64,
+    /// MinIO CAS objects (raw + rendered page PNGs) deleted for this org.
+    /// Zero both when the org genuinely had none AND when CAS erasure is
+    /// unconfigured (`cas: None` was passed to `purge_organization_data`) —
+    /// the two are indistinguishable from this count alone.
+    pub cas_objects: u64,
 }
 
 impl PurgeSummary {
-    /// Total points deleted across all three collections in one purge run.
+    /// Total points/objects deleted across every store in one purge run.
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.knowledge_points + self.wiki_points + self.visual_points
+        self.knowledge_points + self.wiki_points + self.visual_points + self.cas_objects
     }
 }
 
-/// Hard-purge every org-scoped vector point this crate owns across its
-/// three Qdrant collections, for `org_id`.
+/// Hard-purge every org-scoped vector point this crate owns across its three
+/// Qdrant collections, plus (when `cas` is configured) every MinIO CAS object
+/// — raw page binaries and rendered PNGs — the org owns, for `org_id`.
+///
+/// The CAS bucket's literal writer is Ingestion Plane's renderer, not this
+/// crate — but this is still the right owner for its *erasure*: Ingestion
+/// Plane never receives Data Plane v2's GDPR/DSAR erasure events (crossing
+/// that direction would mean Data Plane telling Ingestion Plane what to do,
+/// backwards from every other cross-plane contract here), and this crate
+/// already owns the domain's Qdrant-side erasure (`visual_points` above).
+/// `cas` is `None` when `CAS_BUCKET` is unset, matching every other
+/// optionally-configured arm in this crate (e.g. the visual embedder itself)
+/// — an org purge must still succeed for every store that IS configured
+/// rather than failing whole-hog over a store nobody turned on.
 ///
 /// # Errors
 ///
 /// Returns an error if `org_id` is empty (defense in depth — the caller
 /// already validated this via [`parse_erasure_event`], but a delete-by-filter
 /// is destructive enough that this module never trusts an unchecked
-/// caller), or if any Qdrant count/delete call fails. Collections are
-/// purged independently (no cross-collection transaction — Qdrant has none),
-/// so a failure purging one does not roll back an already-completed purge
-/// of another; a NAK'd redelivery simply repeats every collection's purge,
-/// which is safe because each is independently idempotent.
+/// caller), or if any store's count/delete/list call fails. Every store is
+/// purged independently (no cross-store transaction is possible — Qdrant and
+/// S3 have none), so a failure purging one does not roll back an
+/// already-completed purge of another; a NAK'd redelivery simply repeats
+/// every store's purge, which is safe because each is independently
+/// idempotent (deleting an already-deleted point/object is a no-op, not an
+/// error).
 pub async fn purge_organization_data(
     qdrant: &Qdrant,
     collections: &PurgeCollections,
+    cas: Option<&crate::cas_store::CasStore>,
     org_id: &str,
 ) -> anyhow::Result<PurgeSummary> {
     anyhow::ensure!(
@@ -190,10 +210,16 @@ pub async fn purge_organization_data(
         "organization erasure purge requires a non-empty org_id"
     );
 
+    let cas_objects = match cas {
+        Some(store) => store.delete_by_org(org_id).await?,
+        None => 0,
+    };
+
     Ok(PurgeSummary {
         knowledge_points: purge_collection(qdrant, &collections.knowledge, org_id).await?,
         wiki_points: purge_collection(qdrant, &collections.wiki, org_id).await?,
         visual_points: purge_collection(qdrant, &collections.visual, org_id).await?,
+        cas_objects,
     })
 }
 
@@ -387,13 +413,14 @@ mod tests {
     }
 
     #[test]
-    fn purge_summary_total_sums_all_collections() {
+    fn purge_summary_total_sums_every_store() {
         let summary = PurgeSummary {
             knowledge_points: 3,
             wiki_points: 2,
             visual_points: 1,
+            cas_objects: 4,
         };
-        assert_eq!(summary.total(), 6);
+        assert_eq!(summary.total(), 10);
     }
 
     #[test]
@@ -470,10 +497,17 @@ mod tests {
                 .expect("seed scratch test points");
         }
 
-        let summary = purge_organization_data(&qdrant, &collections, "org-a")
+        // CAS erasure has its own unit tests in `cas_store.rs` (prefix layout,
+        // pagination); this test stays scoped to the Qdrant purge it was
+        // written for, so `cas: None` here is deliberate, not an oversight.
+        let summary = purge_organization_data(&qdrant, &collections, None, "org-a")
             .await
             .expect("purge org-a");
         assert_eq!(summary.total(), 6, "2 org-a points x 3 collections");
+        assert_eq!(
+            summary.cas_objects, 0,
+            "cas erasure was not configured in this test"
+        );
 
         for name in names {
             let org_a_remaining = qdrant
@@ -514,7 +548,7 @@ mod tests {
 
         // Idempotency: redelivery of the same event purges zero points the
         // second time, not an error.
-        let replay = purge_organization_data(&qdrant, &collections, "org-a")
+        let replay = purge_organization_data(&qdrant, &collections, None, "org-a")
             .await
             .expect("replayed purge is a no-op, not an error");
         assert_eq!(replay.total(), 0);

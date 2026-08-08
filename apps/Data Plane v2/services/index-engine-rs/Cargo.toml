@@ -7,6 +7,10 @@ edition.workspace = true
 name = "index-engine"
 path = "src/main.rs"
 
+[[bin]]
+name = "reembed-switch"
+path = "src/bin/reembed_switch.rs"
+
 [dependencies]
 tokio.workspace = true
 serde.workspace = true

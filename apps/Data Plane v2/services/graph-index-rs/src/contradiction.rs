@@ -69,8 +69,7 @@ pub struct DetectedPair {
 /// / ~38% Norwegian, mixed within single chunks, so both always apply).
 const NEGATIONS: [&str; 12] = [
     // Norwegian
-    "ikke", "ingen", "aldri", "uten", "verken",
-    // English
+    "ikke", "ingen", "aldri", "uten", "verken", // English
     "not", "no", "never", "without", "neither", "nor", "none",
 ];
 
@@ -293,7 +292,13 @@ mod tests {
     fn identical_claims_are_not_contradictions() {
         let s = "Aquatiq supplies hygiene systems to the food industry";
         assert_eq!(v(s, s), Verdict::Compatible);
-        assert_eq!(v(s, "  AQUATIQ supplies hygiene systems to the food industry "), Verdict::Compatible);
+        assert_eq!(
+            v(
+                s,
+                "  AQUATIQ supplies hygiene systems to the food industry "
+            ),
+            Verdict::Compatible
+        );
     }
 
     #[test]
@@ -328,9 +333,18 @@ mod tests {
     #[test]
     fn detect_against_candidates_skips_self_and_reports_pairs() {
         let cands = vec![
-            ("c1".to_string(), "The plant is certified for export today".to_string()),
-            ("c2".to_string(), "The plant is not certified for export today".to_string()),
-            ("c3".to_string(), "Bergen hosted the annual seafood conference".to_string()),
+            (
+                "c1".to_string(),
+                "The plant is certified for export today".to_string(),
+            ),
+            (
+                "c2".to_string(),
+                "The plant is not certified for export today".to_string(),
+            ),
+            (
+                "c3".to_string(),
+                "Bergen hosted the annual seafood conference".to_string(),
+            ),
         ];
         let found = detect_against_candidates(
             &StructuralAdjudicator,

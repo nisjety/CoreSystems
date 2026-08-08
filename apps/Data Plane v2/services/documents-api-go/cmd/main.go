@@ -174,6 +174,30 @@ func main() {
 	}
 	outboxPublisher.Start(ctx)
 
+	// The Knowledge telemetry mirror is optional for a standalone Data Plane,
+	// but when configured it uses its own Application Plane publisher identity.
+	// It reads the local durable outbox after the primary lifecycle event was
+	// accepted, so an Insights outage cannot block document persistence/indexing.
+	if cfg.KnowledgeObservabilityNatsURL != "" {
+		observabilityNats, observabilityErr := nats.Connect(
+			cfg.KnowledgeObservabilityNatsURL,
+			nats.Name("documents-api-knowledge-observability"),
+			nats.UserInfo(cfg.KnowledgeObservabilityNatsUser, cfg.KnowledgeObservabilityNatsPassword),
+		)
+		if observabilityErr != nil {
+			log.Warn().Err(observabilityErr).Msg("knowledge observability mirror unavailable; document outbox remains pending")
+		} else {
+			defer observabilityNats.Close()
+			knowledgeOutbox, outboxErr := events.NewKnowledgeObservabilityOutbox(pool, observabilityNats)
+			if outboxErr != nil {
+				log.Warn().Err(outboxErr).Msg("knowledge observability mirror disabled; document outbox remains pending")
+			} else {
+				knowledgeOutbox.Start(ctx)
+				log.Info().Msg("knowledge observability mirror enabled")
+			}
+		}
+	}
+
 	// NOTE: the legacy shared-NATS "quarry.documents.crawled" subscriber was
 	// removed. Quarry-v2 never published that subject (it emits quarry.run.* /
 	// quarry.events.* for observability only); Quarry document ingestion is now

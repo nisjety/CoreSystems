@@ -1,3 +1,7 @@
+pub mod dlq;
+
+pub use dlq::{ensure_dlq_stream, ensure_or_warn, DLQ_STREAM_NAME, DLQ_SUBJECT_FILTER};
+
 /// Connect to NATS using the Data Plane's token from a dedicated environment
 /// variable. Credentials are deliberately kept out of the URL so they cannot
 /// leak through URL logging and are handled correctly by async-nats 0.49.

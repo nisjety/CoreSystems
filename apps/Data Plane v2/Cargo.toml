@@ -3,11 +3,13 @@ resolver = "2"
 members = [
     "services/nats-connection-rs",
     "services/event-envelope-rs",
+    "services/pg-org-scope-rs",
     "services/retrieval-engine-rs",
     "services/index-engine-rs",
     "services/embedding-engine-rs",
     "services/graph-index-rs",
     "services/quickwit-adapter-rs",
+    "services/meilisearch-adapter-rs",
 ]
 exclude = [
     "gen/rust",

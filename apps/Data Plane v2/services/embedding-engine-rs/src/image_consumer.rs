@@ -276,8 +276,9 @@ pub async fn spawn(
                                 "error": e.to_string(),
                                 "attempts": delivered,
                             });
-                            if let Err(error) =
-                                nats.publish(PAGE_IMAGE_DLQ_SUBJECT, dlq.to_string().into()).await
+                            if let Err(error) = nats
+                                .publish(PAGE_IMAGE_DLQ_SUBJECT, dlq.to_string().into())
+                                .await
                             {
                                 tracing::error!(%error, "page-image DLQ publish failed");
                             }

@@ -112,6 +112,11 @@ pub struct RetrievalPipeline {
     /// fused graph arm only when the request carries a verified bearer to
     /// forward; otherwise the arm's in-process 1-hop grounding serves alone.
     pub graph_remote: Option<crate::search::graph_remote::GraphTraverseClient>,
+    /// Keyword arm query client (Meilisearch, typo-tolerant exact-ID/code
+    /// lookup). `None` when `MEILISEARCH_URL`/`MEILISEARCH_API_KEY` aren't
+    /// both configured — text-only and pre-Meilisearch deployments are
+    /// unaffected, exactly like `visual_embedder`'s `None` path.
+    pub keyword_client: Option<crate::search::keyword::MeilisearchQueryClient>,
 }
 
 /// A page-image candidate's fetchable `image_url`, read from its raw Qdrant
@@ -236,17 +241,24 @@ fn blend_vectors(query: &[f32], expansion: &[f32], weight_expansion: f32) -> Vec
 ///   3. wiki RRF (k=60, `w_wiki`) when `w_wiki > 0` and the wiki arm returned hits.
 ///   4. visual RRF (k=60, `w_visual`) when `w_visual > 0` and the visual arm
 ///      returned hits.
+///   5. keyword RRF (k=60, `w_keyword`) when `w_keyword > 0` and the Meilisearch
+///      keyword arm returned hits. Last in fusion order because it is the
+///      newest, least-proven arm — same reasoning `w_visual` landed last
+///      before it, kept consistent by adding new arms at the end rather than
+///      reordering the established chain.
 ///
 /// Returns the fused list plus the sparse candidate count for the trace. The
 /// `Option` on `sparse` is load-bearing: `None` (route off) yields the raw dense
 /// list, whereas `Some(empty)` (route on, zero hits) still runs RRF and thus
 /// re-weights the dense scores — the two are NOT interchangeable.
+#[allow(clippy::too_many_arguments)] // one Vec per fused arm; a struct would just move the same count elsewhere
 fn fuse_arms(
     dense: Vec<ScoredCandidate>,
     sparse: Option<Vec<ScoredCandidate>>,
     graph: Vec<ScoredCandidate>,
     wiki: Vec<ScoredCandidate>,
     visual: Vec<ScoredCandidate>,
+    keyword: Vec<ScoredCandidate>,
     mix: &ResolvedWeights,
     route_dense: bool,
 ) -> (Vec<ScoredCandidate>, usize) {
@@ -294,6 +306,12 @@ fn fuse_arms(
     // Visual arm — layer Embed v4 page-image hits by w_visual (purely additive).
     if mix.w_visual > 0.0 && !visual.is_empty() {
         fused = reciprocal_rank_fusion(&fused, &visual, rrf_k, mix.w_visual);
+    }
+
+    // Keyword arm — layer Meilisearch typo-tolerant hits by w_keyword (purely
+    // additive, same peer position as graph/wiki/visual).
+    if mix.w_keyword > 0.0 && !keyword.is_empty() {
+        fused = reciprocal_rank_fusion(&fused, &keyword, rrf_k, mix.w_keyword);
     }
 
     (fused, sparse_count)
@@ -585,6 +603,36 @@ impl RetrievalPipeline {
         }
     }
 
+    /// Keyword arm — Meilisearch typo-tolerant exact-ID/code lookup over the
+    /// query TEXT (no embedding), so it runs regardless of the dense route —
+    /// same shape as the graph arm. Gated on `w_keyword > 0` AND a configured
+    /// `keyword_client`. NON-FATAL: on skip, an HTTP error, or an empty result
+    /// it returns an empty list, exactly like the wiki/visual arms — a
+    /// Meilisearch outage degrades the blend, it never fails the request.
+    async fn arm_keyword(
+        &self,
+        query: &str,
+        org_id: &str,
+        w_keyword: f32,
+        top_k: usize,
+    ) -> Vec<ScoredCandidate> {
+        if w_keyword <= 0.0 {
+            return Vec::new();
+        }
+        let Some(ref client) = self.keyword_client else {
+            return Vec::new();
+        };
+        match crate::search::keyword::keyword_arm_candidates(client, query, org_id, top_k as i64)
+            .await
+        {
+            Ok(keyword) => keyword,
+            Err(e) => {
+                tracing::warn!(error = %e, "keyword arm (Meilisearch) failed; skipping");
+                Vec::new()
+            }
+        }
+    }
+
     #[tracing::instrument(
         name = "retrieval.pipeline",
         skip(self, req),
@@ -660,6 +708,7 @@ impl RetrievalPipeline {
                         w_bm25 = ?smart.w_bm25,
                         w_graph = ?smart.w_graph,
                         w_visual = ?smart.w_visual,
+                        w_keyword = ?smart.w_keyword,
                         "smart hybrid mode-mix suggestion"
                     );
                     Some(smart)
@@ -674,6 +723,7 @@ impl RetrievalPipeline {
             self.config.w_graph,
             self.config.w_wiki,
             self.config.w_visual,
+            self.config.w_keyword,
             self.config.rrf_k,
         );
 
@@ -762,7 +812,14 @@ impl RetrievalPipeline {
         // arm exactly as the sequential code did with `qv.clone()`. The sparse
         // weight for RRF is the captured `w_bm25` (renormalized over dense+bm25).
         let arms_start = Instant::now();
-        let (dense_res, sparse_res, graph_candidates, wiki_candidates, visual_candidates) = tokio::join!(
+        let (
+            dense_res,
+            sparse_res,
+            graph_candidates,
+            wiki_candidates,
+            visual_candidates,
+            keyword_candidates,
+        ) = tokio::join!(
             self.arm_dense(&query_vector, &req.org_id, conditions, top_k),
             self.arm_sparse(&req.query, &req.org_id, top_k, route.sparse),
             self.arm_graph(
@@ -780,6 +837,7 @@ impl RetrievalPipeline {
                 embed_zdr,
                 top_k,
             ),
+            self.arm_keyword(&req.query, &req.org_id, mix_for_scoring.w_keyword, top_k),
         );
         // Dense + sparse are fatal — surface their errors just as the sequential
         // `?` did. `sparse_res` is `Ok(None)` when the sparse route was off and
@@ -793,7 +851,7 @@ impl RetrievalPipeline {
         // Fuse the gathered arms sequentially: RRF(dense, sparse) with
         // renormalized bm25_share (or sparse-only / dense-only per route), then
         // RRF(_, graph) by w_graph, then RRF(_, wiki) by w_wiki, then
-        // RRF(_, visual) by w_visual.
+        // RRF(_, visual) by w_visual, then RRF(_, keyword) by w_keyword.
         let fusion_start = Instant::now();
         let (fused_candidates, candidate_count_sparse) = fuse_arms(
             dense_candidates,
@@ -801,6 +859,7 @@ impl RetrievalPipeline {
             graph_candidates,
             wiki_candidates,
             visual_candidates,
+            keyword_candidates,
             &mix_for_scoring,
             route.dense,
         );
@@ -1339,12 +1398,23 @@ mod tests {
     }
 
     fn mix(w_dense: f32, w_bm25: f32, w_wiki: f32, w_visual: f32) -> ResolvedWeights {
+        mix_keyword(w_dense, w_bm25, w_wiki, w_visual, 0.0)
+    }
+
+    fn mix_keyword(
+        w_dense: f32,
+        w_bm25: f32,
+        w_wiki: f32,
+        w_visual: f32,
+        w_keyword: f32,
+    ) -> ResolvedWeights {
         ResolvedWeights {
             w_dense,
             w_bm25,
             w_graph: 0.0,
             w_wiki,
             w_visual,
+            w_keyword,
             rerank: true,
             rrf_k: crate::search::fusion::DEFAULT_RRF_K,
         }
@@ -1395,6 +1465,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             &m,
             true,
         );
@@ -1422,6 +1493,7 @@ mod tests {
             vec![],
             wiki.clone(),
             vec![],
+            vec![],
             &m,
             true,
         );
@@ -1447,11 +1519,82 @@ mod tests {
             vec![],
             wiki.clone(),
             visual.clone(),
+            vec![],
             &m,
             true,
         );
 
         assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_layers_keyword_after_visual() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+        let wiki = vec![cand("k-w1", "doc-w1", 0.8)];
+        let visual = vec![cand("k-v1", "doc-v1", 0.6)];
+        let keyword = vec![
+            cand("k-kw1", "doc-kw1", 0.95),
+            cand("k-shared", "doc-shared", 0.4),
+        ];
+        let m = mix_keyword(0.5, 0.2, 0.2, 0.1, 0.4);
+
+        // Oracle: dense+sparse RRF, then wiki, then visual, THEN keyword —
+        // the newest arm fuses last (see `fuse_arms`'s doc comment).
+        let base = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
+        let with_wiki = reciprocal_rank_fusion(&base, &wiki, DEFAULT_RRF_K, m.w_wiki);
+        let with_visual = reciprocal_rank_fusion(&with_wiki, &visual, DEFAULT_RRF_K, m.w_visual);
+        let expected = reciprocal_rank_fusion(&with_visual, &keyword, DEFAULT_RRF_K, m.w_keyword);
+
+        let (got, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            wiki.clone(),
+            visual.clone(),
+            keyword.clone(),
+            &m,
+            true,
+        );
+
+        assert_eq!(project(&got), project(&expected));
+    }
+
+    #[test]
+    fn fuse_skips_keyword_when_weight_zero_or_empty() {
+        let dense = dense_fixture();
+        let sparse = sparse_fixture();
+
+        // w_keyword = 0 but a keyword list IS supplied → it must be ignored.
+        let base_mix = mix(0.7, 0.3, 0.0, 0.0);
+        let expected =
+            reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&base_mix));
+        let (got_weight_off, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            vec![],
+            vec![cand("k-kw1", "doc-kw1", 0.9)],
+            &base_mix,
+            true,
+        );
+        assert_eq!(project(&got_weight_off), project(&expected));
+
+        // w_keyword > 0 but the arm returned nothing → skipped.
+        let m = mix_keyword(0.6, 0.2, 0.0, 0.0, 0.4);
+        let expected_empty = reciprocal_rank_fusion(&dense, &sparse, DEFAULT_RRF_K, bm25_share(&m));
+        let (got_empty, _) = fuse_arms(
+            dense.clone(),
+            Some(sparse.clone()),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
+        assert_eq!(project(&got_empty), project(&expected_empty));
     }
 
     #[test]
@@ -1465,6 +1608,7 @@ mod tests {
         let (got, sparse_count) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1482,7 +1626,16 @@ mod tests {
         let m = mix(1.0, 0.0, 0.0, 0.0);
 
         // sparse = None (route off): dense returned raw, count 0, no RRF.
-        let (got, sparse_count) = fuse_arms(dense.clone(), None, vec![], vec![], vec![], &m, true);
+        let (got, sparse_count) = fuse_arms(
+            dense.clone(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            &m,
+            true,
+        );
         assert_eq!(sparse_count, 0);
         assert_eq!(project(&got), project(&dense));
 
@@ -1494,6 +1647,7 @@ mod tests {
         let (got_empty, count_empty) = fuse_arms(
             dense.clone(),
             Some(vec![]),
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1520,6 +1674,7 @@ mod tests {
             vec![],
             vec![cand("k-w1", "doc-w1", 0.9)],
             vec![],
+            vec![],
             &base_mix,
             true,
         );
@@ -1532,6 +1687,7 @@ mod tests {
         let (got_empty_arms, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1548,6 +1704,7 @@ mod tests {
             w_graph,
             w_wiki: 0.0,
             w_visual: 0.0,
+            w_keyword: 0.0,
             rerank: true,
             rrf_k: crate::search::fusion::DEFAULT_RRF_K,
         }
@@ -1574,6 +1731,7 @@ mod tests {
             graph.clone(),
             vec![],
             vec![],
+            vec![],
             &m,
             true,
         );
@@ -1596,6 +1754,7 @@ mod tests {
             vec![cand("k-g1", "doc-g1", 0.9)],
             vec![],
             vec![],
+            vec![],
             &base_mix,
             true,
         );
@@ -1607,6 +1766,7 @@ mod tests {
         let (got_empty, _) = fuse_arms(
             dense.clone(),
             Some(sparse.clone()),
+            vec![],
             vec![],
             vec![],
             vec![],

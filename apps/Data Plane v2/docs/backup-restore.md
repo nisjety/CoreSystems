@@ -65,7 +65,7 @@ For production, schedule via cron or a Kubernetes CronJob. Example crontab line:
 Upload to durable storage (S3, GCS, B2) immediately after creation:
 
 ```bash
-aws s3 sync /var/backups/dpv2/ s3://aquatiq-dpv2-backups/ \
+aws s3 sync /var/backups/dpv2/ s3://coresystem-dpv2-backups/ \
   --exclude "*" --include "*.gz" --include "*/qdrant/*"
 ```
 

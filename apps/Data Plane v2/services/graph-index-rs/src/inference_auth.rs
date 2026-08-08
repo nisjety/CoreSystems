@@ -22,6 +22,60 @@ const MAX_TOKEN_TTL_SECONDS: i64 = 300;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 const CLOCK_LEEWAY_SECONDS: i64 = 30;
 
+/// Retention posture this deployment expects on an issued inference token.
+///
+/// Mirrors auth-core's service-principal registry vocabulary — the
+/// `retentionByAudience` map takes exactly `"zdr"` or `"persistent"` per
+/// audience. The issuer alone selects the posture (auth-core rejects any
+/// caller-supplied `x-zdr` header or `zdr` body field), so this is an assertion
+/// that the token matches the principal we are registered as, never a request.
+///
+/// Keep this aligned with the registry entry for this service's
+/// `inference-core` audience. A mismatch fails closed on every mint, which is
+/// how embedding silently died when the registry moved to `persistent` while
+/// the clients still demanded `zdr` — see commit 3666503f.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RetentionPosture {
+    /// Registry `"zdr"`: the token must carry `zdr:true`.
+    ZeroRetention,
+    /// Registry `"persistent"`: the token must carry `zdr:false`.
+    Persistent,
+}
+
+impl RetentionPosture {
+    pub(super) fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim() {
+            "zdr" => Ok(Self::ZeroRetention),
+            "persistent" => Ok(Self::Persistent),
+            other => anyhow::bail!(
+                "MODEL_PLANE_INFERENCE_RETENTION_POSTURE must be `zdr` or `persistent`, got `{other}`"
+            ),
+        }
+    }
+
+    /// The `zdr` claim value a correctly issued token carries under this posture.
+    const fn expected_zdr(self) -> bool {
+        matches!(self, Self::ZeroRetention)
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ZeroRetention => "zdr",
+            Self::Persistent => "persistent",
+        }
+    }
+}
+
+/// Renders an observed `zdr` claim in the registry's vocabulary so a mismatch
+/// error names both sides in the same terms the operator configures.
+const fn observed_posture(zdr: bool) -> &'static str {
+    if zdr {
+        "zdr"
+    } else {
+        "persistent"
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct InferenceTokenClient {
     http: Client,
@@ -29,6 +83,7 @@ pub(super) struct InferenceTokenClient {
     expected_issuer: Arc<str>,
     service_id: Arc<str>,
     service_api_key: Arc<str>,
+    retention_posture: RetentionPosture,
 }
 
 impl fmt::Debug for InferenceTokenClient {
@@ -39,6 +94,7 @@ impl fmt::Debug for InferenceTokenClient {
             .field("expected_issuer", &self.expected_issuer)
             .field("service_id", &self.service_id)
             .field("service_api_key", &"[REDACTED]")
+            .field("retention_posture", &self.retention_posture)
             .finish()
     }
 }
@@ -98,12 +154,14 @@ impl InferenceTokenClient {
         expected_issuer: &str,
         service_id: &str,
         service_api_key: &str,
+        retention_posture: RetentionPosture,
     ) -> anyhow::Result<Self> {
         Self::build(
             token_url,
             expected_issuer,
             service_id,
             service_api_key,
+            retention_posture,
             false,
         )
     }
@@ -117,12 +175,14 @@ impl InferenceTokenClient {
         expected_issuer: &str,
         service_id: &str,
         service_api_key: &str,
+        retention_posture: RetentionPosture,
     ) -> anyhow::Result<Self> {
         Self::build(
             token_url,
             expected_issuer,
             service_id,
             service_api_key,
+            retention_posture,
             true,
         )
     }
@@ -132,6 +192,7 @@ impl InferenceTokenClient {
         expected_issuer: &str,
         service_id: &str,
         service_api_key: &str,
+        retention_posture: RetentionPosture,
         allow_unconfigured: bool,
     ) -> anyhow::Result<Self> {
         let token_url = Url::parse(token_url.trim())
@@ -170,6 +231,7 @@ impl InferenceTokenClient {
             expected_issuer: Arc::from(expected_issuer),
             service_id: Arc::from(service_id),
             service_api_key: Arc::from(service_api_key),
+            retention_posture,
         })
     }
 
@@ -257,13 +319,22 @@ impl InferenceTokenClient {
                 && claims.sub == expected_subject
                 && claims.service_id == expected_subject
                 && claims.scopes.as_slice() == [INFERENCE_SCOPE]
-                && claims.reason == TOKEN_REASON
-                // Graph embeddings persist, so the registry provisions this
-                // principal `persistent` (zdr:false). See embedding-engine's
-                // inference_auth.rs for why requiring zdr:true here broke every
-                // call once the registry posture was corrected.
-                && !claims.zdr,
+                && claims.reason == TOKEN_REASON,
             "inference service-token claims exceeded requested authority"
+        );
+
+        // Graph extractions persist, so the registry provisions this principal
+        // `persistent` by default. Checked separately from the authority bounds
+        // above so a posture drift between this deployment and auth-core's
+        // registry names both sides instead of hiding inside a nine-clause
+        // assertion.
+        anyhow::ensure!(
+            claims.zdr == self.retention_posture.expected_zdr(),
+            "inference service-token carried the `{}` retention posture but this deployment \
+             expects `{}`; align MODEL_PLANE_INFERENCE_RETENTION_POSTURE with auth-core's \
+             retentionByAudience entry for this principal's `{INFERENCE_AUDIENCE}` audience",
+            observed_posture(claims.zdr),
+            self.retention_posture.as_str(),
         );
 
         let now = Utc::now();
@@ -310,7 +381,7 @@ fn valid_org_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::InferenceTokenClient;
+    use super::{InferenceTokenClient, RetentionPosture};
 
     #[test]
     fn standalone_constructor_allows_bind_but_keeps_inference_unconfigured() {
@@ -319,6 +390,7 @@ mod tests {
             "http://auth-core:3011/api/convex-auth",
             "graph-index",
             "",
+            RetentionPosture::Persistent,
         )
         .expect("standalone startup may bind without the external principal");
         assert!(client.service_api_key.is_empty());

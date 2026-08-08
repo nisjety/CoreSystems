@@ -8,6 +8,7 @@ mod gdpr;
 mod gdpr_nats;
 mod normalizer;
 mod outbox;
+mod reconcile;
 mod stream;
 
 use crate::config::Config;
@@ -75,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
         )?);
         let nats_client = nats_connection::connect(&cfg.nats_url).await?;
         let js = async_nats::jetstream::new(nats_client.clone());
+        // D17: the DLQ stream must exist before any consumer can dead-letter into
+        // it. Definition lives once in `nats_connection::dlq`; this call is
+        // idempotent across every service that shares it.
+        nats_connection::ensure_or_warn(&js).await;
         stream::setup_stream(&js).await?;
         Some((
             stream::create_consumer(&js).await?,
@@ -86,6 +91,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("unsigned indexing mutation consumer enabled for insecure development");
         let nats_client = nats_connection::connect(&cfg.nats_url).await?;
         let js = async_nats::jetstream::new(nats_client.clone());
+        // D17: the DLQ stream must exist before any consumer can dead-letter into
+        // it. Definition lives once in `nats_connection::dlq`; this call is
+        // idempotent across every service that shares it.
+        nats_connection::ensure_or_warn(&js).await;
         stream::setup_stream(&js).await?;
         Some((stream::create_consumer(&js).await?, nats_client, None, None))
     } else {
@@ -144,12 +153,24 @@ async fn main() -> anyhow::Result<()> {
                 );
                 match signer {
                     Some(signer) => {
-                        let publisher = outbox::run_publisher(
+                        let js = async_nats::jetstream::new(nats_client);
+                        let publisher =
+                            outbox::run_publisher(pool.clone(), js.clone(), signer.clone());
+                        // D19: the failed-embedding reconciler runs beside the
+                        // deletion outbox because both need the same thing —
+                        // this service's `index-events-v1` signing key. It is
+                        // deliberately inside the `Some(signer)` arm: without a
+                        // signer there is no legitimate way to re-emit
+                        // `dataplane.knowledge.units.created`, and publishing
+                        // it unsigned would be rejected by embedding-engine's
+                        // issuer-pinned verifier anyway.
+                        let reconciler = reconcile::run(
                             pool,
-                            async_nats::jetstream::new(nats_client),
+                            js,
                             signer,
+                            reconcile::ReconcileConfig::from_env(),
                         );
-                        tokio::try_join!(consumer, publisher).map(|_| ())
+                        tokio::try_join!(consumer, publisher, reconciler).map(|_| ())
                     }
                     None => consumer.await,
                 }

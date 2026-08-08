@@ -37,7 +37,8 @@ pub struct EmbedTextError {
 
 fn provider() -> Result<&'static EmbeddingProvider, anyhow::Error> {
     static PROVIDER: OnceLock<anyhow::Result<EmbeddingProvider>> = OnceLock::new();
-    match PROVIDER.get_or_init(|| Config::from_env().and_then(|cfg| EmbeddingProvider::from_config(&cfg)))
+    match PROVIDER
+        .get_or_init(|| Config::from_env().and_then(|cfg| EmbeddingProvider::from_config(&cfg)))
     {
         Ok(provider) => Ok(provider),
         Err(err) => Err(anyhow::anyhow!("{err}")),

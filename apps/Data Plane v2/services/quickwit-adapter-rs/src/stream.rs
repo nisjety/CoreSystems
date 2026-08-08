@@ -143,6 +143,12 @@ pub async fn spawn(
     security: Arc<EventSecurity>,
 ) -> anyhow::Result<()> {
     let js = jetstream::new(nats.clone());
+    // D17. Note this does NOT contradict `bind_durable`'s rule below that this
+    // service never creates a stream: that rule is about the streams it
+    // *consumes*, which producers own. This service is itself a *producer* on
+    // `dataplane.dlq.quickwit-adapter`, and the DLQ stream's single shared
+    // definition lives in `nats_connection::dlq`. Idempotent.
+    nats_connection::ensure_or_warn(&js).await;
 
     for (stream_name, subjects) in consumer_plan() {
         match bind_durable(&js, stream_name, subjects).await {
@@ -335,10 +341,7 @@ async fn run_durable(
                         "error": error.to_string(),
                         "attempts": delivered,
                     });
-                    if let Err(error) = nats
-                        .publish(DLQ_SUBJECT, dlq.to_string().into())
-                        .await
-                    {
+                    if let Err(error) = nats.publish(DLQ_SUBJECT, dlq.to_string().into()).await {
                         tracing::error!(%error, "Quickwit DLQ publish failed");
                     }
                     let _ = msg.ack().await;
@@ -354,6 +357,7 @@ pub async fn spawn_unverified_legacy(
     nats: async_nats::Client,
     ctx: Arc<RebuildContext>,
 ) -> anyhow::Result<()> {
+    nats_connection::ensure_or_warn(&jetstream::new(nats.clone())).await;
     for subject in subscribed_subjects() {
         let mut sub = nats
             .subscribe(subject.to_string())

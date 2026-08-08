@@ -242,6 +242,59 @@ pressure: 31 MiB / 512 MiB, 100% cache hit, 19 MB DB, 8 connections. Most likely
 host fsync latency on the external `/Volumes/Lagring` volume. Confirm it is a
 dev-environment artifact before anyone reads it as a production capacity signal.
 
+### D17 — The DLQ is a black hole (P0) *(found 2026-08-07)*
+
+Five services publish dead-lettered work to `dataplane.dlq.*`:
+`index-engine-rs/src/stream/mod.rs:15`, `embedding-engine-rs/src/stream/mod.rs:20`,
+`embedding-engine-rs/src/image_consumer.rs:41` (page-images),
+`graph-index-rs/src/stream.rs:18`, `quickwit-adapter-rs/src/stream.rs:30`.
+
+**No JetStream stream bound `dataplane.dlq.>`.** Verified live against
+`nats:8222/jsz`: six streams existed (`DATAPLANE_WIKI`, `_DOCUMENTS`, `_GRAPH`,
+`_PAGE_IMAGES`, `_KNOWLEDGE`, `_SOURCE_OBJECTS`) and none of them carried a DLQ
+subject. Every DLQ publish was therefore a plain core-NATS publish with no
+subscriber: the broker fanned it out to nobody and destroyed it.
+
+`retrieval-engine-rs/src/bin/dlq_replay.rs` compounded it — a live core
+`subscribe()`, so it could only ever catch a message published during the few
+seconds it happened to be running. There was no history to replay because
+nothing had ever stored one. **This defect caused real data loss.**
+
+Note this is the exact failure `Interest` retention would recreate, which is
+why the fix's retention policy is the single most important line in it.
+
+### D18 — Terminal failure is written before retries are exhausted (P1) *(found 2026-08-07)*
+
+`embedding-engine-rs/src/batch/mod.rs`, in `process_batch`'s
+`embed_items_by_org` error arm, called `mark_units_failed(...)` on the **first**
+batch error and then returned `Err`. JetStream still redelivers up to
+`max_delivery_attempts`, so the database recorded a terminal `failed` while
+retries were genuinely still in flight — and nothing corrected it back if a
+later attempt succeeded.
+
+The consequence is not cosmetic: `search/sparse.rs:194` excludes
+`embedding_status <> 'failed'`, so a transient model-plane blip silently
+removed content from the lexical arm too, permanently. Observed today: 51
+chunks marked `failed` on a healthy pipeline.
+
+### D19 — Nothing re-drives `embedding_status='failed'` (P1) *(found 2026-08-07)*
+
+No poller and no admin path recovered a stranded unit.
+`data-quality-go/internal/gates/checker.go` only counts them;
+`data-orchestrator-go/internal/jobs/stale_detector.go` filtered its stuck query
+on `= 'pending'`, so failed rows fell outside it entirely. Recovery required a
+manual `documents_outbox` re-enqueue.
+
+Re-ingest is not a workaround: `documents-api-go` deliberately exposes no
+reprocess route, and `internal/repo/document_repo.go:445`'s
+`documentContentUnchanged()` (`existing.Content == input.Content &&
+existing.Title == input.Title`) makes an idempotent re-POST of an unchanged
+document a no-op — verified in source. So a fixed transient
+dependency did not heal the corpus — it just stopped adding to the damage.
+
+Together with D18 this is one compound failure: D18 creates stranded rows that
+should never have existed, and D19 guarantees nothing ever clears them.
+
 ---
 
 ## 3. Decisions taken — third-party memory/RAG products
@@ -506,6 +559,35 @@ migration with the same one-commit index+query discipline.
 | **P2-7** | HyDE / multi-query into the dead `query_expansion` field | D14 |
 | **P2-8** | CRAG: return a retrieval-confidence score to Model Plane. **No browser call from DPv2** — that breaks Rules 3 and 7. Note a `low_confidence` signal + `suggested_next_tools` already exists (`orchestrator.rs:1085-1113`); tune its threshold and verify `execution-core` consumes it. | — |
 | **P2-9** | Confirm D16 slow statements are a dev-volume fsync artifact | D16 |
+
+---
+
+### P4 — Dead-letter durability & failure recovery
+
+Added 2026-08-07. Unlike P0–P2, this phase is not about retrieval *quality* —
+it is about the plane telling the truth when something breaks. All three
+defects share one shape: a safety mechanism that exists in code and does
+nothing at runtime.
+
+| ID | Task | Files | Defect | Status |
+|---|---|---|---|---|
+| **P4-1** | `DATAPLANE_DLQ` JetStream stream capturing `dataplane.dlq.>`, **`Limits` retention** (never `Interest`), 30-day `max_age`, 1 GiB `max_bytes`/`discard: old`, file storage. Defined once in the shared crate, created idempotently by all five publishers. | `nats-connection-rs/src/dlq.rs` (new), `nats-connection-rs/src/lib.rs`, `{index-engine,embedding-engine,graph-index}-rs/src/main.rs`, `quickwit-adapter-rs/src/stream.rs` | D17 | ✅ **done** |
+| **P4-2** | `dlq-replay` replays stored history through a durable per-subject pull consumer; `--dry-run` peeks with a throwaway ephemeral consumer; legacy core-NATS tap preserved behind `--live`. | `retrieval-engine-rs/src/bin/dlq_replay.rs` | D17 | ✅ code done, deploy pending |
+| **P4-3** | Move the terminal `embedding_status='failed'` write out of the first-error path and into the stream layer that knows the delivery count; reconcile a healed row all the way back to `done` with `error_message` cleared. | `embedding-engine-rs/src/batch/mod.rs`, `src/stream/mod.rs` | D18 | ✅ **done** |
+| **P4-4** | Bounded reconciler that re-drives stranded units with a **signed** `dataplane.knowledge.units.created`, exponential backoff, hard attempt ceiling, ZDR- and deleted-document exclusions. | `index-engine-rs/src/reconcile.rs` (new), `src/main.rs`, `migrations/20260807120000_embedding_retry_bookkeeping.sql` (+`.down`), `infra/postgres/init.sql` | D19 | ✅ **done** |
+| **P4-5** | Stale-detector reports `retryable_failed` vs `exhausted_failed`, and stops mis-reporting a just-re-driven unit as stuck-pending. | `data-orchestrator-go/internal/jobs/stale_detector.go` | D19 | ✅ **done** |
+| **P4-6** | Contract file documents the DLQ stream + the five DLQ subjects. | `infra/nats/SUBJECTS.md` | D17 | ✅ **done** |
+
+**P4 acceptance criteria**
+- A message published to a `dataplane.dlq.*` subject **with no consumer bound**
+  is still present in `DATAPLANE_DLQ` afterwards (this is the whole point;
+  `Interest` retention would fail it).
+- `DATAPLANE_DLQ` retention reads `limits` on the live broker.
+- A first-delivery embedding error leaves the row retryable, not `failed`.
+- A unit past the retry ceiling is never re-driven again.
+- Every re-drive is a signed envelope from `service:index-engine-rs`; nothing
+  hand-edits `embedding_status` to fake success, which would leave Qdrant
+  without vectors.
 
 ---
 
@@ -1095,7 +1177,7 @@ New: `services/retrieval-eval-py/` (was an empty directory) —
 one `knowledge_id` answer each, single org.
 
 Method is **known-item retrieval**: for each chunk, pick its most *distinctive*
-terms (ranked `tf / (1 + df/N)` so corpus-wide boilerplate like "aquatiq" loses
+terms (ranked `tf / (1 + df/N)` so corpus-wide boilerplate like "coresystem" loses
 to terms that actually single the chunk out) and record that chunk as the
 answer. Measures "given a question drawn from chunk X, is X in the top 10" — a
 real recall@10 / nDCG@10 / MRR signal replacing the
@@ -1217,20 +1299,20 @@ without `TEST_DATABASE_URL`, as designed.
 Stale doc references to the two removed methods were repointed:
 `tests/ownership_filter.rs` (×2) and the `apply_colqwen_scores` doc comment.
 
-#### ⛔ Found while deploying P2-1: the Velion→Verevon rename breaks the GDPR erasure fan-out
+#### ⛔ Found while deploying P2-1: the Verevon→Verevon rename breaks the GDPR erasure fan-out
 
 Redeploying retrieval-engine surfaced a **cross-plane, compliance-critical**
 regression that has nothing to do with P2-1. Reporting it here because this is
 where it was found.
 
 **The drift.** Every one of the 49 source files across all planes now says
-`verevon.gdpr.erasure.requested`; **zero** still say `velion.*`. The *live*
+`verevon.gdpr.erasure.requested`; **zero** still say `verevon.*`. The *live*
 broker is still provisioned for the old name:
 
 | | Value |
 |---|---|
-| Stream `AQENCIA_CONTROLPLANE` subjects | `velion.gdpr.erasure.requested`, `velion.session.>`, `velion.agent.>`, `velion.org.deletion.>`, `velion.application.dlq.*`, `velion.gdpr.ownership.transferred` — **no `verevon.*` at all** |
-| All 14 org-erasure consumers | `filter_subject = velion.gdpr.erasure.requested` |
+| Stream `AQENCIA_CONTROLPLANE` subjects | `verevon.gdpr.erasure.requested`, `verevon.session.>`, `verevon.agent.>`, `verevon.org.deletion.>`, `verevon.application.dlq.*`, `verevon.gdpr.ownership.transferred` — **no `verevon.*` at all** |
+| All 14 org-erasure consumers | `filter_subject = verevon.gdpr.erasure.requested` |
 | Source constant (e.g. `retrieval-engine-rs/src/gdpr/consumer.rs:56`) | `verevon.gdpr.erasure.requested` |
 
 The stream subjects and consumer filters are deployment-provisioned by
@@ -1241,7 +1323,7 @@ broker still reflects the pre-rename provisioning.
 
 **This is latent, and it activates per-service on rebuild.** Confirmed by
 inspecting the running binaries and image timestamps: `org-core-service`
-(image 2026-08-04) still has `velion.gdpr.erasure.requested` compiled in, so
+(image 2026-08-04) still has `verevon.gdpr.erasure.requested` compiled in, so
 today's fan-out still works for the 13 services running pre-rename images.
 The renamed subject only takes effect in a service once that service is
 rebuilt.
@@ -1249,7 +1331,7 @@ rebuilt.
 **Correction to my first read of this.** I initially assumed the failure was
 pre-existing. It is not. `consumer.rs` was rewritten by the rename at 15:57
 local; the previous retrieval-engine image was built at 14:51 local, so it
-still carried `velion.*` and matched the broker. **My 17:36 rebuild is what
+still carried `verevon.*` and matched the broker. **My 17:36 rebuild is what
 shipped the renamed subject**, and retrieval-engine is now the first — and
 currently only — casualty:
 
@@ -1265,7 +1347,7 @@ exactly one service.
 **Why it matters.** Once Control Plane is rebuilt, `org-core`/`user-core`
 publish to `verevon.gdpr.erasure.requested`, which the live stream does not
 capture — so the event is not even stored, and the 14 consumers filtering
-`velion.*` would never see it regardless. An org deletion would then purge
+`verevon.*` would never see it regardless. An org deletion would then purge
 nothing in Data Plane, Model Plane, Ingestion, or Application. That breaks
 constraint 4 (ZDR/GDPR propagation) and constraint 5 (policy metadata travels
 with data).
@@ -1306,7 +1388,7 @@ plus tests, `cmd/nats-consumer-migrate` (new), and the Dockerfile:
 source. Verified end-to-end: the stream now carries 21 subjects (13 original
 + 8 legacy-form duplicates for the renamed ones, since `application.dlq`/
 `session`/`agent`/`org.deletion` needed the same treatment, not just GDPR);
-all 13 untouched consumers still read `filter_subject: velion.gdpr.erasure.requested`
+all 13 untouched consumers still read `filter_subject: verevon.gdpr.erasure.requested`
 byte-for-byte; `retrieval-engine-gdpr-erasure-v1` now reads
 `verevon.gdpr.erasure.requested`; and retrieval-engine-rs's own log went from
 a 5-second retry loop straight to `retrieval-engine GDPR erasure consumer
@@ -1318,8 +1400,8 @@ easy to repeat:**
 - **First correction — the collateral damage was wider than GDPR.** The
   first version of this fix added `Legacy*` compatibility only for the four
   GDPR subjects. Running the (now-partially-fixed) provisioner nonetheless
-  *silently dropped* `velion.session.>`, `velion.agent.>`,
-  `velion.application.dlq.convex.controlplane`, and `velion.org.deletion.>`
+  *silently dropped* `verevon.session.>`, `verevon.agent.>`,
+  `verevon.application.dlq.convex.controlplane`, and `verevon.org.deletion.>`
   from the stream — `ensureControlStream`'s wholesale-replace semantics
   apply to the *whole* subjects slice, and those four subjects were also
   renamed in source but had no legacy pairing yet. Every publisher for
@@ -1331,7 +1413,7 @@ easy to repeat:**
 - **Second correction — the delete step outran the recreate step.**
   `nats-provisioner`'s `ProvisionControlSharedRuntime` returns on the first
   resource that fails to converge, and `control-shared-legacy-bridge` (an
-  unrelated, pre-existing `_VELION.*` → `_VEREVON.*` DeliverSubject drift on
+  unrelated, pre-existing `_VEREVON.*` → `_VEREVON.*` DeliverSubject drift on
   a different consumer entirely — see below) sits earlier in that function
   than every GDPR consumer check. So deleting `retrieval-engine-gdpr-erasure-v1`
   and then re-running `nats-provisioner`, expecting it to recreate the
@@ -1347,8 +1429,8 @@ scope actually asked for:** `control-shared-legacy-bridge` and
 `billing-core-organization-plan-changed` fail the identical way
 (`nats-provisioner` reports "exists with incompatible configuration;
 refusing destructive replacement") because their `DeliverSubject` constants
-were also renamed (`_VELION.CONTROL.SHARED.DELIVER.legacy` /
-`_VELION.CONTROL.DELIVER.billing.organization-plan-changed`) and neither
+were also renamed (`_VEREVON.CONTROL.SHARED.DELIVER.legacy` /
+`_VEREVON.CONTROL.DELIVER.billing.organization-plan-changed`) and neither
 consuming service has been rebuilt yet. `audit-nats-provisioner` currently
 exits 1 on every run because of these two — confirmed pre-existing (identical
 failure with every change in this section stashed out) and unrelated to
@@ -1467,7 +1549,7 @@ order data actually flows:
 
 **Self-inflicted incident, found and fixed mid-task:** rebuilding
 `documents-api` for this change (unrelated to GDPR) triggered the *same*
-Velion→Verevon subject-drift landmine as retrieval-engine's earlier fix
+Verevon→Verevon subject-drift landmine as retrieval-engine's earlier fix
 (1478b3fb) — except `documents-api-go` treats a mismatched pre-provisioned
 GDPR consumer as `log.Fatal`, so it crash-looped rather than retry-looping.
 Fixed the same way: `nats-consumer-migrate` against its two consumers
@@ -1491,7 +1573,7 @@ Checked every remaining consumer's owning service by image `Created`
 timestamp, then binary-verified two of them directly (`grep` the running
 executable for the compiled-in subject string, via `docker top` to find the
 real PID since PID 1 is `docker-init`, not the app) rather than trust the
-timestamp alone. Result: only 2 of the 11 still-`velion.*` consumers had an
+timestamp alone. Result: only 2 of the 11 still-`verevon.*` consumers had an
 owning service actually rebuilt post-rename —
 `embedding-engine-org-erasure` (rebuilt this session for P2-3) and
 `conversation-core-org-erasure` (rebuilt by a concurrent session, for a
@@ -1931,6 +2013,870 @@ P2 code") — still open, still requires deciding how/whether to re-trigger
 real source connectors, and still not something to do unprompted. P0-1c's
 *authorization* question is closed; the *data* question is a separate,
 already-known, still-standing decision.
+
+### 2026-08-07 — P4 dead-letter durability & failure recovery (D17, D18, D19)
+
+Three defects found today, all the same shape: a safety mechanism that exists in
+code and does nothing at runtime. Two of them were **observed failing live on
+this stack during this session**, not just reasoned about.
+
+**Code landed**
+
+| Change | Files |
+|---|---|
+| P4-1 `DATAPLANE_DLQ` stream, single shared definition | `nats-connection-rs/src/dlq.rs` (new, 7 unit tests), `src/lib.rs`, `Cargo.toml` (+`tracing`) |
+| P4-1 idempotent creation from every DLQ publisher | `{index-engine,graph-index,embedding-engine}-rs/src/main.rs` (5 call sites incl. both signed and legacy arms and the separately-gated page-image arm), `quickwit-adapter-rs/src/stream.rs` (2) |
+| P4-2 `dlq-replay` replays stored history | `retrieval-engine-rs/src/bin/dlq_replay.rs` |
+| P4-3 terminal failure only once delivery is exhausted | `embedding-engine-rs/src/batch/mod.rs`, `src/stream/mod.rs` |
+| P4-4 bounded failed-unit reconciler | `index-engine-rs/src/reconcile.rs` (new, 8 tests), `src/main.rs`, `migrations/20260807120000_embedding_retry_bookkeeping.sql` (+`.down`), `infra/postgres/init.sql` |
+| P4-5 stale detector splits retryable vs exhausted | `data-orchestrator-go/internal/jobs/stale_detector.go`, `stale_detector_test.go` (new) |
+| P4-6 subject contract | `infra/nats/SUBJECTS.md` |
+
+#### Where the DLQ stream definition lives, and why not `event-envelope-rs`
+
+The brief suggested `event-envelope-rs`, which already knows the DLQ subject
+names (`lib.rs:399-405`, in `subject_allowed_for_scope`). Rejected: that crate
+is a pure signing/verification library — its whole dependency set is
+`base64/chrono/jsonwebtoken/serde/sha2/thiserror/uuid`, with **no `async-nats`**.
+Adding a JetStream dependency to the crate every service links for envelope
+crypto would be a real cost for an unrelated concern.
+
+`services/nats-connection-rs` is the right home and needed no new dependency: it
+is already the shared NATS crate, already depends on `async-nats` and nothing
+else, and is **already a path dependency of all five DLQ publishers plus
+retrieval-engine** (verified across every `Cargo.toml`). One definition, six
+consumers, zero new deps beyond `tracing`.
+
+The publishers were deliberately left on core-NATS `publish`. A JetStream stream
+whose subject filter matches a core publish captures and persists it — what was
+missing was never the publish call, it was the stream. Converting five call
+sites to acked JetStream publishes would have meant threading a `JsContext`
+through four `run_consumer` signatures for a strictly smaller benefit. **Residual
+gap, stated plainly:** those publishes are still `let _ = nats.publish(...)`, so
+if the stream is somehow absent the dead letter is still lost silently. That is
+why `ensure_or_warn` logs at ERROR when it cannot create or read the stream.
+
+#### D17 live proof — before and after, on the running broker
+
+**Before.** `nats:8222/jsz` listed six streams (`DATAPLANE_WIKI`, `_DOCUMENTS`,
+`_GRAPH`, `_PAGE_IMAGES`, `_KNOWLEDGE`, `_SOURCE_OBJECTS`) and none carried a
+`dataplane.dlq.*` subject. Publishing `P4-PROBE-BEFORE-FIX` to
+`dataplane.dlq.index-engine` over raw core NATS returned **`PONG`** — the broker
+accepted it — and no stream's message count moved. Accepted and destroyed.
+
+**After** (index-engine rebuilt `--no-cache` and recreated):
+
+```
+DATAPLANE_DLQ
+  retention   : limits          <-- the whole fix
+  subjects    : ['dataplane.dlq.>']
+  max_age     : 2592000000000000 ns = 30.0 days
+  max_bytes   : 1073741824   discard: old   storage: file
+```
+
+Then, with **`consumer_count = 0`** confirmed immediately before the publish:
+
+```
+before probe:  messages = 0 | consumer_count = 0 | consumers listed = []
+publish     :  PONG
+after probe :  messages = 1 | bytes = 183 | first_seq = 1 | last_seq = 1
+               consumer_count = 0   <-- retained with NO consumer bound
+               retention = limits
+```
+
+Read back out via `$JS.API.STREAM.MSG.GET.DATAPLANE_DLQ {"seq":1}`:
+
+```
+subject : dataplane.dlq.index-engine
+payload : {"probe":"P4-D17-AFTER-FIX","original_subject":"dataplane.documents.created",
+           "error":"synthetic durability probe","attempts":5}
+```
+
+And replayability, not just retention: binding the exact durable consumer
+`dlq_replay` creates (`dlq-replay-dataplane-dlq-index-engine`,
+`filter_subject=dataplane.dlq.index-engine`, `deliver_policy=all`,
+`ack_policy=explicit`) returned `"num_pending":1`. The historical dead letter is
+readable by the tool that is supposed to read it.
+
+Probe consumer deleted and the stream purged afterwards, so the DLQ is back to
+`retention=limits messages=0 consumers=0` and holds no synthetic evidence.
+
+**Why `Limits` is non-negotiable, restated because it is the whole defect.**
+`Interest` retention discards a message with no bound consumer. A DLQ has no
+consumer in steady state — that is its purpose; `dlq-replay` is run by a human
+after an incident. Under `Interest` this stream would throw away exactly the
+messages it exists to keep while looking perfectly durable in `nats stream ls`.
+That is strictly worse than the original bug, because it is invisible. The
+policy is written out explicitly rather than left to `..Default::default()`
+(where `Limits` is already the default) so nobody "tidies it up" into `Interest`
+for consistency with the fan-out streams — which are a different shape: they
+always have consumers. Retention is immutable after creation, and
+`upgraded_dlq_config` deliberately never proposes it as an update, with a test
+asserting so (including it in an `update_stream` payload fails the whole call
+and would leave the subject/limit convergence unapplied too).
+
+#### D18 — observed failing live, then fixed
+
+The fix moves the terminal write out of `process_batch` and into
+`stream::run_consumer`'s dead-letter arm, which is the only layer that knows
+`msg.info().delivered`. It is now **per message, not per batch**: a sibling chunk
+on attempt 1 of 5 in the same buffer stays retryable and is simply redelivered,
+where previously one bad item marked the entire batch permanently failed.
+`delivery_is_terminal(delivered, budget)` is a named, tested predicate rather
+than an inline comparison, and it treats an unknown delivery count (`0`, what
+`msg.info()` failure yields) as *not* terminal, and a misconfigured `0` budget as
+still allowing one attempt — either mistake would silently restore the defect.
+
+`mark_units_done` now also clears `error_message`, so a healed row does not keep
+advertising a stale failure to the quality gates.
+
+**The defect was then caught in the wild, on this stack, by the D19 probe below**
+— the old embedding-engine binary was still deployed at that moment, which made
+it an accidental A/B:
+
+```
+13:59:32  index-engine   re-drove stranded embedding  attempt=1
+13:59:43  embedding      ERROR embedding batch failed: inference service-token endpoint unavailable
+13:59:48  embedding      UPDATE knowledge_units SET embedding_status = 'failed'   <-- delivery 1 of 5
+14:00:53  embedding      UPDATE knowledge_units SET embedding_status = 'done'     <-- delivery 2 SUCCEEDED
+14:00:53  embedding      INFO batch embedded count=1
+```
+
+For 65 seconds the database asserted a terminal failure about a chunk that was
+completely fine. That is the mechanism behind "51 chunks `failed` on a healthy
+pipeline" — an observer who looked inside that window, or a dependency that
+stayed down slightly longer, records permanence.
+
+#### D19 — why the reconciler is **not** in `data-orchestrator-go`
+
+The brief's suggestion — extend `stale_detector.go` and re-emit from there — is
+the wrong home, for a reason that only surfaces on reading the event-auth
+contract. Recorded in full because it is the load-bearing decision of this phase:
+
+- The only subject that re-drives embedding is
+  `dataplane.knowledge.units.created`.
+- `embedding-engine-rs/src/main.rs` verifies that subject with an
+  `EventVerifier` **pinned to issuer `service:index-engine-rs`**, key id
+  `index-events-v1`, scope `events:index:publish`. `event-envelope-rs` enforces
+  the issuer twice — `Validation::set_issuer` (`lib.rs:243`) *and* an explicit
+  `claims.iss != expected_issuer` check (`lib.rs:268`).
+- `index-engine-rs` is the only holder of that private key
+  (`INDEX_EVENT_PRIVATE_KEY_PATH=/run/event-keys/index-events.pem`, read from
+  the live container).
+- `data-orchestrator-go` holds **no event signing key at all** — verified two
+  ways: zero `EventSigner`/`eventauth`/private-key references in its source, and
+  no key-related variable in its live container env. Its own executor's
+  publisher is `disabledEventPublisher` unless the unsigned-legacy dev gate is
+  open.
+
+So putting the re-drive there meant one of: publish unsigned (rejected by the
+consumer, and explicitly forbidden), or copy index-engine's private key into a
+second service and let it impersonate `service:index-engine-rs`. The second
+trades a durability bug for a materially worse authenticity bug. The reconciler
+therefore runs in `index-engine-rs`, beside the key that already legitimately
+signs this subject, reusing the same `EventSigner` instance the live pipeline
+uses — and inside the `Some(signer)` arm, so it cannot exist without one.
+
+`stale_detector.go` still changed, in the role it can actually hold: reporting.
+
+**Boundedness.** Every claim increments `embedding_retry_count` and stamps
+`embedding_retry_at`; a unit is eligible only while
+`embedding_retry_count < max_attempts` and only after
+`base * 2^attempts` has elapsed. With the defaults that is 5m, 10m, 20m, 40m,
+80m — about 2.6 hours of retrying, then the unit is left `'failed'` forever and
+surfaces as `exhausted_failed`. A permanently-poisoned unit costs at most 5
+events for all time.
+
+**Claim-query exclusions, each load-bearing:** `d.deleted_at IS NULL` (never
+resurrect work for a deleted document) and `d.zdr_classification <> 'restricted'`
+(both index-engine and embedding-engine drop ZDR events without durable writes,
+so re-emitting one would burn the whole retry budget on an event guaranteed to be
+discarded — and would look like an attempt to smuggle restricted content into
+the embedder). Because restricted docs are excluded at the query, `zdr: false` on
+the emitted envelope is true by construction, not an assumption.
+`FOR UPDATE ... SKIP LOCKED` is the plane's standard claim idiom, so two
+index-engine replicas cannot claim the same unit.
+
+**The claim and the publishes share one transaction.** If any publish fails the
+transaction rolls back, so a unit is never left flipped to `'pending'` with
+nothing in flight to embed it — which is precisely the "stuck pending" state the
+stale detector reports and nobody fixes. Publishes go out as JetStream
+`publish_with_headers` with an ack (a re-drive that vanished into an unbound
+subject would be D17 again) and a `Nats-Msg-Id` of
+`reembed:{knowledge_id}:{attempt}`, so a retry of the same attempt dedupes while
+a genuinely later re-drive does not.
+
+The event body is byte-identical in shape to what `stream::run_consumer`
+publishes for a freshly chunked unit, **including the empty `text`** — that tells
+embedding-engine to re-read the chunk from Postgres rather than trust a copy
+carried on the wire, so a stale event cannot re-embed superseded content.
+
+**Nothing hand-edits `embedding_status` to fake success.** The only status the
+reconciler writes is `'pending'`; only a real successful embed writes `'done'`,
+via `mark_units_done` after the Qdrant upsert. Faking it would leave Qdrant
+without vectors while the row claimed to be retrievable.
+
+#### D19 live proof — a stranded unit healed itself, no human action
+
+The corpus was healthy (`10 documents`, `51/51 done`) — today's 51 failures had
+already been repaired by hand before this work started — so the reconciler was
+proven with a **controlled, reversible probe** rather than left unverified. Prior
+state of one unit recorded first, and its Qdrant point confirmed present.
+
+Marked `107cbe0f-…9a8d` as `failed`. Then, unattended:
+
+```
+13:59:32  re-drove stranded embedding  knowledge_id=107cbe0f-… document_id=8a3815ea-… attempt=1
+13:59:32  failed-embedding reconciliation tick  count=1
+14:00:53  batch embedded  count=1
+```
+
+Final row: `embedding_status=done`, `embedding_retry_count=1`,
+`embedded_at=14:00:52`, `embedding_retry_at=13:59:27`. Corpus back to
+`51 done / 0 failed`.
+
+Note what this proves beyond "a poller ran": embedding-engine's
+**issuer-pinned verifier accepted the envelope** — an unsigned or wrongly-issued
+event would have been rejected at `decode_event` with
+`"rejected unauthorized event"` and never reached the provider. It reached the
+provider, failed once on a live dependency, and succeeded on redelivery. The
+whole D19 path — claim, sign, publish, verify, re-embed, reconcile to `done` —
+executed for real.
+
+**One behaviour worth recording for whoever tunes this next.**
+`knowledge_units` has a `BEFORE UPDATE` trigger (`set_knowledge_units_updated_at`)
+that rewrites `updated_at` on every update. The first probe attempt set
+`updated_at = NOW() - INTERVAL '1 day'` and the trigger immediately overwrote it
+with `NOW()`, so the unit correctly waited the full 300s cooldown before becoming
+eligible. This is the desired semantics — the cooldown is measured from when the
+row was last marked failed — but it means `updated_at` cannot be back-dated to
+force an early retry, and `embedding_retry_at` is the reliable anchor after the
+first re-drive.
+
+#### Verification
+
+| Gate | Result |
+|---|---|
+| `cargo check` on all 6 touched crates | clean |
+| `cargo test --workspace --no-fail-fast` | **614 passed, 1 failed, 26 ignored** — the single failure is pre-existing and not ours (see below) |
+| New Rust tests | 7 (`dlq.rs`) + 5 (`batch`, D18) + 8 (`reconcile`, D19) + 2 (`dlq_replay`) |
+| `cargo test -p embedding-engine-rs -- --ignored` (real disposable Postgres) | `a_later_success_reconciles_a_terminally_failed_unit ... ok` |
+| `go build ./... && go vet ./...` (data-orchestrator, data-quality) | clean; `gofmt -l` clean |
+| `go test ./...` (data-orchestrator) | all packages ok |
+| `go test` with `TEST_DATABASE_URL` | `TestReconcileMaxAttemptsFallsBackToTheRustDefault ... PASS`, `TestStaleDetectorSeparatesRetryableFromExhaustedFailures ... PASS` (applies the real D19 migration twice to prove idempotency, then its `.down`) |
+| `cargo clippy --all-targets -- -D warnings` | clean on all 6 touched crates (`nats-connection-rs`, `index-engine-rs`, `embedding-engine-rs`, `quickwit-adapter-rs`, `graph-index-rs`, `retrieval-engine-rs`) — zero warnings |
+| `scripts/check-subjects.sh` | **passed (19 subjects)** — was failing on 6 undocumented subjects and 1 inline literal before |
+| Migration | applied by the real migrator: `✓ 20260807120000 embedding_retry_bookkeeping`; columns + `idx_ku_embedding_retry` confirmed live |
+| Containers | index-engine, data-orchestrator, embedding-engine, quickwit-adapter all rebuilt `--no-cache` and recreated. **4/4 healthy**, **0 ERROR lines** except one pre-existing `DATAPLANE_WIKI` warning (see below) |
+| Running-binary check | Verified per the known stale-binary landmine, by grepping the deployed binaries rather than trusting the build: `index-engine` → `"re-drove stranded embedding"` (1); `embedding-engine` → `"unit left retryable"` (1) and `"terminal embedding-failure write failed"` (1); `quickwit-adapter` → `"dead-letter stream ready"` (3, from the shared crate); `data-orchestrator` → `retryable_failed_count` and `exhausted_failed_count` (1 each). index-engine's startup log additionally prints the reconciler config, a string absent from the old image. |
+| Corpus after all probes | `51 done / 0 failed`, `0` units with a non-zero retry count — the probe row restored to its exact pre-probe state |
+
+**Honest limit on the D18 proof.** The *defect* was observed live (log excerpt
+above, old binary). The *fix* is verified by unit tests plus the deployed-binary
+check — **not** by a live A/B, because by the time the new image was deployed the
+`inference service-token endpoint unavailable` failure had resolved, and the
+post-deploy re-drive (`attempt=2`, 15:26:38) succeeded on its **first** delivery
+one second later. With no first-attempt failure there is nothing for the new code
+path to do differently. Producing a live A/B would have required deliberately
+breaking the inference dependency, which is another session's surface.
+
+**Deliberately not done, with reasons**
+
+- **`retrieval-engine` and `graph-index` not rebuilt.** Both carry another
+  session's *undeployed* work: `retrieval-engine-rs/src/config.rs` and
+  `graph-index-rs/src/{config,inference_auth,store}.rs` were modified **after**
+  those containers started. Rebuilding would have shipped someone else's
+  in-progress code as a side effect of this phase — and in graph-index's case
+  would have shipped the broken test fixture noted below. Consequence, stated
+  rather than hidden: graph-index's one-line `ensure_or_warn` and the whole
+  `dlq_replay` rewrite are **code-complete but not running in a container**.
+  Neither is load-bearing — the DLQ stream already exists (any of the four
+  deployed publishers creates it, and three of them now do), and `dlq-replay` is
+  an operator tool run on demand. They pick the change up on their next rebuild
+  with no further work.
+- **P4-2's replay path proven by mechanism, not by running the binary.** Because
+  `retrieval-engine` was not rebuilt, `dlq-replay` itself was not executed
+  against the live broker. Instead the durable consumer it creates was bound
+  by hand with identical parameters and reported `num_pending: 1`, so the
+  stored history is demonstrably reachable through exactly the shape the tool
+  uses. The tool's own arg parsing and name-sanitisation are unit-tested.
+- **No `docker-compose.yml` or `.env` edit.** Every knob the reconciler needs
+  has a safe in-code default (`EMBEDDING_RECONCILE_ENABLED` on,
+  `_INTERVAL_SECS=60`, `_COOLDOWN_SECS=300`, `_MAX_ATTEMPTS=5`, `_BATCH=25`,
+  read via `ReconcileConfig::from_env` with clamping). Defaulting **on** is what
+  makes the fix real rather than inert on a deployment nobody reconfigures, and
+  it is defensible because the blast radius is hard-bounded: ≤5 signed,
+  tenant-scoped, Qdrant-idempotent events per unit for all time, ≤25 per tick.
+  Set `EMBEDDING_RECONCILE_ENABLED=0` to disable.
+- **`data-quality-go`'s `no_failed_embeddings` gate left alone.** It counts all
+  `failed`, so it will now flap while a transient failure is inside its retry
+  window. Arguably it should read `exhausted_failed` instead, but changing a
+  quality gate's semantics is a separate decision and was not asked for.
+- **`documents.indexed` transition-only publish not touched.** A related defect
+  exists a few lines away in `batch/mod.rs`
+  (`UPDATE documents SET status='indexed' … AND status != 'indexed' RETURNING`
+  means an already-indexed document can never be re-announced, so graph-index
+  can never re-extract it). Flagged by the coordinator, explicitly out of scope,
+  and confirmed untouched by the D18 change.
+- **Relation/consumer-side changes to the four other DLQ publishers' payload
+  shape.** `quickwit-adapter`'s DLQ envelopes remain unsigned plain JSON — it
+  mounts four `.pub` verifiers and no `.pem`, so it has nothing to sign with.
+  Those entries are now *durable*, which is the P4 goal, but they remain an
+  operator/diagnostic surface and must never be fed back into a verified
+  consumer. Documented as such in `SUBJECTS.md`.
+
+**Pre-existing failures encountered and left alone (neither is ours)**
+
+1. `graph-index-rs` `store::identity_tests::claim_identity_is_org_scoped_and_normalised`
+   fails. Cause is an uncommitted Aquatiq→CoreSystem rename in another
+   session's `store.rs:1516`: the test asserts
+   `claim_identity("org1","Aquatiq uses HACCP") == claim_identity("org1","  coresystem uses haccp ")`.
+   The committed version compared two spellings of the *same* string; the rename
+   rewrote only one side, so the assertion is now comparing different strings and
+   is simply false. A test-fixture casualty of a global rename, not a code
+   defect — and not this phase's file to repair.
+2. `data-orchestrator-go` `TestPostgresJobStoreLifecycleIdempotencyAndTenantIsolation`
+   fails with `column "lease_until" does not exist` when `TEST_DATABASE_URL` is
+   set. Its helper applies only
+   `20260711160000_quality_orchestrator_durability.sql`, but `lease_until` came
+   from `20260805150000_orchestrator_job_leases.sql` (P2-4). Broken for
+   database-backed runs since 2026-08-05; invisible in CI because the test skips
+   without the variable. Filed as a separate task rather than fixed here.
+
+#### ⚠️ Unrelated regression noticed while checking the deploy — `DATAPLANE_WIKI` is back on `workqueue`
+
+Not caused by this phase, not fixed by it, recorded so it is not lost. The
+2026-08-05 deployment record above states all four fan-out streams were migrated
+to `interest`, with `DATAPLANE_WIKI` carrying `embedding-engine-wiki +
+quickwit-adapter`. The live topology after this session's deploy is:
+
+```
+DATAPLANE_DLQ              retention=limits     msgs=0      cons=0
+DATAPLANE_DOCUMENTS        retention=interest   msgs=0      cons=2
+DATAPLANE_GRAPH            retention=interest   msgs=0      cons=2
+DATAPLANE_KNOWLEDGE        retention=interest   msgs=0      cons=3
+DATAPLANE_PAGE_IMAGES      retention=workqueue  msgs=0      cons=1   (correct: single consumer)
+DATAPLANE_SOURCE_OBJECTS   retention=limits     msgs=11969  cons=1
+DATAPLANE_WIKI             retention=workqueue  msgs=0      cons=1   <-- regressed
+```
+
+`DATAPLANE_WIKI` reports `created: 2026-08-06T01:44:14Z` — i.e. it was destroyed
+and recreated *after* the P0-1b migration, and came back as `workqueue`.
+`get_or_create_stream` cannot change retention on an existing stream, and
+`wiki_consumer.rs` has no `upgraded_*_config` follow-up like
+`embedding-engine/stream/mod.rs` does for `DATAPLANE_KNOWLEDGE`, so it does not
+self-heal.
+
+Consequence, visible in the logs as the single ERROR line on quickwit-adapter
+startup (P0-1a's deliberately loud message doing its job): quickwit-adapter is
+back on a **lossy ephemeral subscription** for
+`dataplane.wiki.version.published`, so a wiki publish while the adapter is down
+is lost. The stream currently holds 0 messages, so a delete-and-recreate would
+be zero-loss right now — but that is an operator action on another phase's
+surface, so it is flagged rather than performed. The durable fix is to give
+`wiki_consumer.rs` the same idempotent retention-upgrade path
+`stream/mod.rs` already has.
+
+**Incidental fix taken while in the file:** `batch/mod.rs` published
+`dataplane.cost.ledger` as a bare inline literal, which
+`scripts/check-subjects.sh` rejects (`publish()` with an inline subject). Now a
+named `SUBJECT_COST_LEDGER` const, matching the file's existing
+`SUBJECT_DOC_INDEXED`. Also added three already-shipped-but-undocumented
+subjects to `SUBJECTS.md` (`dataplane.knowledge.units.deleted`,
+`dataplane.page_images.created`, `dataplane.page_images.deleted`) so the
+contract lint is green rather than habitually red.
+
+**Follow-up, same day, closes both flagged gaps above.** The `DATAPLANE_WIKI`
+retention regression this section flagged was repaired live (delete +
+recreate while genuinely empty, verified via `nats stream info`) and
+`wiki_consumer.rs` gained the exact idempotent retention-upgrade path this
+section says it was missing — `ensure_wiki_stream`/`upgraded_wiki_config`,
+mirroring `nats_connection::dlq`'s already-proven split (converge mutable
+fields via `update_stream`; a retention mismatch is logged loudly, never fed
+into `update_stream`, since that fails the whole call). Both
+`embedding-engine` and `quickwit-adapter` re-verified as durable consumers on
+the stream after the repair. See the CAS erasure entry directly below for the
+full detail — it's the same deploy.
+
+### 2026-08-07 — Visual-arm GDPR erasure completeness (Phase 5 gap, closed for the two erasure triggers this codebase has)
+
+Asked to continue the roadmap; investigating `docs/sovereign-rag-phased-plan.md`
+Phase 5 ("erasure completeness for the new stores") surfaced a real,
+independently-confirmed gap distinct from anything above: **nothing in Data
+Plane v2 could delete a MinIO CAS object.** `image_consumer.rs`'s
+`dataplane.page_images.deleted` handler has always correctly purged the
+page-image Qdrant vectors on receipt — but nothing has ever published that
+event (confirmed by an exhaustive repo-wide grep for any publisher), so the
+handler has never once run. Independently, the whole-org GDPR path
+(`gdpr.rs::purge_organization_data`) purged three Qdrant collections and
+never touched CAS either. A deleted document's rendered page PNGs —
+potentially scanned PII — stayed in object storage forever, on both erasure
+triggers this codebase actually has.
+
+**Fix, in `embedding-engine-rs`:**
+- `cas_store.rs` (new) — delete-only `CasStore`, byte-for-byte matching
+  Ingestion Plane's `quarry-runtime::cas_store::CasStore` key layout
+  (`org={org}/doc={doc}/pages/...`, `force_path_style(true)`). `delete_by_doc`
+  + `delete_by_org`; paginates both list and delete (the Ingestion Plane
+  original assumed ≤1000 keys — this doesn't).
+- `document_erasure_consumer.rs` (new) — binds a durable JetStream consumer
+  directly to the already-published `dataplane.documents.deleted` on
+  `DATAPLANE_DOCUMENTS` (owned by `index-engine-rs`; mirrors
+  `quickwit-adapter`'s `bind_durable` for a stream this crate doesn't own).
+  On a verified event, purges the page-image Qdrant vectors AND the CAS
+  objects for that one document — skips the dead `page_images.deleted`
+  indirection entirely, one hop off the event that's actually live.
+- `gdpr.rs` — `purge_organization_data` now also takes `Option<&CasStore>`
+  and calls `delete_by_org`; `PurgeSummary` gained a `cas_objects` field.
+
+The CAS bucket's literal writer is Ingestion Plane, not this crate — noted
+explicitly in the module docs as a deliberate exception to this file's
+"purge only what you write" rule (§Architecture constraints, rule 1
+adjacent): Ingestion Plane never receives Data Plane v2's GDPR/DSAR events
+(that direction would mean Data Plane telling Ingestion Plane what to do,
+backwards from every cross-plane contract here), so this crate — which
+already owns this domain's Qdrant-side erasure — is the only place erasure
+can actually be triggered from.
+
+**Verified, not assumed — real signed event, real object, real API, in that
+order:**
+1. Minted a real service-principal token (`finspo-core`, already registered
+   in `PLANE_SERVICE_PRINCIPALS_JSON` with `documents:write`/`allowAnyOrg`)
+   via the real `POST /api/data-plane/internal-token`.
+2. `POST /v1/documents` created a real throwaway document
+   (`034cbaca-a0e3-431f-a1c4-a96190c07bb2`, org `erasure-test-org`).
+3. Wrote a real object into the live `dataplane-cas` bucket at that
+   document's exact CAS key (`mc cp` + `mc ls` confirmed present).
+4. `DELETE /v1/documents/{id}` — the real handler, real
+   `SoftDeleteWithOutbox` path, real signed `dataplane.documents.deleted`
+   (confirmed `published=true` in `documents_outbox`).
+5. Re-ran `mc ls` on the document's CAS prefix: **empty.** Re-ran it on a
+   *different*, still-present sibling test object in the same org: **still
+   there** — proving the deletion was correctly document-scoped, not an
+   accidental org-wide wipe or a false-positive empty query.
+6. Container logs showed zero errors/DLQ entries for the document across the
+   whole window; since `purge()` calls the Qdrant delete before the CAS
+   delete and both are gated by `?`, the CAS deletion succeeding is itself
+   proof the Qdrant vector purge succeeded first.
+7. All test rows/objects removed afterward (`documents_outbox`, `documents`,
+   the CAS bucket); the real 10-document corpus confirmed untouched
+   (`count=10, indexed=10`, unchanged) throughout.
+
+The one thing NOT constructible even as a test: a forged tenant-mismatch
+envelope (`org_id` in payload ≠ signer's claims). `EventSigner::sign`'s own
+`validate_payload_claims` already refuses to sign one — confirmed directly,
+the attempt returned `Err(InvalidEnvelope)` before a signature ever existed.
+The `event.org_id == verified.claims.org_id` check in
+`document_erasure_consumer.rs` stays as defense-in-depth (matching the
+identical check in `retrieval-engine-rs/src/cache/invalidator.rs`) but has no
+live test, on the same reasoning `gdpr.rs`'s own comments already use
+elsewhere in this file for structurally-unreachable paths.
+
+**Build discipline:** `cargo fmt` clean, `cargo clippy --all-targets -- -D
+warnings` clean, 56/56 unit tests pass (one test — the unconstructable forged
+envelope above — was written then deleted rather than left disabled or
+faked). `docker compose config` validated before any deploy. Deployed via the
+same `BUILD_DATE`/`SOURCE_REVISION`-export dance every other Rust service
+deploy in this file needed.
+
+**Deliberately not done:** the org-wide GDPR path's CAS purge is wired but
+its live end-to-end trigger (a real `verevon.gdpr.erasure.requested` event
+through `control-shared-nats`) was not separately fire-tested this session —
+only the per-document path was proven with a real event; the org path shares
+the same `CasStore::delete_by_org` call, unit-tested for prefix correctness,
+but not yet observed purging a real bucket end to end. Also not done: making
+`quickwit-adapter`'s CAS-adjacent domains (none currently) participate in any
+of this — out of scope, this section is the visual/page-image arm only.
+
+### 2026-08-07 — Phase 4: Meilisearch keyword arm (typo-tolerant exact-ID/code lookup — closes the remaining Phase-4 gap)
+
+`docs/sovereign-rag-blueprint-reconciliation.md` and this plan's own Phase 4
+called out a genuine, confirmed-still-missing gap: none of dense, sparse
+(Postgres/Quickwit BM25), wiki-ANN, visual, or graph handle exact-ID/code/
+typo-tolerant lookup well — a misspelled proper noun or a one-digit-off SKU
+loses to semantic-similarity noise on the dense arm and to exact-token
+matching on the lexical ones. Added Meilisearch as a genuine 4th (well, 6th —
+graph and keyword both landed after this doc's original "4-arm" framing) RRF
+arm, mirroring the graph arm's shape (`search/graph.rs::graph_arm_candidates`
+→ `arm_graph` in the `tokio::join!` fan-out → `fuse_arms` applies `w_graph`)
+as the most-recently-added, best-maintained template.
+
+**New service, `meilisearch-adapter-rs`** (write side — keeps the index
+converged with the corpus):
+- `src/stream.rs` — durable JetStream pull consumers on exactly three
+  subjects: `dataplane.knowledge.units.created` (index-engine), single-unit
+  index, tolerates "not embedded yet"; `dataplane.documents.indexed`
+  (embedding-engine), clear-then-reindex the whole document (covers both
+  first-index and content-update); `dataplane.documents.deleted`
+  (documents-api-go's `SoftDeleteWithOutbox`) — the erasure hook. Same
+  ack/nak/DLQ/durable-with-ephemeral-fallback shape as
+  `quickwit-adapter-rs::stream`, own DLQ subject
+  `dataplane.dlq.meilisearch-adapter`. ZDR-gated identically: a restrictive-ZDR
+  event never reaches the persistence subjects; deletion is exempt (purging
+  is always safe).
+- `src/indexer.rs` — the two Postgres→Meilisearch functions
+  (`index_knowledge_unit_by_id`, `index_document_knowledge_units`), same
+  eligibility gate as `quickwit-adapter-rs::rebuild` (`embedding_status =
+  'done'`, `d.deleted_at IS NULL`, non-restricted ZDR classification) so the
+  keyword arm never surfaces a chunk the other arms wouldn't.
+- `src/meilisearch.rs` / `src/model.rs` — ingest-only HTTP client
+  (`ensure_index` converges `filterableAttributes: [org_id, document_id]` +
+  `searchableAttributes` every boot) and the `KeywordDocument` shape
+  (`id == knowledge_id`, satisfies Meilisearch's `^[A-Za-z0-9_-]+$` primary-key
+  charset for free).
+- `src/config.rs`, `src/main.rs`, `Dockerfile`, `Cargo.toml`.
+
+**Retrieval side, in `retrieval-engine-rs`:**
+- `src/search/keyword.rs` (new) — `MeilisearchQueryClient` (a SEPARATE HTTP
+  client from the adapter's, same split as `QuickwitClient` vs this crate's
+  own Quickwit query path) and `keyword_arm_candidates`, same contract as
+  `graph_arm_candidates`: org-scoped via a Meilisearch **filter expression**
+  (never free text), scores left at 0 (RRF consumes list order), non-fatal.
+- `src/pipeline/orchestrator.rs` — `keyword_client` field on
+  `RetrievalPipeline`; `arm_keyword` (gated on `w_keyword > 0` AND a
+  configured client, same shape as `arm_wiki`); added to the `tokio::join!`
+  fan-out (now 6 arms); `fuse_arms` gained a `keyword` parameter and RRF step,
+  fused LAST (newest, least-proven arm — same reasoning `w_visual` fused last
+  before it).
+- `src/pipeline/types.rs` — `w_keyword` on `ModeMixWeights`/`ResolvedWeights`;
+  `.resolve()` gained a `default_keyword` parameter, included in the
+  sum-to-1.0 renormalization.
+- `src/config.rs` — `meilisearch_url` (defaults to the compose-internal
+  service), `meilisearch_api_key` (`#[serde(default)]`, deliberately NO
+  default value — a master key must never have a checked-in fallback),
+  `meilisearch_index_uid`, `w_keyword` (default **0.05**, the same
+  calibration `w_visual` launched with — a new, unproven arm starts small,
+  provable against the P0.5 golden set, not at parity with established arms).
+- `src/pipeline/smart_mix.rs` — `looks_code_like()` already exists
+  specifically for "SKU-1234"/"INV-20394"/short-ALL-CAPS-code queries and was
+  already boosting `w_bm25`/`w_dense` for them; now also sets
+  `w_keyword = Some(0.15)` on the same trigger — this is the literal query
+  shape the keyword arm exists for, so leaving it at the flat static default
+  would have undersold the arm on exactly the queries motivating this work.
+- `src/main.rs` / `src/trace/mod.rs` — client construction
+  (`from_config` → `None` when URL or key is empty, fails closed to "arm off,"
+  never to an unauthenticated request) and `w_keyword` added to
+  `mode_mix_applied` (NOT to the legacy `mode_mix` column, matching the exact
+  precedent `w_visual` set when it was added — that column stays frozen for
+  historical-row comparability).
+
+**Infra:** new `meilisearch` service (`getmeili/meilisearch:v1.12.5`,
+multi-arch tag confirmed via `docker manifest inspect` before writing it into
+compose), `MEILI_MASTER_KEY` required via the same `${VAR:?required}`
+convention as `POSTGRES_PASSWORD`/`DATAPLANE_NATS_TOKEN` — no checked-in
+default, a real key generated with `openssl rand -hex 32` and appended
+(additively) to the local `.env`. New `meilisearch-adapter` service block.
+New `dpv2_meilisearch` volume. `docker-compose.yml` already carried another
+session's unrelated in-flight WIP (retention-posture env vars, a rerank
+endpoint fallback, a knowledge-observability bridge) when this started —
+checked via `git status`/`git diff` first, left completely untouched, new
+blocks added alongside.
+
+**Isolation — how it was proven, not just asserted.** Meilisearch has no
+per-request transaction-scoped GUC like Postgres RLS would; the filter clause
+on every query IS the isolation boundary, so it has no defense-in-depth layer
+under it inside the Meilisearch client itself. What it DOES inherit for free:
+every arm's candidates — including the keyword arm's — flow through the
+pipeline's universal step-6 ownership gate, which re-verifies per-user
+visibility against the real `knowledge_id`/`document_id` regardless of which
+arm produced the candidate (dense/sparse/graph/wiki/visual already rely on
+this same gate; the keyword arm needed no new per-user logic, only a correct
+org filter, to land in the same isolation tier as those arms per this plan's
+own "Isolation audit" table — NOT the "aux HTTP, body-trusted org" tier those
+Phase-1-hardened endpoints occupy, because the fused arm's org comes from the
+already-authenticated `req.org_id` upstream of every arm, never from a
+per-arm-trusted body field). Verified live, not reasoned about: queried the
+real running Meilisearch for the seeded test document's exact text
+(`org_id = "org-e2e-meili-test"`) → 1 hit; **identical query, `org_id =
+"some-other-org"`** → 0 hits; a request with no `Authorization` header at all
+→ `401`. `quote_filter_value` (identical escaping logic exists independently
+in both the adapter's ingest client and the retrieval-side query client) is
+unit-tested against a hostile value containing an embedded `"` to confirm
+every quote comes out escaped, so a value can never close its own filter
+clause early.
+
+**Erasure — verified with a real signed event, not a direct function call.**
+Seeded a real `documents`/`knowledge_units` row pair directly in Postgres
+(this codebase's own established pattern for exercising indexing logic
+against real data — e.g. `quickwit-adapter-rs/tests/admin_jobs_postgres.rs`).
+Signed a REAL `dataplane.documents.indexed` envelope with the stack's actual
+already-provisioned `embedding-events.pem` private key (via a throwaway
+probe outside the repo, in scratchpad, using `event_envelope_rs::EventSigner`
+directly — never a fabricated/unsigned payload) and published it over a
+temporary `alpine/socat` port-forward to the real `nats` service (a
+standalone container, not a `docker-compose.yml` change). The real, already
+running `meilisearch-adapter` container logged
+`"re-indexed document knowledge units in Meilisearch" document_id=doc-e2e-meili-test-1 count=1`
+and the document became searchable in the real Meilisearch — including under
+a **deliberate one-character typo** (`ZX-90441-KELVIM` for the seeded
+`ZX-90441-KELVIN`), proving typo-tolerance end to end. Then signed and
+published a REAL `dataplane.documents.deleted` envelope with the real
+`documents-events.pem` key; the document was confirmed gone from Meilisearch
+(0 hits, verified by direct query) with no code change needed to prove it —
+the same `dataplane.documents.deleted` subject `documents-api-go`'s
+`SoftDeleteWithOutbox` already publishes for every ordinary delete AND every
+document an org-erasure cascade removes, so this one handler covers both
+without a second, GDPR-fanout-specific consumer (identical reasoning
+`quickwit-adapter-rs::gdpr`'s module docs already state for the Quickwit arm).
+
+**Fusion — a real Meilisearch-sourced candidate through real RRF, not a
+mocked score.** Because minting a valid cross-plane JWT for `/v1/retrieve`
+depends on the Control Plane's real auth-service (a dependency this task has
+no reason to stand up), the fused-RRF proof was made one layer down — at the
+exact boundary this task actually changed — by calling the REAL, unmodified
+`retrieval_engine::search::keyword::keyword_arm_candidates` against the real
+running Meilisearch, then the REAL, unmodified
+`retrieval_engine::search::fusion::reciprocal_rank_fusion` (the identical
+function `fuse_arms` calls for every arm) via a temporary `src/bin/` binary
+compiled into the already-built crate, deleted immediately after use. With a
+synthetic dense/sparse baseline standing in for the other arms:
+
+```
+=== keyword_arm_candidates(query="ZX-90441-KELVIM", org_id="org-e2e-meili-test") ===
+  knowledge_id=ku-e2e-meili-test-1 document_id=doc-e2e-meili-test-1 final_score=0
+
+=== + keyword arm RRF (w_keyword=0.05) ===
+  k-d1 final_score=0.015573771
+  k-d2 final_score=0.01532258
+  k-d3 final_score=0.015079365
+  k-s1 final_score=0.01484375
+  k-s2 final_score=0.014615385
+  ku-e2e-meili-test-1 final_score=0.00081967213
+
+RESULT: a Meilisearch-sourced candidate is present in the fused ranking at
+position 5 with a nonzero score contribution from w_keyword=0.05.
+```
+
+`0.00081967213` is exactly `0.05 / (60 + 0 + 1)` — the RRF formula at rank 0,
+weight 0.05, `k=60` — confirming the fusion math, not just presence, is real.
+Re-running the identical probe after the delete event above returned zero
+Meilisearch candidates and the keyword-sourced row correctly absent from the
+fused ranking.
+
+**Verification**
+
+| Gate | Result |
+|---|---|
+| `cargo fmt` (scoped to the two touched crates — a blanket `cargo fmt --all` would have rewritten another session's uncommitted, differently-formatted file in `embedding-engine-rs`; left untouched) | clean |
+| `cargo check --workspace` | clean |
+| `cargo clippy --all-targets -- -D warnings` | clean (two real findings fixed along the way: `fuse_arms` at 8 args needed `#[allow(clippy::too_many_arguments)]`, matching the precedent already on `trace::persist_trace`; a test's `assert_eq!` on `Vec<ScoredCandidate>` needed `PartialEq` that type doesn't have — switched to `.is_empty()`) |
+| `cargo test --workspace --no-fail-fast` | **678 passed, 1 failed, 27 ignored** — the single failure is the SAME pre-existing `graph-index-rs::store::identity_tests::claim_identity_is_org_scoped_and_normalised` this file already documented above (another session's uncommitted rename); not ours, not touched |
+| New Rust tests | 16 (`meilisearch-adapter-rs` lib) + 5 (`meilisearch_client_test.rs`, mock-server) + 1 `#[ignore]` (`meilisearch_live_test.rs`, real Meilisearch round-trip) + `search/keyword.rs` unit+mock-server tests + `pipeline/types.rs`/`orchestrator.rs`/`smart_mix.rs`/`config.rs` additions, all colocated per this repo's convention |
+| `scripts/check-subjects.sh` | passed for every subject this work introduces (all three consumed subjects already existed in `SUBJECTS.md`; the new `dataplane.dlq.meilisearch-adapter` subject required — and got — a new row, per the contract's own "Adding a new subject" rule). **Pre-existing, unrelated failure left as found:** `dataplane.dlq.embedding-engine-document-erasure` (from the CAS-erasure entry directly above, not this entry) is still undocumented in `SUBJECTS.md` — flagged here since this session ran the lint, not fixed, since that file is this entry's neighbor's to close |
+| Containers | `meilisearch`, `meilisearch-adapter` (new), `retrieval-engine` (rebuilt) — **3/3 healthy**. `meilisearch-adapter` bound DURABLE JetStream consumers on `DATAPLANE_KNOWLEDGE`/`DATAPLANE_GRAPH`/`DATAPLANE_DOCUMENTS` with zero refusals — confirming those streams are live `interest` retention (verified by this session, not assumed from `SUBJECTS.md`'s own stale `WorkQueue` column — see the aside below) |
+| Running-binary check | `grep -a` (no `strings` in the slim runtime image) on the deployed binaries for strings unique to this change: `meilisearch-adapter` → 3 hits; `retrieval-engine` → "keyword arm (Meilisearch) enabled" logged at actual startup |
+| Image freshness | Both images' `Created` timestamp matched the build just run, checked before trusting any live test, per this file's own standing landmine warning |
+
+**Deliberately not done, with reasons**
+
+- **Wiki-page and source-object indexing.** The keyword arm's job is exact-ID/
+  code lookup over the same knowledge-unit corpus dense/sparse/graph already
+  search; wiki has its own dedicated ANN arm, and source objects are
+  connector bookkeeping, not a retrieval target. `meilisearch-adapter-rs`
+  subscribes to exactly the three subjects that drive that corpus's
+  lifecycle, not the five `quickwit-adapter-rs` does. Additive later: new
+  `consumer_plan` entries plus a field on the shared document shape.
+- **No admin rebuild-from-scratch HTTP API** (`quickwit-adapter-rs`'s
+  `jobs`/`rebuild`/`api`/`auth` modules have no analogue here). Live-update
+  coverage is the correctness-critical half; a batch backfill is an operator
+  convenience addable later as a one-shot script reusing
+  `indexer::index_document_knowledge_units` in a loop over `documents`.
+- **No separate GDPR org-erasure fan-out consumer.** Unlike
+  `quickwit-adapter-rs::gdpr`, there is no admin-job bookkeeping table this
+  crate owns to purge, and the search-index-content purge is already covered
+  by the `dataplane.documents.deleted` handler for the same reason the
+  Quickwit arm's own docs give (see the erasure paragraph above).
+- **No dedicated standalone `/v1/retrieve/keyword` endpoint.** Graph/wiki/
+  contradictions/timeline each pair a fused arm with a richer standalone
+  domain endpoint (entities/relationships/claims, wiki pages); Meilisearch's
+  keyword hits are the same chunk shape as the fused candidates already
+  are, so a second endpoint would add surface with no new information.
+- **No scoped, search-only Meilisearch API key.** Meilisearch supports
+  generating a restricted `actions: ["search"]` key; this ships with the
+  admin/master key shared between the adapter (ingest) and retrieval-engine
+  (query), matching how this compose file already shares one Postgres/
+  Dragonfly credential across every internal consumer rather than minting
+  per-service scoped ones. The isolation boundary is the `filter` clause, not
+  the key's scope, so this is a hardening follow-up, not a correctness gap.
+- **The fused-RRF proof stops one layer below the authenticated HTTP/gRPC
+  `/v1/retrieve` contract** (see the fusion paragraph above) — a real
+  end-to-end proof through that layer needs a real Control-Plane-issued JWT,
+  a dependency orthogonal to what this task changed. `keyword_arm_candidates`
+  and `reciprocal_rank_fusion` are the exact, unmodified production functions
+  `arm_keyword`/`fuse_arms` call; nothing between that boundary and the HTTP
+  layer was touched by this work, so the gap is the auth layer's own
+  pre-existing test surface, not a hole in this arm.
+- **`docs/sovereign-rag-phased-plan.md`'s open architectural decisions**
+  (self-hosted GPU embedder, tenant-vs-org axis) — confirmed unrelated before
+  starting, untouched throughout, exactly as scoped.
+
+**Two pre-existing things noticed and flagged, not fixed (both outside this
+entry's scope):** `infra/nats/SUBJECTS.md`'s `DATAPLANE_DOCUMENTS`/
+`DATAPLANE_KNOWLEDGE` rows still say `WorkQueue, 7d` retention; this session's
+own consumer bind (and the live topology this file already recorded above)
+confirms the real, current retention is `interest` — the column predates that
+migration and was annotated in place rather than silently rewritten, since
+correcting broader documentation drift wasn't asked for here. And
+`dataplane.dlq.embedding-engine-document-erasure` (introduced by the CAS
+erasure entry directly above) fails `scripts/check-subjects.sh` — not
+introduced by this entry, not this entry's file to close, noted so it isn't
+lost.
+
+### 2026-08-07 — `documents.indexed` re-announce (closes the gap the CAS erasure entry and this entry's own Meilisearch backfill both hit)
+
+**Fixed the lint the Meilisearch entry above flagged as not its file to
+close**: `dataplane.dlq.embedding-engine-document-erasure` added to
+`infra/nats/SUBJECTS.md`, alongside documenting `document_erasure_consumer`
+as a fourth consumer of `DATAPLANE_DOCUMENTS`'s `.deleted` subject.
+`scripts/check-subjects.sh` passes (21 subjects).
+
+**The actual fix.** `check_documents_indexed` (`batch/mod.rs`) only published
+`dataplane.documents.indexed` on a genuine `status != 'indexed'` → `'indexed'`
+transition. That guard meant an already-indexed document could never be
+re-announced, by any caller, for any reason — graph extraction has
+consequently never run once in this deployment (confirmed earlier this
+session: zero entities, zero inference calls, ever), and the Meilisearch arm
+two entries above shipped with zero production documents in its index and no
+way to backfill them. Both are downstream of the exact same missing capability.
+
+Fix: the `UPDATE ... WHERE status != 'indexed'` guard is gone. `SET status =
+'indexed'` is a no-op write when already set; the row is now unconditionally
+re-selected so a repeat call always re-announces. Verified this is safe
+BEFORE making the change, not after: `graph-index-rs::store` upserts
+entities/relationships/claims on deterministic, content-derived ids (`ON
+CONFLICT ... DO UPDATE` / `DO NOTHING`), and Meilisearch/Quickwit upsert by
+document id — no consumer of this event can be made to duplicate anything by
+receiving it twice.
+
+New test `an_already_indexed_document_is_re_announced_not_silently_skipped`
+(`#[ignore]`-gated, `TEST_DATABASE_URL`) asserts the actual regression this
+closes: call once (genuine transition, must announce), call again with
+nothing changed (must ALSO announce — this is the line that would have failed
+before the fix). Ran it for real against a throwaway `docker run
+postgres:16-alpine` (not the live database — that table-drop would have
+destroyed the real corpus) plus a throwaway `qdrant/qdrant` for the
+pre-existing sibling GDPR test in the same ignored group; both disposable
+containers removed immediately after. `cargo fmt` clean, `cargo clippy
+--all-targets -- -D warnings` clean, 59 passed / 0 failed / 3 ignored on the
+non-ignored suite, 3/3 on the ignored group. Built and deployed with the
+established `BUILD_DATE`/`SOURCE_REVISION` export; container healthy,
+`document erasure subscriber online` and `wiki durable subscriber online`
+both logged clean on boot.
+
+**Honest limit — this fix alone does NOT backfill the 10 real documents
+today, and here is the precise reason, confirmed live, not assumed.**
+Re-driving `dataplane.documents.created` for all 10 (the same outbox-replay
+technique that worked for the CAS erasure proof and the earlier graph-entity
+attempt) made `index-engine-rs` re-chunk every document —
+confirmed live, `"chunk lineage recorded"` for all 10 — but
+`builder/mod.rs`'s reuse logic (deliberately, correctly) found every chunk's
+content-derived `knowledge_id` already matches a prior `'done'` unit, so it
+published **zero** `dataplane.knowledge.units.created` events. My fix lives
+inside `embedding-engine-rs::batch::process_batch`, which only runs when that
+event arrives — and it never did. `check_documents_indexed`'s guard was a
+real bug and is now fixed, but it was never the ONLY thing standing between
+"already-indexed content" and "re-announced" for a pure backfill with zero
+content change: `index-engine-rs`'s exact-reuse optimization sits upstream of
+it and, correctly, never re-emits for unchanged bytes. Confirmed directly:
+`knowledge_units` for this org is 51 rows, all `'done'`, zero `'failed'` — so
+`index-engine-rs::reconcile` (D19, the P4 entry above) has nothing to claim
+either; that reconciler is scoped to `'failed'` rows on purpose and mutates
+status as part of its claim, which is the wrong tool for re-announcing rows
+that are already correctly `'done'`.
+
+What would close this the rest of the way: a purpose-built backfill/replay
+path that re-publishes a real signed `knowledge.units.created` for an
+operator-specified set of already-`done` units, without touching their
+status — the same signing identity `reconcile.rs` already legitimately holds
+(`service:index-engine-rs`), used for a "re-announce" reason instead of a
+"recover a failure" reason. Not built here — this entry's fix closes the
+downstream half of the gap (an already-indexed document CAN now be
+re-announced); the upstream half (a way to trigger that re-announcement for
+content that hasn't changed) is a distinct, not-yet-built tool. Until it
+exists, this fix's effect on the CURRENT 10-document corpus is latent: it
+will apply correctly the next time any of these documents undergoes a
+genuine reprocessing cycle that reaches `process_batch` with `pending = 0`
+(a real content edit synced from SharePoint, or a future D19 recovery of a
+unit that transiently fails) — not before.
+
+### 2026-08-08 — Backfill tool built and run; the real 10-document corpus is now in the graph and keyword index
+
+Closes the gap the previous entry left open. `embedding-engine-rs/src/bin/
+backfill_reannounce.rs` (new `[[bin]]`, `backfill-reannounce`) re-publishes
+`dataplane.documents.indexed` directly for operator-specified, already-
+`'indexed'` documents — bypassing the embedding pipeline entirely rather
+than re-embedding unchanged content just to reach the fixed guard. It
+signs with the exact identity `process_batch` already uses for this
+subject (`service:embedding-engine-rs` / `embedding-events-v1`) and
+publishes the same way (plain core-NATS `publish`, no JetStream headers).
+Both current consumers (`graph-index-rs`, `meilisearch-adapter-rs`) durably
+capture the subject via their own `DATAPLANE_GRAPH` stream (`Interest`
+retention) regardless of publish style, so timing relative to either
+consumer's own uptime doesn't matter. Touches no `knowledge_units` row.
+
+Considered and rejected: replaying `dataplane.knowledge.units.created`
+instead (the `index-engine-rs::reconcile` signing identity/payload shape).
+That would have forced a real re-embed of all 51 chunks through the
+embedding provider for zero benefit — the units are already `'done'` — so
+`documents.indexed` is the actual signal the two stuck consumers need, and
+publishing it directly is strictly cheaper and more targeted.
+
+**Run against the real corpus** (org `xfRxqdEqR8AbJyy5e5EhpxWURkhuFRYt`, 10
+documents, 51 knowledge_units, all `'done'`): `--dry-run` first confirmed
+the exact 10-document target list, then a real run re-announced all 10.
+
+**A real bug surfaced during verification, not assumed clean.** Publishing
+all 10 signed envelopes back-to-back (~10ms total) got 4/10 rejected by
+`graph-index-rs`'s verifier with `"invalid signed event envelope"` —
+confirmed live via logs, not inferred. Root-caused by elimination rather
+than left as "probably fine": the rejected documents' titles carry no
+common trait (ASCII and non-ASCII titles on both sides of the split), and
+an isolated, individually-issued retry of each rejected document — same
+signer, same payload shape, same key — succeeded every time with zero
+rejections. That rules out a payload/data defect and points at a rate-
+sensitive condition specific to signing and publishing many envelopes
+within single-digit milliseconds of each other, a pattern the real
+pipeline (one publish per completed embedding batch) never produces. Fix:
+a 100ms pace between publishes in the tool's loop — cheap for a 10-document
+backfill, and it keeps a bulk backfill inside the same publish rate the
+consumers have always had to handle. Not fully root-caused inside
+`event-envelope-rs` itself (the specific check inside the shared
+`InvalidEnvelope` catch-all was not isolated) — flagged here rather than
+overclaimed.
+
+**Verified live, fully, after the fix**: all 10 documents show
+`total_chunks == mapped_chunks` in `graph_text_units` (51/51 chunks
+mapped, zero gaps) and zero duplicate `(org_id, entity_text, entity_type)`
+rows despite six documents having been processed twice by JetStream
+redelivery during the first pass — confirming the deterministic
+content-derived entity/relationship/claim ids dedupe correctly under
+reprocessing, exactly as designed. Final real totals for the org:
+**614 entities, 165 relationships, 213 claims** — sampled names are real
+content (`MagicInfo`, `WebAuthor`, `S6 device`, `SuperOffice`), not
+placeholders. Meilisearch's `dataplane-knowledge` index went from 0 real
+documents to `numberOfDocuments: 51`, confirmed with a live search for
+"SuperOffice" correctly returning the SuperOffice pricing document. Both
+retrieval arms this plan added (D1's replacement lexical arm's sibling
+keyword arm, and graph extraction/D7) are no longer empty of real
+production data.
+
+### 2026-08-08 — Dense text embedder migrated to Cohere Embed v4 (D-B, `sovereign-rag-phased-plan.md` Phase 3b)
+
+Closes D-B, one of the three architectural decisions
+`sovereign-rag-phased-plan.md` had listed as "please confirm." Full design
+rationale, the free-tier rate-limit incident, and the live semantic-search
+proof are recorded there under Phase 3b — this entry is the pointer for
+anyone reading the durability plan's chronological log. Summary: dense text
+moved from `text-embedding-3-large` (3072-dim, English-tuned) to Cohere
+Embed v4 (1536-dim, multilingual — the real corpus is confirmed
+Norwegian-first) via a new `EmbeddingBackend::Cohere` variant in both
+`embedding-engine-rs` and `retrieval-engine-rs`, a new `dataplane_
+knowledge_embedv4` Qdrant collection, and a new operator tool
+(`index-engine-rs`'s `reembed-switch`, distinct from `backfill-reannounce`
+because this case genuinely needs the embedding pipeline to run, not
+bypass it). All 51 real knowledge_units re-embedded and verified via a live
+Norwegian query against the new collection. The old 3072-dim collection was
+left untouched as a rollback path.
 
 ---
 

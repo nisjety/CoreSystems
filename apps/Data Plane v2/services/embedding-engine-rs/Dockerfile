@@ -44,8 +44,9 @@ COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --release --bin embedding-engine \
-    && cp target/release/embedding-engine /usr/local/bin/embedding-engine
+    cargo build --release --bin embedding-engine --bin backfill-reannounce \
+    && cp target/release/embedding-engine /usr/local/bin/embedding-engine \
+    && cp target/release/backfill-reannounce /usr/local/bin/backfill-reannounce
 
 FROM debian:bookworm-slim AS runtime
 ARG SOURCE_REVISION=unverified
@@ -71,6 +72,7 @@ RUN groupadd --gid 10001 dpv2 \
 USER dpv2
 
 COPY --from=builder /usr/local/bin/embedding-engine /usr/local/bin/embedding-engine
+COPY --from=builder /usr/local/bin/backfill-reannounce /usr/local/bin/backfill-reannounce
 
 EXPOSE 9202
 

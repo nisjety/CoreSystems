@@ -90,10 +90,14 @@ pub async fn persist_trace(
         ))
     };
 
-    // §16.1.1 — mode_mix vs mode_mix_applied. Since the 5-arm fold-in
-    // (graph/wiki/visual all drive fused scoring), the applied mix IS the
-    // resolved mix — the column stays so historical rows (which recorded
-    // zeroed graph/wiki with the old scorer) remain interpretable.
+    // §16.1.1 — mode_mix vs mode_mix_applied. Since the 5-arm (now 6-arm,
+    // with keyword) fold-in (graph/wiki/visual/keyword all drive fused
+    // scoring), the applied mix IS the resolved mix — the column stays so
+    // historical rows (which recorded zeroed graph/wiki with the old
+    // scorer) remain interpretable. `mode_mix` above is deliberately left at
+    // its pre-visual shape for the same historical-comparability reason —
+    // `w_keyword` is added only here, matching how `w_visual` itself was
+    // added only here and not backfilled into `mode_mix`.
     let mode_mix_applied_json = mode_mix.map(|w| {
         serde_json::json!({
             "w_dense": w.w_dense,
@@ -101,6 +105,7 @@ pub async fn persist_trace(
             "w_graph": w.w_graph,
             "w_wiki":  w.w_wiki,
             "w_visual": w.w_visual,
+            "w_keyword": w.w_keyword,
             "rerank":  w.rerank,
             "note":    "all arm weights applied by the fused RRF scorer",
         })

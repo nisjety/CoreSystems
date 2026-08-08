@@ -43,8 +43,9 @@ COPY services/ services/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --release --bin index-engine \
-    && cp target/release/index-engine /usr/local/bin/index-engine
+    cargo build --release --bin index-engine --bin reembed-switch \
+    && cp target/release/index-engine /usr/local/bin/index-engine \
+    && cp target/release/reembed-switch /usr/local/bin/reembed-switch
 
 FROM debian:bookworm-slim AS runtime
 ARG SOURCE_REVISION=unverified
@@ -69,6 +70,7 @@ RUN groupadd --gid 10001 dpv2 \
 USER dpv2
 
 COPY --from=builder /usr/local/bin/index-engine /usr/local/bin/index-engine
+COPY --from=builder /usr/local/bin/reembed-switch /usr/local/bin/reembed-switch
 
 EXPOSE 9201
 

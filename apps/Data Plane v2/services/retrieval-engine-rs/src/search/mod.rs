@@ -5,6 +5,7 @@ pub mod filters;
 pub mod fusion;
 pub mod graph;
 pub mod graph_remote;
+pub mod keyword;
 pub mod rerank;
 pub mod sparse;
 pub mod timeline;

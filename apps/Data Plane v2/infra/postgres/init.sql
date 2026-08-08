@@ -129,6 +129,12 @@ CREATE TABLE IF NOT EXISTS knowledge_units (
     embedding_model   TEXT,
     metadata          JSONB        NOT NULL DEFAULT '{}',
     error_message     TEXT,
+    -- D19 (P4): bounded re-drive bookkeeping for the failed-embedding
+    -- reconciler in index-engine-rs. Kept as real columns rather than inside
+    -- `metadata`, which index-engine rewrites wholesale on rebuild and would
+    -- silently reset the retry budget.
+    embedding_retry_count INTEGER    NOT NULL DEFAULT 0,
+    embedding_retry_at    TIMESTAMPTZ,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     -- Phase 3 freshness seam: set when vectors are upserted (embedding_status='done').
@@ -141,6 +147,8 @@ CREATE INDEX IF NOT EXISTS idx_ku_org_id           ON knowledge_units (org_id);
 CREATE INDEX IF NOT EXISTS idx_ku_embedding_status ON knowledge_units (embedding_status);
 CREATE INDEX IF NOT EXISTS idx_ku_content_hash     ON knowledge_units (content_hash);
 CREATE INDEX IF NOT EXISTS idx_ku_text_fts         ON knowledge_units USING GIN(to_tsvector('simple', text));
+CREATE INDEX IF NOT EXISTS idx_ku_embedding_retry  ON knowledge_units (embedding_retry_count, embedding_retry_at)
+    WHERE embedding_status = 'failed';
 
 -- ── document_acl REMOVED (Per-User Data Ownership & Sharing phase) ────────────
 -- The dormant, duplicated document_acl table was consolidated into user-core's
@@ -697,12 +705,17 @@ CREATE TABLE IF NOT EXISTS documents_outbox (
     event_type   TEXT         NOT NULL,
     payload      JSONB        NOT NULL,
     published    BOOLEAN      NOT NULL DEFAULT FALSE,
+    observability_published BOOLEAN NOT NULL DEFAULT FALSE,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    published_at TIMESTAMPTZ
+    published_at TIMESTAMPTZ,
+    observability_published_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_documents_outbox_unpublished
     ON documents_outbox (created_at)
     WHERE published = FALSE;
+CREATE INDEX IF NOT EXISTS idx_documents_outbox_observability_pending
+    ON documents_outbox (created_at)
+    WHERE published = TRUE AND observability_published = FALSE;
 
 -- CAG — pinned permanent-memory context. Org-scoped facts preloaded into
 -- context packs (and served via /v1/context/preload) WITHOUT a retrieval loop.

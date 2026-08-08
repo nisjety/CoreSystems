@@ -9,7 +9,7 @@ info:
     than the underlying protobuf — the protos are the wire contract for the
     Model Plane (gRPC); this YAML is the contract for HTTP clients.
 
-    Service map (container DNS on `aquatiq-local`):
+    Service map (container DNS on `coresystem-local`):
       - retrieval-engine: http://retrieval-engine:8004
       - documents-api:    http://documents-api:8010
       - wiki-store:       http://wiki-store:8011

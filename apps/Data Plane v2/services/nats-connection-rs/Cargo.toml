@@ -9,4 +9,5 @@ path = "src/lib.rs"
 
 [dependencies]
 async-nats.workspace = true
+tracing.workspace = true
 

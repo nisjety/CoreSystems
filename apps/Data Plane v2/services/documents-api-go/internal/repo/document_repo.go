@@ -232,19 +232,52 @@ func (r *DocumentRepo) CreateWithOutbox(
 					return nil, ErrIdempotencyOwnershipConflict
 				}
 				if documentContentUnchanged(existing, input) {
+					// An ACL move on identical bytes is NOT idempotent reuse —
+					// who may read the document changed — so it emits the
+					// lifecycle event and reports Updated, which invalidates
+					// caches and lets read-model mirrors follow. It does NOT
+					// reset status; see updateVisibilityOnlySQL for why that
+					// would strand the document at 'pending'.
+					if next := sourceVisibilityUpdate(existing, input); next != nil {
+						revised, visErr := scanDocument(tx.QueryRow(ctx,
+							updateVisibilityOnlySQL+documentColumns,
+							input.OrgID, existing.DocumentID, *next))
+						if visErr != nil {
+							tx.Rollback(ctx)
+							return nil, fmt.Errorf("update document visibility from source: %w", visErr)
+						}
+						if err := enqueueLifecycleEventTx(ctx, tx, input.OrgID, revised, true, eventFactory); err != nil {
+							return nil, err
+						}
+						if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+							return nil, err
+						}
+						if err := tx.Commit(ctx); err != nil {
+							return nil, fmt.Errorf("commit document visibility update: %w", err)
+						}
+						return &CreateResult{Document: revised, Updated: true}, nil
+					}
 					if err := tx.Commit(ctx); err != nil {
 						return nil, fmt.Errorf("commit document reuse: %w", err)
 					}
 					return &CreateResult{Document: existing, Reused: true}, nil
 				}
+				// NULL leaves visibility as-is; a connector-reported ACL supplies
+				// a value and takes effect (mirrors updateContent).
+				var sourceVisibility *string
+				if input.VisibilityFromSource {
+					v := normalizeVisibility(input.Visibility)
+					sourceVisibility = &v
+				}
 				updatedRow := tx.QueryRow(ctx, `
 					UPDATE documents SET source=$3,type=$4,title=$5,content=$6,metadata=$7,
 					zdr_classification=$8,extraction_trace=$9,status='pending',error_message=NULL,
-					deleted_at=NULL,updated_at=NOW(),document_date=COALESCE($11,document_date)
+					deleted_at=NULL,updated_at=NOW(),document_date=COALESCE($11,document_date),
+					visibility=COALESCE($12,visibility)
 					WHERE org_id=$1 AND document_id=$2 AND owner_id=$10
 					RETURNING `+documentColumns,
 					input.OrgID, existing.DocumentID, input.Source, input.Type, input.Title,
-					input.Content, meta, zdr, trace, ownerID, input.DocumentDate)
+					input.Content, meta, zdr, trace, ownerID, input.DocumentDate, sourceVisibility)
 				updated, updateErr := scanDocument(updatedRow)
 				if updateErr != nil {
 					tx.Rollback(ctx)
@@ -359,6 +392,18 @@ func (r *DocumentRepo) Create(ctx context.Context, input model.CreateDocumentInp
 				return nil, ErrIdempotencyOwnershipConflict
 			}
 			if documentContentUnchanged(existing, input) {
+				if next := sourceVisibilityUpdate(existing, input); next != nil {
+					revised, visErr := scanDocument(r.pool.QueryRow(ctx,
+						updateVisibilityOnlySQL+documentColumns,
+						input.OrgID, existing.DocumentID, *next))
+					if visErr != nil {
+						return nil, fmt.Errorf("update document visibility from source: %w", visErr)
+					}
+					r.bumpOrgVersion(ctx, input.OrgID)
+					// Updated, not Reused: the ACL moved, so downstream stages
+					// must re-evaluate the document (see the outbox path).
+					return &CreateResult{Document: revised, Updated: true}, nil
+				}
 				return &CreateResult{Document: existing, Reused: true}, nil
 			}
 			// Same logical document, new content: refresh in place and signal
@@ -415,11 +460,55 @@ func documentContentUnchanged(existing *model.Document, input model.CreateDocume
 	return existing.Content == input.Content && existing.Title == input.Title
 }
 
+// sourceVisibilityUpdate reports the visibility an existing document should move
+// to because a verified connector reported the upstream ACL, or nil when nothing
+// should change. Used on the content-unchanged paths: a permission change
+// upstream produces byte-identical content, so without this the ACL would never
+// propagate — the case that stranded every SharePoint document at `private`.
+func sourceVisibilityUpdate(existing *model.Document, input model.CreateDocumentInput) *string {
+	if !input.VisibilityFromSource || existing == nil {
+		return nil
+	}
+	v := normalizeVisibility(input.Visibility)
+	if existing.Visibility == v {
+		return nil
+	}
+	return &v
+}
+
+// Visibility moves WITHOUT touching status, deliberately.
+//
+// Resetting to 'pending' here looks tempting — graph extraction gates on
+// visibility, so a promoted document ought to be re-extracted. It does not work
+// and actively breaks things: index-engine reuses chunks whose content-derived
+// ids and text are unchanged, so it emits no `knowledge.units.created`,
+// embedding-engine never runs, and `check_documents_indexed` (the ONLY writer
+// that moves a document back to 'indexed') never fires. The document would sit
+// at 'pending' forever.
+//
+// Re-extraction therefore needs a real trigger, which does not exist yet:
+// `dataplane.documents.indexed` is only published on a state TRANSITION into
+// indexed (embedding-engine `src/batch/mod.rs`: `UPDATE documents SET
+// status='indexed' ... AND status != 'indexed' RETURNING`, published only when
+// that returns a row). An already-indexed document can never be re-announced,
+// so nothing can pull it into the graph after an ACL change. Fixing that
+// belongs in embedding-engine (re-announce idempotently when every unit for a
+// re-notified document is already done), not here.
+const updateVisibilityOnlySQL = `
+	UPDATE documents SET visibility = $3, updated_at = NOW()
+	 WHERE org_id = $1 AND document_id = $2
+	RETURNING `
+
 // updateContent refreshes an existing document in place with re-ingested
 // content and resets it to 'pending' so the chunking/embedding pipeline
 // reprocesses it. deleted_at is cleared so a re-ingest also resurrects a
-// previously soft-deleted document. Ownership + visibility are intentionally
-// left untouched — a re-ingest must not silently re-open a privately-scoped doc.
+// previously soft-deleted document. Ownership is intentionally left untouched.
+//
+// Visibility is also left untouched by default — a re-ingest must not silently
+// re-open a privately-scoped doc — EXCEPT when input.VisibilityFromSource says a
+// verified connector is reporting the upstream system's own ACL. That case is
+// the opposite of a silent re-open: it is how a permission change made in
+// SharePoint (in either direction) reaches this document at all.
 func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID, ownerID string, input model.CreateDocumentInput) (*model.Document, error) {
 	meta := input.Metadata
 	if meta == nil {
@@ -434,15 +523,24 @@ func (r *DocumentRepo) updateContent(ctx context.Context, orgID, documentID, own
 		trace = json.RawMessage(`{}`)
 	}
 
+	// NULL leaves visibility as-is via COALESCE; a connector-reported ACL
+	// supplies a real value and takes effect.
+	var sourceVisibility *string
+	if input.VisibilityFromSource {
+		v := normalizeVisibility(input.Visibility)
+		sourceVisibility = &v
+	}
+
 	row := r.pool.QueryRow(ctx, `
 		UPDATE documents
 		   SET source = $3, type = $4, title = $5, content = $6, metadata = $7,
 		       zdr_classification = $8, extraction_trace = $9, status = 'pending',
 		       error_message = NULL, deleted_at = NULL, updated_at = NOW(),
-		       document_date = COALESCE($11, document_date)
+		       document_date = COALESCE($11, document_date),
+		       visibility = COALESCE($12, visibility)
 		 WHERE org_id = $1 AND document_id = $2 AND owner_id = $10
 		RETURNING `+documentColumns+`
-	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace, ownerID, input.DocumentDate)
+	`, orgID, documentID, input.Source, input.Type, input.Title, input.Content, meta, zdr, trace, ownerID, input.DocumentDate, sourceVisibility)
 
 	return scanDocument(row)
 }

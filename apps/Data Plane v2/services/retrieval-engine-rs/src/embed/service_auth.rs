@@ -22,6 +22,60 @@ const MAX_TOKEN_TTL_SECONDS: i64 = 300;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 const CLOCK_LEEWAY_SECONDS: i64 = 30;
 
+/// Retention posture this deployment expects on an issued inference token.
+///
+/// Mirrors auth-core's service-principal registry vocabulary — the
+/// `retentionByAudience` map takes exactly `"zdr"` or `"persistent"` per
+/// audience. The issuer alone selects the posture (auth-core rejects any
+/// caller-supplied `x-zdr` header or `zdr` body field), so this is an assertion
+/// that the token matches the principal we are registered as, never a request.
+///
+/// Keep this aligned with the registry entry for this service's
+/// `inference-core` audience. A mismatch fails closed on every mint, which is
+/// how embedding silently died when the registry moved to `persistent` while
+/// the clients still demanded `zdr` — see commit 3666503f.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RetentionPosture {
+    /// Registry `"zdr"`: the token must carry `zdr:true`.
+    ZeroRetention,
+    /// Registry `"persistent"`: the token must carry `zdr:false`.
+    Persistent,
+}
+
+impl RetentionPosture {
+    pub(super) fn parse(value: &str) -> anyhow::Result<Self> {
+        match value.trim() {
+            "zdr" => Ok(Self::ZeroRetention),
+            "persistent" => Ok(Self::Persistent),
+            other => anyhow::bail!(
+                "MODEL_PLANE_INFERENCE_RETENTION_POSTURE must be `zdr` or `persistent`, got `{other}`"
+            ),
+        }
+    }
+
+    /// The `zdr` claim value a correctly issued token carries under this posture.
+    const fn expected_zdr(self) -> bool {
+        matches!(self, Self::ZeroRetention)
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ZeroRetention => "zdr",
+            Self::Persistent => "persistent",
+        }
+    }
+}
+
+/// Renders an observed `zdr` claim in the registry's vocabulary so a mismatch
+/// error names both sides in the same terms the operator configures.
+const fn observed_posture(zdr: bool) -> &'static str {
+    if zdr {
+        "zdr"
+    } else {
+        "persistent"
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct InferenceTokenClient {
     http: Client,
@@ -29,6 +83,7 @@ pub(super) struct InferenceTokenClient {
     expected_issuer: Arc<str>,
     service_id: Arc<str>,
     service_api_key: Arc<str>,
+    retention_posture: RetentionPosture,
 }
 
 impl fmt::Debug for InferenceTokenClient {
@@ -39,6 +94,7 @@ impl fmt::Debug for InferenceTokenClient {
             .field("expected_issuer", &self.expected_issuer)
             .field("service_id", &self.service_id)
             .field("service_api_key", &"[REDACTED]")
+            .field("retention_posture", &self.retention_posture)
             .finish()
     }
 }
@@ -98,6 +154,7 @@ impl InferenceTokenClient {
         expected_issuer: &str,
         service_id: &str,
         service_api_key: &str,
+        retention_posture: RetentionPosture,
     ) -> anyhow::Result<Self> {
         let token_url = Url::parse(token_url.trim())
             .context("MODEL_PLANE_INFERENCE_TOKEN_URL must be an absolute HTTP(S) URL")?;
@@ -135,6 +192,7 @@ impl InferenceTokenClient {
             expected_issuer: Arc::from(expected_issuer),
             service_id: Arc::from(service_id),
             service_api_key: Arc::from(service_api_key),
+            retention_posture,
         })
     }
 
@@ -220,13 +278,20 @@ impl InferenceTokenClient {
                 && claims.service_id == expected_subject
                 && claims.scopes.len() == 1
                 && claims.scopes[0] == INFERENCE_SCOPE
-                && claims.reason == TOKEN_REASON
-                // Query embeddings ride the same `persistent`-posture principal
-                // as document embeddings (zdr:false). See embedding-engine's
-                // inference_auth.rs for why requiring zdr:true here broke every
-                // call once the registry posture was corrected.
-                && !claims.zdr,
+                && claims.reason == TOKEN_REASON,
             "inference service-token claims exceeded requested authority"
+        );
+
+        // Checked separately from the authority bounds above so a posture drift
+        // between this deployment and auth-core's registry names both sides
+        // instead of hiding inside a ten-clause assertion.
+        anyhow::ensure!(
+            claims.zdr == self.retention_posture.expected_zdr(),
+            "inference service-token carried the `{}` retention posture but this deployment \
+             expects `{}`; align MODEL_PLANE_INFERENCE_RETENTION_POSTURE with auth-core's \
+             retentionByAudience entry for this principal's `{INFERENCE_AUDIENCE}` audience",
+            observed_posture(claims.zdr),
+            self.retention_posture.as_str(),
         );
 
         let now = Utc::now();
@@ -301,7 +366,12 @@ mod tests {
         WrongAudience,
         WrongScope,
         WrongOrg,
-        Retaining,
+        /// A retention posture that does not match the one this client is
+        /// configured to expect. Inference Core treats `zdr` as a floor
+        /// (`effective_zdr = issuer_zdr || request_zdr`), so an unexpected
+        /// posture means the response came from a different principal or a
+        /// misrouted issuer, not a safe narrowing.
+        MismatchedRetention,
     }
 
     #[derive(Clone)]
@@ -312,6 +382,9 @@ mod tests {
 
     struct MockState {
         problem: TokenProblem,
+        /// Posture this mock issuer is configured to mint, standing in for the
+        /// principal's `retentionByAudience` entry in auth-core's registry.
+        issued_posture: RetentionPosture,
         requests: Mutex<Vec<RecordedRequest>>,
     }
 
@@ -386,7 +459,10 @@ mod tests {
             service_id: format!("service:{SERVICE_ID}"),
             scopes,
             reason: TOKEN_REASON,
-            zdr: !matches!(state.problem, TokenProblem::Retaining),
+            // A correctly issued token carries whatever posture this issuer is
+            // registered for; only the mismatch case diverges from it.
+            zdr: state.issued_posture.expected_zdr()
+                != matches!(state.problem, TokenProblem::MismatchedRetention),
         };
         let mut header = Header::new(Algorithm::RS256);
         header.typ = Some("JWT".to_string());
@@ -407,10 +483,18 @@ mod tests {
     }
 
     async fn start_server(problem: TokenProblem) -> (String, Arc<MockState>) {
+        start_server_issuing(problem, RetentionPosture::Persistent).await
+    }
+
+    async fn start_server_issuing(
+        problem: TokenProblem,
+        issued_posture: RetentionPosture,
+    ) -> (String, Arc<MockState>) {
         // Keep key generation outside the production client's short timeout.
         let _ = encoding_key();
         let state = Arc::new(MockState {
             problem,
+            issued_posture,
             requests: Mutex::new(Vec::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -432,7 +516,11 @@ mod tests {
     }
 
     fn client(token_url: &str) -> InferenceTokenClient {
-        InferenceTokenClient::new(token_url, ISSUER, SERVICE_ID, SERVICE_CREDENTIAL)
+        client_expecting(token_url, RetentionPosture::Persistent)
+    }
+
+    fn client_expecting(token_url: &str, posture: RetentionPosture) -> InferenceTokenClient {
+        InferenceTokenClient::new(token_url, ISSUER, SERVICE_ID, SERVICE_CREDENTIAL, posture)
             .expect("inference token client")
     }
 
@@ -475,10 +563,68 @@ mod tests {
             TokenProblem::WrongAudience,
             TokenProblem::WrongScope,
             TokenProblem::WrongOrg,
-            TokenProblem::Retaining,
+            TokenProblem::MismatchedRetention,
         ] {
             let (token_url, _) = start_server(problem).await;
             assert!(client(&token_url).mint("org-a").await.is_err());
+        }
+    }
+
+    /// Regression guard for the retention-posture check.
+    ///
+    /// The `zdr` claim is issuer-determined: auth-core rejects any caller
+    /// attempt to select a posture and resolves it from the service-principal
+    /// registry's `retentionByAudience` entry. This client therefore asserts
+    /// the configured posture rather than a hardcoded one — a silent flip in
+    /// either direction is a production outage (demanding `zdr` against a
+    /// `persistent` registry rejected every honestly issued token, the defect
+    /// fixed in 3666503f; the mirror image would break a tightened registry).
+    ///
+    /// Both postures are exercised against both issuers, so neither the
+    /// polarity nor the config plumbing can regress unnoticed.
+    #[tokio::test]
+    async fn pins_token_retention_posture_to_the_configured_registry_entry() {
+        for expected in [
+            RetentionPosture::Persistent,
+            RetentionPosture::ZeroRetention,
+        ] {
+            let (matching_url, _) = start_server_issuing(TokenProblem::None, expected).await;
+            client_expecting(&matching_url, expected)
+                .mint("org-a")
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("issuer posture {expected:?} must be accepted, got: {error}")
+                });
+
+            let (diverging_url, _) =
+                start_server_issuing(TokenProblem::MismatchedRetention, expected).await;
+            let error = client_expecting(&diverging_url, expected)
+                .mint("org-a")
+                .await
+                .expect_err("a posture the deployment does not expect is rejected");
+            assert!(
+                error.to_string().contains("retention posture"),
+                "mismatch must name the posture, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_retention_posture_configuration() {
+        assert_eq!(
+            RetentionPosture::parse("persistent").expect("persistent parses"),
+            RetentionPosture::Persistent
+        );
+        assert_eq!(
+            RetentionPosture::parse(" zdr ").expect("zdr parses with surrounding space"),
+            RetentionPosture::ZeroRetention
+        );
+        // Misconfiguration fails at startup rather than on the first mint.
+        for invalid in ["", "PERSISTENT", "true", "zero-retention"] {
+            assert!(
+                RetentionPosture::parse(invalid).is_err(),
+                "`{invalid}` must not parse as a retention posture"
+            );
         }
     }
 
@@ -488,14 +634,16 @@ mod tests {
             "http://auth-core:3011/api/inference-core/internal-token",
             ISSUER,
             SERVICE_ID,
-            ""
+            "",
+            RetentionPosture::Persistent
         )
         .is_err());
         assert!(InferenceTokenClient::new(
             "http://credential@auth-core:3011/api/inference-core/internal-token",
             ISSUER,
             SERVICE_ID,
-            SERVICE_CREDENTIAL
+            SERVICE_CREDENTIAL,
+            RetentionPosture::Persistent
         )
         .is_err());
     }
