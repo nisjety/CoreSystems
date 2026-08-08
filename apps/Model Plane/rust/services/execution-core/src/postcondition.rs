@@ -44,6 +44,11 @@ const CONFIRMED_BOOKING_STATUSES: &[&str] = &["booked", "confirmed", "in_transit
 /// Booking states that positively contradict a claimed successful booking.
 const REFUTING_BOOKING_STATUSES: &[&str] = &["cancelled", "canceled", "failed", "rejected"];
 
+/// Keys whose *string* value is treated as an object's own identity. Matching
+/// only these — never a substring of arbitrary text — is what stops an id
+/// quoted inside a message body from confirming that the message exists.
+const IDENTIFIER_KEYS: &[&str] = &["ts", "id", "message_id", "messageId", "provider_message_id"];
+
 /// The three-valued judgment a postcondition verifier can reach. Three, not
 /// two, because "I could not tell" must be representable — collapsing it into
 /// either success or failure is how false claims get made.
@@ -192,13 +197,100 @@ pub enum ReadBackStrength {
     BoundedList,
 }
 
+/// One field the write asked to change, and the value it asked for,
+/// canonicalized to a string so a JSON number and its textual form compare
+/// equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldExpectation {
+    pub field: String,
+    pub expected: String,
+}
+
+/// How a read-back reaches its verdict.
+///
+/// The split exists because the two cases are not interchangeable, and using
+/// the wrong one is the most plausible way to manufacture a false confirmation
+/// in this module. A *create* is proven by its object existing. A *mutation*
+/// is not: the object existed before the write, so finding it says nothing.
+/// Putting that in the type system means a mutation cannot accidentally be
+/// wired to the existence check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadBackJudgment {
+    /// Confirm by finding the write's receipt id in the read-back.
+    IdentifierPresence,
+    /// Confirm by comparing the values the write asked for against the values
+    /// the system of record now reports.
+    FieldValues {
+        /// Identifies the mutated object *inside* the read-back — the receipt
+        /// id for a listing, the target id for a by-id read. Never a value the
+        /// caller supplies independently of the write.
+        locator: String,
+        /// Non-empty by construction: a field comparison with nothing to
+        /// compare would silently degenerate into an existence check, which is
+        /// exactly what a mutation must not use.
+        expectations: Vec<FieldExpectation>,
+    },
+}
+
 /// A planned read-back: which frozen-surface operation to call, with what
-/// params, and what its answer is worth.
+/// params, what its answer is worth, and how to judge it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderReadBack {
     pub operation: &'static str,
     pub params: Value,
     pub strength: ReadBackStrength,
+    pub judgment: ReadBackJudgment,
+}
+
+/// Canonicalize a JSON scalar for comparison. Returns `None` for objects and
+/// arrays: a nested value's textual shape depends on provider normalization,
+/// and comparing those would produce refutations that reflect formatting
+/// rather than whether the mutation applied.
+fn scalar_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.trim().to_owned()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+/// The scalar fields a write asked to set, taken from its own request body.
+///
+/// Only top-level scalars: a nested object in the request has no reliable
+/// correspondence to how the provider reports it back.
+fn scalar_expectations(value: &Value) -> Vec<FieldExpectation> {
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut fields: Vec<FieldExpectation> = map
+        .iter()
+        .filter_map(|(field, raw)| {
+            let expected = scalar_to_string(raw)?;
+            if expected.is_empty() {
+                return None;
+            }
+            Some(FieldExpectation {
+                field: field.clone(),
+                expected,
+            })
+        })
+        .collect();
+    // Deterministic order so a plan is reproducible and testable.
+    fields.sort_by(|a, b| a.field.cmp(&b.field));
+    fields
+}
+
+/// The scalar fields a RestLi partial update asked to set.
+///
+/// LinkedIn's update body is `{"patch": {"$set": {…}}}`; anything else (a
+/// nested per-field patch, a `$delete`) yields nothing, which correctly makes
+/// the planner return `None` rather than a comparison with no content.
+fn restli_set_expectations(body: &Value) -> Vec<FieldExpectation> {
+    body.get("patch")
+        .and_then(|patch| patch.get("$set"))
+        .map(scalar_expectations)
+        .unwrap_or_default()
 }
 
 /// Plan the read-back for a completed provider write, or `None` when this
@@ -222,21 +314,29 @@ pub struct ProviderReadBack {
 ///   in `integration_tools` match only string values. No receipt is extracted,
 ///   so `issues.create` never reaches `Completed` either — a read-back against
 ///   the `issues` listing would be unreachable code, not a missing verifier.
-/// - **Mutations of an existing object cannot be verified by finding that
-///   object.** `issues.update`, `events.update`, `ads.campaign.update`,
-///   `user.suspend`, `user.activate` and `catalog.product.upsert` all have a
-///   perfectly good read on the frozen surface, and pairing them with it would
-///   be wrong: the object existed *before* the write, so its presence afterward
-///   is evidence of nothing. Confirming a mutation needs the read-back to carry
-///   the mutated field, which is a different judgment than identifier presence
-///   and is deliberately not attempted here.
+/// - GitHub `issues.update` inherits exactly the same numeric-id problem as
+///   `issues.create`, so it is out of reach for the same reason — not because
+///   the `issues` listing could not be compared against.
+///
+/// Mutations use [`ReadBackJudgment::FieldValues`] instead: the read-back must
+/// show the values the write asked for, because the object's mere existence
+/// predates the write. Their reachability is gated on something separate from
+/// this planner — see [`verify_provider_action`].
 #[must_use]
 pub fn plan_provider_read_back(
     operation: &str,
+    params: &Value,
     body: &Value,
     receipt_id: &str,
 ) -> Option<ProviderReadBack> {
     let receipt_id = receipt_id.trim();
+    let param = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
     match operation.trim() {
         // Slack chat.postMessage returns the message `ts`; conversations.history
         // lists a bounded window of the same channel's messages.
@@ -249,6 +349,7 @@ pub fn plan_provider_read_back(
                 operation: "messages.list",
                 params: serde_json::json!({ "channel": channel, "limit": 100 }),
                 strength: ReadBackStrength::BoundedList,
+                judgment: ReadBackJudgment::IdentifierPresence,
             })
         }
         // Gmail send returns the created message id; the message list returns
@@ -257,6 +358,7 @@ pub fn plan_provider_read_back(
             operation: "gmail.messages",
             params: serde_json::json!({ "maxResults": 100 }),
             strength: ReadBackStrength::BoundedList,
+            judgment: ReadBackJudgment::IdentifierPresence,
         }),
         // LinkedIn creates answer with an empty body plus an `x-restli-id`
         // header, which integration-corev2's `doJSON` materializes as
@@ -271,6 +373,7 @@ pub fn plan_provider_read_back(
                 operation: "events.get",
                 params: serde_json::json!({ "eventId": receipt_id }),
                 strength: ReadBackStrength::AuthoritativeById,
+                judgment: ReadBackJudgment::IdentifierPresence,
             })
         }
         // Posts have no by-id read on the frozen surface, only an author-scoped
@@ -286,6 +389,7 @@ pub fn plan_provider_read_back(
                 operation: "posts.list",
                 params: serde_json::json!({ "author": author, "count": 100 }),
                 strength: ReadBackStrength::BoundedList,
+                judgment: ReadBackJudgment::IdentifierPresence,
             })
         }
         // The Meta family returns Graph node ids as JSON strings, and each of
@@ -298,6 +402,7 @@ pub fn plan_provider_read_back(
                 operation: "live.get",
                 params: serde_json::json!({ "liveVideoId": receipt_id }),
                 strength: ReadBackStrength::AuthoritativeById,
+                judgment: ReadBackJudgment::IdentifierPresence,
             })
         }
         // Confirms the *container* exists, which is what this write creates —
@@ -306,23 +411,127 @@ pub fn plan_provider_read_back(
             operation: "instagram.media.status",
             params: serde_json::json!({ "creationId": receipt_id }),
             strength: ReadBackStrength::AuthoritativeById,
+            judgment: ReadBackJudgment::IdentifierPresence,
         }),
         "threads.container.create" if !receipt_id.is_empty() => Some(ProviderReadBack {
             operation: "threads.container.status",
             params: serde_json::json!({ "creationId": receipt_id }),
             strength: ReadBackStrength::AuthoritativeById,
+            judgment: ReadBackJudgment::IdentifierPresence,
         }),
+
+        // --- Mutations: judged on values, never on existence ----------------
+        //
+        // Each of these reads the object back by the id the *write itself*
+        // targeted (from its params), so the verifier looks at exactly the
+        // object the approval authorized and nowhere else. An update with
+        // nothing comparable in its patch plans no read at all rather than
+        // degenerating into an existence check.
+        "events.update" | "linkedin.events.update" => {
+            let event_id = param("eventId")?;
+            let expectations = restli_set_expectations(body);
+            if expectations.is_empty() {
+                return None;
+            }
+            Some(ProviderReadBack {
+                operation: "events.get",
+                params: serde_json::json!({ "eventId": event_id }),
+                strength: ReadBackStrength::AuthoritativeById,
+                judgment: ReadBackJudgment::FieldValues {
+                    locator: event_id.to_owned(),
+                    expectations,
+                },
+            })
+        }
+        "ads.campaign.update" | "linkedin.ads.campaign.update" => {
+            let account_id = param("accountId")?;
+            let campaign_id = param("campaignId")?;
+            let expectations = restli_set_expectations(body);
+            if expectations.is_empty() {
+                return None;
+            }
+            Some(ProviderReadBack {
+                operation: "ads.campaign",
+                params: serde_json::json!({
+                    "accountId": account_id,
+                    "campaignId": campaign_id,
+                }),
+                strength: ReadBackStrength::AuthoritativeById,
+                judgment: ReadBackJudgment::FieldValues {
+                    locator: campaign_id.to_owned(),
+                    expectations,
+                },
+            })
+        }
+        // The expected value here comes from the *operation*, not the body:
+        // these lifecycle calls carry no body at all, and what they assert is
+        // named by which endpoint was called. Okta reports user status as an
+        // uppercase enum on each element of the (bounded) user listing, so the
+        // user is located in that window first and only then compared.
+        "user.suspend" | "okta.user.suspend" | "user.activate" | "okta.user.activate" => {
+            let user_id = param("userId")?;
+            let expected_status = if operation.trim().ends_with("suspend") {
+                "SUSPENDED"
+            } else {
+                "ACTIVE"
+            };
+            Some(ProviderReadBack {
+                operation: "users",
+                params: serde_json::json!({ "limit": 200 }),
+                strength: ReadBackStrength::BoundedList,
+                judgment: ReadBackJudgment::FieldValues {
+                    locator: user_id.to_owned(),
+                    expectations: vec![FieldExpectation {
+                        field: "status".to_owned(),
+                        expected: expected_status.to_owned(),
+                    }],
+                },
+            })
+        }
+        // An upsert either created or changed the product, so existence proves
+        // nothing either way; the retailer fields it set are what distinguish
+        // the two. Located by receipt inside the catalog's bounded listing.
+        "catalog.product.upsert" if !receipt_id.is_empty() => {
+            let catalog_id = param("catalogId")?;
+            let expectations = scalar_expectations(body);
+            if expectations.is_empty() {
+                return None;
+            }
+            Some(ProviderReadBack {
+                operation: "catalog.products",
+                params: serde_json::json!({ "catalogId": catalog_id, "limit": 100 }),
+                strength: ReadBackStrength::BoundedList,
+                judgment: ReadBackJudgment::FieldValues {
+                    locator: receipt_id.to_owned(),
+                    expectations,
+                },
+            })
+        }
         _ => None,
     }
 }
 
-/// Judge a completed read-back against the receipt the write claimed.
+/// Judge a completed read-back, by whichever rule the plan declared.
 ///
 /// The asymmetry enforced here is the whole point: presence always confirms,
 /// but absence only refutes when the read-back was authoritative for that
 /// exact id.
 #[must_use]
 pub fn judge_provider_read_back(
+    plan: &ProviderReadBack,
+    receipt_id: &str,
+    result: &Value,
+) -> PostconditionOutcome {
+    match &plan.judgment {
+        ReadBackJudgment::IdentifierPresence => judge_identifier_presence(plan, receipt_id, result),
+        ReadBackJudgment::FieldValues {
+            locator,
+            expectations,
+        } => judge_field_values(plan, locator, expectations, result),
+    }
+}
+
+fn judge_identifier_presence(
     plan: &ProviderReadBack,
     receipt_id: &str,
     result: &Value,
@@ -360,6 +569,161 @@ pub fn judge_provider_read_back(
     }
 }
 
+/// Judge a mutation by comparing the values it asked for against the values
+/// the provider now reports.
+///
+/// # Why a mismatch is allowed to refute
+///
+/// This is the one place the module compares content rather than identity, and
+/// content comparison is how false *failures* get manufactured — a provider
+/// that trims, re-cases or normalizes a stored value would otherwise read as
+/// "the mutation did not apply". Three rules keep that from happening:
+/// scalars only (a nested value's shape is the provider's choice), comparison
+/// after trimming and case-folding, and a field the read-back does not report
+/// at all counts as unknown rather than as a mismatch. What survives all three
+/// is a field the provider *did* report, with a value that is genuinely not
+/// the one requested — which is a real contradiction of the write's success.
+fn judge_field_values(
+    plan: &ProviderReadBack,
+    locator: &str,
+    expectations: &[FieldExpectation],
+    result: &Value,
+) -> PostconditionOutcome {
+    let scope = locate_object(result, locator, 0);
+    let scope = match (scope, plan.strength) {
+        (Some(object), _) => object,
+        // A by-id read *is* the object, so failing to spot the id inside it is
+        // far more likely to mean the provider reports ids in a shape this
+        // search does not recognize than that it answered about something
+        // else. Comparing the fields against the whole response is the safe
+        // reading: a genuinely wrong object still refutes, on the mismatch,
+        // while an unrecognized id shape costs nothing.
+        (None, ReadBackStrength::AuthoritativeById) => result,
+        (None, ReadBackStrength::BoundedList) => {
+            return PostconditionOutcome::Inconclusive {
+                detail: format!(
+                    "{locator} was not in the bounded {} window, so its fields \
+                     could not be compared",
+                    plan.operation
+                ),
+            };
+        }
+    };
+
+    let mut matched: Vec<&str> = Vec::new();
+    let mut mismatched: Vec<String> = Vec::new();
+    let mut unknown: Vec<&str> = Vec::new();
+    for expectation in expectations {
+        let reported = field_values(scope, &expectation.field, 0);
+        if reported.is_empty() {
+            unknown.push(&expectation.field);
+        } else if reported
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(expectation.expected.trim()))
+        {
+            matched.push(&expectation.field);
+        } else {
+            mismatched.push(format!(
+                "{} is {} but the write set it to {}",
+                expectation.field,
+                reported.join("/"),
+                expectation.expected
+            ));
+        }
+    }
+
+    if !mismatched.is_empty() {
+        return PostconditionOutcome::Refuted {
+            detail: format!(
+                "provider's own {} read contradicts the write: {}",
+                plan.operation,
+                mismatched.join("; ")
+            ),
+        };
+    }
+    if matched.is_empty() {
+        return PostconditionOutcome::Inconclusive {
+            detail: format!(
+                "provider's own {} read reports none of the changed fields ({}), \
+                 so the mutation could not be checked",
+                plan.operation,
+                unknown.join(", ")
+            ),
+        };
+    }
+    PostconditionOutcome::Confirmed {
+        detail: format!(
+            "provider's own {} read independently reports {} as the write set them{}",
+            plan.operation,
+            matched.join(", "),
+            if unknown.is_empty() {
+                String::new()
+            } else {
+                format!(" ({} not reported back)", unknown.join(", "))
+            }
+        ),
+    }
+}
+
+/// Find the object inside a read-back that carries `locator` as its own
+/// identifier — the one element of a listing, or the object a by-id read
+/// returned. Depth-bounded like the identifier search.
+///
+/// Unlike [`response_contains_identifier`], which mirrors the receipt
+/// extractor's string-only rule, this accepts a numeric id as well: providers
+/// that report ids as JSON numbers (GitHub, and Graph in places) are common,
+/// and failing to locate an object on that basis would push a perfectly good
+/// mutation toward a verdict it has not earned.
+fn locate_object<'a>(value: &'a Value, locator: &str, depth: u8) -> Option<&'a Value> {
+    if depth > 6 {
+        return None;
+    }
+    match value {
+        Value::Object(map) => {
+            for key in IDENTIFIER_KEYS {
+                if map
+                    .get(*key)
+                    .and_then(scalar_to_string)
+                    .is_some_and(|candidate| candidate == locator)
+                {
+                    return Some(value);
+                }
+            }
+            map.values()
+                .find_map(|nested| locate_object(nested, locator, depth + 1))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| locate_object(item, locator, depth + 1)),
+        _ => None,
+    }
+}
+
+/// Every scalar value reported at `field` within this object, canonicalized.
+///
+/// Searches nested objects because a provider may report a field one level
+/// down (Snap and Graph both wrap payloads); an array of objects is *not*
+/// descended into, since those are sibling records rather than this object's
+/// own fields.
+fn field_values(value: &Value, field: &str, depth: u8) -> Vec<String> {
+    if depth > 4 {
+        return Vec::new();
+    }
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = Vec::new();
+    if let Some(reported) = map.get(field).and_then(scalar_to_string) {
+        found.push(reported);
+    }
+    for nested in map.values() {
+        if nested.is_object() {
+            found.extend(field_values(nested, field, depth + 1));
+        }
+    }
+    found
+}
+
 /// Does this response carry `identifier` as an actual identifier value?
 ///
 /// Matches only on string values at identifier-shaped keys, never on a
@@ -372,9 +736,9 @@ fn response_contains_identifier(value: &Value, identifier: &str, depth: u8) -> b
     }
     match value {
         Value::Object(map) => {
-            for key in ["ts", "id", "message_id", "messageId", "provider_message_id"] {
+            for key in IDENTIFIER_KEYS {
                 if map
-                    .get(key)
+                    .get(*key)
                     .and_then(Value::as_str)
                     .is_some_and(|candidate| candidate.trim() == identifier)
                 {
@@ -411,11 +775,31 @@ fn response_contains_identifier(value: &Value, identifier: &str, depth: u8) -> b
 /// the listing and stay inconclusive. That is the safe direction, but it means
 /// a verifier can be silently unexercised in production — the connection needs
 /// the *read* capability for verification to be worth anything.
+///
+/// # The receipt gate, which matters most for mutations
+///
+/// This is only ever reached from a `Completed` disposition, and a provider
+/// action reaches `Completed` only when the receipt heuristic found a **string**
+/// id in the write's response. That is a poor fit for mutations: the object's
+/// id was known *before* the call, and providers commonly answer a successful
+/// update with `204 No Content` — for which integration-corev2's `doJSON`
+/// returns `{"ok": true}` and, unlike the empty-body-with-200 path, does not
+/// even attach `x-restli-id`. Such a write is currently recorded as
+/// `invalid_continuation`, a terminal failure, despite the same code path
+/// noting that integration-corev2 durably completed it.
+///
+/// The mutation verifiers below therefore key on the object id the write
+/// *targeted* rather than on a receipt, so they are correct whenever they run —
+/// but until the disposition rule stops requiring a receipt for actions whose
+/// identity is already known, the ones whose providers answer 204 will not run.
+/// That gap is a false *failure*, not a false success, so it is recorded here
+/// rather than papered over by loosening what counts as a verified outcome.
 pub async fn verify_provider_action(
     client: &crate::integration_tools::IntegrationActionsClient,
     org_id: &str,
     connection_id: &str,
     operation: &str,
+    params: &Value,
     body: &Value,
     receipt_id: &str,
 ) -> PostconditionOutcome {
@@ -424,7 +808,7 @@ pub async fn verify_provider_action(
             detail: "no provider receipt id to verify against".to_owned(),
         };
     }
-    let Some(plan) = plan_provider_read_back(operation, body, receipt_id) else {
+    let Some(plan) = plan_provider_read_back(operation, params, body, receipt_id) else {
         return PostconditionOutcome::Inconclusive {
             detail: format!("no postcondition verifier is defined for {operation}"),
         };
@@ -669,6 +1053,7 @@ mod tests {
     fn slack_send_plans_a_channel_scoped_history_read() {
         let plan = plan_provider_read_back(
             "slack.message.send",
+            &json!({}),
             &json!({ "channel": "C123", "text": "hello" }),
             "1700000000.000200",
         )
@@ -680,14 +1065,20 @@ mod tests {
 
     #[test]
     fn slack_send_without_a_channel_has_no_plan() {
-        assert!(
-            plan_provider_read_back("slack.message.send", &json!({ "text": "hi" }), "ts-1")
-                .is_none()
-        );
-        assert!(
-            plan_provider_read_back("slack.message.send", &json!({ "channel": "  " }), "ts-1")
-                .is_none()
-        );
+        assert!(plan_provider_read_back(
+            "slack.message.send",
+            &json!({}),
+            &json!({ "text": "hi" }),
+            "ts-1"
+        )
+        .is_none());
+        assert!(plan_provider_read_back(
+            "slack.message.send",
+            &json!({}),
+            &json!({ "channel": "  " }),
+            "ts-1"
+        )
+        .is_none());
     }
 
     #[test]
@@ -705,7 +1096,7 @@ mod tests {
             "whatever",
         ] {
             assert!(
-                plan_provider_read_back(operation, &json!({}), "receipt-1").is_none(),
+                plan_provider_read_back(operation, &json!({}), &json!({}), "receipt-1").is_none(),
                 "{operation} must not claim a verifier it does not have"
             );
         }
@@ -714,31 +1105,65 @@ mod tests {
     #[test]
     fn a_mutation_is_never_paired_with_a_read_that_would_find_it_anyway() {
         // Each of these has a usable read on the frozen surface, and pairing
-        // them with it would be the subtlest false confirmation available here:
-        // the object existed before the write, so finding it says nothing about
-        // whether the mutation applied.
-        for (operation, body) in [
-            ("issues.update", json!({})),
-            ("github.issues.update", json!({})),
-            ("events.update", json!({})),
-            ("linkedin.events.update", json!({})),
-            ("ads.campaign.update", json!({})),
-            ("user.suspend", json!({})),
-            ("okta.user.activate", json!({})),
-            ("catalog.product.upsert", json!({})),
+        // it with the identifier check would be the subtlest false confirmation
+        // available here: the object existed before the write, so finding it
+        // says nothing about whether the mutation applied. They are verified —
+        // but only ever on values.
+        let patch = json!({ "patch": { "$set": { "name": "New name" } } });
+        for (operation, params, body) in [
+            ("events.update", json!({ "eventId": "ev-1" }), patch.clone()),
+            (
+                "linkedin.events.update",
+                json!({ "eventId": "ev-1" }),
+                patch.clone(),
+            ),
+            (
+                "ads.campaign.update",
+                json!({ "accountId": "acc-1", "campaignId": "cmp-1" }),
+                patch.clone(),
+            ),
+            ("user.suspend", json!({ "userId": "00u1" }), json!({})),
+            ("okta.user.activate", json!({ "userId": "00u1" }), json!({})),
+            (
+                "catalog.product.upsert",
+                json!({ "catalogId": "cat-1" }),
+                json!({ "retailer_id": "SKU-1" }),
+            ),
         ] {
+            let plan = plan_provider_read_back(operation, &params, &body, "receipt-1")
+                .unwrap_or_else(|| panic!("{operation} has a field-level verifier"));
             assert!(
-                plan_provider_read_back(operation, &body, "receipt-1").is_none(),
-                "{operation} mutates an existing object; its presence in a read-back \
-                 is not evidence the mutation happened"
+                matches!(plan.judgment, ReadBackJudgment::FieldValues { .. }),
+                "{operation} mutates an existing object, so it must never be judged \
+                 on identifier presence"
+            );
+        }
+        // GitHub is excluded for a different reason entirely: its ids come back
+        // as JSON numbers, so no receipt is ever extracted and the write never
+        // reaches a Completed disposition to verify.
+        for operation in ["issues.update", "github.issues.update"] {
+            assert!(
+                plan_provider_read_back(
+                    operation,
+                    &json!({ "owner": "o", "repo": "r", "issueNumber": "5" }),
+                    &json!({ "state": "closed" }),
+                    "receipt-1"
+                )
+                .is_none(),
+                "{operation} produces no receipt, so a verifier would be unreachable"
             );
         }
     }
 
     #[test]
     fn linkedin_event_create_plans_an_authoritative_by_id_lookup() {
-        let plan = plan_provider_read_back("linkedin.events.create", &json!({}), "  7212345  ")
-            .expect("events.create has a verifier");
+        let plan = plan_provider_read_back(
+            "linkedin.events.create",
+            &json!({}),
+            &json!({}),
+            "  7212345  ",
+        )
+        .expect("events.create has a verifier");
         assert_eq!(plan.operation, "events.get");
         assert_eq!(
             plan.params["eventId"],
@@ -752,6 +1177,7 @@ mod tests {
     fn linkedin_post_create_plans_an_author_scoped_listing_from_its_own_body() {
         let plan = plan_provider_read_back(
             "posts.create",
+            &json!({}),
             &json!({ "author": "urn:li:organization:42", "commentary": "hi" }),
             "urn:li:share:999",
         )
@@ -767,9 +1193,13 @@ mod tests {
 
     #[test]
     fn linkedin_post_create_without_an_author_has_no_plan() {
-        assert!(plan_provider_read_back("posts.create", &json!({}), "urn:li:share:9").is_none());
+        assert!(
+            plan_provider_read_back("posts.create", &json!({}), &json!({}), "urn:li:share:9")
+                .is_none()
+        );
         assert!(plan_provider_read_back(
             "posts.create",
+            &json!({}),
             &json!({ "author": " " }),
             "urn:li:share:9"
         )
@@ -791,8 +1221,9 @@ mod tests {
                 "creationId",
             ),
         ] {
-            let plan = plan_provider_read_back(operation, &json!({}), "17900000000000000")
-                .unwrap_or_else(|| panic!("{operation} has a verifier"));
+            let plan =
+                plan_provider_read_back(operation, &json!({}), &json!({}), "17900000000000000")
+                    .unwrap_or_else(|| panic!("{operation} has a verifier"));
             assert_eq!(plan.operation, read);
             assert_eq!(plan.params[key], json!("17900000000000000"));
             assert_eq!(plan.strength, ReadBackStrength::AuthoritativeById);
@@ -804,6 +1235,281 @@ mod tests {
         }
     }
 
+    // --- Mutations: field-level read-backs ---------------------------------
+
+    fn field_plan(strength: ReadBackStrength, expectations: &[(&str, &str)]) -> ProviderReadBack {
+        ProviderReadBack {
+            operation: "events.get",
+            params: json!({}),
+            strength,
+            judgment: ReadBackJudgment::FieldValues {
+                locator: "ev-1".to_owned(),
+                expectations: expectations
+                    .iter()
+                    .map(|(field, expected)| FieldExpectation {
+                        field: (*field).to_owned(),
+                        expected: (*expected).to_owned(),
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn an_event_update_is_judged_on_the_values_its_patch_set() {
+        let plan = plan_provider_read_back(
+            "linkedin.events.update",
+            &json!({ "eventId": "7212345" }),
+            &json!({ "patch": { "$set": { "name": "Autumn launch", "capacity": 250 } } }),
+            "",
+        )
+        .expect("events.update has a verifier");
+        assert_eq!(plan.operation, "events.get");
+        assert_eq!(plan.params["eventId"], json!("7212345"));
+        let ReadBackJudgment::FieldValues {
+            locator,
+            expectations,
+        } = &plan.judgment
+        else {
+            panic!("a mutation must never be judged on identifier presence");
+        };
+        assert_eq!(locator, "7212345", "the locator is the write's own target");
+        assert_eq!(
+            expectations,
+            &vec![
+                FieldExpectation {
+                    field: "capacity".to_owned(),
+                    expected: "250".to_owned()
+                },
+                FieldExpectation {
+                    field: "name".to_owned(),
+                    expected: "Autumn launch".to_owned()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mutation_with_nothing_comparable_plans_no_read_at_all() {
+        // Rather than a read that would silently degenerate into "the object
+        // exists", which is the false confirmation this whole split prevents.
+        for body in [
+            json!({}),
+            json!({ "patch": {} }),
+            json!({ "patch": { "$delete": ["name"] } }),
+            // Nested-only: no scalar whose reported shape we could trust.
+            json!({ "patch": { "$set": { "schedule": { "start": 1 } } } }),
+        ] {
+            assert!(
+                plan_provider_read_back(
+                    "events.update",
+                    &json!({ "eventId": "7212345" }),
+                    &body,
+                    ""
+                )
+                .is_none(),
+                "an update with no comparable field must not plan a read"
+            );
+        }
+        assert!(
+            plan_provider_read_back(
+                "events.update",
+                &json!({}),
+                &json!({ "patch": { "$set": { "name": "x" } } }),
+                ""
+            )
+            .is_none(),
+            "without the target id there is nothing to read back"
+        );
+    }
+
+    #[test]
+    fn okta_lifecycle_expectations_come_from_the_operation_not_the_body() {
+        for (operation, expected) in [
+            ("user.suspend", "SUSPENDED"),
+            ("okta.user.suspend", "SUSPENDED"),
+            ("user.activate", "ACTIVE"),
+            ("okta.user.activate", "ACTIVE"),
+        ] {
+            let plan =
+                plan_provider_read_back(operation, &json!({ "userId": "00u1" }), &json!({}), "")
+                    .unwrap_or_else(|| panic!("{operation} has a verifier"));
+            assert_eq!(plan.operation, "users");
+            let ReadBackJudgment::FieldValues {
+                locator,
+                expectations,
+            } = &plan.judgment
+            else {
+                panic!("{operation} must be judged on the resulting status");
+            };
+            assert_eq!(locator, "00u1");
+            assert_eq!(expectations.len(), 1);
+            assert_eq!(expectations[0].field, "status");
+            assert_eq!(expectations[0].expected, expected);
+        }
+    }
+
+    #[test]
+    fn a_catalog_upsert_is_located_by_receipt_then_compared() {
+        let plan = plan_provider_read_back(
+            "catalog.product.upsert",
+            &json!({ "catalogId": "cat-9" }),
+            &json!({ "retailer_id": "SKU-1", "price": "199 NOK" }),
+            "prod-77",
+        )
+        .expect("catalog.product.upsert has a verifier");
+        assert_eq!(plan.operation, "catalog.products");
+        assert_eq!(plan.params["catalogId"], json!("cat-9"));
+        assert_eq!(plan.strength, ReadBackStrength::BoundedList);
+        let ReadBackJudgment::FieldValues { locator, .. } = &plan.judgment else {
+            panic!("an upsert must be judged on values, not existence");
+        };
+        assert_eq!(locator, "prod-77");
+    }
+
+    #[test]
+    fn finding_the_object_is_never_enough_to_confirm_a_mutation() {
+        // The single most important property of this split: the locator is
+        // present, so the identifier check would have confirmed — and the
+        // field judgment must not, because the object predates the write.
+        let plan = field_plan(ReadBackStrength::AuthoritativeById, &[("name", "New name")]);
+        let outcome =
+            judge_provider_read_back(&plan, "ev-1", &json!({ "id": "ev-1", "name": "Old name" }));
+        assert!(
+            matches!(outcome, PostconditionOutcome::Refuted { .. }),
+            "an unchanged field must contradict the write, not confirm it"
+        );
+        assert!(outcome.detail().contains("Old name"));
+    }
+
+    #[test]
+    fn every_reported_field_matching_confirms_the_mutation() {
+        let plan = field_plan(
+            ReadBackStrength::AuthoritativeById,
+            &[("name", "New name"), ("capacity", "250")],
+        );
+        let outcome = judge_provider_read_back(
+            &plan,
+            "ev-1",
+            &json!({ "data": { "id": "ev-1", "name": "New name", "capacity": 250 } }),
+        );
+        assert!(matches!(outcome, PostconditionOutcome::Confirmed { .. }));
+        assert_eq!(outcome.method(), Some("postcondition"));
+    }
+
+    #[test]
+    fn provider_normalization_does_not_manufacture_a_refutation() {
+        // Trimming and re-casing are the provider's business; refuting on
+        // those would report a successful write as a failure.
+        let plan = field_plan(
+            ReadBackStrength::AuthoritativeById,
+            &[("name", " New Name ")],
+        );
+        let outcome =
+            judge_provider_read_back(&plan, "ev-1", &json!({ "id": "ev-1", "name": "new name" }));
+        assert!(matches!(outcome, PostconditionOutcome::Confirmed { .. }));
+    }
+
+    #[test]
+    fn a_field_the_provider_does_not_report_is_unknown_not_mismatched() {
+        let plan = field_plan(
+            ReadBackStrength::AuthoritativeById,
+            &[("name", "New name"), ("visibility", "PUBLIC")],
+        );
+        let outcome =
+            judge_provider_read_back(&plan, "ev-1", &json!({ "id": "ev-1", "name": "New name" }));
+        assert!(matches!(outcome, PostconditionOutcome::Confirmed { .. }));
+        assert!(
+            outcome.detail().contains("visibility"),
+            "what could not be checked must be stated, not quietly dropped"
+        );
+    }
+
+    #[test]
+    fn a_read_back_reporting_none_of_the_changed_fields_is_inconclusive() {
+        let plan = field_plan(ReadBackStrength::AuthoritativeById, &[("name", "New name")]);
+        let outcome = judge_provider_read_back(&plan, "ev-1", &json!({ "id": "ev-1" }));
+        assert!(matches!(outcome, PostconditionOutcome::Inconclusive { .. }));
+        assert_eq!(outcome.method(), None);
+    }
+
+    #[test]
+    fn a_mutated_object_missing_from_a_bounded_window_is_inconclusive() {
+        let plan = field_plan(ReadBackStrength::BoundedList, &[("status", "SUSPENDED")]);
+        let outcome = judge_provider_read_back(
+            &plan,
+            "ev-1",
+            &json!({ "users": [{ "id": "other", "status": "ACTIVE" }] }),
+        );
+        assert!(
+            matches!(outcome, PostconditionOutcome::Inconclusive { .. }),
+            "a window that did not include the object proves nothing about it"
+        );
+    }
+
+    #[test]
+    fn an_authoritative_lookup_answering_about_another_object_is_refuted_on_the_values() {
+        let plan = field_plan(ReadBackStrength::AuthoritativeById, &[("name", "New name")]);
+        let outcome =
+            judge_provider_read_back(&plan, "ev-1", &json!({ "id": "someone-else", "name": "x" }));
+        assert!(matches!(outcome, PostconditionOutcome::Refuted { .. }));
+    }
+
+    #[test]
+    fn an_id_reported_as_a_number_still_locates_the_object() {
+        // Refuting because the provider serializes its id as a number rather
+        // than a string would be a false failure on a successful mutation.
+        let plan = field_plan(ReadBackStrength::BoundedList, &[("state", "closed")]);
+        let outcome = judge_provider_read_back(
+            &plan,
+            "ev-1",
+            &json!({ "items": [{ "id": 4242, "state": "open" }] }),
+        );
+        assert!(
+            matches!(outcome, PostconditionOutcome::Inconclusive { .. }),
+            "an unrelated numeric-id record must not be mistaken for the target"
+        );
+
+        let plan = ProviderReadBack {
+            operation: "issues",
+            params: json!({}),
+            strength: ReadBackStrength::BoundedList,
+            judgment: ReadBackJudgment::FieldValues {
+                locator: "4242".to_owned(),
+                expectations: vec![FieldExpectation {
+                    field: "state".to_owned(),
+                    expected: "closed".to_owned(),
+                }],
+            },
+        };
+        let outcome = judge_provider_read_back(
+            &plan,
+            "4242",
+            &json!({ "items": [{ "id": 4242, "state": "open" }] }),
+        );
+        assert!(
+            matches!(outcome, PostconditionOutcome::Refuted { .. }),
+            "a numeric id must locate its object so the stale value can refute"
+        );
+    }
+
+    #[test]
+    fn the_right_element_of_a_listing_is_the_one_compared() {
+        let plan = field_plan(ReadBackStrength::BoundedList, &[("status", "SUSPENDED")]);
+        let outcome = judge_provider_read_back(
+            &plan,
+            "ev-1",
+            &json!({ "users": [
+                { "id": "other", "status": "ACTIVE" },
+                { "id": "ev-1", "status": "SUSPENDED" },
+            ]}),
+        );
+        assert!(
+            matches!(outcome, PostconditionOutcome::Confirmed { .. }),
+            "a sibling record's field must not decide this object's verdict"
+        );
+    }
+
     #[test]
     fn a_by_id_read_back_is_not_planned_without_a_receipt() {
         for operation in [
@@ -813,7 +1519,7 @@ mod tests {
             "threads.container.create",
         ] {
             assert!(
-                plan_provider_read_back(operation, &json!({}), "   ").is_none(),
+                plan_provider_read_back(operation, &json!({}), &json!({}), "   ").is_none(),
                 "{operation} cannot look anything up without an id to look up"
             );
         }
@@ -825,6 +1531,7 @@ mod tests {
             operation: "messages.list",
             params: json!({}),
             strength: ReadBackStrength::BoundedList,
+            judgment: ReadBackJudgment::IdentifierPresence,
         };
         let result = json!({ "data": { "action": { "result": {
             "messages": [{ "ts": "1699999999.000100" }, { "ts": "1700000000.000200" }]
@@ -842,6 +1549,7 @@ mod tests {
             operation: "messages.list",
             params: json!({}),
             strength: ReadBackStrength::BoundedList,
+            judgment: ReadBackJudgment::IdentifierPresence,
         };
         let result = json!({ "messages": [{ "ts": "1699999999.000100" }] });
         let outcome = judge_provider_read_back(&plan, "1700000000.000200", &result);
@@ -858,6 +1566,7 @@ mod tests {
             operation: "issue.get",
             params: json!({}),
             strength: ReadBackStrength::AuthoritativeById,
+            judgment: ReadBackJudgment::IdentifierPresence,
         };
         let outcome = judge_provider_read_back(&plan, "42", &json!({ "id": "43" }));
         assert!(matches!(outcome, PostconditionOutcome::Refuted { .. }));
@@ -871,6 +1580,7 @@ mod tests {
             operation: "messages.list",
             params: json!({}),
             strength: ReadBackStrength::BoundedList,
+            judgment: ReadBackJudgment::IdentifierPresence,
         };
         let result = json!({ "messages": [
             { "ts": "1699999999.000100", "text": "see 1700000000.000200 for details" }
@@ -888,6 +1598,7 @@ mod tests {
             operation: "messages.list",
             params: json!({}),
             strength: ReadBackStrength::BoundedList,
+            judgment: ReadBackJudgment::IdentifierPresence,
         };
         let outcome = judge_provider_read_back(&plan, "   ", &json!({ "messages": [] }));
         assert!(matches!(outcome, PostconditionOutcome::Inconclusive { .. }));
@@ -895,8 +1606,9 @@ mod tests {
 
     #[test]
     fn gmail_send_plans_a_bounded_message_list() {
-        let plan = plan_provider_read_back("gmail.send", &json!({ "raw": "…" }), "msg-1")
-            .expect("gmail.send has a verifier");
+        let plan =
+            plan_provider_read_back("gmail.send", &json!({}), &json!({ "raw": "…" }), "msg-1")
+                .expect("gmail.send has a verifier");
         assert_eq!(plan.operation, "gmail.messages");
         assert_eq!(plan.strength, ReadBackStrength::BoundedList);
     }

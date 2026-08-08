@@ -366,6 +366,9 @@ enum VerifierTarget {
     ProviderAction {
         connection_id: String,
         operation: String,
+        /// Mutation verifiers read the object back by the id the write itself
+        /// targeted, which lives here rather than in the body.
+        params: Value,
         body: Value,
     },
 }
@@ -806,6 +809,7 @@ async fn process_delivery(
         ResumableAction::ProviderAction(input) => VerifierTarget::ProviderAction {
             connection_id: input.connection_id.clone(),
             operation: input.operation.clone(),
+            params: input.params.clone(),
             body: input.body.clone(),
         },
     };
@@ -871,6 +875,7 @@ async fn process_delivery(
                 VerifierTarget::ProviderAction {
                     connection_id,
                     operation,
+                    params,
                     body,
                 } => Some(
                     crate::postcondition::verify_provider_action(
@@ -878,6 +883,7 @@ async fn process_delivery(
                         &descriptor.org_id,
                         connection_id,
                         operation,
+                        params,
                         body,
                         provider_receipt_id,
                     )
