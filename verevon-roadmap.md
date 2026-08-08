@@ -349,8 +349,35 @@ The following order is authoritative where it conflicts with older Phase A wordi
    Microsoft `mail.send` is **not verifiable by construction** and now says
    so: it returns `202` with no id, so the dispatcher never reaches a
    `Completed` disposition for it at all.
-   Remaining: the rest of `execute_provider_action`'s write operations
-   (each needs a matching frozen-surface read), and browser procedures.
+   **Browser procedures judged too, in a different shape.** They never pass
+   through the approval-continuation dispatcher and have no provider receipt
+   to re-read, so the judgment is against the loop's own final observation.
+   The trap there is **circularity**: a plan's `stop_criteria` is the
+   substring that *made the loop stop*, so re-checking the final page for it
+   would always succeed and prove nothing — it tests the agent against its
+   own stop decision. `judge_browser_procedure` refuses that explicitly
+   instead of emitting a confident-looking confirmation.
+   It refutes when the final observation is `failed`/`timeout`/`blocked` or
+   the procedure aborted (a loop can report `Completed` while the last thing
+   that actually happened was a failure), and when a postcondition declared
+   *independently of* `stop_criteria` is absent from the final page. It
+   confirms only when such a postcondition is present, the observation
+   succeeded, and a screenshot or DOM snapshot was retained so the claim is
+   inspectable. ZDR runs keep no page content and are therefore inconclusive
+   by construction.
+   **So browser procedures can currently be refuted but never confirmed** —
+   `PlanConfig` carries no postcondition distinct from `stop_criteria`. That
+   is the honest current state and a test asserts it, so adding a
+   confirmation path has to be deliberate. Adding that one field is the
+   change that unlocks it; the confirmation path is already implemented and
+   tested.
+   The verdict is attached to the completed step's output rather than used
+   to rewrite the lifecycle status — downgrading `Completed` to `Failed`
+   would change execution semantics on an unestablished inference about when
+   those states can legitimately co-occur.
+   Remaining: the rest of `execute_provider_action`'s write operations (each
+   needs a matching frozen-surface read), and a declared browser
+   postcondition field.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
