@@ -380,8 +380,38 @@ The following order is authoritative where it conflicts with older Phase A wordi
    to rewrite the lifecycle status — downgrading `Completed` to `Failed`
    would change execution semantics on an unestablished inference about when
    those states can legitimately co-occur.
-   Remaining: the rest of `execute_provider_action`'s write operations, each
-   needing a matching read on the frozen surface.
+   **Provider coverage extended 2026-08-08** to five more writes, using only
+   operations already in the frozen actions surface: linkedin
+   `events.create` → `events.get`, meta `live.create` → `live.get`,
+   `instagram.media.create` → `instagram.media.status`,
+   `threads.container.create` → `threads.container.status` (all four
+   authoritative, keyed on nothing but the receipt the write itself returned,
+   so a verifier cannot be pointed anywhere the write did not already go), and
+   linkedin `posts.create` → `posts.list` (bounded, author taken from the
+   write's own body).
+   Three things are deliberately **not** verified, each pinned by a test so a
+   later reader does not "fix" them:
+   - **Mutations of an existing object** — `issues.update`, `events.update`,
+     `ads.campaign.update`, `user.suspend`/`user.activate`,
+     `catalog.product.upsert` — all have a perfectly usable read, and pairing
+     them with it would be the subtlest false confirmation available here: the
+     object existed *before* the write, so finding it afterward is evidence of
+     nothing. Confirming a mutation needs the read-back to carry the mutated
+     field, a different judgment that is not attempted.
+   - **GitHub `issues.create`** returns `id`/`number` as JSON *numbers*, and
+     the receipt extractor matches strings only on both sides of the boundary,
+     so it never reaches `Completed` at all — the same class as Microsoft
+     `mail.send`, for a less obvious reason.
+   - **A provider 404** reaches this layer as `502 action_failed` with the
+     upstream status buried in a message string, so an authoritative absence
+     stays inconclusive rather than being decided by string-matching error
+     prose. `AuthoritativeById` therefore confirms in practice and refutes only
+     when a 200 comes back without the id.
+   Verification also depends on the connection holding the *read* capability,
+   not just the write one — the safe direction, but it means a verifier can sit
+   silently unexercised in production.
+   Remaining: writes whose only read counterpart is a mutation-blind listing,
+   which need field-level read-back rather than identifier presence.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
