@@ -389,16 +389,34 @@ The following order is authoritative where it conflicts with older Phase A wordi
    so a verifier cannot be pointed anywhere the write did not already go), and
    linkedin `posts.create` → `posts.list` (bounded, author taken from the
    write's own body).
-   Three things are deliberately **not** verified, each pinned by a test so a
+   **Mutations covered 2026-08-08** by a second judgment rule. A mutation
+   cannot be verified by finding its object — the object existed *before* the
+   write — so `ReadBackJudgment` splits the two rules in the type system:
+   `IdentifierPresence` for a create, `FieldValues` for a mutation. Wired for
+   linkedin `events.update` and `ads.campaign.update` (RestLi `patch.$set`
+   compared against the object), okta `user.suspend`/`user.activate` (status
+   `SUSPENDED`/`ACTIVE` — the expected value comes from the *operation*, since
+   those calls carry no body), and meta `catalog.product.upsert`. Each reads
+   the object back by the id the write itself targeted, and an update whose
+   patch has nothing comparable plans no read at all rather than quietly
+   degenerating into an existence check.
+   Comparing content is how false *failures* get manufactured, so three rules
+   bound it: scalars only (a nested value's shape is the provider's choice),
+   comparison after trimming and case-folding, and a field the read-back does
+   not report counts as unknown rather than as a mismatch.
+   ⚠ **What limits this in practice is the receipt gate.** A verifier is only
+   reached from a `Completed` disposition, which requires a string receipt id —
+   a poor fit for a mutation, whose id was known before the call. A provider
+   answering `204 No Content` yields `{"ok": true}` with no id attached
+   (`doJSON` returns early, before the `x-restli-id` path), so that write is
+   recorded as `invalid_continuation` — a terminal failure — even though the
+   same code path notes integration-corev2 durably completed it. That is a
+   false *failure* rather than a false success, so it is recorded here rather
+   than fixed by loosening what counts as a verified outcome; the fix is to
+   stop requiring a receipt for actions whose identity is already known.
+   Two things remain deliberately **not** verified, each pinned by a test so a
    later reader does not "fix" them:
-   - **Mutations of an existing object** — `issues.update`, `events.update`,
-     `ads.campaign.update`, `user.suspend`/`user.activate`,
-     `catalog.product.upsert` — all have a perfectly usable read, and pairing
-     them with it would be the subtlest false confirmation available here: the
-     object existed *before* the write, so finding it afterward is evidence of
-     nothing. Confirming a mutation needs the read-back to carry the mutated
-     field, a different judgment that is not attempted.
-   - **GitHub `issues.create`** returns `id`/`number` as JSON *numbers*, and
+   - **GitHub `issues.create`** (and `issues.update`) returns `id`/`number` as JSON *numbers*, and
      the receipt extractor matches strings only on both sides of the boundary,
      so it never reaches `Completed` at all — the same class as Microsoft
      `mail.send`, for a less obvious reason.
@@ -410,8 +428,11 @@ The following order is authoritative where it conflicts with older Phase A wordi
    Verification also depends on the connection holding the *read* capability,
    not just the write one — the safe direction, but it means a verifier can sit
    silently unexercised in production.
-   Remaining: writes whose only read counterpart is a mutation-blind listing,
-   which need field-level read-back rather than identifier presence.
+   Remaining: lift the receipt gate above, which is what actually stops the
+   mutation verifiers from running; and the writes with no read counterpart at
+   all on the frozen surface (meta `pages.post`, `whatsapp.messages.send`,
+   `messenger.messages.send`, github `issues.comment.create`), which cannot be
+   verified without adding an operation to a contract that is frozen.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
