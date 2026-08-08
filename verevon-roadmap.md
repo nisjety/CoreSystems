@@ -404,16 +404,35 @@ The following order is authoritative where it conflicts with older Phase A wordi
    bound it: scalars only (a nested value's shape is the provider's choice),
    comparison after trimming and case-folding, and a field the read-back does
    not report counts as unknown rather than as a mismatch.
-   ⚠ **What limits this in practice is the receipt gate.** A verifier is only
-   reached from a `Completed` disposition, which requires a string receipt id —
-   a poor fit for a mutation, whose id was known before the call. A provider
-   answering `204 No Content` yields `{"ok": true}` with no id attached
-   (`doJSON` returns early, before the `x-restli-id` path), so that write is
-   recorded as `invalid_continuation` — a terminal failure — even though the
-   same code path notes integration-corev2 durably completed it. That is a
-   false *failure* rather than a false success, so it is recorded here rather
-   than fixed by loosening what counts as a verified outcome; the fix is to
-   stop requiring a receipt for actions whose identity is already known.
+   **Receipt gate lifted 2026-08-08.** A verifier used to be reachable only
+   from a `Completed` disposition, which required a string receipt id — a poor
+   fit for a mutation, whose id was known before the call. A provider answering
+   `204 No Content` yields `{"ok": true}` with no id attached (`doJSON` returns
+   early, before the `x-restli-id` path), so a successful LinkedIn partial
+   update or Okta lifecycle call was recorded as `invalid_continuation`, a
+   terminal failure, even though the same code path notes integration-corev2
+   durably completed it.
+   The disposition is now decided by evidence rather than by whether an id came
+   back. `UnreceiptedWrite` is explicitly not a verdict; the postcondition step
+   resolves it into `CompletedByPostcondition` (recorded under the object id the
+   write targeted, `method: "postcondition"`), `FailedTerminal` with the new
+   `postcondition_refuted` code, or — for anything inconclusive — the terminal
+   judgment it always had. Three properties keep it from becoming a way to
+   manufacture success: only a mutation may take the path (`plan_unreceipted_mutation`
+   refuses every identifier-presence plan, since a create's identity is exactly
+   what the missing receipt failed to supply); `CompletedByPostcondition`
+   reports `UNKNOWN` in the structural arm, so without a `Confirmed` outcome it
+   claims nothing; and silence never promotes — an unreachable provider, an
+   unreported field, or no verifier at all all leave the terminal judgment
+   untouched.
+   ⚠ **Deploy session-core first**: it rejects any failure code outside its
+   allowlist, so it must accept `postcondition_refuted` before a worker that
+   can emit it ships.
+   Fixed alongside it: this case used to return `RejectBeforeStart` *after*
+   executing, which made `record_continuation_outcome` fail with "called for a
+   pre-start disposition", so the delivery was never acknowledged and the lease
+   expired into another attempt — indefinitely. Executed-then-failed
+   dispositions now record and acknowledge Terminal.
    Two things remain deliberately **not** verified, each pinned by a test so a
    later reader does not "fix" them:
    - **GitHub `issues.create`** (and `issues.update`) returns `id`/`number` as JSON *numbers*, and
@@ -428,11 +447,10 @@ The following order is authoritative where it conflicts with older Phase A wordi
    Verification also depends on the connection holding the *read* capability,
    not just the write one — the safe direction, but it means a verifier can sit
    silently unexercised in production.
-   Remaining: lift the receipt gate above, which is what actually stops the
-   mutation verifiers from running; and the writes with no read counterpart at
-   all on the frozen surface (meta `pages.post`, `whatsapp.messages.send`,
-   `messenger.messages.send`, github `issues.comment.create`), which cannot be
-   verified without adding an operation to a contract that is frozen.
+   Remaining: the writes with no read counterpart at all on the frozen surface
+   (meta `pages.post`, `whatsapp.messages.send`, `messenger.messages.send`,
+   github `issues.comment.create`), which cannot be verified without adding an
+   operation to a contract that is frozen.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
