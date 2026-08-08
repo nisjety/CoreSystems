@@ -35,6 +35,6 @@ pub use approval::{Approval, ApprovalKind, ApprovalState};
 pub use error::{OrchestrationError, OrchestrationResult};
 pub use plan::{Plan, PlanState, PlanStep, PlanStepState};
 pub use proto_shim::ShimError;
-pub use run_event::{OrchestrationEvent, OrchestrationEventKind};
+pub use run_event::{OrchestrationEvent, OrchestrationEventKind, VerificationStatus};
 pub use subagent::{SubagentLineage, SubagentRole};
 pub use todo::{Todo, TodoPriority, TodoState};

@@ -13,8 +13,10 @@ use mp_contracts::model_plane::v1::{
     orchestration_event, ApprovalKind as ProtoApprovalKind, ApprovalState as ProtoApprovalState,
     OrchestrationEvent as ProtoOrchestrationEvent, PlanState as ProtoPlanState,
     SubagentRole as ProtoSubagentRole, TodoState as ProtoTodoState,
+    VerificationResult as ProtoVerificationResult, VerificationStatus as ProtoVerificationStatus,
 };
 use orchestration_event::{
+    ApprovalContinuationVerified as PbApprovalContinuationVerified,
     ApprovalStateChanged as PbApprovalStateChanged,
     BrowserActionApprovalRequired as PbBrowserActionApprovalRequired,
     BrowserActionDecided as PbBrowserActionDecided,
@@ -27,7 +29,10 @@ use orchestration_event::{
     SubagentStopped as PbSubagentStopped, TodoTransitioned as PbTodoTransitioned,
 };
 
-use crate::{ApprovalKind, ApprovalState, OrchestrationEvent, PlanState, SubagentRole, TodoState};
+use crate::{
+    ApprovalKind, ApprovalState, OrchestrationEvent, PlanState, SubagentRole, TodoState,
+    VerificationStatus,
+};
 
 /// Errors returned when decoding a wire-format orchestration event.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -56,6 +61,16 @@ pub enum ShimError {
     /// An integer code did not map to a known `SubagentRole`.
     #[error("unknown SubagentRole code: {0}")]
     UnknownSubagentRole(i32),
+    /// An integer code did not map to a known, judged `VerificationStatus`
+    /// (`Unspecified` is also rejected here — this event never carries an
+    /// unjudged verification).
+    #[error("unknown or unspecified VerificationStatus code: {0}")]
+    UnknownVerificationStatus(i32),
+    /// `ApprovalContinuationVerified` requires a `verification` field; an
+    /// event missing it cannot round-trip (the recording handler never emits
+    /// this event without one — see `orchestration_grpc.rs`).
+    #[error("approval continuation verified event missing verification result")]
+    MissingVerificationResult,
 }
 
 // ---------- timestamp helpers ----------
@@ -127,6 +142,15 @@ fn subagent_role_to_proto(r: SubagentRole) -> i32 {
     }
 }
 
+fn verification_status_to_proto(s: VerificationStatus) -> i32 {
+    match s {
+        VerificationStatus::Unknown => ProtoVerificationStatus::Unknown as i32,
+        VerificationStatus::VerifiedSuccess => ProtoVerificationStatus::VerifiedSuccess as i32,
+        VerificationStatus::VerifiedFailure => ProtoVerificationStatus::VerifiedFailure as i32,
+        VerificationStatus::PartiallyVerified => ProtoVerificationStatus::PartiallyVerified as i32,
+    }
+}
+
 // ---------- enum decode ----------
 
 fn plan_state_from_proto(code: i32) -> Result<PlanState, ShimError> {
@@ -190,6 +214,18 @@ fn subagent_role_from_proto(code: i32) -> Result<SubagentRole, ShimError> {
         ProtoSubagentRole::Researcher => Ok(SubagentRole::Researcher),
         ProtoSubagentRole::Explorer => Ok(SubagentRole::Explorer),
         ProtoSubagentRole::Generic => Ok(SubagentRole::Generic),
+    }
+}
+
+fn verification_status_from_proto(code: i32) -> Result<VerificationStatus, ShimError> {
+    let p = ProtoVerificationStatus::try_from(code)
+        .map_err(|_| ShimError::UnknownVerificationStatus(code))?;
+    match p {
+        ProtoVerificationStatus::Unspecified => Err(ShimError::UnknownVerificationStatus(code)),
+        ProtoVerificationStatus::Unknown => Ok(VerificationStatus::Unknown),
+        ProtoVerificationStatus::VerifiedSuccess => Ok(VerificationStatus::VerifiedSuccess),
+        ProtoVerificationStatus::VerifiedFailure => Ok(VerificationStatus::VerifiedFailure),
+        ProtoVerificationStatus::PartiallyVerified => Ok(VerificationStatus::PartiallyVerified),
     }
 }
 
@@ -406,6 +442,31 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     decided_by,
                 }),
             ),
+            OrchestrationEvent::ApprovalContinuationVerified {
+                run_id,
+                delivery_id,
+                approval_id,
+                receipt_id,
+                verification_status,
+                verification_method,
+                verification_reason,
+                at,
+            } => envelope(
+                at,
+                ProtoEvent::ApprovalContinuationVerified(PbApprovalContinuationVerified {
+                    run_id,
+                    delivery_id,
+                    approval_id,
+                    receipt_id: receipt_id.clone(),
+                    verification: Some(ProtoVerificationResult {
+                        effect_id: receipt_id,
+                        status: verification_status_to_proto(verification_status),
+                        method: verification_method,
+                        reason: verification_reason,
+                        verified_at: Some(ts_from(at)),
+                    }),
+                }),
+            ),
         }
     }
 }
@@ -415,6 +476,11 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
 impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
     type Error = ShimError;
 
+    // One match arm per oneof variant keeps the mapping exhaustively visible
+    // in a single place rather than splitting it across helper functions —
+    // same tradeoff `model-gateway`'s `orchestration_event_to_step_update`
+    // makes for the same reason.
+    #[allow(clippy::too_many_lines)]
     fn try_from(pb: ProtoOrchestrationEvent) -> Result<Self, Self::Error> {
         let at = ts_to(pb.at.ok_or(ShimError::MissingTimestamp)?)?;
         let event = pb.event.ok_or(ShimError::MissingEvent)?;
@@ -516,6 +582,19 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 decided_by: p.decided_by,
                 at,
             },
+            ProtoEvent::ApprovalContinuationVerified(p) => {
+                let v = p.verification.ok_or(ShimError::MissingVerificationResult)?;
+                OrchestrationEvent::ApprovalContinuationVerified {
+                    run_id: p.run_id,
+                    delivery_id: p.delivery_id,
+                    approval_id: p.approval_id,
+                    receipt_id: p.receipt_id,
+                    verification_status: verification_status_from_proto(v.status)?,
+                    verification_method: v.method,
+                    verification_reason: v.reason,
+                    at,
+                }
+            }
         })
     }
 }
@@ -626,6 +705,70 @@ mod tests {
             decided_by: "user@example.com".into(),
             at: fixture_at(),
         });
+    }
+
+    #[test]
+    fn round_trip_approval_continuation_verified() {
+        round_trip(&OrchestrationEvent::ApprovalContinuationVerified {
+            run_id: "run-1".into(),
+            delivery_id: "delivery-1".into(),
+            approval_id: "appr-1".into(),
+            receipt_id: "receipt-1".into(),
+            verification_status: VerificationStatus::VerifiedSuccess,
+            verification_method: "structural".into(),
+            verification_reason: "provider returned authoritative receipt id booking-1".into(),
+            at: fixture_at(),
+        });
+    }
+
+    #[test]
+    fn decode_rejects_unspecified_verification_status() {
+        let mut pb: ProtoOrchestrationEvent = OrchestrationEvent::ApprovalContinuationVerified {
+            run_id: "run-1".into(),
+            delivery_id: "delivery-1".into(),
+            approval_id: "appr-1".into(),
+            receipt_id: "receipt-1".into(),
+            verification_status: VerificationStatus::Unknown,
+            verification_method: "structural".into(),
+            verification_reason: String::new(),
+            at: fixture_at(),
+        }
+        .into();
+        if let Some(ProtoEvent::ApprovalContinuationVerified(ref mut e)) = pb.event {
+            e.verification.as_mut().expect("verification present").status =
+                ProtoVerificationStatus::Unspecified as i32;
+        } else {
+            panic!("expected ApprovalContinuationVerified");
+        }
+        let decoded: Result<OrchestrationEvent, ShimError> = pb.try_into();
+        assert_eq!(
+            decoded,
+            Err(ShimError::UnknownVerificationStatus(
+                ProtoVerificationStatus::Unspecified as i32
+            ))
+        );
+    }
+
+    #[test]
+    fn decode_rejects_a_missing_verification_result() {
+        let mut pb: ProtoOrchestrationEvent = OrchestrationEvent::ApprovalContinuationVerified {
+            run_id: "run-1".into(),
+            delivery_id: "delivery-1".into(),
+            approval_id: "appr-1".into(),
+            receipt_id: "receipt-1".into(),
+            verification_status: VerificationStatus::Unknown,
+            verification_method: "structural".into(),
+            verification_reason: String::new(),
+            at: fixture_at(),
+        }
+        .into();
+        if let Some(ProtoEvent::ApprovalContinuationVerified(ref mut e)) = pb.event {
+            e.verification = None;
+        } else {
+            panic!("expected ApprovalContinuationVerified");
+        }
+        let decoded: Result<OrchestrationEvent, ShimError> = pb.try_into();
+        assert_eq!(decoded, Err(ShimError::MissingVerificationResult));
     }
 
     #[test]
