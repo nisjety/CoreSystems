@@ -24,6 +24,13 @@ async fn main() -> Result<()> {
     // a service that cannot report its health must still serve.
     execution_core::health_attest::spawn_heartbeat();
 
+    // Post-approval continuation dispatcher: claims durable approval-delivery
+    // leases and resumes the one action kind (execute_provider_action) this
+    // codebase can currently re-attest and re-execute safely. See
+    // approval_delivery_worker's module doc for scope and protocol. Detached,
+    // same as the heartbeat above — idles quietly until configured.
+    execution_core::approval_delivery_worker::spawn();
+
     let readiness = Readiness::new();
     let state = StateStore::new();
     let auth = JwtVerifier::from_env().await?;

@@ -1,6 +1,8 @@
 //! execution-core — runtime loop ownership for agent execution.
 
+pub mod approval_delivery_worker;
 pub mod artifact;
+pub mod attestation;
 pub mod auth;
 pub mod browser_agent;
 pub mod browser_events;
@@ -16,6 +18,7 @@ pub mod integration_tools;
 pub mod knowledge_tools;
 pub mod llm_planner;
 pub mod mcp_gateway;
+pub mod org_directory;
 pub mod permission;
 pub mod policy;
 pub mod promote_on_use;
@@ -30,5 +33,6 @@ pub mod social_tools;
 pub mod state;
 pub mod subagent;
 pub mod tool_bridge;
+pub mod user_core_client;
 pub mod web_tools;
 pub mod wiki_agent;
