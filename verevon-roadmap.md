@@ -314,7 +314,28 @@ The following order is authoritative where it conflicts with older Phase A wordi
    sections (*known*, *charged*, *retained*), each of which must arrive
    through its owning plane's own contract — there is no shared database to
    join across.
-3. Add deterministic postcondition verifiers for the pilot actions and browser procedures.
+3. **Landed 2026-08-08 for the pilot action — deterministic postcondition
+   verifiers.** `execution-core`'s new `postcondition` module reaches a
+   three-valued judgment (`Confirmed` / `Refuted` / `Inconclusive`) by
+   re-reading the system of record, and the worker's `VerificationResult`
+   now carries `method: "postcondition"` when a real check ran. First
+   verifier covers `book_shipment` — the same pilot action §9.4 cites —
+   re-reading the booking from shipping-core (org-scoped server-side from
+   the minted token's principal) and judging its actual status and tracking
+   number.
+   **Precedence is the substance:** `Confirmed` upgrades the method,
+   `Refuted` **overrides a structural success into `verified_failure`**
+   (the boundary said yes, the system of record said no — the false-success
+   case in `Verevon-ai-first.md` §8 item 7), and `Inconclusive` or
+   no-verifier leaves the structural judgment byte-for-byte unchanged. An
+   unreachable provider never reads as a refutation; a check that could not
+   run is never credited as one that ran and passed. Unknown or in-between
+   states (`pending`, or a status a future shipping-core adds) are
+   inconclusive rather than guessed.
+   Remaining: `execute_provider_action`'s many operations (each needs a
+   read-back from the frozen actions surface — several writes already have
+   a matching read, e.g. Slack `message.send` → `messages.list`), and
+   browser procedures.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
 5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
 6. Add Surface/API/Agent parity tests for material actions.
