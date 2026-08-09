@@ -95,6 +95,57 @@ Provider gates:
 - `zdr=true`, `zdr_ephemeral`, and `credential_or_secret` requests deny
   third-party providers even when a processor ID is present.
 
+### Proxy egress DNS-authority boundary
+
+The third-party/first-party classification above is a *privacy* gate --
+is a proxy allowed to see this org's request/response content. It is a
+separate question from whether Quarry's own SSRF/private-address guard
+(`quarry_security::heur::resolve_guard`, used by `dns_guard.rs`'s
+preflight) actually covers the connection, and the answer depends on the
+proxy's scheme:
+
+- `socks5://` (and plain `socks4://`, though undocumented/unused here):
+  reqwest resolves the target hostname itself before it ever contacts the
+  proxy, so `fetch.rs` pins that resolution through the same guard as
+  direct egress (`StaticDriver::proxy_pin_resolvers`). **Covered.**
+- `socks5h://`, `http://`, `https://`: the proxy resolves the target
+  hostname itself -- reqwest hands it the raw hostname (a SOCKS5
+  domain-name address, or the `CONNECT host:port` request line) and never
+  calls its own resolver for it. Quarry has no visibility into what
+  address the proxy resolves the hostname to, and no client-side fix can
+  create that visibility: the resolution happens on infrastructure Quarry
+  doesn't run. **Not covered** by `resolve_guard`.
+
+What that gap means depends on who operates the proxy:
+
+- Default (`QUARRY_PROXY_FIRST_PARTY` unset, pool treated as third-party):
+  if a target resolves to a private/internal address on the proxy's side,
+  the blast radius is the third-party provider's own network, not
+  Quarry's or the customer's -- the same trust a customer already extends
+  by consenting to third-party processing at all. Most commercial
+  residential/datacenter proxy pools only support server-side resolution;
+  that's the entire reason `socks5h://`/`http://`/`https://` are
+  supported schemes here, not an oversight. Defending that infrastructure
+  is the provider's responsibility, not something Quarry's DNS guard can
+  substitute for.
+- `QUARRY_PROXY_FIRST_PARTY=1`: the operator is declaring every configured
+  `QUARRY_PROXY_POOL` entry (the flag is process-wide, not per-entry) to
+  be Quarry's/the operator's own trusted infrastructure. If that
+  infrastructure shares network space with anything sensitive (a cloud
+  metadata endpoint, an internal admin service), a
+  `socks5h://`/`http://`/`https://` entry here has Direct egress's full
+  SSRF exposure with none of Direct egress's protection, because the
+  guard never sees the resolved address. **Operators declaring
+  first-party proxies should prefer `socks5://` so the pinned resolver
+  actually applies; where that isn't possible, the proxy itself must
+  independently enforce equivalent private-address filtering, since
+  Quarry structurally cannot.**
+
+There is no code-level fix for the `socks5h://`/`http://`/`https://` gap
+that doesn't also remove the ability to proxy through third-party
+providers that only support server-side resolution. The contract above is
+the documented trust boundary in place of one.
+
 429/block handling:
 
 - Static fetches route through `EgressBroker`, which builds a bounded egress

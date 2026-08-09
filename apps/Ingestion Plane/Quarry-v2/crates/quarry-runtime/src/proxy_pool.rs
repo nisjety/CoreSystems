@@ -14,10 +14,25 @@
 //!
 //! Configuration: a `;`-separated list of proxy URIs in
 //! `QUARRY_PROXY_POOL`. Schemes accepted:
-//!   - `socks5://user:pass@host:port`
-//!   - `socks5h://...` (DNS through the proxy)
-//!   - `http://...`   (HTTP CONNECT proxy)
-//!   - `https://...`
+//!   - `socks5://user:pass@host:port` (client resolves the target hostname,
+//!     then hands the proxy an IP -- reqwest's configured DNS resolver runs
+//!     here, so `fetch.rs` pins it exactly like direct egress)
+//!   - `socks5h://...` (DNS through the proxy -- the raw hostname goes to
+//!     the proxy, which resolves it; no client-side resolver is ever
+//!     consulted, so a pin here would be a no-op)
+//!   - `http://...`   (HTTP CONNECT proxy -- same server-side resolution as
+//!     `socks5h://`: the `CONNECT host:port` line carries the hostname
+//!     verbatim)
+//!   - `https://...`  (HTTP CONNECT over a TLS-fronted proxy connection;
+//!     same server-side resolution as `http://`)
+//!
+//! Only `socks5://` (and, if ever configured, plain `socks4://`) gets a
+//! client-side DNS pin today. For the other three schemes, Quarry has no
+//! visibility into what address the proxy resolves the target to -- that is
+//! a proxy-trust-boundary question, not something a client-side fix can
+//! close. See the "Provider gates" section of `docs/POLICY.md` for the
+//! documented contract (`QUARRY_PROXY_FIRST_PARTY`, third-party processor
+//! gating) that governs which proxies are allowed to be configured here.
 //!
 //! Empty / unset → `ProxyPool::empty()`; callers see `None` from
 //! `pick()` and fall back to direct egress. This is the default in
