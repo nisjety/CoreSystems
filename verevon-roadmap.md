@@ -458,11 +458,38 @@ The following order is authoritative where it conflicts with older Phase A wordi
 #### P2 — quality, usability, and performance
 
 1. Procedure/Skill compiler for 3–5 curated presets; no canvas dependency.
-2. Progressive MCP/capability disclosure, schema caching, result handles, projections, and direct tool-to-tool dataflow.
+2. Progressive MCP/capability disclosure, schema caching, result handles, projections, and direct
+   tool-to-tool dataflow. **The 2026-07-28 MCP spec release candidate supplies the wire primitive
+   for staged disclosure** (`server/discover`, capability info in per-request `_meta` instead of a
+   one-time handshake) — this narrows the design space, it does not shrink the build:
+   `capability-core`'s staged Level 0–3 model, ranking, and caching are still unbuilt (confirmed
+   2026-08-09, `MODEL_PLANE_IMPROVEMENTS_2026.md` §23.1/§23.11).
 3. Prompt/cache/context observability and benchmark-driven static TOON/compact-JSON selection.
 4. Data Plane Memory Intelligence: async typed candidates, provenance, authorized scope, temporal validity, contradiction/supersession, multi-signal retrieval, retention, and deletion proof.
 5. Quarry Adaptive Target Memory, Challenge Intelligence, compiled browser procedures, Change Intelligence, and Quarry Quality OS.
 6. Action Readiness Map to turn production failures into ranked knowledge/data/capability/procedure/policy/verification improvements.
+7. **New 2026-08-09 — migrate the MCP client to the 2026-07-28 spec release candidate.**
+   `model-gateway/src/mcp_http.rs`, the one production Streamable HTTP client (proven live against
+   Visma Net, §140 `VEREVON.md`), is fully legacy-stateful: `initialize`/`initialized` handshake,
+   server-assigned `Mcp-Session-Id` tracked across calls, protocol version `2024-11-05` pinned at
+   connect time. The RC removes the handshake and the session header outright (SEP-2575, SEP-2567);
+   the two methods that carry the real work, `tools/list`/`tools/call`, are unchanged in substance,
+   only re-framed as single self-contained requests with identity in `_meta`. We use zero roots,
+   sampling, or logging — the RC's deprecated surface — so nothing else in our client is affected.
+   Bounded to one file plus its call site in `runtime_registries.rs`; net code removed, not added,
+   since there is no session state left to hold. Not urgent under the new 12-month deprecation
+   floor, but third-party servers (Visma included) will move on their own schedule, so this needs
+   to land before they drop the legacy handshake, not after.
+8. **New 2026-08-09 — evaluate exposing Verevon itself as an MCP server** (distribution, not
+   execution — a vision-level option the RC makes newly cheap, not a committed roadmap item).
+   Today we are MCP client-only. Statelessness removes the session-store/sticky-routing cost that
+   made serving MCP expensive; Simon Willison's `datasette-mcp` (2026-07-31) is the concrete
+   existence proof — three tools, wired directly into ChatGPT and Claude, that only became
+   shippable once the protocol went stateless. A stateless `/mcp` endpoint over Verevon's grounded
+   retrieval and governed, approval-gated actions would put that surface inside a user's own
+   assistant rather than only Verevon's own chat UI. This is a `verevon-vision.md` distribution
+   question first — flagged here because the enabling change landed in Model Plane's dependency
+   surface, not because Model Plane owns the product decision.
 
 #### P3 — execution-model evolution
 

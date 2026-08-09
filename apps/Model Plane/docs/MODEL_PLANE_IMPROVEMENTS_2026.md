@@ -38,7 +38,7 @@ The objective is to **converge, harden, and improve** those components.
 
 ---
 
-## 1a. Verification pass against the running stack — 2026-08-03
+## 1a. Verification pass against the running stack — 2026-08-03, re-run 2026-08-09
 
 This document was written as a research proposal. This section is the
 difference between that and reality: every major component below was
@@ -46,7 +46,75 @@ checked against the actual current Rust/Go source (file:line cited) and
 against fixes that landed this same week, so the rest of the document can be
 read as **verified-and-prioritized**, not just proposed. Re-run this check
 before treating anything below as still accurate — it has already drifted
-once (see §18).
+twice (§18 on the first pass, §14 on this one).
+
+**2026-08-09 re-verification.** `git log --since=2026-08-03` on
+`session-core`, `execution-core`, `model-gateway`, `capability-core`,
+`cost-core`, and `orchestrator-core` was checked commit-by-commit against
+this section's claims. One item moved, from the single most-cited gap in
+the whole document to shipped:
+
+- **§14 (durable approval continuation) is now DONE**, not PARTIAL ~70%. The
+  missing piece named below — "nothing calls it,
+  `execution-core/src/runtime_loop/agent.rs:2237` stubs the client side" —
+  is fixed: `approval_delivery_worker.rs` (committed `34f30ee4`, 1331 lines)
+  is the real dispatcher. It leases a row via `ClaimApprovalDeliveries`,
+  resumes the exact suspended tool call (provider action or shipment
+  booking), executes it, and records+acknowledges the outcome. It grew past
+  what this section speculated in three ways not anticipated here:
+  - **Deterministic postcondition verification** (roadmap P1.3, `d7a7b01d`
+    through `61c46594`): a completed dispatch is independently re-checked
+    against the system of record — shipping-core, 6 provider read-backs
+    (LinkedIn/Meta by-id, LinkedIn posts by bounded listing), 4 mutation
+    verifiers with field-level value comparison, and browser procedures
+    against their own final observation. `PostconditionOutcome`
+    (Confirmed/Refuted/Inconclusive) can *override* a structural success
+    into `verified_failure`, or *strengthen* it to `method: "postcondition"`
+    — never the reverse, and never on an unreachable check.
+  - **The receipt gate is lifted** (`214902ff`): a provider write that
+    integration-corev2 durably completed but returned no id-like field
+    (common for LinkedIn partial updates and Okta lifecycle calls, which
+    answer `204 No Content`) used to be recorded as a terminal
+    `invalid_continuation` regardless. It now resolves through the same
+    postcondition machinery — `CompletedByPostcondition` only on a
+    `Confirmed` outcome, `postcondition_refuted` as a new allowlisted
+    failure code otherwise, silence never promoted to success.
+  - **This is the first live producer of `pb::VerificationResult`**,
+    i.e. the first real instance of §1's "Verified Outcome Foundation"
+    concept this whole document assumes. The Proof Bundle (roadmap P1.2,
+    `b86b2447`/`fa49b65d`) reads exactly this data end-to-end into the Agent
+    Run Console.
+
+  Everything else in this section's original per-component ledger was
+  re-checked directly against source rather than assumed carried-forward,
+  and is confirmed **unchanged**:
+  - §8.1's "attest exact execution request" step: still no `Attest*`
+    function in `capability-core` scoped to a specific call (only runtime
+    *health* attestation exists — `AttestAvailabilityForOrg`/
+    `AttestAvailabilityGlobal`, `capabilities_store.go:344-425` — a
+    different concept from signing a specific execution request). Still
+    GREENFIELD as originally scoped.
+  - §9: no `RoutingDecision` type or step-level routing function exists
+    anywhere in `model-gateway`. Still request-level only.
+  - §13: `skill_promotion.go` last touched 2026-07-31 (before the original
+    pass); unchanged, 141 lines, same shape.
+  - §18: `cost-core` still has no `Reserve`/reservation type anywhere in the
+    service. Durable ledger claim and the reservation/commit gap both stand.
+  - §21: `MAX_TOOL_ROUNDS` is still resolved once from env, clamped
+    `1..=32`, defaulting to 12 (`tool_loop.rs:50-67`) — unchanged.
+  - §22: TOON usage and prompt-cache-key handling are still confined to
+    `http_routes.rs`; no second provider's cache_control equivalent has been
+    added. Still narrower than proposed, still Anthropic-only.
+  - §23.1/23.2 (progressive MCP disclosure) and §23.4 (MCP code mode): still
+    no `server/discover`-equivalent staged disclosure in `capability-core`.
+    Still GREENFIELD — see the 2026-07-28 MCP release-candidate note added
+    to §23 below, which changes *how* this should be built, not whether it
+    still needs building.
+  - §23.9: `CapabilitiesStore.RankedList` (`capabilities_store.go:553`)
+    still scores on the same measured fields (`success_rate`,
+    `p95_latency_ms`, `mean_cost_usd`, `approval_rate`, `incident_count`,
+    `operator_rating`) via `sort.SliceStable` — real, unchanged, still the
+    thing to extend rather than replace.
 
 **Read this first: three corrections to how the rest of the document should
 be read.**
@@ -105,21 +173,23 @@ be read.**
    above. It has no existing scaffolding to extend.
 
 **Per-component ledger** (EXISTS / PARTIAL / GREENFIELD), cross-referenced
-inline at each relevant section below rather than only here:
+inline at each relevant section below rather than only here. Re-verified
+2026-08-09 against source; changes from the 2026-08-03 pass are marked.
 
 | Doc section | Proposed component                                | Verified state                                                             |
 | ----------- | ------------------------------------------------- | -------------------------------------------------------------------------- |
-| §8          | Capability attestation                            | GREENFIELD — see §8 note                                                   |
-| §9          | Step-level model routing + RoutingDecision record | PARTIAL (request-level only) — see §9 note                                 |
-| §13         | Skill promotion / failure learning                | PARTIAL, and a real live instance already ships — see §13 note             |
-| §14         | Durable approval continuation                     | PARTIAL, ~70% — see the correction above                                   |
-| §18         | Durable cost ledger                               | **DONE** — see the correction above                                        |
-| §21         | Loop engineering (goal loop specifically)         | The acute pain this would fix is **already fixed**, simpler — see §21 note |
-| §22         | TOON usage                                        | EXISTS, narrower than proposed — see §22 note                              |
-| §22.6       | Anthropic prompt caching                          | EXISTS, Anthropic-only — see §22 note                                      |
-| §23.1–23.2  | Progressive MCP disclosure                        | GREENFIELD — see §23 note                                                  |
-| §23.4       | MCP code mode                                     | GREENFIELD, confirmed                                                      |
-| §23.9       | Outcome-driven capability ranking                 | **Real ranking already exists, extend it** — see §23 note                  |
+| §8          | Capability attestation                            | GREENFIELD — see §8 note (unchanged 08-09)                                 |
+| §9          | Step-level model routing + RoutingDecision record | PARTIAL (request-level only) — see §9 note (unchanged 08-09)               |
+| §13         | Skill promotion / failure learning                | PARTIAL, and a real live instance already ships — see §13 note (unchanged 08-09) |
+| §14         | Durable approval continuation                     | **DONE 08-09** (was PARTIAL ~70% on 08-03) — see the 2026-08-09 correction above |
+| §18         | Durable cost ledger                               | **DONE** — see the correction above (unchanged 08-09)                      |
+| §21         | Loop engineering (goal loop specifically)         | The acute pain this would fix is **already fixed**, simpler — see §21 note (unchanged 08-09) |
+| §22         | TOON usage                                        | EXISTS, narrower than proposed — see §22 note (unchanged 08-09)            |
+| §22.6       | Anthropic prompt caching                          | EXISTS, Anthropic-only — see §22 note (unchanged 08-09)                    |
+| §23.1–23.2  | Progressive MCP disclosure                        | GREENFIELD — mechanism now specified by the 2026-07-28 MCP RC, see §23 note |
+| §23.4       | MCP code mode                                     | GREENFIELD, confirmed (unchanged 08-09)                                    |
+| §23.9       | Outcome-driven capability ranking                 | **Real ranking already exists, extend it** — see §23 note (unchanged 08-09) |
+| §23 (new)   | MCP client migration to the 2026-07-28 RC          | **NEW 08-09** — our client is legacy stateful; see §23 note                |
 
 ---
 
@@ -1692,7 +1762,10 @@ model-gateway fix — "auto-discover tools instead of requiring a manual
 allowlist," 2026-07-28 — happens at connect-time in a different service and
 does not change what capability-core stores or discloses to the model at
 inference time; do not conflate the two.) This section's proposal is real,
-unbuilt work.
+unbuilt work — **see §23.11 for the 2026-07-28 MCP spec release candidate,
+which supplies a real staged-disclosure primitive (`server/discover`) for
+exactly this Level 0-3 model, rather than requiring one to be invented from
+scratch.**
 
 Do not load every connected tool schema into model context.
 
@@ -1898,6 +1971,76 @@ Expose common groups as discoverable bundles:
 - meeting preparation.
 
 A bundle reduces discovery cost but grants no additional authority.
+
+### 23.11 The 2026-07-28 MCP specification release candidate
+
+**New 2026-08-09.** The `2026-07-28` MCP spec RC ([Anthropic's own
+announcement](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/))
+is the largest revision since MCP launched, and it lands in two places this
+document already names.
+
+**What changed, precisely.** The `initialize`/`initialized` handshake is
+removed (SEP-2575): protocol version, client info, and capabilities now
+travel in `_meta` on every request instead of being negotiated once, and a
+new `server/discover` method lets a client fetch server capabilities
+on-demand rather than only at connection time. The `Mcp-Session-Id` header
+and the protocol-level session it implied are also removed (SEP-2567) — any
+request can now land on any server instance, so the sticky routing and
+shared session store a horizontal deployment used to need are no longer
+required at the protocol layer. Full JSON Schema 2020-12 is now supported
+for tool schemas (previously a constrained subset). Roots, sampling, and
+`logging/setLevel` move to Deprecated under a new feature-lifecycle policy
+(minimum twelve months before removal); MCP Apps (server-rendered UI) and
+Tasks graduate into first-class, opt-in Extensions.
+
+**What this means for our client.** `model-gateway/src/mcp_http.rs` — the
+one production Streamable HTTP client, called from `runtime_registries.rs`,
+proven live against Visma Net per §140 of `VEREVON.md` — is fully legacy
+stateful: it opens with `initialize`, tracks a server-assigned
+`Mcp-Session-Id` (`mcp_http.rs:37`, `MCP_SESSION_HEADER`), and negotiates
+`MCP_PROTOCOL_VERSION = "2024-11-05"` (`mcp_jsonrpc.rs:17`) once at
+connection time. It uses exactly four methods: `initialize`,
+`notifications/initialized`, `tools/list`, `tools/call`. The first two are
+removed outright by the RC; the two that carry the real work
+(`tools/list`/`tools/call`) are structurally unchanged, just re-framed as
+single self-contained requests. We use zero roots, sampling, or logging
+calls, so none of the deprecations touch us.
+
+The migration this implies is a rewrite of `mcp_http.rs`'s session-opening
+logic into a single-request-per-call shape — drop the `initialize`
+round-trip and `Mcp-Session-Id` tracking, move client identity into `_meta`,
+send `MCP-Protocol-Version`/`Mcp-Method`/`Mcp-Name` per request — bounded to
+that one file plus its call site, net code *removed* rather than added
+(no session state to hold). Not urgent under the new twelve-month
+deprecation floor, but not optional either: third-party MCP servers
+(Visma's included) will move to the new spec on their own timeline, and our
+client needs to speak it before they drop the legacy handshake.
+
+**What this means for §23.1-23.2 (progressive capability disclosure).**
+That proposal is GREENFIELD specifically because nothing today "calls out to
+an MCP server to enumerate schemas progressively." `server/discover` is
+exactly that primitive on the wire — a client can fetch Level 0/1
+(identity, capability summary) cheaply and defer Level 2/3 (full schema,
+examples) until a candidate is shortlisted, without a bespoke discovery
+protocol of our own. This does not reduce the size of the §23.1-23.2 build
+(the staged-disclosure logic, ranking, and caching in `capability-core` are
+still entirely unbuilt) — it removes one design question (what wire
+primitive to build discovery on) by supplying a standard answer.
+
+**A capability the RC opens that no Verevon document currently proposes:
+exposing Verevon as an MCP server, not only consuming one.** Statelessness
+is what made Simon Willison's `datasette-mcp` ship after ["the fourth time
+[he'd] tried building this
+plugin"](https://simonwillison.net/2026/Jul/31/stateless-mcp/) — no session
+store, no sticky routing, so a plugin can add an `/-/mcp` endpoint to an
+existing service cheaply. The same removal applies to us: a stateless
+`/mcp` endpoint over Verevon's grounded retrieval and governed actions
+surface could be wired directly into a user's own ChatGPT or Claude, the
+same way `datasette-mcp` wires into either today. This is a distribution
+question for `verevon-vision.md` and a roadmap-sequencing question for
+`verevon-roadmap.md`, not a Model Plane implementation detail — flagged here
+because the RC is what makes it newly cheap, not because Model Plane owns
+the decision.
 
 ---
 
