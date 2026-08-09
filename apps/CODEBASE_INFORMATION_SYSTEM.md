@@ -17,6 +17,7 @@ Updated: 2026-07-13
 > and [MVP/enterprise-next roadmap](Model%20Plane/MODEL_PLANE_ROADMAP.md).
 
 Scope:
+- `apps/Infra Plane`
 - `apps/Application Plane`
 - `apps/Data Plane v2`
 - `apps/Control Plane`
@@ -33,6 +34,7 @@ Evidence used:
 - CodeGraph status on 2026-07-02: 11,635 indexed files, 216,888 nodes, 760,041 edges.
 - Canonical target ownership: `apps/master-ownership-matrix.md`.
 - Cross-plane privacy contract: `apps/GDPR_SUMMARY.md`.
+- Infra Plane runtime contract: `apps/Infra Plane/README.md`, `docker-compose.yml`, and `configs/traefik/dynamic.yml`.
 - Verevon v3 source/docs: `apps/Frontend Plane/verevonv3/README.md`, `package.json`, `vite.config.ts`, `apps/gateway/src/main.rs`, `apps/gateway/src/domains/*`, `src/shared/actions/action-registry.ts`.
 - Data Plane v2 docs/manifests: `apps/Data Plane v2/docs/gap-data.md`, `Makefile`, service manifests.
 - Ingestion docs/manifests: `apps/Ingestion Plane/Quarry-v2/docs/ARCHITECTURE.md`, `docs/CONTRACTS.md`, `docs/CROSS_PLANE_INTEGRATION.md`, service manifests.
@@ -50,6 +52,7 @@ The authority model stays unchanged:
 
 ```text
 Control owns authority.
+Infra routes local edge traffic without owning plane data.
 Data owns durable knowledge.
 Ingestion captures evidence.
 Model reasons and executes agent loops.
@@ -61,6 +64,7 @@ Frontend presents and normalizes access.
 
 | Layer | Plane | Directory | Current role |
 |---|---|---|---|
+| L0 | CoreSystem Infra Plane | `apps/Infra Plane` | Local-only Traefik traffic layer, NGINX landing surface, bounded operator self-status; no shared databases |
 | L1 | Control Plane | `apps/Control Plane` | Identity, users, orgs, billing, sessions, audit, quotas, entitlements |
 | L2 | Data Plane v2 | `apps/Data Plane v2` | Documents, chunks, embeddings, retrieval, GraphRAG, LLM wiki, quality gates |
 | L3 | Ingestion Plane | `apps/Ingestion Plane` | Quarry-v2 web/search evidence, imports, integrations, SharePoint/M365 sync |
@@ -76,6 +80,9 @@ The canonical live runtime map and integration-proof matrix is maintained in `do
 ```mermaid
 flowchart LR
   User["User / operator"] --> Frontend["Frontend Plane: Verevon v3 Solid/Vite"]
+  Operator["Local operator"] --> Infra["CoreSystem Infra Plane: Traefik / NGINX / bounded operator gateway"]
+  Infra --> InfraGateway["Core Infra gateway: self-status only"]
+  Infra --> LocalLanding["NGINX local landing page"]
   Frontend --> Gateway["Verevon v3 Rust gateway: apps/gateway"]
   Frontend --> Actions["Shared action registry and context packs"]
   Gateway --> Control["Control Plane: auth/user/org/billing/session/audit"]
@@ -256,6 +263,29 @@ Primary docs:
 - `apps/Application Plane/notification-core/README.md`
 - `apps/Application Plane/zammad-foundation/README.md`
 
+### CoreSystem Infra Plane
+
+Purpose: local-only traffic and operator infrastructure. It provides explicit
+Traefik routes, an NGINX local landing surface, and bounded Core Infra
+self-status. It is not a shared platform datastore and is not a cross-plane
+gateway.
+
+Primary runtime components:
+- `core-infra-gateway` - Go health/readiness and token-protected local operator status only.
+- `traefik` - loopback-only local ingress with explicit routes, rate limiting, and security headers.
+- `nginx` - local static landing surface.
+- `coresystem-edge` - routeable HTTP network. Databases, queues, object stores, and private plane services must not join it.
+
+Conventions:
+- No PostgreSQL, Redis, NATS, MinIO, Qdrant, n8n, Docker socket, or generic gRPC management service belongs in this plane.
+- Another plane may expose only its public gateway/service through an explicit local route; authorization and tenant scope remain in that plane.
+- The current runtime is local Docker only. It does not certify an external deployment path.
+
+Primary docs:
+- `apps/Infra Plane/README.md`
+- `apps/Infra Plane/docker-compose.yml`
+- `apps/Infra Plane/configs/traefik/dynamic.yml`
+
 ### Frontend Plane: Verevon v3
 
 Purpose: the current human-facing Verevon workspace and frontend gateway surface.
@@ -336,6 +366,7 @@ This is future scope. Channel Plane should eventually own adapter install/runtim
 |---|---|
 | `apps/master-ownership-matrix.md` | Canonical target ownership and cross-plane decision rules |
 | `apps/CORESYSTEM_AUDIT_BACKLOG.md` | Current bug/gap/remediation backlog from onboarding audits |
+| `apps/Infra Plane` | Local CoreSystem traffic/NGINX/operator infrastructure with no shared data authority |
 | `apps/Application Plane` | Collaborative workspace, Convex/AFFiNE-adjacent projections, notifications, application-facing services |
 | `apps/Data Plane v2` | Durable knowledge, retrieval, graph, wiki, indexing, embedding, data quality |
 | `apps/Control Plane` | Identity, org, user, billing, session, audit authority |
@@ -417,12 +448,21 @@ cd "apps/Application Plane"
 docker compose up -d --build
 ```
 
+Infra Plane:
+
+```bash
+cd "apps/Infra Plane"
+./start-local.sh
+curl --fail http://127.0.0.1:8090/infra/health
+```
+
 ## Where To Look
 
 | Task | Start here |
 |---|---|
 | Understand ownership boundaries | `apps/master-ownership-matrix.md` |
 | Inspect current audit findings | `apps/CORESYSTEM_AUDIT_BACKLOG.md` |
+| Change local edge traffic, NGINX, or Core Infra operator status | `apps/Infra Plane/README.md` and `apps/Infra Plane/configs/traefik/dynamic.yml` |
 | Add a Verevon v3 product surface | `apps/Frontend Plane/verevonv3/src/features/*` and `src/app` |
 | Add a human/model action | `apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts` |
 | Add frontend API client behavior | `apps/Frontend Plane/verevonv3/src/shared/api`, `src/shared/rpc`, `src/shared/graphrest` |

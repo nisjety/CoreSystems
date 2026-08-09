@@ -73,7 +73,7 @@ curl -s -X POST http://localhost:3001/api/v2/auth/admin/users/list \
     {
       "id": "WIg7ckmm0qf7SxZCnZRChH5cysE1tjoY",
       "name": "System Admin",
-      "email": "admin@aquatiq.com",
+      "email": "admin@coresystem.com",
       "emailVerified": false,
       "role": "admin",
       "status": "active",
@@ -165,7 +165,7 @@ curl -s -X POST http://localhost:3001/api/v2/auth/admin/users/get \
 ```bash
 curl -s -v -X POST http://localhost:3001/api/auth/sign-in/email \
   -H "Content-Type: application/json" \
-  -d '{"email": "admin@aquatiq.com", "password": "AdminPass123!"}' 2>&1
+  -d '{"email": "admin@coresystem.com", "password": "AdminPass123!"}' 2>&1
 ```
 
 **Response Headers:**

@@ -16,8 +16,8 @@
 > [audit](Application%20Plane/docs/core-research/plane-audit-2026-07-13.md).
 
 > Generated: 2026-05-06  
-> Scope: Quarry v2, Data Plane, Model Plane, App/Shell, and future reference tooling.  
-> Rule: **Quarry captures evidence. Data Plane knows. Model Plane reasons. App Shell presents.**
+> Scope: CoreSystem Infra, Quarry v2, Data Plane, Model Plane, App/Shell, and future reference tooling.
+> Rule: **Core Infra routes local traffic. Quarry captures evidence. Data Plane knows. Model Plane reasons. App Shell presents.**
 > Privacy contract: [`GDPR_SUMMARY.md`](./GDPR_SUMMARY.md).
 
 ## 0. Decision Rules
@@ -28,6 +28,7 @@
 | Does it store, chunk, embed, index, retrieve, graph, version, or maintain durable knowledge? | **Data Plane** |
 | Does it plan, reason, synthesize, act as an agent, choose tools, write memory/wiki updates, or run research loops? | **Model Plane** |
 | Does it expose human-facing graph/wiki/IDE/CLI/canvas/voice UX? | **App Shell** |
+| Does it terminate or route local HTTP traffic without reading or owning plane data? | **CoreSystem Infra Plane** |
 | Is it latency-sensitive, CPU/memory-sensitive, parsing-heavy, retrieval-heavy, browser-runtime-heavy, or protocol-heavy? | **Rust** |
 | Is it durable workflow, registry, policy, scheduling, resource CRUD, grants, billing, or operator control? | **Go** |
 | Is it eval/research/model-lab/provider-specific ML glue only? | **Python** |
@@ -116,6 +117,15 @@
 | `cost-core` | Go | Token/cost ledger, budgets, usage events |
 | `graph-lab-py` / `eval-lab-py` | Python | LangGraph/LangChain/Deep Agents/eval prototyping; no production hot path |
 
+### CoreSystem Infra Plane target
+
+| Component | Language / runtime | Owner scope |
+|---|---|---|
+| `core-infra-gateway` | Go | Local operator self-status only; no cross-plane API, database, cache, Docker socket, or gRPC surface |
+| Traefik | Docker | Local loopback ingress, explicit routes, rate limits, and edge security headers |
+| NGINX | Docker | Local static landing surface only |
+| `coresystem-edge` | Docker network | Routeable HTTP services only; never databases, brokers, queues, or object stores |
+
 ## 3. Non-negotiable Cross-Plane Contracts
 
 1. **No direct database crossing.** Model and Quarry never connect to Data Plane Postgres/Qdrant directly.
@@ -130,6 +140,7 @@
 10. **Application projections only narrow access.** Convex, notification, conversation, and other Application services may cache or mirror membership for availability, but a denial/removal must revoke the projection and an authority outage must never create or widen access.
 11. **Notification intake is Application Plane-owned.** The canonical contract is `POST /api/v1/notification-requests`; Ingestion support workers and the Frontend gateway own their client calls and must propagate authentication, tenant, retention, and delivery failures honestly.
 12. **Provider execution never invents approval authority.** Conversation owns its durable human intent or approved-AI action; Ingestion Integration owns provider execution and the single-use receipt. An effectful call requires a tenant-bound service bearer plus a short-lived signature over the exact durable authorization, actor, tenant, provider effect, payload digest, and idempotency key. Every other issuer, including Model Plane, fails closed until it implements an equivalent durable contract.
+13. **Core Infra is traffic-only.** It may expose a local HTTP route to a plane-owned public gateway, but it never shares or administers a plane database, cache, broker, object store, tenant scope, provider credential, or user authority. A service on `coresystem-edge` is not granted access to another plane.
 
 ## 4. Research Notes Used
 

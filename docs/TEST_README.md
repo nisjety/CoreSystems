@@ -38,7 +38,7 @@ Quick test for inviting members to existing organizations.
 cd /Volumes/Lagring/Triodelab/CoreSystem/backend
 
 # List available organizations first
-docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -t -c \
+docker exec coresystem-postgres-local psql -U coresystem -d auth_service -t -c \
   "SELECT id, name FROM organization ORDER BY created_at DESC LIMIT 5;"
 
 # Then run the invitation test
@@ -90,13 +90,13 @@ go run test/test-org-events.go all
 
 **Auth Service (Better Auth):**
 ```bash
-docker exec aquatiq-postgres-local psql -U aquatiq -d auth_service -c \
+docker exec coresystem-postgres-local psql -U coresystem -d auth_service -c \
   "SELECT id, name, slug, created_at FROM organization ORDER BY created_at DESC LIMIT 5;"
 ```
 
 **Org-Core (Synchronized):**
 ```bash
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
   "SELECT org_id, org_name, status, plan_level, created_at FROM organizations ORDER BY created_at DESC LIMIT 5;"
 ```
 
@@ -116,19 +116,19 @@ docker logs org-core-service 2>&1 | grep "Received auth event"
 
 **Capabilities:**
 ```bash
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
   "SELECT org_id, capability_type, enabled FROM org_capabilities ORDER BY created_at DESC LIMIT 10;"
 ```
 
 **Quotas:**
 ```bash
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
   "SELECT org_id, max_products, max_rag_docs, max_api_calls_per_day FROM org_quotas ORDER BY created_at DESC LIMIT 5;"
 ```
 
 **Usage Tracking:**
 ```bash
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core -c \
   "SELECT org_id, date, api_calls, rag_docs_count FROM org_usage ORDER BY created_at DESC LIMIT 5;"
 ```
 

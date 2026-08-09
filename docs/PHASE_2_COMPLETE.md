@@ -202,7 +202,7 @@ GET /api/v1/admin/audit/stats
 **UUID**: `550e8400-e29b-41d4-a716-446655440000`  
 **Plan**: Enterprise  
 **Status**: Active  
-**Database**: `aquatiq_dev`
+**Database**: `coresystem_dev`
 
 ### Test Script
 
@@ -222,10 +222,10 @@ Created comprehensive test suite: `backend/test_phase2_manual.sh`
 ### Issues Resolved
 
 1. **Docker Network Misconfiguration** ✅
-   - Fixed: Changed from `aquatiq-digital-signage_aquatiq-net` to `aquatiq-local`
+   - Fixed: Changed from `coresystem-digital-signage_coresystem-net` to `coresystem-local`
 
 2. **AI Core Database Connection** ✅
-   - Fixed: Updated `DATABASE_URL` to point to `aquatiq-postgres-local:5432`
+   - Fixed: Updated `DATABASE_URL` to point to `coresystem-postgres-local:5432`
 
 3. **Template API Pydantic v2 Compatibility** ✅
    - Fixed: Changed `from_orm()` to `model_validate(..., from_attributes=True)`
@@ -237,7 +237,7 @@ Created comprehensive test suite: `backend/test_phase2_manual.sh`
    - Fixed: Updated Log struct to match actual table (resource_type, created_at, details JSONB)
 
 6. **Audit Logs FK Constraint Violation** ✅
-   - Root Cause: Test organization created in wrong database (`org_core` instead of `aquatiq_dev`)
+   - Root Cause: Test organization created in wrong database (`org_core` instead of `coresystem_dev`)
    - Fixed: Inserted test org into correct database
    - Result: All audit logs now writing successfully
 
@@ -345,10 +345,10 @@ RATE_LIMIT_CRAWL_RPM=10
 AUDIT_LOG_ENABLED=true
 
 # Database
-POSTGRES_DSN=postgres://postgres:postgres@aquatiq-postgres-local:5432/aquatiq_dev?sslmode=disable
+POSTGRES_DSN=postgres://postgres:postgres@coresystem-postgres-local:5432/coresystem_dev?sslmode=disable
 
 # Redis
-REDIS_URL=redis://:redis@aquatiq-redis-local:6379/0
+REDIS_URL=redis://:redis@coresystem-redis-local:6379/0
 ```
 
 **AI Core** (via docker-compose.yml):
@@ -360,10 +360,10 @@ RATE_LIMIT_EMBEDDING_RPM=180
 RATE_LIMIT_DOCUMENT_RPM=90
 
 # Database
-DATABASE_URL=postgresql://postgres:postgres@aquatiq-postgres-local:5432/ai_core
+DATABASE_URL=postgresql://postgres:postgres@coresystem-postgres-local:5432/ai_core
 
 # Redis
-REDIS_URL=redis://:redis@aquatiq-redis-local:6379/4
+REDIS_URL=redis://:redis@coresystem-redis-local:6379/4
 ```
 
 ---
@@ -371,13 +371,13 @@ REDIS_URL=redis://:redis@aquatiq-redis-local:6379/4
 ## 🔍 Troubleshooting
 
 ### Rate Limiting Not Working
-- Check Redis connectivity: `docker exec aquatiq-redis-local redis-cli ping`
+- Check Redis connectivity: `docker exec coresystem-redis-local redis-cli ping`
 - Verify `RATE_LIMIT_ENABLED=true` in environment
 - Check logs for Redis errors
 - Ensure org_id is being passed correctly
 
 ### Audit Logs Not Writing
-- Verify test organization exists in `aquatiq_dev` database
+- Verify test organization exists in `coresystem_dev` database
 - Check foreign key constraint on `audit_logs.org_id`
 - Review docker logs: `docker logs org-core-service | grep audit`
 - Ensure middleware is enabled in server setup

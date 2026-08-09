@@ -218,7 +218,7 @@ cd apps/backend/ai-core && pip install -r requirements.txt
 
 ```bash
 # Start databases and message queue
-docker-compose up -d aquatiq-postgres-local aquatiq-redis-local aquatiq-nats-local aquatiq-qdrant-local
+docker-compose up -d coresystem-postgres-local coresystem-redis-local coresystem-nats-local coresystem-qdrant-local
 ```
 
 ### 4. Start Services (Development)

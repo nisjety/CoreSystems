@@ -12,13 +12,13 @@
 
 ### ✅ Done (2026-06-18)
 - **Azure OpenAI key** (`core-ai-rg` KEY1, RG `Core-Ai-RG`): zero-downtime rotation — configs switched to KEY2, KEY1 regenerated; old value verified dead.
-- **Control-plane DB password** (`aquatiq`@controlplane-postgres): `ALTER USER` to a new password; 10 gitignored env files updated; new verified, old rejected (scram path).
+- **Control-plane DB password** (`coresystem`@controlplane-postgres): `ALTER USER` to a new password; 10 gitignored env files updated; new verified, old rejected (scram path).
 - **`BETTER_AUTH_SECRET`**: new shared secret in `auth-core/.env`, `auth-core/.env.docker`, root `.env`; separate prod secret in `auth-core/.env.production`; `docker-compose.yml` L22 changed to required `${BETTER_AUTH_SECRET:?…}`.
 - Working tree redacted in 9 tracked files; `.gitignore` confirmed comprehensive (only `*.env.example`/templates tracked).
 
 ### ⚠️ Immediate (post-rotation restart — REQUIRED)
 ```bash
-cd "apps/Control Plane" && docker compose up -d --build   # new aquatiq pw + BETTER_AUTH_SECRET
+cd "apps/Control Plane" && docker compose up -d --build   # new coresystem pw + BETTER_AUTH_SECRET
 docker compose up -d                                       # repo root: frontend/root stack
 ```
 - Logs all users out (new auth secret) — expected.

@@ -238,7 +238,7 @@ POST /api/auth/signIn/sso
 
 2. ✅ **COMPLETE** - Database schema verified
    - All Better Auth tables exist (user, session, account, etc.)
-   - Admin user created: admin@aquatiq.com
+   - Admin user created: admin@coresystem.com
    - Role field properly configured
    - No additional migrations needed
 

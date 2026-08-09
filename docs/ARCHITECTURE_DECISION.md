@@ -311,7 +311,7 @@ gateway-service:
     - nats
     - convex-backend
   networks:
-    - aquatiq-local
+    - coresystem-local
 ```
 
 ---

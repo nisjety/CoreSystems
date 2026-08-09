@@ -306,7 +306,7 @@ CACHE_TYPE=multi-tier
 CACHE_LOCAL_MAX_COST_MB=100      # L1: 100MB
 CACHE_LOCAL_TTL_SECONDS=60       # L1: 60s
 CACHE_LOCAL_BUFFER_SIZE=64       # Ristretto buffer
-REDIS_URL=redis://:redis@aquatiq-redis-local:6379/0
+REDIS_URL=redis://:redis@coresystem-redis-local:6379/0
 CACHE_TTL_SECONDS=120            # L2: 120s
 CACHE_ENABLED=true
 ```

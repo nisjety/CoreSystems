@@ -345,7 +345,7 @@ For testing purposes, use this pre-created organization:
 **Name**: Ima Admin Org  
 **UUID**: `550e8400-e29b-41d4-a716-446655440000`  
 **Plan**: Enterprise  
-**Database**: `aquatiq_dev`
+**Database**: `coresystem_dev`
 
 ### Test with Headers
 ```bash
@@ -388,10 +388,10 @@ RATE_LIMIT_BURST_MULTIPLIER=1.5
 AUDIT_LOG_ENABLED=true
 
 # Database
-POSTGRES_DSN=postgres://postgres:postgres@aquatiq-postgres-local:5432/aquatiq_dev?sslmode=disable
+POSTGRES_DSN=postgres://postgres:postgres@coresystem-postgres-local:5432/coresystem_dev?sslmode=disable
 
 # Redis
-REDIS_URL=redis://:redis@aquatiq-redis-local:6379/0
+REDIS_URL=redis://:redis@coresystem-redis-local:6379/0
 ```
 
 **AI Core** (docker-compose.yml):
@@ -404,8 +404,8 @@ environment:
   - RATE_LIMIT_SAFETY_RPM=200
   - RATE_LIMIT_TRANSLATE_RPM=100
   - RATE_LIMIT_IMAGE_GEN_RPM=30
-  - DATABASE_URL=postgresql://postgres:postgres@aquatiq-postgres-local:5432/ai_core
-  - REDIS_URL=redis://:redis@aquatiq-redis-local:6379/4
+  - DATABASE_URL=postgresql://postgres:postgres@coresystem-postgres-local:5432/ai_core
+  - REDIS_URL=redis://:redis@coresystem-redis-local:6379/4
 ```
 
 ---
@@ -418,7 +418,7 @@ environment:
 **Solution**: Ensure `RATE_LIMIT_ENABLED=true` and Redis is running
 ```bash
 docker ps | grep redis
-docker exec aquatiq-redis-local redis-cli ping
+docker exec coresystem-redis-local redis-cli ping
 ```
 
 **Problem**: Rate limits not enforcing  
@@ -433,7 +433,7 @@ docker logs org-core-service | grep "rate limit"
 **Solution**: Verify test org exists in correct database
 ```sql
 -- Connect to correct database
-docker exec aquatiq-postgres-local psql -U postgres -d aquatiq_dev
+docker exec coresystem-postgres-local psql -U postgres -d coresystem_dev
 
 -- Check if org exists
 SELECT org_id, name FROM organizations 

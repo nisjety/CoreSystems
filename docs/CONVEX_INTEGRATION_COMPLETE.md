@@ -37,8 +37,8 @@ Successfully added `backend/convex-gateway` to the main `backend/docker-compose.
 
 ### ✅ Network Connectivity
 ```
-✓ Convex → Org-Core: Connected via aquatiq-local network
-✓ Convex → AI-Core: Connected via aquatiq-local network
+✓ Convex → Org-Core: Connected via coresystem-local network
+✓ Convex → AI-Core: Connected via coresystem-local network
 ```
 
 ### ✅ Performance Metrics
@@ -65,7 +65,7 @@ convex-backend:
     - AI_CORE_URL=http://ai-core-service:8040
     - ORG_CORE_URL=http://org-core-service:8080
   networks:
-    - aquatiq-local
+    - coresystem-local
 
 convex-dashboard:
   image: ghcr.io/get-convex/convex-dashboard:latest
@@ -74,7 +74,7 @@ convex-dashboard:
   environment:
     - CONVEX_BACKEND_URL=http://convex-backend:3210
   networks:
-    - aquatiq-local
+    - coresystem-local
 ```
 
 ### Volumes Added
@@ -281,7 +281,7 @@ JWT_ISSUER=auth.coresystem.local
 docker logs convex-backend
 
 # Verify network
-docker network inspect aquatiq-local
+docker network inspect coresystem-local
 
 # Restart
 docker-compose restart convex-backend

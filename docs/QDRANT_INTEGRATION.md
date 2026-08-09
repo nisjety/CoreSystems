@@ -4,7 +4,7 @@
 
 ### 1. **Real Qdrant Connection Configured**
 - Added `QDRANT_URL` environment variable to [.env.local](backend/Org-core/.env.local)
-- Configured to connect to `aquatiq-qdrant-local:6333` (your existing Docker container)
+- Configured to connect to `coresystem-qdrant-local:6333` (your existing Docker container)
 - Set vector dimension to 384 for sentence-transformers/all-MiniLM-L6-v2 model
 
 ### 2. **VectorStore Adapter Created**
@@ -29,7 +29,7 @@
 ### Environment Variables (.env.local)
 ```bash
 VECTOR_STORE_TYPE=qdrant
-QDRANT_URL=http://aquatiq-qdrant-local:6333
+QDRANT_URL=http://coresystem-qdrant-local:6333
 QDRANT_API_KEY=                    # Optional for cloud Qdrant
 QDRANT_COLLECTION_PREFIX=org
 VECTOR_DIMENSION=384
@@ -37,10 +37,10 @@ VECTOR_DIMENSION=384
 
 ### Docker Container Info
 ```
-Container: aquatiq-qdrant-local
+Container: coresystem-qdrant-local
 Image: qdrant/qdrant:latest
 Ports: 6333:6333 (HTTP API), 6334:6334 (gRPC)
-Network: aquatiq-digital-signage_aquatiq-net
+Network: coresystem-digital-signage_coresystem-net
 ```
 
 ### MCP Server Tools Available
@@ -152,7 +152,7 @@ Log message when using mock:
 
 Log message when using real Qdrant:
 ```
-2026-02-01T00:53:30Z INF Using real Qdrant vector store url=http://aquatiq-qdrant-local:6333
+2026-02-01T00:53:30Z INF Using real Qdrant vector store url=http://coresystem-qdrant-local:6333
 ```
 
 ## 🎯 Next Steps

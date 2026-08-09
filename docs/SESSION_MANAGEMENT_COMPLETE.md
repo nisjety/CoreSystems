@@ -350,7 +350,7 @@ sessionManager.SetContextWindowLimits(
 ### Apply Migration
 ```bash
 # Via Docker
-docker exec -i aquatiq-postgres-local psql -U postgres -d aquatiq_dev < migrations/003_sessions.up.sql
+docker exec -i coresystem-postgres-local psql -U postgres -d coresystem_dev < migrations/003_sessions.up.sql
 
 # Via psql (if installed)
 psql $POSTGRES_DSN -f migrations/003_sessions.up.sql
@@ -358,7 +358,7 @@ psql $POSTGRES_DSN -f migrations/003_sessions.up.sql
 
 ### Rollback Migration
 ```bash
-docker exec -i aquatiq-postgres-local psql -U postgres -d aquatiq_dev < migrations/003_sessions.down.sql
+docker exec -i coresystem-postgres-local psql -U postgres -d coresystem_dev < migrations/003_sessions.down.sql
 ```
 
 ## Code Statistics

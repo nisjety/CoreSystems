@@ -255,10 +255,10 @@ docker ps | grep postgres
 cd /Volumes/Lagring/Triodelab/CoreSystem/backend/Org-core
 
 # Create database if needed
-cat migrations/001_init.up.sql | docker exec -i aquatiq-postgres-local psql -U aquatiq -d org_core
+cat migrations/001_init.up.sql | docker exec -i coresystem-postgres-local psql -U coresystem -d org_core
 
 # Add RAG tables
-cat migrations/006_rag_tables.up.sql | docker exec -i aquatiq-postgres-local psql -U aquatiq -d org_core
+cat migrations/006_rag_tables.up.sql | docker exec -i coresystem-postgres-local psql -U coresystem -d org_core
 ```
 
 ### 3. Configure Environment
@@ -270,7 +270,7 @@ cat > .env.local << 'EOF'
 ENABLE_RAG=true
 
 # Database
-DATABASE_DSN="postgres://aquatiq:PASSWORD@localhost:5432/org_core?sslmode=disable"
+DATABASE_DSN="postgres://coresystem:PASSWORD@localhost:5432/org_core?sslmode=disable"
 
 # Qdrant Configuration
 QDRANT_HOST=localhost
@@ -1233,16 +1233,16 @@ curl -X POST $BASE_URL/api/v1/rag/retrieve \
 
 ```bash
 # Vacuum to reclaim space
-docker exec aquatiq-postgres-local \
-  psql -U aquatiq -d org_core -c "VACUUM ANALYZE rag_documents;"
+docker exec coresystem-postgres-local \
+  psql -U coresystem -d org_core -c "VACUUM ANALYZE rag_documents;"
 
 # Re-index for performance
-docker exec aquatiq-postgres-local \
-  psql -U aquatiq -d org_core -c "REINDEX TABLE rag_retrievals;"
+docker exec coresystem-postgres-local \
+  psql -U coresystem -d org_core -c "REINDEX TABLE rag_retrievals;"
 
 # Archive old metrics (>90 days)
-docker exec aquatiq-postgres-local \
-  psql -U aquatiq -d org_core -c \
+docker exec coresystem-postgres-local \
+  psql -U coresystem -d org_core -c \
   "DELETE FROM rag_retrievals WHERE created_at < NOW() - INTERVAL '90 days';"
 ```
 

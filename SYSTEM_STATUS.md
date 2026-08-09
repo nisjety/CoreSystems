@@ -699,14 +699,14 @@ Prefers `STRIPE_API_KEY_SECRET`; falls back to `STRIPE_API_KEY` for backwards co
 **Root cause:** `DATABASE_URL` was set to `...controlplane-postgres:5432/postgres` — the PostgreSQL maintenance database — instead of a dedicated service database.
 
 **Fix:**
-1. Created dedicated database: `CREATE DATABASE billing_service OWNER aquatiq;` on `controlplane-postgres`.
+1. Created dedicated database: `CREATE DATABASE billing_service OWNER coresystem;` on `controlplane-postgres`.
 2. Updated `.env.docker`:
    ```dotenv
    # Before:
-   DATABASE_URL=postgres://aquatiq:...@controlplane-postgres:5432/postgres?sslmode=disable
+   DATABASE_URL=postgres://coresystem:...@controlplane-postgres:5432/postgres?sslmode=disable
    
    # After:
-   DATABASE_URL=postgres://aquatiq:...@controlplane-postgres:5432/billing_service?sslmode=disable
+   DATABASE_URL=postgres://coresystem:...@controlplane-postgres:5432/billing_service?sslmode=disable
    ```
 3. Rebuilt and restarted `billing-core-service` — all 5 migrations applied cleanly to the new database.
 

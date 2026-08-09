@@ -246,13 +246,13 @@ PATCH /api/v1/preferences   - Update user preferences
 **Before (Hardcoded Secrets):**
 ```yaml
 - JWT_SECRET=dev-jwt-secret-change-in-production
-- DATABASE_URL=postgres://aquatiq:<REDACTED-DB_PASSWORD>@...
+- DATABASE_URL=postgres://coresystem:<REDACTED-DB_PASSWORD>@...
 ```
 
 **After (Environment Variables):**
 ```yaml
 - JWT_SECRET=${JWT_SECRET:-dev-jwt-secret-local}
-- DATABASE_URL=postgres://${DB_USER:-aquatiq}:${DB_PASSWORD}@${DB_HOST:-aquatiq-postgres-local}:${DB_PORT:-5432}/...
+- DATABASE_URL=postgres://${DB_USER:-coresystem}:${DB_PASSWORD}@${DB_HOST:-coresystem-postgres-local}:${DB_PORT:-5432}/...
 ```
 
 **Service URL Normalization:**

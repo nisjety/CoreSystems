@@ -236,7 +236,7 @@ docker logs auth-service --tail 100
 docker logs org-core-service --tail 100
 
 # Verify database state
-docker exec aquatiq-postgres-local psql -U aquatiq -d org_core \
+docker exec coresystem-postgres-local psql -U coresystem -d org_core \
   -c "SELECT org_id, org_name, status FROM organizations ORDER BY created_at DESC LIMIT 5;"
 ```
 
@@ -253,7 +253,7 @@ docker exec auth-service ls -la /app/dist/src/middleware/
 ### Events Not Reaching Org-Core?
 ```bash
 # Check NATS connection
-docker exec auth-service nc -zv aquatiq-nats-local 4222
+docker exec auth-service nc -zv coresystem-nats-local 4222
 
 # Check org-core subscriber
 docker logs org-core-service 2>&1 | grep "Subscribing to"

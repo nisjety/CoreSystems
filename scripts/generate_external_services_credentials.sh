@@ -49,7 +49,7 @@ ZAMMAD_API_TOKEN=$ZAMMAD_API_TOKEN
 
 # Zammad API Details
 ZAMMAD_API_URL=http://localhost:3012/api/v1
-ZAMMAD_API_USER=zammad@aquatiq.io
+ZAMMAD_API_USER=zammad@coresystem.io
 ZAMMAD_API_PASSWORD=$(generate_secret 16)
 
 # ==============================================

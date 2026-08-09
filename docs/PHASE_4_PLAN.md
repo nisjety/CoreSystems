@@ -43,7 +43,7 @@ Paths: gateway = `apps/Frontend Plane/verevonv3/apps/gateway`; SPA = `apps/Front
 - **DoD:** `shared/read-data` exports the typed substrate with tests; lint fails CI on the fixture (and would have caught the pre-existing A1/A5/A6 violations); `pnpm verify` green.
 
 ### `PR-2` — WorkspaceSettingsPage de-fake *(DO FIRST, release blocker)* — deps: PR-1
-The acute breach: `securityToggles` all `enabled:true` under a "Security policy" header + `'aquatiq.no Verified'` / `'Connected apps 2/4'` / `'Last sync 8 minutes ago'` / webhook `'200 OK 8 min ago'` static arrays — a **fabricated security/integration posture** (GDPR/SOC2 misrepresentation, worse than a missing feature).
+The acute breach: `securityToggles` all `enabled:true` under a "Security policy" header + `'coresystem.no Verified'` / `'Connected apps 2/4'` / `'Last sync 8 minutes ago'` / webhook `'200 OK 8 min ago'` static arrays — a **fabricated security/integration posture** (GDPR/SOC2 misrepresentation, worse than a missing feature).
 - Replace `securityToggles` with real org-security reads or a disabled/unknown state — **never render a security control as enabled from a literal**; replace the status cards + `webhookRows` with live reads or honest empty state (via the A9 substrate). The honest pattern (`TrustCenterSection.tsx` `createResource`) is local + copyable.
 - **DoD:** zero concrete-false values survive (grep-clean + a **negative render test** that fails if any known false string renders without a backing resource); verified live against a real org with **MFA NOT enabled** (shows disabled, not "Required").
 

@@ -41,7 +41,7 @@ The CoreSystem uses **8 docker-compose files** spread across 7 planes plus a leg
 - **6 critical host-port conflicts** that prevent simultaneous plane operation
 - **2 verevon-net internal port collisions** between Data Plane and Model Plane v2
 - **4 cross-plane reference issues** (v1-only hardcoded addresses)
-- **1 legacy root compose** (`docker-compose.yml`) that predates the plane architecture and uses an incompatible network (`aquatiq-local`)
+- **1 legacy root compose** (`docker-compose.yml`) that predates the plane architecture and uses an incompatible network (`coresystem-local`)
 
 ### Compose File Inventory
 
@@ -54,7 +54,7 @@ The CoreSystem uses **8 docker-compose files** spread across 7 planes plus a leg
 | 5 | `apps/Model Plane v2/docker-compose.yml` | `model-plane-v2` | reasoning-net | agent-core-v2, execution-core-v2, capability-core-v2, llm-worker, ai-core v2 gateway |
 | 6 | `apps/Application Plane/docker-compose.yml` | `application-plane` | app-net | convex-backend, convex-dashboard, convex-gateway, convex-subscriber, notification-core, AFFiNE |
 | 7 | `apps/Frontend Plane/verevon/docker-compose.yml` | `frontend-plane-agencia` | _(none — verevon-net only)_ | frontend |
-| 8 | `docker-compose.yml` (root) | _(default)_ | _(none)_ | **LEGACY** — duplicates many plane services on aquatiq-local network |
+| 8 | `docker-compose.yml` (root) | _(default)_ | _(none)_ | **LEGACY** — duplicates many plane services on coresystem-local network |
 
 ---
 
@@ -83,14 +83,14 @@ Frontend Plane has **no private network** — it connects only to verevon-net.
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│               aquatiq-local (external)               │
+│               coresystem-local (external)               │
 │  Used ONLY by root docker-compose.yml (LEGACY)       │
 │  Also declares controlplane-network (external)       │
 │  INCOMPATIBLE with plane architecture                │
 └──────────────────────────────────────────────────────┘
 ```
 
-**Recommendation:** Deprecate `aquatiq-local` network and migrate root compose services into their respective planes.
+**Recommendation:** Deprecate `coresystem-local` network and migrate root compose services into their respective planes.
 
 ---
 
@@ -201,7 +201,7 @@ AI_CORE_URL: "http://ai-core:8000"
 ### 4c. Root Compose Frontend → Legacy Services
 
 **File:** `docker-compose.yml` (root)
-**Problem:** Frontend references services by legacy names on `aquatiq-local` network:
+**Problem:** Frontend references services by legacy names on `coresystem-local` network:
 
 ```yaml
 AI_CORE_URL: "http://ai-core:8000"           # v1 only
@@ -219,8 +219,8 @@ QUARRY_URL: "http://quarry-api:8090"
 **Problem:** `notification-core` references legacy infrastructure names:
 
 ```yaml
-NATS_URL: "nats://aquatiq-nats-local:4222"
-REDIS_URL: "redis://aquatiq-redis-local:6379"
+NATS_URL: "nats://coresystem-nats-local:4222"
+REDIS_URL: "redis://coresystem-redis-local:6379"
 ```
 
 **Fix:** The Application Plane version of `notification-core` already uses proper references. Deprecate root compose copy.
@@ -338,7 +338,7 @@ REDIS_URL: "redis://aquatiq-redis-local:6379"
 
 ## 6. Root Compose Deprecation Plan
 
-The root `docker-compose.yml` is a **legacy monolith** that predates the plane-based architecture. It uses the `aquatiq-local` network (not `verevon-net`) and duplicates services from Control, Application, and Frontend planes with **different port mappings and configurations**.
+The root `docker-compose.yml` is a **legacy monolith** that predates the plane-based architecture. It uses the `coresystem-local` network (not `verevon-net`) and duplicates services from Control, Application, and Frontend planes with **different port mappings and configurations**.
 
 **2026-07-12 safety update:** every root service is quarantined behind the
 explicit `legacy-monolith` profile. A normal root-level `docker compose up`
@@ -361,7 +361,7 @@ builds and deployments must use the six canonical plane-level Compose files.
 2. **Consolidate Temporal** — Merge org-core-temporal into Ingestion Plane's existing temporal instance (or create a shared Temporal in Control Plane).
 3. **Verify all root compose services** have plane equivalents with correct configurations.
 4. **Rename** root compose to `docker-compose.legacy.yml`.
-5. **Delete** `aquatiq-local` network references across all files.
+5. **Delete** `coresystem-local` network references across all files.
 
 ---
 
@@ -432,7 +432,7 @@ Both Model Plane v1 and v2 are designed to run simultaneously with canary routin
 # 8. Assign letta-server to a plane
 # 9. Consolidate Temporal instances
 # 10. Rename root compose to docker-compose.legacy.yml
-# 11. Remove aquatiq-local network
+# 11. Remove coresystem-local network
 ```
 
 ---

@@ -9,7 +9,7 @@ Better Auth admin plugin has been successfully integrated into the auth-service:
 - **Plugin Enabled**: ✅ Configured in auth.ts (lines 825-865)
 - **Admin Roles**: admin, superadmin
 - **Admin User IDs**: Service account configured via env
-- **Default Admin Emails**: ima.dacosta@aquatiq.com (auto-assigned on creation)
+- **Default Admin Emails**: ima.dacosta@coresystem.com (auto-assigned on creation)
 - **Endpoints Mounted**: /api/v2/auth/admin/*
 
 ### Available Admin Endpoints (10 total)
@@ -27,7 +27,7 @@ Better Auth admin plugin has been successfully integrated into the auth-service:
 
 ### Database Setup ✅
 
-- **Admin User Created**: admin@aquatiq.com (password: AdminPass123!)
+- **Admin User Created**: admin@coresystem.com (password: AdminPass123!)
 - **Role Field**: Exists in user table, properly configured
 - **User Table Schema**: Includes role, banned, banReason, banExpires fields
 - **Total Tables**: 18 Better Auth tables present and operational
@@ -93,7 +93,7 @@ The initial testing issues were **NOT** related to HTTPS requirements. The actua
 # Sign in and extract cookie
 SIGNIN=$(curl -s -v -X POST http://localhost:3001/api/auth/sign-in/email \
   -H "Content-Type: application/json" \
-  -d '{"email": "admin@aquatiq.com", "password": "AdminPass123!"}' 2>&1)
+  -d '{"email": "admin@coresystem.com", "password": "AdminPass123!"}' 2>&1)
 
 COOKIE=$(echo "$SIGNIN" | grep -E "< set-cookie.*__Secure-sid=" | head -1 | sed 's/.*__Secure-sid=\([^;]*\).*/\1/')
 

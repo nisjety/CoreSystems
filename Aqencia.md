@@ -147,7 +147,7 @@ Aqencia runs on **CoreSystem**, a five-plane distributed architecture:
 | **Novu Event Bridge** | NATS→Novu adapter; subscribes to `notifications.>` events and triggers Novu workflows |
 | **Real-time Sync** | Live ingestion progress, document status updates |
 
-*Note: Convex mirrors backend events and is not a source of truth for persistent data. Novu (self-hosted on `aquatiq-local` network) owns notification delivery orchestration across all channels.*
+*Note: Convex mirrors backend events and is not a source of truth for persistent data. Novu (self-hosted on `coresystem-local` network) owns notification delivery orchestration across all channels.*
 
 #### App-Level Event Composition
 

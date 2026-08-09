@@ -117,7 +117,7 @@ Every shim below requires an **explicit owner**, **migration target**, and **rem
 - Stale service keys: `auth-service`, `user-service` (should be `auth-core`, `user-core`)
 - Stale container names matching stale service keys
 - Legacy ports 8040, 50014 (all 8 occurrences confined to this file)
-- Networks `aquatiq-local`, `controlplane-network` (external) — not used by canonical plane composes
+- Networks `coresystem-local`, `controlplane-network` (external) — not used by canonical plane composes
 - Duplicates services already defined in `apps/Control Plane/docker-compose.yml`
 
 **Owner:** Platform Team  
@@ -179,7 +179,7 @@ Every shim below requires an **explicit owner**, **migration target**, and **rem
 2. Replace all root-level compose invocations with plane-specific compose paths.
 3. Rename `docker-compose.yml` → `docker-compose.legacy.yml` with a deprecation header.
 4. After 30 days with no usage, delete `docker-compose.legacy.yml`.
-5. Remove `aquatiq-local` and `controlplane-network` (external) network definitions if no other compose references them.
+5. Remove `coresystem-local` and `controlplane-network` (external) network definitions if no other compose references them.
 
 ### Phase 5: Remove Model Plane v1 (HIGH RISK — After Bake Period)
 

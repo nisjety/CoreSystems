@@ -53,7 +53,7 @@ pip install redis-py python-redis-rate-limit
 **Configuration**:
 ```env
 RATE_LIMIT_ENABLED=true
-REDIS_URL=redis://aquatiq-redis-local:6379
+REDIS_URL=redis://coresystem-redis-local:6379
 RATE_LIMIT_RAG_RPM=60
 RATE_LIMIT_CHAT_RPM=120
 RATE_LIMIT_INDEX_RPM=30

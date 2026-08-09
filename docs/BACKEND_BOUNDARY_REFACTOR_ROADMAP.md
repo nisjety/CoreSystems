@@ -347,9 +347,9 @@ go func() {
 ```bash
 # .env.example (130+ variables organized by category)
 # Database Configuration
-DB_USER=aquatiq
+DB_USER=coresystem
 DB_PASSWORD=${DB_PASSWORD}  # Injected at runtime
-DB_HOST=aquatiq-postgres-local
+DB_HOST=coresystem-postgres-local
 
 # Service URLs (Internal - Docker network)
 AUTH_SERVICE_URL=http://auth-service:3011

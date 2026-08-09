@@ -24,10 +24,10 @@ Standardize service communication URLs, environment variables, and configuration
 | Org-core | `org-core-service` | `org-core-service` |
 | AI-core | `ai-core-service` | `ai-core-service` |
 | Temporal (Org) | `org-core-temporal` | `org-core-temporal` |
-| PostgreSQL | `aquatiq-postgres-local` | `aquatiq-postgres-local` |
-| Redis | `aquatiq-redis-local` | `aquatiq-redis-local` |
-| NATS | `aquatiq-nats-local` | `aquatiq-nats-local` |
-| Qdrant | `aquatiq-qdrant-local` | `aquatiq-qdrant-local` |
+| PostgreSQL | `coresystem-postgres-local` | `coresystem-postgres-local` |
+| Redis | `coresystem-redis-local` | `coresystem-redis-local` |
+| NATS | `coresystem-nats-local` | `coresystem-nats-local` |
+| Qdrant | `coresystem-qdrant-local` | `coresystem-qdrant-local` |
 
 ---
 
@@ -97,16 +97,16 @@ BETTER_AUTH_URL=https://auth.example.com  # production
 **Correct (Internal):**
 ```env
 # Auth service DB
-DATABASE_URL=postgres://aquatiq:${DB_PASSWORD}@aquatiq-postgres-local:5432/auth_service?sslmode=disable
+DATABASE_URL=postgres://coresystem:${DB_PASSWORD}@coresystem-postgres-local:5432/auth_service?sslmode=disable
 
 # User service DB
-DATABASE_URL=postgres://aquatiq:${DB_PASSWORD}@aquatiq-postgres-local:5432/user_service?sslmode=disable
+DATABASE_URL=postgres://coresystem:${DB_PASSWORD}@coresystem-postgres-local:5432/user_service?sslmode=disable
 
 # Org-core DB
-DATABASE_URL=postgres://aquatiq:${DB_PASSWORD}@aquatiq-postgres-local:5432/org_core?sslmode=disable
+DATABASE_URL=postgres://coresystem:${DB_PASSWORD}@coresystem-postgres-local:5432/org_core?sslmode=disable
 
 # AI-core DB
-DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@aquatiq-postgres-local:5432/ai_core
+DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@coresystem-postgres-local:5432/ai_core
 ```
 
 **Note:** Use environment variable for password, not hardcoded value
@@ -123,10 +123,10 @@ DATABASE_URL=postgresql://postgres:${DB_PASSWORD}@aquatiq-postgres-local:5432/ai
 REDIS_PASSWORD=redis  # or use ${REDIS_PASSWORD}
 
 # Service-specific DB numbers
-AUTH_REDIS_URL=redis://:${REDIS_PASSWORD}@aquatiq-redis-local:6379/3
-USER_REDIS_URL=redis://:${REDIS_PASSWORD}@aquatiq-redis-local:6379/2
-ORG_REDIS_URL=redis://:${REDIS_PASSWORD}@aquatiq-redis-local:6379/1
-AI_REDIS_URL=redis://:${REDIS_PASSWORD}@aquatiq-redis-local:6379/4
+AUTH_REDIS_URL=redis://:${REDIS_PASSWORD}@coresystem-redis-local:6379/3
+USER_REDIS_URL=redis://:${REDIS_PASSWORD}@coresystem-redis-local:6379/2
+ORG_REDIS_URL=redis://:${REDIS_PASSWORD}@coresystem-redis-local:6379/1
+AI_REDIS_URL=redis://:${REDIS_PASSWORD}@coresystem-redis-local:6379/4
 ```
 
 ---
@@ -138,7 +138,7 @@ AI_REDIS_URL=redis://:${REDIS_PASSWORD}@aquatiq-redis-local:6379/4
 **Correct:**
 ```env
 # All services use same NATS cluster
-NATS_URL=nats://aquatiq-nats-local:4222
+NATS_URL=nats://coresystem-nats-local:4222
 NATS_TOKEN=${NATS_TOKEN:-nats}  # Use env var with fallback
 ```
 
@@ -184,7 +184,7 @@ NATS_TOKEN=your-nats-token
 - [ ] Normalize all internal service URLs to use service names
 - [ ] Normalize all port assignments to standard pattern
 - [ ] Update service .env files to reference correct service names
-- [ ] Remove hardcoded fallback URLs (like "aquatiq-qdrant-local" in code)
+- [ ] Remove hardcoded fallback URLs (like "coresystem-qdrant-local" in code)
 
 ### Phase 5 Validation
 
@@ -201,7 +201,7 @@ NATS_TOKEN=your-nats-token
 ```env
 # Database
 DB_PASSWORD=secure-password-here
-DB_USER=aquatiq
+DB_USER=coresystem
 
 # Dragonfly
 REDIS_PASSWORD=secure-redis-password

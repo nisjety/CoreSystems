@@ -39,7 +39,7 @@ chmod +x build-and-run.sh
 ### Option 2: Manual Docker Compose Commands
 ```bash
 # Create network (if needed)
-docker network create aquatiq-local
+docker network create coresystem-local
 
 # Build all services
 docker-compose build --parallel
@@ -140,10 +140,10 @@ docker-compose logs -f frontend
 ### Services won't start
 ```bash
 # Check network exists
-docker network ls | grep aquatiq-local
+docker network ls | grep coresystem-local
 
 # Create network manually
-docker network create aquatiq-local
+docker network create coresystem-local
 
 # Check for port conflicts
 lsof -i :3000  # Check if port 3000 is in use
@@ -165,12 +165,12 @@ docker image prune -a
 
 ### Database connection issues
 Check that the database URLs in each service match the network configuration:
-- Hostname should be the service name (e.g., `aquatiq-postgres-local`)
+- Hostname should be the service name (e.g., `coresystem-postgres-local`)
 - Port should be the internal port (e.g., `5432` not `5433`)
 
 ## Network Configuration
 
-All services are connected via the `aquatiq-local` external network:
+All services are connected via the `coresystem-local` external network:
 - Services communicate using their container names as hostnames
 - Internal ports are used for inter-service communication
 - External ports (mapped) are for host access

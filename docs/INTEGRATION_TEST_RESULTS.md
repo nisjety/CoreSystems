@@ -138,9 +138,9 @@ Auth Service now has all required variables:
 EMAIL_PASSWORD_ENABLED=true
 BETTER_AUTH_SECRET=<REDACTED-rotate-and-set-via-.env>
 BETTER_AUTH_URL=http://localhost:3000
-DATABASE_URL=postgres://...@aquatiq-postgres-local:5432/auth_service
-REDIS_URL=redis://:redis@aquatiq-redis-local:6379/3
-NATS_URL=nats://aquatiq-nats-local:4222
+DATABASE_URL=postgres://...@coresystem-postgres-local:5432/auth_service
+REDIS_URL=redis://:redis@coresystem-redis-local:6379/3
+NATS_URL=nats://coresystem-nats-local:4222
 ```
 
 #### Database Connections Verified

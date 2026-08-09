@@ -139,7 +139,7 @@ go get github.com/hibiken/asynq
 
 **Configuration**:
 ```env
-REDIS_URL=redis://aquatiq-redis-local:6379
+REDIS_URL=redis://coresystem-redis-local:6379
 JOB_QUEUE_WORKERS=5
 JOB_QUEUE_CONCURRENCY=10
 ```
