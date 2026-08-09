@@ -141,18 +141,23 @@ const DESTRUCTIVE_MARKERS: &[&str] = &[
 ];
 const POSTING_MARKERS: &[&str] = &["submit", "post-comment", "publish", "send-message"];
 
-/// Deterministic backstop risk classification, OR'd with the planner's own
-/// self-reported `action.risk_category` (checked first — a positive
-/// self-report always wins). Never classifies `downloads`/`uploads` — see
-/// [`RiskCategory`]'s doc for why.
+/// Deterministic risk classification with the planner's self-report as an
+/// additive fallback. Concrete browser evidence wins whenever both are
+/// present, so a planner cannot relabel a checkout or destructive action to
+/// make the human approval prompt less informative. Never classifies
+/// `downloads`/`uploads` — see [`RiskCategory`]'s doc for why.
 pub(super) fn classify_action_risk(
     action: &BrowserAction,
     last_observation: Option<&BrowserObservation>,
 ) -> Option<RiskCategory> {
-    if let Some(reported) = action.risk_category {
-        return Some(reported);
-    }
+    let deterministic = classify_deterministic_risk(action, last_observation);
+    deterministic.or(action.risk_category)
+}
 
+fn classify_deterministic_risk(
+    action: &BrowserAction,
+    last_observation: Option<&BrowserObservation>,
+) -> Option<RiskCategory> {
     // Cross-domain navigation: compare the target host of a `Goto` against
     // the host of the last page actually observed — NOT the allow-list
     // (`AgentPlan::is_domain_allowed`), which is a separate, unconditional
@@ -286,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_planner_self_report_wins_over_backstop() {
+    fn classify_planner_self_report_covers_a_risk_without_deterministic_evidence() {
         let mut a = action(
             ActionType::Click,
             "https://example.com/help",
@@ -298,6 +303,19 @@ mod tests {
             classify_action_risk(&a, None),
             Some(RiskCategory::Destructive)
         );
+    }
+
+    #[test]
+    fn classify_deterministic_checkout_is_not_masked_by_a_planner_login_label() {
+        let mut a = action(
+            ActionType::Click,
+            "https://shop.example.com/checkout",
+            "button.continue",
+            "",
+        );
+        a.risk_category = Some(RiskCategory::Login);
+
+        assert_eq!(classify_action_risk(&a, None), Some(RiskCategory::Checkout));
     }
 
     #[test]

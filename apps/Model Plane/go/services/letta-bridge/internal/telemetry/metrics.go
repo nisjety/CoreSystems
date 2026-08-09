@@ -16,6 +16,10 @@ var (
 	MemorySearchesTotal metric.Int64Counter
 	// MemoryIndexedTotal counts memory indexing attempts, labelled by outcome.
 	MemoryIndexedTotal metric.Int64Counter
+	// MemoryListedTotal counts memory list attempts, labelled by outcome.
+	MemoryListedTotal metric.Int64Counter
+	// MemoryDeletedTotal counts memory delete attempts, labelled by outcome.
+	MemoryDeletedTotal metric.Int64Counter
 )
 
 func init() {
@@ -31,5 +35,13 @@ func init() {
 	MemoryIndexedTotal, _ = meter.Int64Counter(
 		"letta_bridge_memory_indexed_total",
 		metric.WithDescription("Total memory indexing attempts, labelled by outcome."),
+	)
+	MemoryListedTotal, _ = meter.Int64Counter(
+		"letta_bridge_memory_listed_total",
+		metric.WithDescription("Total memory list attempts, labelled by outcome."),
+	)
+	MemoryDeletedTotal, _ = meter.Int64Counter(
+		"letta_bridge_memory_deleted_total",
+		metric.WithDescription("Total memory delete attempts, labelled by outcome."),
 	)
 }

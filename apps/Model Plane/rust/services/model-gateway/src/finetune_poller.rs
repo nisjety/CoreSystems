@@ -18,6 +18,19 @@
 //! Disabled when:
 //!   * `FINETUNE_ENABLED != "1"` (matches the route gate), or
 //!   * `AzureFinetuneClient` is `None` (no creds configured).
+//!
+//! Every tick presents session-core with a freshly minted `aud=session-core`
+//! service bearer (see [`authed`]) rather than a forwarded caller credential —
+//! the poller is a background loop with no inbound request to forward one
+//! from. It mints via its own dedicated [`FinetunePollerTokenProvider`]
+//! (`finetune_poller_auth.rs`), not model-gateway's `SessionTerminalTokenProvider`:
+//! that one's Auth Core registry entry is `retentionByAudience.session-core =
+//! "zdr"` (correct for its terminalize/heartbeat purpose, no durable content),
+//! while this poller's `UpdateJobStatus` writes durable job cost/deployment
+//! state and needs its own `persistent`-retention principal instead. Neither
+//! credential needs a scope beyond what its registry grants: session-core's
+//! `finetune_grpc.rs` authorizes `list_active_jobs`/`update_job_status` on
+//! `caller.is_service()` alone.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,18 +38,28 @@ use std::time::{Duration, Instant};
 use mp_contracts::model_plane::v1 as pb;
 use mp_contracts::model_plane::v1::finetune_jobs_client::FinetuneJobsClient;
 use serde_json::json;
-use tonic::transport::Channel;
+use tonic::{transport::Channel, Request};
 use tracing::{info, warn};
 
 use crate::finetune_azure::{AzureFinetuneClient, AzureJobStatus, DeploymentTier};
+use crate::finetune_poller_auth::FinetunePollerTokenProvider;
 use crate::finetune_routes::{
     azure_status_is_terminal, map_azure_status_to_local, publish_finetune_event,
 };
-use crate::state::DynPublisher;
+use crate::state::{AppState, DynPublisher};
 
 const FEATURE_ENV: &str = "FINETUNE_ENABLED";
 const INTERVAL_ENV: &str = "FINETUNE_POLLER_INTERVAL_SECS";
 const DEFAULT_INTERVAL_SECS: u64 = 60;
+
+/// The finetune poller scans every organization in a single tick —
+/// `ListActiveFinetuneJobs`/`UpdateFinetuneJobStatus` take no org filter and
+/// session-core authorizes both purely on `caller.is_service()`
+/// (`finetune_grpc.rs`), never inspecting the credential's `org_id` claim.
+/// Auth Core's mint endpoint still requires a non-empty `orgId`, so this
+/// value is a label for the audit trail, not an authorization boundary.
+/// `pub(crate)` because `finetune_poller_auth.rs`'s mint call uses it too.
+pub(crate) const FINETUNE_POLLER_SERVICE_ORG_LABEL: &str = "system";
 
 /// Re-escalate a still-unresolved failure to WARN every this many suppressed
 /// ticks.
@@ -136,6 +159,24 @@ pub(crate) fn generate_deployment_name(job_id: &str) -> String {
     format!("{DEPLOYMENT_NAME_PREFIX}{suffix}")
 }
 
+/// Attach the poller's minted `aud=session-core` service bearer as gRPC
+/// `authorization` metadata. Unlike every other session-core caller in this
+/// service, the poller has no inbound request to forward a caller's bearer
+/// from — it is a background loop, not an RPC handler — so without this,
+/// session-core's `auth.rs::extract_bearer` 401s every single tick with
+/// "verified caller credential required".
+#[allow(clippy::result_large_err)]
+fn authed<T>(value: T, bearer: &str) -> Result<Request<T>, tonic::Status> {
+    let mut request = Request::new(value);
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {bearer}").parse().map_err(|_| {
+            tonic::Status::internal("finetune poller credential is not forwardable")
+        })?,
+    );
+    Ok(request)
+}
+
 /// Apply the decided action. Best-effort — any failure logs and returns
 /// without touching the row, so the next tick will retry. When `publisher`
 /// is `Some`, emits an `mp.v1.finetune.{org_id}.{event}` NATS event on
@@ -146,6 +187,7 @@ async fn apply_action(
     publisher: Option<&DynPublisher>,
     row: &pb::FinetuneJob,
     action: PollerAction,
+    bearer: &str,
 ) {
     match action {
         PollerAction::NoOp => {}
@@ -163,6 +205,7 @@ async fn apply_action(
                 &error_message,
                 &fine_tuned_model,
                 terminal,
+                bearer,
             )
             .await;
         }
@@ -177,6 +220,7 @@ async fn apply_action(
                 row,
                 &deployment_name,
                 &fine_tuned_model,
+                bearer,
             )
             .await;
         }
@@ -184,6 +228,7 @@ async fn apply_action(
 }
 
 /// Persist a non-deploy status transition and emit the matching lifecycle event.
+#[allow(clippy::too_many_arguments)] // request context, mirrors apply_deploy_then_update
 async fn apply_update_status(
     client: &mut FinetuneJobsClient<Channel>,
     publisher: Option<&DynPublisher>,
@@ -192,14 +237,15 @@ async fn apply_update_status(
     error_message: &str,
     fine_tuned_model: &str,
     terminal: bool,
+    bearer: &str,
 ) {
     let event_type = match new_status {
         "failed" => mp_events::subjects::FINETUNE_EVENT_FAILED,
         "cancelled" => mp_events::subjects::FINETUNE_EVENT_CANCELLED,
         _ => mp_events::subjects::FINETUNE_EVENT_TRANSITIONED,
     };
-    if let Err(e) = client
-        .update_job_status(pb::UpdateFinetuneJobStatusRequest {
+    let request = match authed(
+        pb::UpdateFinetuneJobStatusRequest {
             job_id: row.job_id.clone(),
             org_id: row.org_id.clone(),
             status: new_status.to_owned(),
@@ -211,9 +257,16 @@ async fn apply_update_status(
             // Empty = leave the persisted tier unchanged; a status-only
             // transition never touches the deployment SKU.
             deployment_tier: String::new(),
-        })
-        .await
-    {
+        },
+        bearer,
+    ) {
+        Ok(request) => request,
+        Err(e) => {
+            warn!(error = %e, job_id = %row.job_id, "poller update_job_status credential attach failed");
+            return;
+        }
+    };
+    if let Err(e) = client.update_job_status(request).await {
         warn!(error = %e, job_id = %row.job_id, "poller update_job_status failed");
         return;
     }
@@ -246,6 +299,7 @@ async fn apply_deploy_then_update(
     row: &pb::FinetuneJob,
     deployment_name: &str,
     fine_tuned_model: &str,
+    bearer: &str,
 ) {
     // Provision deployment first — if it fails the status flip
     // doesn't happen and the next tick retries. Operators can
@@ -268,8 +322,8 @@ async fn apply_deploy_then_update(
         return;
     }
 
-    if let Err(e) = client
-        .update_job_status(pb::UpdateFinetuneJobStatusRequest {
+    let request = match authed(
+        pb::UpdateFinetuneJobStatusRequest {
             job_id: row.job_id.clone(),
             org_id: row.org_id.clone(),
             status: "succeeded".to_owned(),
@@ -280,9 +334,16 @@ async fn apply_deploy_then_update(
             set_completed: true,
             // Auto-deploys always land on the free Developer tier.
             deployment_tier: DeploymentTier::Developer.as_str().to_owned(),
-        })
-        .await
-    {
+        },
+        bearer,
+    ) {
+        Ok(request) => request,
+        Err(e) => {
+            warn!(error = %e, job_id = %row.job_id, "poller update_job_status (succeeded) credential attach failed");
+            return;
+        }
+    };
+    if let Err(e) = client.update_job_status(request).await {
         warn!(error = %e, job_id = %row.job_id, "poller update_job_status (succeeded) failed");
         return;
     }
@@ -323,16 +384,26 @@ async fn apply_deploy_then_update(
     }
 }
 
-/// One pass over all active jobs. Public for tests; the spawn entry point is
-/// [`run`]. When `publisher` is `Some`, emits NATS lifecycle events on
-/// transitions.
+/// One pass over all active jobs. `pub(crate)` for tests; the top-level entry
+/// point is [`spawn`], which spawns [`run`]'s loop around this. When
+/// `publisher` is `Some`, emits NATS lifecycle events on transitions.
 pub(crate) async fn tick(
     azure: &AzureFinetuneClient,
     client: &mut FinetuneJobsClient<Channel>,
     publisher: Option<&DynPublisher>,
+    poller_tokens: &FinetunePollerTokenProvider,
 ) -> Result<usize, tonic::Status> {
+    // A bearer the poller mints for itself, not one forwarded from a caller —
+    // see `authed`.
+    let bearer = poller_tokens.token().await.map_err(|e| {
+        tonic::Status::unauthenticated(format!("finetune poller credential mint failed: {e}"))
+    })?;
+
     let resp = client
-        .list_active_jobs(pb::ListActiveFinetuneJobsRequest { limit: 0 })
+        .list_active_jobs(authed(
+            pb::ListActiveFinetuneJobsRequest { limit: 0 },
+            &bearer,
+        )?)
         .await?
         .into_inner();
 
@@ -347,28 +418,61 @@ pub(crate) async fn tick(
             }
         };
         let action = decide_action(&row, &azure_status);
-        apply_action(azure, client, publisher, &row, action).await;
+        apply_action(azure, client, publisher, &row, action, &bearer).await;
     }
 
     Ok(count)
 }
 
-/// Top-level spawn target. Loops every `FINETUNE_POLLER_INTERVAL_SECS`
-/// (default 60). Returns only on unrecoverable error from the tonic channel
-/// itself; transient failures are absorbed inside [`tick`].
+/// Spawn the poller if Azure fine-tuning is configured; returns `None`
+/// (spawns nothing) otherwise, since there is then no provider to refresh
+/// against. Builds the poller's own dedicated session-core credential
+/// provider from `FINETUNE_POLLER_SERVICE_ID`/`FINETUNE_POLLER_SERVICE_API_KEY`
+/// — the poller is a background loop with no inbound caller bearer to
+/// forward, so it must present its own. A missing/invalid credential is
+/// logged here and passed through as `None`; it does not fail gateway
+/// startup, matching `AzureFinetuneClient::from_env`'s own soft-fail for this
+/// optional feature — `run`'s loop keeps that failure visible via the same
+/// suppressed-warning path as any other tick failure.
+pub fn spawn(state: &AppState) -> Option<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    let azure = state.azure_finetune.clone()?;
+    let client = state.finetune_jobs_client.clone();
+    let publisher = state.publisher.clone();
+    let poller_tokens = match FinetunePollerTokenProvider::from_env() {
+        Ok(provider) => Some(Arc::new(provider)),
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "finetune poller session-core credential not configured; poller will idle"
+            );
+            None
+        }
+    };
+    Some(tokio::spawn(run(azure, client, publisher, poller_tokens)))
+}
+
+/// Loop body for the finetune poller, spawned via [`spawn`]. Loops every
+/// `FINETUNE_POLLER_INTERVAL_SECS` (default 60). Returns only on
+/// unrecoverable error from the tonic channel itself; transient failures are
+/// absorbed inside [`tick`].
 ///
 /// `publisher` is `Arc<DynPublisher>` so the poller shares the same NATS
 /// connection the routes use — no duplicate connections, no separate
-/// configuration surface.
+/// configuration surface. `poller_tokens` mints the `aud=session-core`
+/// service bearer `tick` presents to session-core on every call; `None` is
+/// treated as a (suppressible, still-logged) tick failure — see the loop
+/// below — rather than a silent no-op, so a misconfigured credential cannot
+/// hide the same way the bare-401 bug this replaces did.
 ///
 /// # Errors
 ///
 /// Returns an error only on an unrecoverable failure of the tonic channel itself;
 /// transient per-tick failures are absorbed inside [`tick`].
-pub async fn run(
+pub(crate) async fn run(
     azure: AzureFinetuneClient,
     mut client: FinetuneJobsClient<Channel>,
     publisher: Arc<DynPublisher>,
+    poller_tokens: Option<Arc<FinetunePollerTokenProvider>>,
 ) -> anyhow::Result<()> {
     let interval_secs = std::env::var(INTERVAL_ENV)
         .ok()
@@ -397,7 +501,13 @@ pub async fn run(
         }
 
         let started = Instant::now();
-        match tick(&azure, &mut client, Some(publisher.as_ref())).await {
+        let result = match poller_tokens.as_deref() {
+            Some(tokens) => tick(&azure, &mut client, Some(publisher.as_ref()), tokens).await,
+            None => Err(tonic::Status::failed_precondition(
+                "finetune poller has no session-core service credential configured",
+            )),
+        };
+        match result {
             Ok(n) => {
                 metrics::counter!(
                     "mp_gateway_finetune_poller_ticks_total",
@@ -468,6 +578,19 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::finetune_azure::AzureJobError;
+
+    #[test]
+    fn authed_attaches_bearer_as_authorization_metadata() {
+        let request = authed(pb::ListActiveFinetuneJobsRequest { limit: 0 }, "test-token")
+            .expect("valid bearer parses into ASCII metadata");
+        let value = request
+            .metadata()
+            .get("authorization")
+            .expect("authorization metadata present")
+            .to_str()
+            .expect("ascii metadata value");
+        assert_eq!(value, "Bearer test-token");
+    }
 
     fn row(status: &str, deployment: &str, fine_tuned: &str, err: &str) -> pb::FinetuneJob {
         pb::FinetuneJob {

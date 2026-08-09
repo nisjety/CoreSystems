@@ -225,32 +225,6 @@ pub async fn prepare_run_authenticated(
     .await
 }
 
-/// Crate-internal adapter for an ingress boundary that has already verified a
-/// dedicated `aud=session-core` bearer and bound it to the Model Plane caller.
-///
-/// Raw caller input must never be passed to this function without that boundary
-/// verification.
-pub(crate) async fn prepare_run_with_token(
-    state: &AppState,
-    requested_thread_id: Option<&str>,
-    requested_session_key: Option<&str>,
-    org_id: &str,
-    user_id: &str,
-    goal: &str,
-    bearer: &str,
-) -> Result<SessionRun> {
-    prepare_run_with_bearer(
-        state,
-        requested_thread_id,
-        requested_session_key,
-        org_id,
-        user_id,
-        goal,
-        Some(bearer),
-    )
-    .await
-}
-
 /// Start a Gateway-owned managed run. The additive lifecycle contract makes
 /// run creation and its terminalization obligation atomic, while preserving
 /// the legacy `StartRun` RPC for external compatibility callers.
@@ -901,17 +875,6 @@ pub(crate) async fn append_assistant_message_with_token(
     bearer: &str,
 ) -> Result<()> {
     append_assistant_message_with_bearer(state, thread_id, content, Some(bearer)).await
-}
-
-/// Optional-token variant used only by compatibility code that must fail
-/// closed when no independently verified session credential is available.
-pub(crate) async fn append_assistant_message_with_optional_token(
-    state: &AppState,
-    thread_id: &str,
-    content: &str,
-    bearer: Option<&str>,
-) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, bearer).await
 }
 
 async fn append_assistant_message_with_bearer(

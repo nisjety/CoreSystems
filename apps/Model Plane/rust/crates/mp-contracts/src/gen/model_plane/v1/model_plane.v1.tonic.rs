@@ -2323,6 +2323,30 @@ pub mod run_service_client {
                 .insert(GrpcMethod::new("model_plane.v1.RunService", "CancelRun"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn list_system_runs(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListSystemRunsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListRunsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.RunService/ListSystemRuns",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.RunService", "ListSystemRuns"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn resolve_run_owner(
             &mut self,
             request: impl tonic::IntoRequest<super::ResolveRunOwnerRequest>,
@@ -2378,6 +2402,13 @@ pub mod run_service_server {
             request: tonic::Request<super::CancelRunRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CancelRunResponse>,
+            tonic::Status,
+        >;
+        async fn list_system_runs(
+            &self,
+            request: tonic::Request<super::ListSystemRunsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListRunsResponse>,
             tonic::Status,
         >;
         async fn resolve_run_owner(
@@ -2582,6 +2613,51 @@ pub mod run_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CancelRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.RunService/ListSystemRuns" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListSystemRunsSvc<T: RunService>(pub Arc<T>);
+                    impl<
+                        T: RunService,
+                    > tonic::server::UnaryService<super::ListSystemRunsRequest>
+                    for ListSystemRunsSvc<T> {
+                        type Response = super::ListRunsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListSystemRunsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunService>::list_system_runs(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListSystemRunsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -9905,6 +9981,54 @@ pub mod memory_service_client {
                 .insert(GrpcMethod::new("model_plane.v1.MemoryService", "IndexMemory"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn list_memory(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListMemoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMemoryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.MemoryService/ListMemory",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.MemoryService", "ListMemory"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn delete_memory(
+            &mut self,
+            request: impl tonic::IntoRequest<super::DeleteMemoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteMemoryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.MemoryService/DeleteMemory",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.MemoryService", "DeleteMemory"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn health(
             &mut self,
             request: impl tonic::IntoRequest<super::MemoryHealthRequest>,
@@ -9956,6 +10080,20 @@ pub mod memory_service_server {
             request: tonic::Request<super::IndexMemoryRequest>,
         ) -> std::result::Result<
             tonic::Response<super::IndexMemoryResponse>,
+            tonic::Status,
+        >;
+        async fn list_memory(
+            &self,
+            request: tonic::Request<super::ListMemoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListMemoryResponse>,
+            tonic::Status,
+        >;
+        async fn delete_memory(
+            &self,
+            request: tonic::Request<super::DeleteMemoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::DeleteMemoryResponse>,
             tonic::Status,
         >;
         async fn health(
@@ -10117,6 +10255,96 @@ pub mod memory_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = IndexMemorySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.MemoryService/ListMemory" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListMemorySvc<T: MemoryService>(pub Arc<T>);
+                    impl<
+                        T: MemoryService,
+                    > tonic::server::UnaryService<super::ListMemoryRequest>
+                    for ListMemorySvc<T> {
+                        type Response = super::ListMemoryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListMemoryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MemoryService>::list_memory(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListMemorySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.MemoryService/DeleteMemory" => {
+                    #[allow(non_camel_case_types)]
+                    struct DeleteMemorySvc<T: MemoryService>(pub Arc<T>);
+                    impl<
+                        T: MemoryService,
+                    > tonic::server::UnaryService<super::DeleteMemoryRequest>
+                    for DeleteMemorySvc<T> {
+                        type Response = super::DeleteMemoryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::DeleteMemoryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MemoryService>::delete_memory(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DeleteMemorySvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -10652,6 +10880,97 @@ pub mod orchestration_core_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_approval_continuation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetApprovalContinuationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetApprovalContinuationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "GetApprovalContinuation",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn record_approval_continuation_started(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::RecordApprovalContinuationStartedRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordApprovalContinuationStartedResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "RecordApprovalContinuationStarted",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn record_approval_continuation_outcome(
+            &mut self,
+            request: impl tonic::IntoRequest<
+                super::RecordApprovalContinuationOutcomeRequest,
+            >,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordApprovalContinuationOutcomeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationOutcome",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "RecordApprovalContinuationOutcome",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn acknowledge_approval_delivery(
             &mut self,
             request: impl tonic::IntoRequest<super::AcknowledgeApprovalDeliveryRequest>,
@@ -10888,6 +11207,27 @@ pub mod orchestration_core_service_server {
             request: tonic::Request<super::ClaimApprovalDeliveriesRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ClaimApprovalDeliveriesResponse>,
+            tonic::Status,
+        >;
+        async fn get_approval_continuation(
+            &self,
+            request: tonic::Request<super::GetApprovalContinuationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetApprovalContinuationResponse>,
+            tonic::Status,
+        >;
+        async fn record_approval_continuation_started(
+            &self,
+            request: tonic::Request<super::RecordApprovalContinuationStartedRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordApprovalContinuationStartedResponse>,
+            tonic::Status,
+        >;
+        async fn record_approval_continuation_outcome(
+            &self,
+            request: tonic::Request<super::RecordApprovalContinuationOutcomeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordApprovalContinuationOutcomeResponse>,
             tonic::Status,
         >;
         async fn acknowledge_approval_delivery(
@@ -11591,6 +11931,171 @@ pub mod orchestration_core_service_server {
                     };
                     Box::pin(fut)
                 }
+                "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetApprovalContinuationSvc<T: OrchestrationCoreService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<super::GetApprovalContinuationRequest>
+                    for GetApprovalContinuationSvc<T> {
+                        type Response = super::GetApprovalContinuationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::GetApprovalContinuationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::get_approval_continuation(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetApprovalContinuationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted" => {
+                    #[allow(non_camel_case_types)]
+                    struct RecordApprovalContinuationStartedSvc<
+                        T: OrchestrationCoreService,
+                    >(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<
+                        super::RecordApprovalContinuationStartedRequest,
+                    > for RecordApprovalContinuationStartedSvc<T> {
+                        type Response = super::RecordApprovalContinuationStartedResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::RecordApprovalContinuationStartedRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::record_approval_continuation_started(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RecordApprovalContinuationStartedSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationOutcome" => {
+                    #[allow(non_camel_case_types)]
+                    struct RecordApprovalContinuationOutcomeSvc<
+                        T: OrchestrationCoreService,
+                    >(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<
+                        super::RecordApprovalContinuationOutcomeRequest,
+                    > for RecordApprovalContinuationOutcomeSvc<T> {
+                        type Response = super::RecordApprovalContinuationOutcomeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::RecordApprovalContinuationOutcomeRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::record_approval_continuation_outcome(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RecordApprovalContinuationOutcomeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery" => {
                     #[allow(non_camel_case_types)]
                     struct AcknowledgeApprovalDeliverySvc<T: OrchestrationCoreService>(
@@ -11886,6 +12391,317 @@ pub mod orchestration_core_service_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "model_plane.v1.OrchestrationCoreService";
     impl<T> tonic::server::NamedService for OrchestrationCoreServiceServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod orchestrator_workflow_service_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct OrchestratorWorkflowServiceClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl OrchestratorWorkflowServiceClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> OrchestratorWorkflowServiceClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> OrchestratorWorkflowServiceClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            OrchestratorWorkflowServiceClient::new(
+                InterceptedService::new(inner, interceptor),
+            )
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn start_workflow(
+            &mut self,
+            request: impl tonic::IntoRequest<super::StartWorkflowRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::StartWorkflowResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestratorWorkflowService/StartWorkflow",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestratorWorkflowService",
+                        "StartWorkflow",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod orchestrator_workflow_service_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with OrchestratorWorkflowServiceServer.
+    #[async_trait]
+    pub trait OrchestratorWorkflowService: std::marker::Send + std::marker::Sync + 'static {
+        async fn start_workflow(
+            &self,
+            request: tonic::Request<super::StartWorkflowRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::StartWorkflowResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct OrchestratorWorkflowServiceServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> OrchestratorWorkflowServiceServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>>
+    for OrchestratorWorkflowServiceServer<T>
+    where
+        T: OrchestratorWorkflowService,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/model_plane.v1.OrchestratorWorkflowService/StartWorkflow" => {
+                    #[allow(non_camel_case_types)]
+                    struct StartWorkflowSvc<T: OrchestratorWorkflowService>(pub Arc<T>);
+                    impl<
+                        T: OrchestratorWorkflowService,
+                    > tonic::server::UnaryService<super::StartWorkflowRequest>
+                    for StartWorkflowSvc<T> {
+                        type Response = super::StartWorkflowResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::StartWorkflowRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestratorWorkflowService>::start_workflow(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = StartWorkflowSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for OrchestratorWorkflowServiceServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "model_plane.v1.OrchestratorWorkflowService";
+    impl<T> tonic::server::NamedService for OrchestratorWorkflowServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
@@ -13187,6 +14003,32 @@ pub mod session_core_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn set_agent_skill_enabled(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetAgentSkillEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAgentSkillEnabledResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.SessionCore/SetAgentSkillEnabled",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("model_plane.v1.SessionCore", "SetAgentSkillEnabled"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn list_conversation(
             &mut self,
             request: impl tonic::IntoRequest<super::ListConversationRequest>,
@@ -13364,6 +14206,13 @@ pub mod session_core_server {
             request: tonic::Request<super::ListAgentSkillsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListAgentSkillsResponse>,
+            tonic::Status,
+        >;
+        async fn set_agent_skill_enabled(
+            &self,
+            request: tonic::Request<super::SetAgentSkillEnabledRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetAgentSkillEnabledResponse>,
             tonic::Status,
         >;
         async fn list_conversation(
@@ -14009,6 +14858,52 @@ pub mod session_core_server {
                     };
                     Box::pin(fut)
                 }
+                "/model_plane.v1.SessionCore/SetAgentSkillEnabled" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetAgentSkillEnabledSvc<T: SessionCore>(pub Arc<T>);
+                    impl<
+                        T: SessionCore,
+                    > tonic::server::UnaryService<super::SetAgentSkillEnabledRequest>
+                    for SetAgentSkillEnabledSvc<T> {
+                        type Response = super::SetAgentSkillEnabledResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetAgentSkillEnabledRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SessionCore>::set_agent_skill_enabled(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetAgentSkillEnabledSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/model_plane.v1.SessionCore/ListConversation" => {
                     #[allow(non_camel_case_types)]
                     struct ListConversationSvc<T: SessionCore>(pub Arc<T>);
@@ -14181,6 +15076,484 @@ pub mod session_core_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "model_plane.v1.SessionCore";
     impl<T> tonic::server::NamedService for SessionCoreServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// Generated client implementations.
+pub mod managed_run_lifecycle_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    #[derive(Debug, Clone)]
+    pub struct ManagedRunLifecycleClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl ManagedRunLifecycleClient<tonic::transport::Channel> {
+        /// Attempt to create a new client by connecting to a given endpoint.
+        pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
+        where
+            D: TryInto<tonic::transport::Endpoint>,
+            D::Error: Into<StdError>,
+        {
+            let conn = tonic::transport::Endpoint::new(dst)?.connect().await?;
+            Ok(Self::new(conn))
+        }
+    }
+    impl<T> ManagedRunLifecycleClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> ManagedRunLifecycleClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            ManagedRunLifecycleClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        pub async fn start_managed_run(
+            &mut self,
+            request: impl tonic::IntoRequest<super::StartManagedRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::StartManagedRunResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ManagedRunLifecycle/StartManagedRun",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.ManagedRunLifecycle",
+                        "StartManagedRun",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn record_terminal_outcome(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RecordTerminalOutcomeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordTerminalOutcomeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ManagedRunLifecycle/RecordTerminalOutcome",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.ManagedRunLifecycle",
+                        "RecordTerminalOutcome",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn heartbeat_managed_run(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HeartbeatManagedRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::HeartbeatManagedRunResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.ManagedRunLifecycle/HeartbeatManagedRun",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.ManagedRunLifecycle",
+                        "HeartbeatManagedRun",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod managed_run_lifecycle_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with ManagedRunLifecycleServer.
+    #[async_trait]
+    pub trait ManagedRunLifecycle: std::marker::Send + std::marker::Sync + 'static {
+        async fn start_managed_run(
+            &self,
+            request: tonic::Request<super::StartManagedRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::StartManagedRunResponse>,
+            tonic::Status,
+        >;
+        async fn record_terminal_outcome(
+            &self,
+            request: tonic::Request<super::RecordTerminalOutcomeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RecordTerminalOutcomeResponse>,
+            tonic::Status,
+        >;
+        async fn heartbeat_managed_run(
+            &self,
+            request: tonic::Request<super::HeartbeatManagedRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::HeartbeatManagedRunResponse>,
+            tonic::Status,
+        >;
+    }
+    #[derive(Debug)]
+    pub struct ManagedRunLifecycleServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> ManagedRunLifecycleServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for ManagedRunLifecycleServer<T>
+    where
+        T: ManagedRunLifecycle,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/model_plane.v1.ManagedRunLifecycle/StartManagedRun" => {
+                    #[allow(non_camel_case_types)]
+                    struct StartManagedRunSvc<T: ManagedRunLifecycle>(pub Arc<T>);
+                    impl<
+                        T: ManagedRunLifecycle,
+                    > tonic::server::UnaryService<super::StartManagedRunRequest>
+                    for StartManagedRunSvc<T> {
+                        type Response = super::StartManagedRunResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::StartManagedRunRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ManagedRunLifecycle>::start_managed_run(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = StartManagedRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ManagedRunLifecycle/RecordTerminalOutcome" => {
+                    #[allow(non_camel_case_types)]
+                    struct RecordTerminalOutcomeSvc<T: ManagedRunLifecycle>(pub Arc<T>);
+                    impl<
+                        T: ManagedRunLifecycle,
+                    > tonic::server::UnaryService<super::RecordTerminalOutcomeRequest>
+                    for RecordTerminalOutcomeSvc<T> {
+                        type Response = super::RecordTerminalOutcomeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RecordTerminalOutcomeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ManagedRunLifecycle>::record_terminal_outcome(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RecordTerminalOutcomeSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.ManagedRunLifecycle/HeartbeatManagedRun" => {
+                    #[allow(non_camel_case_types)]
+                    struct HeartbeatManagedRunSvc<T: ManagedRunLifecycle>(pub Arc<T>);
+                    impl<
+                        T: ManagedRunLifecycle,
+                    > tonic::server::UnaryService<super::HeartbeatManagedRunRequest>
+                    for HeartbeatManagedRunSvc<T> {
+                        type Response = super::HeartbeatManagedRunResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::HeartbeatManagedRunRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ManagedRunLifecycle>::heartbeat_managed_run(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = HeartbeatManagedRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for ManagedRunLifecycleServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "model_plane.v1.ManagedRunLifecycle";
+    impl<T> tonic::server::NamedService for ManagedRunLifecycleServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

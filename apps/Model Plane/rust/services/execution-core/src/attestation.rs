@@ -326,7 +326,10 @@ fn valid_key_id(value: &str) -> bool {
 }
 
 fn is_lower_hex_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Post-serialization pass mirroring Go's default `encoding/json` HTML
@@ -479,8 +482,15 @@ mod tests {
         // Not covered by the fixture above (which contains none of these
         // characters) — this proves the escaping path independently.
         let body = serde_json::json!({"text": "<b>Tom & Jerry</b>"});
-        let digest = payload_sha256("org-1", "conn-1", "whatsapp", "whatsapp.messages.send", &Value::Null, &body)
-            .expect("payload_sha256 should succeed");
+        let digest = payload_sha256(
+            "org-1",
+            "conn-1",
+            "whatsapp",
+            "whatsapp.messages.send",
+            &Value::Null,
+            &body,
+        )
+        .expect("payload_sha256 should succeed");
         // The digest must be over the HTML-escaped bytes, not the literal
         // ones: if escaping were skipped, this would equal
         // sha256({"...":"...","body":{"text":"<b>Tom & Jerry</b>"},"params":null,...}) instead.
@@ -525,15 +535,17 @@ mod tests {
         let segments: Vec<&str> = token.split('.').collect();
         assert_eq!(segments.len(), 3);
 
-        let header_json =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(segments[0]).unwrap();
+        let header_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(segments[0])
+            .unwrap();
         let header: Value = serde_json::from_slice(&header_json).unwrap();
         assert_eq!(header["alg"], "EdDSA");
         assert_eq!(header["typ"], ATTESTATION_TYPE);
         assert_eq!(header["kid"], "model-execution-write-test");
 
-        let claims_json =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(segments[1]).unwrap();
+        let claims_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(segments[1])
+            .unwrap();
         let claims: Value = serde_json::from_slice(&claims_json).unwrap();
         assert_eq!(claims["iss"], ISSUER_MODEL_EXECUTION);
         assert_eq!(claims["aud"], AUDIENCE_INTEGRATION_CORE);
@@ -542,8 +554,9 @@ mod tests {
 
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = signing_key.verifying_key();
-        let signature_bytes =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(segments[2]).unwrap();
+        let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(segments[2])
+            .unwrap();
         let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
         let signing_input = format!("{}.{}", segments[0], segments[1]);
         ed25519_dalek::Verifier::verify(&verifying_key, signing_input.as_bytes(), &signature)
@@ -569,8 +582,9 @@ mod tests {
             })
             .expect("sign should succeed for a valid human_intent authorization");
         let segments: Vec<&str> = token.split('.').collect();
-        let claims_json =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(segments[1]).unwrap();
+        let claims_json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(segments[1])
+            .unwrap();
         let claims: Value = serde_json::from_slice(&claims_json).unwrap();
         assert!(
             claims.get("approval_id").is_none(),
@@ -594,6 +608,9 @@ mod tests {
             payload_sha256: FIXTURE_PAYLOAD_SHA256.to_owned(),
             idempotency_key: "approval-1".to_owned(),
         });
-        assert!(result.is_err(), "must fail closed without a matching approval_id");
+        assert!(
+            result.is_err(),
+            "must fail closed without a matching approval_id"
+        );
     }
 }

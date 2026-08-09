@@ -151,7 +151,7 @@ impl Grounding {
 
 // ── Honesty contract for grounded answering ─────────────────────────────────
 //
-// Incident (2026-07-20): asking Verevon "tell me about aquatiq what do they do
+// Incident (2026-07-20): asking Verevon "tell me about coresystem what do they do
 // and sell" returned a confident, fully-formed paragraph guessing the wrong
 // industry, with NO citation and NO caveat in the chat bubble — even though
 // no knowledge-base context was ever retrieved for the turn. Root cause: when

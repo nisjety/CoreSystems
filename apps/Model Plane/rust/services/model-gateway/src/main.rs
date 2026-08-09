@@ -54,11 +54,7 @@ async fn main() -> Result<()> {
     // configured; otherwise the gateway has no provider to refresh against.
     // The poller itself rechecks `FINETUNE_ENABLED` on every tick so an
     // operator can flip the kill switch without restarting.
-    let poller_handle = app_state.azure_finetune.clone().map(|azure| {
-        let client = app_state.finetune_jobs_client.clone();
-        let publisher = app_state.publisher.clone();
-        tokio::spawn(finetune_poller::run(azure, client, publisher))
-    });
+    let poller_handle = finetune_poller::spawn(&app_state);
 
     // Graceful shutdown on SIGTERM
     let shutdown = async {

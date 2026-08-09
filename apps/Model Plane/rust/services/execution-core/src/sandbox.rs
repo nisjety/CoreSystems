@@ -418,7 +418,10 @@ mod tests {
         let first_setenv = argv.iter().position(|a| a == "--setenv").expect("--setenv");
         assert!(clear_at < first_setenv, "clear must precede the allowlist");
         assert!(windowed(&argv, &["--setenv", "PATH", "/usr/bin:/bin"]));
-        assert!(windowed(&argv, &["--setenv", "HOME", "/tmp/verevon-code-x"]));
+        assert!(windowed(
+            &argv,
+            &["--setenv", "HOME", "/tmp/verevon-code-x"]
+        ));
         assert_eq!(
             argv.iter().filter(|a| *a == "--setenv").count(),
             allowlist.len(),

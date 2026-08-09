@@ -26,7 +26,7 @@ from model_plane.v1 import runs_pb2 as model__plane_dot_v1_dot_runs__pb2
 from model_plane.v1 import inference_pb2 as model__plane_dot_v1_dot_inference__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1emodel_plane/v1/execution.proto\x12\x0emodel_plane.v1\x1a\x19model_plane/v1/runs.proto\x1a\x1emodel_plane/v1/inference.proto\"\x9a\x02\n\x0fRunAgentRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x12\n\x04goal\x18\x03 \x01(\tR\x04goal\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x05 \x01(\tR\x06userId\x12\x14\n\x05model\x18\x06 \x01(\tR\x05model\x12\x12\n\x04mode\x18\x07 \x01(\tR\x04mode\x12\x1d\n\nmax_rounds\x18\x08 \x01(\rR\tmaxRounds\x12\x10\n\x03zdr\x18\t \x01(\x08R\x03zdr\x12\x34\n\x05tools\x18\n \x03(\x0b\x32\x1e.model_plane.v1.ToolDefinitionR\x05tools\"v\n\x10RunAgentResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\x12!\n\x0c\x66inal_output\x18\x02 \x01(\tR\x0b\x66inalOutput\x12\'\n\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\"\x8e\x02\n\x12\x45xecuteStepRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n\x07step_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n\ttool_name\x18\x03 \x01(\tR\x08toolName\x12\x1d\n\ntool_input\x18\x04 \x01(\tR\ttoolInput\x12\'\n\x0fpermission_mode\x18\x05 \x01(\tR\x0epermissionMode\x12!\n\x0chook_context\x18\x06 \x01(\tR\x0bhookContext\x12\x15\n\x06org_id\x18\x07 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x08 \x01(\tR\x06userId\x12\x10\n\x03zdr\x18\t \x01(\x08R\x03zdr\"\xa7\x01\n\x13\x45xecuteStepResponse\x12\x17\n\x07step_id\x18\x01 \x01(\tR\x06stepId\x12\x16\n\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n\x05\x65rror\x18\x04 \x01(\tR\x05\x65rror\x12\x31\n\x14\x63ompaction_triggered\x18\x05 \x01(\x08R\x13\x63ompactionTriggered\"\x86\x01\n\x10ResumeRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n\rcheckpoint_id\x18\x02 \x01(\tR\x0c\x63heckpointId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x1f\n\x0b\x61pproval_id\x18\x04 \x01(\tR\napprovalId\"L\n\x11ResumeRunResponse\x12\x18\n\x07resumed\x18\x01 \x01(\x08R\x07resumed\x12\x1d\n\nstep_index\x18\x02 \x01(\rR\tstepIndex\"?\n\x0fPauseRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\"*\n\x10PauseRunResponse\x12\x16\n\x06paused\x18\x01 \x01(\x08R\x06paused2\xa9\x03\n\rExecutionCore\x12V\n\x0b\x45xecuteStep\x12\".model_plane.v1.ExecuteStepRequest\x1a#.model_plane.v1.ExecuteStepResponse\x12P\n\tResumeRun\x12 .model_plane.v1.ResumeRunRequest\x1a!.model_plane.v1.ResumeRunResponse\x12P\n\tCancelRun\x12 .model_plane.v1.CancelRunRequest\x1a!.model_plane.v1.CancelRunResponse\x12M\n\x08PauseRun\x12\x1f.model_plane.v1.PauseRunRequest\x1a .model_plane.v1.PauseRunResponse\x12M\n\x08RunAgent\x12\x1f.model_plane.v1.RunAgentRequest\x1a .model_plane.v1.RunAgentResponseB\xb6\x01\n\x12\x63om.model_plane.v1B\x0e\x45xecutionProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1emodel_plane/v1/execution.proto\x12\x0emodel_plane.v1\x1a\x19model_plane/v1/runs.proto\x1a\x1emodel_plane/v1/inference.proto\"\x9a\x02\n\x0fRunAgentRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n\tthread_id\x18\x02 \x01(\tR\x08threadId\x12\x12\n\x04goal\x18\x03 \x01(\tR\x04goal\x12\x15\n\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x05 \x01(\tR\x06userId\x12\x14\n\x05model\x18\x06 \x01(\tR\x05model\x12\x12\n\x04mode\x18\x07 \x01(\tR\x04mode\x12\x1d\n\nmax_rounds\x18\x08 \x01(\rR\tmaxRounds\x12\x10\n\x03zdr\x18\t \x01(\x08R\x03zdr\x12\x34\n\x05tools\x18\n \x03(\x0b\x32\x1e.model_plane.v1.ToolDefinitionR\x05tools\"\x92\x01\n\x10RunAgentResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\x12!\n\x0c\x66inal_output\x18\x02 \x01(\tR\x0b\x66inalOutput\x12\'\n\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\x12\x1a\n\x08grounded\x18\x04 \x01(\x08R\x08grounded\"\x8e\x02\n\x12\x45xecuteStepRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n\x07step_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n\ttool_name\x18\x03 \x01(\tR\x08toolName\x12\x1d\n\ntool_input\x18\x04 \x01(\tR\ttoolInput\x12\'\n\x0fpermission_mode\x18\x05 \x01(\tR\x0epermissionMode\x12!\n\x0chook_context\x18\x06 \x01(\tR\x0bhookContext\x12\x15\n\x06org_id\x18\x07 \x01(\tR\x05orgId\x12\x17\n\x07user_id\x18\x08 \x01(\tR\x06userId\x12\x10\n\x03zdr\x18\t \x01(\x08R\x03zdr\"\xa7\x01\n\x13\x45xecuteStepResponse\x12\x17\n\x07step_id\x18\x01 \x01(\tR\x06stepId\x12\x16\n\x06status\x18\x02 \x01(\tR\x06status\x12\x16\n\x06output\x18\x03 \x01(\tR\x06output\x12\x14\n\x05\x65rror\x18\x04 \x01(\tR\x05\x65rror\x12\x31\n\x14\x63ompaction_triggered\x18\x05 \x01(\x08R\x13\x63ompactionTriggered\"\x86\x01\n\x10ResumeRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n\rcheckpoint_id\x18\x02 \x01(\tR\x0c\x63heckpointId\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x1f\n\x0b\x61pproval_id\x18\x04 \x01(\tR\napprovalId\"L\n\x11ResumeRunResponse\x12\x18\n\x07resumed\x18\x01 \x01(\x08R\x07resumed\x12\x1d\n\nstep_index\x18\x02 \x01(\rR\tstepIndex\"?\n\x0fPauseRunRequest\x12\x15\n\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n\x06org_id\x18\x02 \x01(\tR\x05orgId\"*\n\x10PauseRunResponse\x12\x16\n\x06paused\x18\x01 \x01(\x08R\x06paused2\xa9\x03\n\rExecutionCore\x12V\n\x0b\x45xecuteStep\x12\".model_plane.v1.ExecuteStepRequest\x1a#.model_plane.v1.ExecuteStepResponse\x12P\n\tResumeRun\x12 .model_plane.v1.ResumeRunRequest\x1a!.model_plane.v1.ResumeRunResponse\x12P\n\tCancelRun\x12 .model_plane.v1.CancelRunRequest\x1a!.model_plane.v1.CancelRunResponse\x12M\n\x08PauseRun\x12\x1f.model_plane.v1.PauseRunRequest\x1a .model_plane.v1.PauseRunResponse\x12M\n\x08RunAgent\x12\x1f.model_plane.v1.RunAgentRequest\x1a .model_plane.v1.RunAgentResponseB\xb6\x01\n\x12\x63om.model_plane.v1B\x0e\x45xecutionProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -36,20 +36,20 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'\n\022com.model_plane.v1B\016ExecutionProtoP\001Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\242\002\003MXX\252\002\rModelPlane.V1\312\002\rModelPlane\\V1\342\002\031ModelPlane\\V1\\GPBMetadata\352\002\016ModelPlane::V1'
   _globals['_RUNAGENTREQUEST']._serialized_start=110
   _globals['_RUNAGENTREQUEST']._serialized_end=392
-  _globals['_RUNAGENTRESPONSE']._serialized_start=394
-  _globals['_RUNAGENTRESPONSE']._serialized_end=512
-  _globals['_EXECUTESTEPREQUEST']._serialized_start=515
-  _globals['_EXECUTESTEPREQUEST']._serialized_end=785
-  _globals['_EXECUTESTEPRESPONSE']._serialized_start=788
-  _globals['_EXECUTESTEPRESPONSE']._serialized_end=955
-  _globals['_RESUMERUNREQUEST']._serialized_start=958
-  _globals['_RESUMERUNREQUEST']._serialized_end=1092
-  _globals['_RESUMERUNRESPONSE']._serialized_start=1094
-  _globals['_RESUMERUNRESPONSE']._serialized_end=1170
-  _globals['_PAUSERUNREQUEST']._serialized_start=1172
-  _globals['_PAUSERUNREQUEST']._serialized_end=1235
-  _globals['_PAUSERUNRESPONSE']._serialized_start=1237
-  _globals['_PAUSERUNRESPONSE']._serialized_end=1279
-  _globals['_EXECUTIONCORE']._serialized_start=1282
-  _globals['_EXECUTIONCORE']._serialized_end=1707
+  _globals['_RUNAGENTRESPONSE']._serialized_start=395
+  _globals['_RUNAGENTRESPONSE']._serialized_end=541
+  _globals['_EXECUTESTEPREQUEST']._serialized_start=544
+  _globals['_EXECUTESTEPREQUEST']._serialized_end=814
+  _globals['_EXECUTESTEPRESPONSE']._serialized_start=817
+  _globals['_EXECUTESTEPRESPONSE']._serialized_end=984
+  _globals['_RESUMERUNREQUEST']._serialized_start=987
+  _globals['_RESUMERUNREQUEST']._serialized_end=1121
+  _globals['_RESUMERUNRESPONSE']._serialized_start=1123
+  _globals['_RESUMERUNRESPONSE']._serialized_end=1199
+  _globals['_PAUSERUNREQUEST']._serialized_start=1201
+  _globals['_PAUSERUNREQUEST']._serialized_end=1264
+  _globals['_PAUSERUNRESPONSE']._serialized_start=1266
+  _globals['_PAUSERUNRESPONSE']._serialized_end=1308
+  _globals['_EXECUTIONCORE']._serialized_start=1311
+  _globals['_EXECUTIONCORE']._serialized_end=1736
 # @@protoc_insertion_point(module_scope)

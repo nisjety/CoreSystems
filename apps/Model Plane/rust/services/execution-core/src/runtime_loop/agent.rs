@@ -45,7 +45,7 @@ use mp_contracts::model_plane::v1::{
     orchestration_core_service_client::OrchestrationCoreServiceClient,
     session_core_client::SessionCoreClient,
 };
-use serde_json::{Value as JsonValue, json};
+use serde_json::{json, Value as JsonValue};
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
@@ -480,8 +480,7 @@ async fn fetch_skill_context(
         .filter(|s| !s.content.trim().is_empty())
         .map(|s| {
             let haystack =
-                format!("{} {} {}", s.name, s.trigger_keywords.join(" "), s.content)
-                    .to_lowercase();
+                format!("{} {} {}", s.name, s.trigger_keywords.join(" "), s.content).to_lowercase();
             let hits = query_terms
                 .iter()
                 .filter(|t| haystack.contains(t.as_str()))
@@ -551,7 +550,8 @@ async fn run_rounds(
     // execute_provider_action, browser_agent, ...) actually run. Injected once
     // per run (not per round) as a single system message right after the
     // preamble, mirroring the inline loop's insertion point exactly.
-    let skill_blocks = fetch_skill_context(ctx.session_channel, ctx.session_bearer, &req.org_id, goal).await;
+    let skill_blocks =
+        fetch_skill_context(ctx.session_channel, ctx.session_bearer, &req.org_id, goal).await;
     if !skill_blocks.is_empty() {
         messages.insert(
             1,
@@ -703,8 +703,7 @@ async fn run_rounds(
                 Some(&subagent_dispatch),
             )
             .await;
-            delegated_rounds =
-                delegated_rounds.saturating_add(subagent_dispatch.rounds_consumed());
+            delegated_rounds = delegated_rounds.saturating_add(subagent_dispatch.rounds_consumed());
 
             // HITL: a gated tool may be reported as paused only after the
             // durable approval write succeeds. Otherwise propagate an explicit
@@ -971,10 +970,7 @@ async fn run_subagent(
             }
         }
         Err(status) => (
-            Err(format!(
-                "subagent '{label}' failed: {}",
-                status.message()
-            )),
+            Err(format!("subagent '{label}' failed: {}", status.message())),
             0,
         ),
     }
@@ -1037,7 +1033,12 @@ fn tool_step_id(prefix: &str, seq: u32, call: &pb::ToolCall) -> String {
 fn knowledge_search_found_grounding(output: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(output)
         .ok()
-        .and_then(|value| value.get("status").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
         .is_some_and(|status| status == "ok")
 }
 
@@ -1739,8 +1740,8 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{
-        Request, Response, Status,
         transport::{Endpoint, Server},
+        Request, Response, Status,
     };
 
     #[tokio::test]
@@ -2000,7 +2001,10 @@ mod tests {
             }
         }
 
-        fn with_message_recorder(steps: Vec<Scripted>, observed_messages: ObservedMessages) -> Self {
+        fn with_message_recorder(
+            steps: Vec<Scripted>,
+            observed_messages: ObservedMessages,
+        ) -> Self {
             Self {
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
@@ -2020,7 +2024,10 @@ mod tests {
         ) -> Result<Response<pb::InferResponse>, Status> {
             let observed = request.into_inner();
             self.observed_zdr.lock().unwrap().push(observed.zdr);
-            self.observed_messages.lock().unwrap().push(observed.messages);
+            self.observed_messages
+                .lock()
+                .unwrap()
+                .push(observed.messages);
             // Default to a plain answer once the script is exhausted, so a loop
             // bug can't hang the test waiting for more rounds.
             let step = self
@@ -2738,7 +2745,10 @@ mod tests {
             name: name.to_owned(),
             description: String::new(),
             content: content.to_owned(),
-            trigger_keywords: keywords.iter().map(std::string::ToString::to_string).collect(),
+            trigger_keywords: keywords
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             trigger_file_patterns: Vec::new(),
             tool_restrictions: Vec::new(),
             enabled: true,
@@ -2772,8 +2782,11 @@ mod tests {
     #[tokio::test]
     async fn fetch_skill_context_is_empty_without_a_bearer() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
-        rec.lock().unwrap().agent_skills =
-            vec![sample_agent_skill("Shipment booking", &["shipment"], "body")];
+        rec.lock().unwrap().agent_skills = vec![sample_agent_skill(
+            "Shipment booking",
+            &["shipment"],
+            "body",
+        )];
         let session_channel = spawn_session_channel(rec).await;
 
         let blocks =
@@ -3595,7 +3608,10 @@ mod tests {
 
         // RESULT PROPAGATION: the parent answered from the subagent's real text.
         assert_eq!(resp.status, "completed");
-        assert_eq!(resp.final_output, format!("Delegated result: {SUBAGENT_ANSWER}"));
+        assert_eq!(
+            resp.final_output,
+            format!("Delegated result: {SUBAGENT_ANSWER}")
+        );
         assert_eq!(
             resp.rounds_executed, 4,
             "2 parent rounds + the 2 rounds its delegate spent, all charged to the run"
@@ -3855,7 +3871,10 @@ mod tests {
             "1 parent round + the 1 round it had left to lend; a 99-round request \
              cannot buy more than the run owns"
         );
-        assert_eq!(resp.status, "failed", "the run really did run out of budget");
+        assert_eq!(
+            resp.status, "failed",
+            "the run really did run out of budget"
+        );
         assert_eq!(resp.final_output, GRACEFUL_FAILURE_REPLY);
         assert_eq!(
             resp.rounds_executed, 2,

@@ -109,7 +109,9 @@ pub fn parse_task(tool_name: &str, tool_input: &str) -> Result<SubagentTask, Str
     }
 
     let raw: RawTask = serde_json::from_str(tool_input).map_err(|error| {
-        format!("invalid {tool_name} input: {error}; expected {{\"goal\": \"<the delegated task>\"}}")
+        format!(
+            "invalid {tool_name} input: {error}; expected {{\"goal\": \"<the delegated task>\"}}"
+        )
     })?;
     let goal = raw.goal.or(raw.task).unwrap_or_default();
     let goal = goal.trim();
@@ -197,8 +199,11 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_task("subagent.research", r#"{"task":"summarise Q3","max_rounds":3}"#)
-                .expect("task alias parses"),
+            parse_task(
+                "subagent.research",
+                r#"{"task":"summarise Q3","max_rounds":3}"#
+            )
+            .expect("task alias parses"),
             SubagentTask {
                 goal: "summarise Q3".to_owned(),
                 max_rounds: Some(3)
@@ -230,8 +235,8 @@ mod tests {
         );
         assert_eq!(resolve_round_budget(5, Some(u32::MAX)).expect("budget"), 5);
 
-        let exhausted = resolve_round_budget(0, Some(4))
-            .expect_err("a parent with no budget cannot lend any");
+        let exhausted =
+            resolve_round_budget(0, Some(4)).expect_err("a parent with no budget cannot lend any");
         assert!(exhausted.contains("no round budget left"), "{exhausted}");
     }
 }

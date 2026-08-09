@@ -1032,6 +1032,33 @@ async fn execute_book_shipment(
     if input.booked_by.trim().is_empty() {
         input.booked_by = user_id.to_owned();
     }
+    // Some carriers (Bring included) reject a booking outright without a
+    // valid recipient phone or email — the model has no reason to know
+    // either for a recipient it has never met. Falls back to the run's own
+    // acting user's contact from user-core (this system's real recipient
+    // for every booking it places today); best-effort, never blocks the
+    // booking on its own. See `enrich_shipment_recipient_contact` in
+    // `runtime_loop::agent` for the same fallback applied to the persisted
+    // continuation descriptor (the cold-resume path never reaches here).
+    let has_contact =
+        |value: &Option<String>| value.as_deref().is_some_and(|v| !v.trim().is_empty());
+    if !has_contact(&input.to.phone) && !has_contact(&input.to.email) {
+        if let Some(client) = crate::user_core_client::UserCoreClient::from_env() {
+            match client.get_contact(user_id).await {
+                Ok(contact) => {
+                    if input.to.email.is_none() {
+                        input.to.email = contact.email;
+                    }
+                    if input.to.phone.is_none() {
+                        input.to.phone = contact.phone;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "book_shipment: could not enrich recipient contact from user-core");
+                }
+            }
+        }
+    }
     let approval_id = match resolve_write_approval(
         session_channel,
         org_id,

@@ -19,23 +19,26 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	OrchestrationCoreService_ListPlans_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ListPlans"
-	OrchestrationCoreService_GetPlan_FullMethodName                     = "/model_plane.v1.OrchestrationCoreService/GetPlan"
-	OrchestrationCoreService_TransitionPlan_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
-	OrchestrationCoreService_ListTodos_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ListTodos"
-	OrchestrationCoreService_GetTodo_FullMethodName                     = "/model_plane.v1.OrchestrationCoreService/GetTodo"
-	OrchestrationCoreService_TransitionTodo_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
-	OrchestrationCoreService_CreateApproval_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/CreateApproval"
-	OrchestrationCoreService_ListApprovals_FullMethodName               = "/model_plane.v1.OrchestrationCoreService/ListApprovals"
-	OrchestrationCoreService_ListPendingApprovals_FullMethodName        = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
-	OrchestrationCoreService_GetApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/GetApproval"
-	OrchestrationCoreService_DecideApproval_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
-	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName     = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
-	OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName = "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery"
-	OrchestrationCoreService_GetSubagentLineage_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
-	OrchestrationCoreService_AttachSubagent_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
-	OrchestrationCoreService_StreamRunEvents_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents"
-	OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName    = "/model_plane.v1.OrchestrationCoreService/RecordOrchestrationEvent"
+	OrchestrationCoreService_ListPlans_FullMethodName                         = "/model_plane.v1.OrchestrationCoreService/ListPlans"
+	OrchestrationCoreService_GetPlan_FullMethodName                           = "/model_plane.v1.OrchestrationCoreService/GetPlan"
+	OrchestrationCoreService_TransitionPlan_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
+	OrchestrationCoreService_ListTodos_FullMethodName                         = "/model_plane.v1.OrchestrationCoreService/ListTodos"
+	OrchestrationCoreService_GetTodo_FullMethodName                           = "/model_plane.v1.OrchestrationCoreService/GetTodo"
+	OrchestrationCoreService_TransitionTodo_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
+	OrchestrationCoreService_CreateApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/CreateApproval"
+	OrchestrationCoreService_ListApprovals_FullMethodName                     = "/model_plane.v1.OrchestrationCoreService/ListApprovals"
+	OrchestrationCoreService_ListPendingApprovals_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
+	OrchestrationCoreService_GetApproval_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/GetApproval"
+	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
+	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
+	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
+	OrchestrationCoreService_RecordApprovalContinuationOutcome_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationOutcome"
+	OrchestrationCoreService_AcknowledgeApprovalDelivery_FullMethodName       = "/model_plane.v1.OrchestrationCoreService/AcknowledgeApprovalDelivery"
+	OrchestrationCoreService_GetSubagentLineage_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/GetSubagentLineage"
+	OrchestrationCoreService_AttachSubagent_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/AttachSubagent"
+	OrchestrationCoreService_StreamRunEvents_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/StreamRunEvents"
+	OrchestrationCoreService_RecordOrchestrationEvent_FullMethodName          = "/model_plane.v1.OrchestrationCoreService/RecordOrchestrationEvent"
 )
 
 // OrchestrationCoreServiceClient is the client API for OrchestrationCoreService service.
@@ -82,6 +85,17 @@ type OrchestrationCoreServiceClient interface {
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
 	ClaimApprovalDeliveries(ctx context.Context, in *ClaimApprovalDeliveriesRequest, opts ...grpc.CallOption) (*ClaimApprovalDeliveriesResponse, error)
+	// Fetch the exact immutable action descriptor for an active delivery lease.
+	// This is service-only and lease-bound; normal approval readers never
+	// receive descriptor content.
+	GetApprovalContinuation(ctx context.Context, in *GetApprovalContinuationRequest, opts ...grpc.CallOption) (*GetApprovalContinuationResponse, error)
+	// Record the immutable receipt that a verified worker has begun the exact
+	// descriptor-backed continuation. The worker supplies only its active lease;
+	// Session Core derives fingerprint/version from retained descriptor data.
+	RecordApprovalContinuationStarted(ctx context.Context, in *RecordApprovalContinuationStartedRequest, opts ...grpc.CallOption) (*RecordApprovalContinuationStartedResponse, error)
+	// Append the terminal outcome for a started continuation. Completion requires
+	// an authoritative provider receipt; this alone does not settle the outbox.
+	RecordApprovalContinuationOutcome(ctx context.Context, in *RecordApprovalContinuationOutcomeRequest, opts ...grpc.CallOption) (*RecordApprovalContinuationOutcomeResponse, error)
 	// Acknowledge a claimed delivery as retryable or terminal. There is no
 	// delivered outcome until Execution Core can present a durable, authenticated
 	// continuation receipt proving that the paused work actually restarted.
@@ -231,6 +245,36 @@ func (c *orchestrationCoreServiceClient) ClaimApprovalDeliveries(ctx context.Con
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) GetApprovalContinuation(ctx context.Context, in *GetApprovalContinuationRequest, opts ...grpc.CallOption) (*GetApprovalContinuationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetApprovalContinuationResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetApprovalContinuation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) RecordApprovalContinuationStarted(ctx context.Context, in *RecordApprovalContinuationStartedRequest, opts ...grpc.CallOption) (*RecordApprovalContinuationStartedResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordApprovalContinuationStartedResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) RecordApprovalContinuationOutcome(ctx context.Context, in *RecordApprovalContinuationOutcomeRequest, opts ...grpc.CallOption) (*RecordApprovalContinuationOutcomeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordApprovalContinuationOutcomeResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_RecordApprovalContinuationOutcome_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) AcknowledgeApprovalDelivery(ctx context.Context, in *AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*AcknowledgeApprovalDeliveryResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AcknowledgeApprovalDeliveryResponse)
@@ -334,6 +378,17 @@ type OrchestrationCoreServiceServer interface {
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
 	ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error)
+	// Fetch the exact immutable action descriptor for an active delivery lease.
+	// This is service-only and lease-bound; normal approval readers never
+	// receive descriptor content.
+	GetApprovalContinuation(context.Context, *GetApprovalContinuationRequest) (*GetApprovalContinuationResponse, error)
+	// Record the immutable receipt that a verified worker has begun the exact
+	// descriptor-backed continuation. The worker supplies only its active lease;
+	// Session Core derives fingerprint/version from retained descriptor data.
+	RecordApprovalContinuationStarted(context.Context, *RecordApprovalContinuationStartedRequest) (*RecordApprovalContinuationStartedResponse, error)
+	// Append the terminal outcome for a started continuation. Completion requires
+	// an authoritative provider receipt; this alone does not settle the outbox.
+	RecordApprovalContinuationOutcome(context.Context, *RecordApprovalContinuationOutcomeRequest) (*RecordApprovalContinuationOutcomeResponse, error)
 	// Acknowledge a claimed delivery as retryable or terminal. There is no
 	// delivered outcome until Execution Core can present a durable, authenticated
 	// continuation receipt proving that the paused work actually restarted.
@@ -398,6 +453,15 @@ func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Contex
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetApprovalContinuation(context.Context, *GetApprovalContinuationRequest) (*GetApprovalContinuationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetApprovalContinuation not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) RecordApprovalContinuationStarted(context.Context, *RecordApprovalContinuationStartedRequest) (*RecordApprovalContinuationStartedResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordApprovalContinuationStarted not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) RecordApprovalContinuationOutcome(context.Context, *RecordApprovalContinuationOutcomeRequest) (*RecordApprovalContinuationOutcomeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordApprovalContinuationOutcome not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) AcknowledgeApprovalDelivery(context.Context, *AcknowledgeApprovalDeliveryRequest) (*AcknowledgeApprovalDeliveryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AcknowledgeApprovalDelivery not implemented")
@@ -652,6 +716,60 @@ func _OrchestrationCoreService_ClaimApprovalDeliveries_Handler(srv interface{}, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_GetApprovalContinuation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalContinuationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetApprovalContinuation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetApprovalContinuation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetApprovalContinuation(ctx, req.(*GetApprovalContinuationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_RecordApprovalContinuationStarted_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordApprovalContinuationStartedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).RecordApprovalContinuationStarted(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).RecordApprovalContinuationStarted(ctx, req.(*RecordApprovalContinuationStartedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_RecordApprovalContinuationOutcome_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordApprovalContinuationOutcomeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).RecordApprovalContinuationOutcome(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_RecordApprovalContinuationOutcome_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).RecordApprovalContinuationOutcome(ctx, req.(*RecordApprovalContinuationOutcomeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_AcknowledgeApprovalDelivery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AcknowledgeApprovalDeliveryRequest)
 	if err := dec(in); err != nil {
@@ -789,6 +907,18 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClaimApprovalDeliveries",
 			Handler:    _OrchestrationCoreService_ClaimApprovalDeliveries_Handler,
+		},
+		{
+			MethodName: "GetApprovalContinuation",
+			Handler:    _OrchestrationCoreService_GetApprovalContinuation_Handler,
+		},
+		{
+			MethodName: "RecordApprovalContinuationStarted",
+			Handler:    _OrchestrationCoreService_RecordApprovalContinuationStarted_Handler,
+		},
+		{
+			MethodName: "RecordApprovalContinuationOutcome",
+			Handler:    _OrchestrationCoreService_RecordApprovalContinuationOutcome_Handler,
 		},
 		{
 			MethodName: "AcknowledgeApprovalDelivery",

@@ -51,3 +51,13 @@ func indexOutcome(err error) string {
 		return "internal_error"
 	}
 }
+
+// deleteOutcome classifies a successful DeleteMemory call (no backend error)
+// for the telemetry.MemoryDeletedTotal counter, distinguishing an actual
+// removal from a well-formed "there was nothing to delete" response.
+func deleteOutcome(deleted bool) string {
+	if deleted {
+		return "deleted"
+	}
+	return "not_found"
+}

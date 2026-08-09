@@ -69,6 +69,7 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         // Stable per-(run, action) key so a retried request collapses onto the
         // existing durable row instead of duplicating it (D-1 idempotency).
         idempotency_key: idempotency_key(&a.run_id, &a.action_id),
+        continuation_descriptor_json: String::new(),
     }
 }
 

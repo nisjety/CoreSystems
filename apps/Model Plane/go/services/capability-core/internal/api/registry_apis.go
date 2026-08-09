@@ -45,12 +45,12 @@ type registryDatabase interface {
 
 // SkillsHandler handles CRUD for agent_skills.
 type SkillsHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 	pub  publisher.EventPublisher
 }
 
 // NewSkillsHandler constructs the handler.
-func NewSkillsHandler(pool *pgxpool.Pool) *SkillsHandler {
+func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
 	return &SkillsHandler{pool: pool}
 }
 
@@ -189,24 +189,31 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if update.Enabled == nil && update.Description == "" && update.Content == "" {
+		jsonErr(w, "at least one skill field is required", http.StatusBadRequest)
+		return
+	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	var enabled any
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
+		enabled = *update.Enabled
 	}
-	if update.Description != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET description=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Description, now, id, orgID)
-	}
-	if update.Content != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE agent_skills SET content=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Content, now, id, orgID)
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE agent_skills
+		SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
+			content=COALESCE(NULLIF($3, ''), content), updated_at=$4
+		WHERE id=$5 AND org_id=$6
+	`, enabled, update.Description, update.Content, now, id, orgID)
+	if !writeSingleScopedMutation(w, "agent skill", result, err) {
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
-	_, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+	result, err := h.pool.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, verifiedOrganizationID(r))
+	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1226,19 +1233,17 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
+	var enabled any
 	if update.Enabled != nil {
-		if _, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID); err != nil {
-			slog.Error("update MCP server enabled state failed", "error", err)
-			jsonErr(w, "database unavailable", http.StatusInternalServerError)
-			return
-		}
+		enabled = *update.Enabled
 	}
-	if update.RolloutState != "" {
-		if _, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET rollout_state=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.RolloutState, now, id, orgID); err != nil {
-			slog.Error("update MCP server rollout state failed", "error", err)
-			jsonErr(w, "database unavailable", http.StatusInternalServerError)
-			return
-		}
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE mcp_servers
+		SET enabled=COALESCE($1, enabled), rollout_state=COALESCE(NULLIF($2, ''), rollout_state), updated_at=$3
+		WHERE id=$4 AND org_id=$5 AND deleted_at IS NULL
+	`, enabled, update.RolloutState, now, id, orgID)
+	if !writeSingleScopedMutation(w, "MCP server", result, err) {
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
@@ -1250,10 +1255,8 @@ func (h *MCPHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
-	_, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, orgID)
-	if err != nil {
-		slog.Error("delete MCP server failed", "error", err)
-		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+	result, err := h.pool.Exec(r.Context(), `UPDATE mcp_servers SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`, now, id, orgID)
+	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1265,12 +1268,12 @@ func (h *MCPHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 
 // RoutingHandler handles CRUD for routing_policies.
 type RoutingHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 	pub  publisher.EventPublisher
 }
 
 // NewRoutingHandler constructs the handler.
-func NewRoutingHandler(pool *pgxpool.Pool) *RoutingHandler {
+func NewRoutingHandler(pool registryDatabase) *RoutingHandler {
 	return &RoutingHandler{pool: pool}
 }
 
@@ -1399,20 +1402,37 @@ func (h *RoutingHandler) patch(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if update.Enabled == nil && update.Priority == nil {
+		jsonErr(w, "at least one routing policy field is required", http.StatusBadRequest)
+		return
+	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	var enabled any
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
+		enabled = *update.Enabled
 	}
+	var priority any
 	if update.Priority != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET priority=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Priority, now, id, orgID)
+		priority = *update.Priority
+	}
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE routing_policies
+		SET enabled=COALESCE($1, enabled), priority=COALESCE($2, priority), updated_at=$3
+		WHERE id=$4 AND org_id=$5 AND deleted_at IS NULL
+	`, enabled, priority, now, id, orgID)
+	if !writeSingleScopedMutation(w, "routing policy", result, err) {
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	now := time.Now().UTC()
-	_, _ = h.pool.Exec(r.Context(), `UPDATE routing_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, verifiedOrganizationID(r))
+	result, err := h.pool.Exec(r.Context(), `UPDATE routing_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`, now, id, verifiedOrganizationID(r))
+	if !writeSingleScopedMutation(w, "routing policy", result, err) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1422,12 +1442,12 @@ func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id strin
 
 // SafetyHandler handles CRUD for safety_policies.
 type SafetyHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 	pub  publisher.EventPublisher
 }
 
 // NewSafetyHandler constructs the handler.
-func NewSafetyHandler(pool *pgxpool.Pool) *SafetyHandler {
+func NewSafetyHandler(pool registryDatabase) *SafetyHandler {
 	return &SafetyHandler{pool: pool}
 }
 
@@ -1556,19 +1576,49 @@ func (h *SafetyHandler) patch(w http.ResponseWriter, r *http.Request, id string)
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if update.Enabled == nil && update.Priority == nil {
+		jsonErr(w, "at least one safety policy field is required", http.StatusBadRequest)
+		return
+	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	var enabled any
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
+		enabled = *update.Enabled
 	}
+	var priority any
 	if update.Priority != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET priority=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Priority, now, id, orgID)
+		priority = *update.Priority
+	}
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE safety_policies
+		SET enabled=COALESCE($1, enabled), priority=COALESCE($2, priority), updated_at=$3
+		WHERE id=$4 AND org_id=$5 AND deleted_at IS NULL
+	`, enabled, priority, now, id, orgID)
+	if !writeSingleScopedMutation(w, "safety policy", result, err) {
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *SafetyHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	now := time.Now().UTC()
-	_, _ = h.pool.Exec(r.Context(), `UPDATE safety_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, verifiedOrganizationID(r))
+	result, err := h.pool.Exec(r.Context(), `UPDATE safety_policies SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`, now, id, verifiedOrganizationID(r))
+	if !writeSingleScopedMutation(w, "safety policy", result, err) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeSingleScopedMutation(w http.ResponseWriter, resource string, result pgconn.CommandTag, err error) bool {
+	if err != nil {
+		slog.Error("scoped mutation failed", "resource", resource, "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return false
+	}
+	if result.RowsAffected() != 1 {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return false
+	}
+	return true
 }

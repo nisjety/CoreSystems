@@ -419,8 +419,21 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		call := database.execs[len(database.execs)-1]
-		if !strings.Contains(call.query, "org_id=$4") || len(call.args) != 4 || call.args[3] != "org-a" {
+		if !strings.Contains(call.query, "org_id=$5") || len(call.args) != 5 || call.args[4] != "org-a" {
 			t.Fatalf("unscoped patch query: %q args=%v", call.query, call.args)
+		}
+	})
+
+	t.Run("patch with no tenant row changed returns not found", func(t *testing.T) {
+		previousTag := database.execTag
+		database.execTag = "UPDATE 0"
+		t.Cleanup(func() { database.execTag = previousTag })
+		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mcp/mcp-foreign", strings.NewReader(`{"enabled":false}`))
+		request.Header.Set("Authorization", "Bearer "+writeToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, body=%s, want 404", response.Code, response.Body.String())
 		}
 	})
 
@@ -436,9 +449,9 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		}
 	})
 
-	t.Run("rollout update error fails closed", func(t *testing.T) {
+	t.Run("combined patch database error fails closed", func(t *testing.T) {
 		database.execErr = errors.New("database unavailable")
-		database.execErrAt = len(database.execs) + 2
+		database.execErrAt = len(database.execs) + 1
 		t.Cleanup(func() { database.execErr, database.execErrAt = nil, 0 })
 		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mcp/mcp-1", strings.NewReader(`{"enabled":false,"rollout_state":"quarantine"}`))
 		request.Header.Set("Authorization", "Bearer "+writeToken)
@@ -471,6 +484,19 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		call := database.execs[len(database.execs)-1]
 		if !strings.Contains(call.query, "org_id=$3") || len(call.args) != 3 || call.args[2] != "org-a" {
 			t.Fatalf("unscoped delete query: %q args=%v", call.query, call.args)
+		}
+	})
+
+	t.Run("delete with no tenant row changed returns not found", func(t *testing.T) {
+		previousTag := database.execTag
+		database.execTag = "UPDATE 0"
+		t.Cleanup(func() { database.execTag = previousTag })
+		request := httptest.NewRequest(http.MethodDelete, "/api/v1/mcp/mcp-foreign", nil)
+		request.Header.Set("Authorization", "Bearer "+writeToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, body=%s, want 404", response.Code, response.Body.String())
 		}
 	})
 

@@ -39,11 +39,25 @@ const MAX_ENTRIES: usize = 1_024;
 const MAX_CACHED_VALUE_BYTES: usize = 64 * 1024;
 
 /// The cacheable shape of a completed `/v1/invoke` response.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CachedInvoke {
     pub request_id: String,
     pub content: String,
     pub model_used: String,
+    pub usage: Option<CachedInvokeUsage>,
+}
+
+/// The exact non-content usage metadata returned with a completed invoke.
+/// It is retained alongside the cached response so an idempotent replay does
+/// not turn a real measured run into a fabricated zero-cost/zero-confidence
+/// run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedInvokeUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cost_usd: Option<f64>,
+    pub latency_ms: u64,
+    pub confidence: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -232,6 +246,7 @@ fn cached_value_bytes(value: &CachedInvoke) -> usize {
         .len()
         .saturating_add(value.content.len())
         .saturating_add(value.model_used.len())
+        .saturating_add(std::mem::size_of::<CachedInvokeUsage>())
 }
 
 #[cfg(test)]
@@ -243,6 +258,7 @@ mod tests {
             request_id: id.to_owned(),
             content: "hello".to_owned(),
             model_used: "test-model".to_owned(),
+            usage: None,
         }
     }
 

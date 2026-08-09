@@ -682,7 +682,6 @@ fn rsa_modulus_bits(modulus: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use tonic::Code;
     use super::*;
     use jsonwebtoken::{encode, EncodingKey, Header};
     use rand::thread_rng;
@@ -691,6 +690,7 @@ mod tests {
         traits::PublicKeyParts,
     };
     use serde_json::{json, Value};
+    use tonic::Code;
     use wiremock::{
         matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
@@ -839,7 +839,10 @@ mod tests {
             mutate(&mut claims);
             assert_eq!(
                 verifier
-                    .delegated_data_plane_bearer(&delegating_request(&sign(&claims, "key-1")), &caller)
+                    .delegated_data_plane_bearer(
+                        &delegating_request(&sign(&claims, "key-1")),
+                        &caller
+                    )
                     .expect_err("cross-identity delegation must be refused")
                     .code(),
                 tonic::Code::PermissionDenied
@@ -1019,7 +1022,11 @@ mod tests {
     /// values do.
     #[test]
     fn a_real_auth_core_actor_id_is_never_a_system_owner() {
-        for actor in ["kx7Qa2Zb9Lm4", "MAF5Ey3xL8LwigSZ3ngKfGhUy54MlI2Y", "orchestratorcore"] {
+        for actor in [
+            "kx7Qa2Zb9Lm4",
+            "MAF5Ey3xL8LwigSZ3ngKfGhUy54MlI2Y",
+            "orchestratorcore",
+        ] {
             assert!(!is_system_run_owner(actor));
             assert!(!actor.contains(':'), "base62 ids contain no colon");
         }
@@ -1130,7 +1137,8 @@ mod tests {
                 .expect_err("cross-org must be refused");
             assert_eq!(error.code(), Code::PermissionDenied);
         }
-        let outside_service = VerifiedIdentity::service_for_test_as("org-2", ORCH, &BOTH_SCOPES, false);
+        let outside_service =
+            VerifiedIdentity::service_for_test_as("org-2", ORCH, &BOTH_SCOPES, false);
         let error = authorize_owner_row(&outside_service, "org-1", ORCH, OwnerIntent::Mutate)
             .expect_err("even the owning workload is org-scoped");
         assert_eq!(error.code(), Code::PermissionDenied);
@@ -1141,8 +1149,13 @@ mod tests {
     #[test]
     fn a_look_alike_owner_gets_no_system_treatment() {
         let human = VerifiedIdentity::user_for_test("org-1", "user-1");
-        let error = authorize_owner_row(&human, "org-1", "service:orchestrator-core-2", OwnerIntent::Read)
-            .expect_err("not a system row, so the user check applies");
+        let error = authorize_owner_row(
+            &human,
+            "org-1",
+            "service:orchestrator-core-2",
+            OwnerIntent::Read,
+        )
+        .expect_err("not a system row, so the user check applies");
         assert_eq!(error.code(), Code::PermissionDenied);
     }
 

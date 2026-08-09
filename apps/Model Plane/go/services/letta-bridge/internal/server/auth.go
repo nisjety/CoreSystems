@@ -22,6 +22,10 @@ func MemoryAuthorizer(principal authctx.Principal, method string, request any) e
 		requestedOrg = value.GetOrgId()
 	case *mpv1.IndexMemoryRequest:
 		requestedOrg = value.GetOrgId()
+	case *mpv1.ListMemoryRequest:
+		requestedOrg = value.GetOrgId()
+	case *mpv1.DeleteMemoryRequest:
+		requestedOrg = value.GetOrgId()
 	case *mpv1.MemoryHealthRequest:
 		return nil
 	default:
@@ -43,6 +47,12 @@ func MemoryAuthorizer(principal authctx.Principal, method string, request any) e
 		return nil
 	}
 	if method == mpv1.MemoryService_IndexMemory_FullMethodName && principal.HasScope("memory:write") {
+		return nil
+	}
+	if method == mpv1.MemoryService_ListMemory_FullMethodName && principal.HasScope("memory:read") {
+		return nil
+	}
+	if method == mpv1.MemoryService_DeleteMemory_FullMethodName && principal.HasScope("memory:write") {
 		return nil
 	}
 	return errMemoryUnauthorized

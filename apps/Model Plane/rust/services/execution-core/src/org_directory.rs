@@ -179,7 +179,10 @@ mod tests {
             .await;
 
         let client = OrgDirectoryClient::new_for_test(&org_core.uri(), "execution-core", "secret");
-        assert_eq!(client.list_all_org_ids().await.unwrap(), Vec::<String>::new());
+        assert_eq!(
+            client.list_all_org_ids().await.unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     #[tokio::test]

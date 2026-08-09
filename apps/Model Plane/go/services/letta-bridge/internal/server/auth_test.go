@@ -85,6 +85,47 @@ func TestMemoryAuthorizerAcceptsOnlyScopedSessionCoreMemoryOperations(t *testing
 	}
 }
 
+func TestMemoryAuthorizerPinsTenantForListAndDeleteMemory(t *testing.T) {
+	user := authctx.Principal{
+		OrganizationID:         "org-a",
+		ActorID:                "user-a",
+		PrincipalType:          "user",
+		RetentionPolicyPresent: true,
+	}
+	if err := MemoryAuthorizer(user, mpv1.MemoryService_ListMemory_FullMethodName,
+		&mpv1.ListMemoryRequest{OrgId: "org-a", UserId: "user-a"}); err != nil {
+		t.Fatalf("own tenant list denied: %v", err)
+	}
+	if err := MemoryAuthorizer(user, mpv1.MemoryService_ListMemory_FullMethodName,
+		&mpv1.ListMemoryRequest{OrgId: "org-b", UserId: "user-a"}); err == nil {
+		t.Fatal("cross-tenant list must be denied")
+	}
+	if err := MemoryAuthorizer(user, mpv1.MemoryService_DeleteMemory_FullMethodName,
+		&mpv1.DeleteMemoryRequest{OrgId: "org-a", UserId: "user-a", MemoryId: "m1"}); err != nil {
+		t.Fatalf("own tenant delete denied: %v", err)
+	}
+	if err := MemoryAuthorizer(user, mpv1.MemoryService_DeleteMemory_FullMethodName,
+		&mpv1.DeleteMemoryRequest{OrgId: "org-b", UserId: "user-a", MemoryId: "m1"}); err == nil {
+		t.Fatal("cross-tenant delete must be denied")
+	}
+
+	readOnlyService := authctx.Principal{
+		OrganizationID:         "org-a",
+		ActorID:                "service:model-gateway",
+		PrincipalType:          "service",
+		Scopes:                 []string{"memory:read"},
+		RetentionPolicyPresent: true,
+	}
+	if err := MemoryAuthorizer(readOnlyService, mpv1.MemoryService_ListMemory_FullMethodName,
+		&mpv1.ListMemoryRequest{OrgId: "org-a", UserId: "user-a"}); err != nil {
+		t.Fatalf("scoped service list denied: %v", err)
+	}
+	if err := MemoryAuthorizer(readOnlyService, mpv1.MemoryService_DeleteMemory_FullMethodName,
+		&mpv1.DeleteMemoryRequest{OrgId: "org-a", UserId: "user-a", MemoryId: "m1"}); err == nil {
+		t.Fatal("read-only service must not delete memory")
+	}
+}
+
 func TestMemoryAuthorizerRejectsZDRAndUnspecifiedRetentionBeforePersistence(t *testing.T) {
 	request := &mpv1.IndexMemoryRequest{OrgId: "org-a"}
 	base := authctx.Principal{

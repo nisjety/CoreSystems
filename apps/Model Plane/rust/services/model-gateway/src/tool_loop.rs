@@ -1451,7 +1451,7 @@ fn duplicate_call_signature(call: &ToolCall) -> Option<String> {
     }
 }
 
-/// Case/whitespace-insensitive normalization so "Aquatiq" and "aquatiq " are
+/// Case/whitespace-insensitive normalization so "Aquatiq" and "coresystem " are
 /// treated as the same repeated query.
 fn normalize_tool_query(query: &str) -> String {
     query
@@ -3420,17 +3420,17 @@ mod tests {
     fn duplicate_signature_catches_exact_repeat_fetch_url() {
         let first = duplicate_call_signature(&tool_call(
             "fetch_url",
-            r#"{"url":"https://aquatiq.no"}"#,
+            r#"{"url":"https://coresystem.no"}"#,
         ))
         .expect("fetch_url signature");
         let same = duplicate_call_signature(&tool_call(
             "fetch_url",
-            r#"{"url":"https://aquatiq.no"}"#,
+            r#"{"url":"https://coresystem.no"}"#,
         ))
         .expect("fetch_url signature");
         let different = duplicate_call_signature(&tool_call(
             "fetch_url",
-            r#"{"url":"https://aquatiq.no/about"}"#,
+            r#"{"url":"https://coresystem.no/about"}"#,
         ))
         .expect("fetch_url signature");
         assert_eq!(first, same);
@@ -3441,10 +3441,10 @@ mod tests {
     fn duplicate_signature_web_search_is_case_and_whitespace_insensitive() {
         let first = duplicate_call_signature(&tool_call(
             "web_search",
-            r#"{"query":"  Aquatiq   AS "}"#,
+            r#"{"query":"  Coresystem   AS "}"#,
         ))
         .expect("web_search signature");
-        let same = duplicate_call_signature(&tool_call("web_search", r#"{"query":"aquatiq as"}"#))
+        let same = duplicate_call_signature(&tool_call("web_search", r#"{"query":"coresystem as"}"#))
             .expect("web_search signature");
         assert_eq!(first, same);
     }

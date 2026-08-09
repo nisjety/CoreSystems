@@ -165,14 +165,12 @@ impl UserCoreClient {
             id: user_id.to_owned(),
         })?;
         let path = PathAndQuery::from_static(GET_USER_PATH);
-        let response: tonic::Response<GetUserResponse> = match client
-            .unary(request, path, ProstCodec::default())
-            .await
-        {
-            Ok(response) => response,
-            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-            Err(status) => return Err(format!("user-core: GetUser failed: {status}")),
-        };
+        let response: tonic::Response<GetUserResponse> =
+            match client.unary(request, path, ProstCodec::default()).await {
+                Ok(response) => response,
+                Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+                Err(status) => return Err(format!("user-core: GetUser failed: {status}")),
+            };
         Ok(response
             .into_inner()
             .user
@@ -190,14 +188,12 @@ impl UserCoreClient {
             user_id: user_id.to_owned(),
         })?;
         let path = PathAndQuery::from_static(GET_USER_PROFILE_PATH);
-        let response: tonic::Response<GetUserProfileResponse> = match client
-            .unary(request, path, ProstCodec::default())
-            .await
-        {
-            Ok(response) => response,
-            Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
-            Err(status) => return Err(format!("user-core: GetUserProfile failed: {status}")),
-        };
+        let response: tonic::Response<GetUserProfileResponse> =
+            match client.unary(request, path, ProstCodec::default()).await {
+                Ok(response) => response,
+                Err(status) if status.code() == tonic::Code::NotFound => return Ok(None),
+                Err(status) => return Err(format!("user-core: GetUserProfile failed: {status}")),
+            };
         Ok(response
             .into_inner()
             .profile

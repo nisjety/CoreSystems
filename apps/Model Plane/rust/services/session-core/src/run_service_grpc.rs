@@ -27,7 +27,9 @@ use sqlx::PgPool;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
-use crate::auth::{authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity};
+use crate::auth::{
+    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
+};
 use crate::orchestration_grpc::json_to_struct;
 
 async fn authorize_run_owner(

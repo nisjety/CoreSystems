@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
@@ -476,11 +477,11 @@ func (h *MemoryHandler) resolve(w http.ResponseWriter, r *http.Request) {
 
 // TasksHandler handles CRUD for tasks.
 type TasksHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 }
 
 // NewTasksHandler constructs the handler.
-func NewTasksHandler(pool *pgxpool.Pool) *TasksHandler {
+func NewTasksHandler(pool registryDatabase) *TasksHandler {
 	return &TasksHandler{pool: pool}
 }
 
@@ -619,20 +620,29 @@ func (h *TasksHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 
 func (h *TasksHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	var update struct {
-		Status   string `json:"status"`
-		Assignee string `json:"assignee"`
+		Status   *string `json:"status"`
+		Assignee *string `json:"assignee"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	now := time.Now().UTC()
-	orgID := verifiedOrganizationID(r)
-	if update.Status != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE tasks SET status=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Status, now, id, orgID)
+	if update.Status == nil && update.Assignee == nil {
+		jsonErr(w, "at least one field is required", http.StatusBadRequest)
+		return
 	}
-	if update.Assignee != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE tasks SET assignee=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.Assignee, now, id, orgID)
+	if update.Status != nil && strings.TrimSpace(*update.Status) == "" {
+		jsonErr(w, "status must not be empty", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE tasks
+		SET status=COALESCE($1, status), assignee=COALESCE($2, assignee), updated_at=$3
+		WHERE id=$4 AND org_id=$5 AND deleted_at IS NULL
+	`, update.Status, update.Assignee, now, id, verifiedOrganizationID(r))
+	if !writeSingleScopedMutation(w, "task", result, err) {
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
@@ -643,14 +653,36 @@ func (h *TasksHandler) cancel(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 	now := time.Now().UTC()
-	_, err := h.pool.Exec(r.Context(),
-		`UPDATE tasks SET status='cancelled', completed_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`,
+	result, err := h.pool.Exec(r.Context(),
+		`UPDATE tasks SET status='cancelled', completed_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL AND status NOT IN ('completed', 'cancelled', 'failed')`,
 		now, id, verifiedOrganizationID(r))
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+	if !writeTaskCancellationMutation(w, r, h.pool, id, result, err) {
 		return
 	}
 	writeJSON(w, map[string]any{"id": id, "status": "cancelled"})
+}
+
+func writeTaskCancellationMutation(w http.ResponseWriter, r *http.Request, database registryDatabase, id string, result pgconn.CommandTag, err error) bool {
+	if err != nil {
+		return writeSingleScopedMutation(w, "task", result, err)
+	}
+	if result.RowsAffected() == 1 {
+		return true
+	}
+
+	var status string
+	err = database.QueryRow(r.Context(), `SELECT status FROM tasks WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`, id, verifiedOrganizationID(r)).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		jsonErr(w, "not found", http.StatusNotFound)
+		return false
+	}
+	if err != nil {
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return false
+	}
+
+	jsonErr(w, "task cannot be cancelled in its current state", http.StatusConflict)
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -659,11 +691,11 @@ func (h *TasksHandler) cancel(w http.ResponseWriter, r *http.Request, id string)
 
 // CronHandler handles CRUD for cron_schedules.
 type CronHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 }
 
 // NewCronHandler constructs the handler.
-func NewCronHandler(pool *pgxpool.Pool) *CronHandler {
+func NewCronHandler(pool registryDatabase) *CronHandler {
 	return &CronHandler{pool: pool}
 }
 
@@ -783,26 +815,58 @@ func (h *CronHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 
 func (h *CronHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	var update struct {
-		Enabled      *bool  `json:"enabled"`
-		ScheduleExpr string `json:"schedule_expr"`
+		Enabled      *bool   `json:"enabled"`
+		ScheduleExpr *string `json:"schedule_expr"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	now := time.Now().UTC()
-	orgID := verifiedOrganizationID(r)
-	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, *update.Enabled, now, id, orgID)
+	if update.Enabled == nil && update.ScheduleExpr == nil {
+		jsonErr(w, "at least one field is required", http.StatusBadRequest)
+		return
 	}
-	if update.ScheduleExpr != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET schedule_expr=$1, updated_at=$2 WHERE id=$3 AND org_id=$4`, update.ScheduleExpr, now, id, orgID)
+	if update.ScheduleExpr != nil && strings.TrimSpace(*update.ScheduleExpr) == "" {
+		jsonErr(w, "schedule expression must not be empty", http.StatusBadRequest)
+		return
+	}
+	now := time.Now().UTC()
+	var nextFireAt any
+	if update.ScheduleExpr != nil {
+		var timezone string
+		err := h.pool.QueryRow(r.Context(), `SELECT timezone FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`, id, verifiedOrganizationID(r)).Scan(&timezone)
+		if errors.Is(err, pgx.ErrNoRows) {
+			jsonErr(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		next, err := cron.NextFrom(*update.ScheduleExpr, timezone, now)
+		if err != nil {
+			jsonErr(w, "invalid cron expression: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		nextFireAt = next
+	}
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE cron_schedules
+		SET enabled=COALESCE($1, enabled), schedule_expr=COALESCE($2, schedule_expr),
+		    next_fire_at=COALESCE($3, next_fire_at), updated_at=$4
+		WHERE id=$5 AND org_id=$6 AND deleted_at IS NULL
+	`, update.Enabled, update.ScheduleExpr, nextFireAt, now, id, verifiedOrganizationID(r))
+	if !writeSingleScopedMutation(w, "cron schedule", result, err) {
+		return
 	}
 	writeJSON(w, map[string]any{"id": id, "updated_at": now})
 }
 
 func (h *CronHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	now := time.Now().UTC()
-	_, _ = h.pool.Exec(r.Context(), `UPDATE cron_schedules SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3`, now, id, verifiedOrganizationID(r))
+	result, err := h.pool.Exec(r.Context(), `UPDATE cron_schedules SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`, now, id, verifiedOrganizationID(r))
+	if !writeSingleScopedMutation(w, "cron schedule", result, err) {
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

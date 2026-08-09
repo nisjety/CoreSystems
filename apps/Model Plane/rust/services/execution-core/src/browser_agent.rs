@@ -866,8 +866,9 @@ async fn gate_persistent_cookie_use(
     }
 }
 
-/// Phase 5 per-action gate: classify `action` (self-report OR deterministic
-/// backstop) and, if risky, request approval before it is returned for
+/// Phase 5 per-action gate: classify `action` from deterministic browser
+/// evidence with planner self-report as an additive fallback and, if risky,
+/// request approval before it is returned for
 /// dispatch. Approving proceeds with `action` unchanged. Denial or timeout
 /// **aborts the run** rather than letting the planner silently try a
 /// different action the human never saw — the safest, simplest behavior for
@@ -1588,6 +1589,31 @@ mod tests {
             _ => panic!("expected Aborted"),
         }
         assert_eq!(plan.status, PlanStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn gate_risky_action_records_deterministic_checkout_not_a_planner_login_label() {
+        let mut plan = AgentPlan::new(test_config());
+        let sink = ScriptedApprovalSink::new(vec![ApprovalOutcome::Granted]);
+        let action = BrowserAction {
+            action_id: "act_checkout".to_owned(),
+            grant_id: "grant_1".to_owned(),
+            action_type: ActionType::Click,
+            selector: "button.continue".to_owned(),
+            value: String::new(),
+            url: "https://shop.example.com/checkout".to_owned(),
+            max_wait_ms: 5_000,
+            reason: "continue after sign-in".to_owned(),
+            risk_category: Some(RiskCategory::Login),
+        };
+
+        assert!(matches!(
+            gate_risky_action(&mut plan, None, action, Some(&sink)).await,
+            PlanStepResult::Action(_)
+        ));
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].risk_category, RiskCategory::Checkout);
     }
 
     #[tokio::test]

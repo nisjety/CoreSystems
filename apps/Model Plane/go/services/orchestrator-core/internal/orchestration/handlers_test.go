@@ -89,6 +89,22 @@ func (s *stubClient) ClaimApprovalDeliveries(ctx context.Context, in *mpv1.Claim
 	s.lastReq = in
 	return s.claimApprovalDeliveriesResp, s.err
 }
+
+// The approval-continuation trio. These handlers do not exercise them, but a
+// stub must satisfy the whole client interface or the package fails to build.
+func (s *stubClient) GetApprovalContinuation(ctx context.Context, in *mpv1.GetApprovalContinuationRequest, opts ...grpc.CallOption) (*mpv1.GetApprovalContinuationResponse, error) {
+	s.lastReq = in
+	return nil, s.err
+}
+func (s *stubClient) RecordApprovalContinuationStarted(ctx context.Context, in *mpv1.RecordApprovalContinuationStartedRequest, opts ...grpc.CallOption) (*mpv1.RecordApprovalContinuationStartedResponse, error) {
+	s.lastReq = in
+	return nil, s.err
+}
+func (s *stubClient) RecordApprovalContinuationOutcome(ctx context.Context, in *mpv1.RecordApprovalContinuationOutcomeRequest, opts ...grpc.CallOption) (*mpv1.RecordApprovalContinuationOutcomeResponse, error) {
+	s.lastReq = in
+	return nil, s.err
+}
+
 func (s *stubClient) AcknowledgeApprovalDelivery(ctx context.Context, in *mpv1.AcknowledgeApprovalDeliveryRequest, opts ...grpc.CallOption) (*mpv1.AcknowledgeApprovalDeliveryResponse, error) {
 	s.lastReq = in
 	return s.ackApprovalDeliveryResp, s.err

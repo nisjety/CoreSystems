@@ -106,11 +106,6 @@ impl VerifiedIngestionBearer {
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(token: &str) -> Self {
-        Self::new(token)
-    }
 }
 
 /// Marker proving that the public Model Gateway bearer passed verification.

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
@@ -22,12 +21,12 @@ import (
 // soft-delete (plugin_packages carries deleted_at + a unique (org,name,version)
 // index scoped to live rows). Plugins default disabled+unpinned (safe rollout).
 type PluginsHandler struct {
-	pool *pgxpool.Pool
+	pool registryDatabase
 	pub  publisher.EventPublisher
 }
 
 // NewPluginsHandler constructs the handler.
-func NewPluginsHandler(pool *pgxpool.Pool) *PluginsHandler {
+func NewPluginsHandler(pool registryDatabase) *PluginsHandler {
 	return &PluginsHandler{pool: pool}
 }
 
@@ -173,19 +172,29 @@ func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, id strin
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if update.Enabled == nil && update.Pinned == nil && update.Description == "" && update.RolloutState == "" {
+		jsonErr(w, "at least one plugin field is required", http.StatusBadRequest)
+		return
+	}
 	now := time.Now().UTC()
 	orgID := verifiedOrganizationID(r)
+	var enabled any
 	if update.Enabled != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE plugin_packages SET enabled=$1, updated_at=$2 WHERE id=$3 AND org_id=$4 AND deleted_at IS NULL`, *update.Enabled, now, id, orgID)
+		enabled = *update.Enabled
 	}
+	var pinned any
 	if update.Pinned != nil {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE plugin_packages SET pinned=$1, updated_at=$2 WHERE id=$3 AND org_id=$4 AND deleted_at IS NULL`, *update.Pinned, now, id, orgID)
+		pinned = *update.Pinned
 	}
-	if update.Description != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE plugin_packages SET description=$1, updated_at=$2 WHERE id=$3 AND org_id=$4 AND deleted_at IS NULL`, update.Description, now, id, orgID)
-	}
-	if update.RolloutState != "" {
-		_, _ = h.pool.Exec(r.Context(), `UPDATE plugin_packages SET rollout_state=$1, updated_at=$2 WHERE id=$3 AND org_id=$4 AND deleted_at IS NULL`, update.RolloutState, now, id, orgID)
+	result, err := h.pool.Exec(r.Context(), `
+		UPDATE plugin_packages
+		SET enabled=COALESCE($1, enabled), pinned=COALESCE($2, pinned),
+			description=COALESCE(NULLIF($3, ''), description),
+			rollout_state=COALESCE(NULLIF($4, ''), rollout_state), updated_at=$5
+		WHERE id=$6 AND org_id=$7 AND deleted_at IS NULL
+	`, enabled, pinned, update.Description, update.RolloutState, now, id, orgID)
+	if !writeSingleScopedMutation(w, "plugin package", result, err) {
+		return
 	}
 	if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindPlugin,
 		reconcile.ActionUpdated, id, orgID); eerr != nil {
@@ -197,11 +206,10 @@ func (h *PluginsHandler) update(w http.ResponseWriter, r *http.Request, id strin
 func (h *PluginsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
 	orgID := verifiedOrganizationID(r)
 	now := time.Now().UTC()
-	_, err := h.pool.Exec(r.Context(),
+	result, err := h.pool.Exec(r.Context(),
 		`UPDATE plugin_packages SET deleted_at=$1, updated_at=$1 WHERE id=$2 AND org_id=$3 AND deleted_at IS NULL`,
 		now, id, orgID)
-	if err != nil {
-		jsonErr(w, err.Error(), http.StatusInternalServerError)
+	if !writeSingleScopedMutation(w, "plugin package", result, err) {
 		return
 	}
 	if eerr := reconcile.Emit(r.Context(), h.pub, reconcile.KindPlugin,
