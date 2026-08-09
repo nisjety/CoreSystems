@@ -27,6 +27,7 @@ envy = "0.4"
 async-nats.workspace = true
 nats-connection-rs = { path = "../nats-connection-rs" }
 event-envelope-rs = { path = "../event-envelope-rs" }
+pg-org-scope-rs = { path = "../pg-org-scope-rs" }
 
 [dev-dependencies]
 rsa = { version = "0.9", features = ["pem"] }

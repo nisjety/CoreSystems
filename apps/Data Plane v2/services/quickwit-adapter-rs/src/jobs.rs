@@ -430,6 +430,26 @@ fn require_lease(state: &InMemoryState, job_id: &str, runner_id: &str) -> Result
     }
 }
 
+/// Phase 1 RLS: every statement in this store deliberately runs on the plain
+/// (unscoped, superuser) pool. This is the admin rebuild job queue, and it is
+/// cross-org twice over:
+///
+/// - **`quickwit_admin_jobs.org_id` and `quickwit_admin_job_audit.org_id` are
+///   NULLABLE**, and a NULL means a platform-wide job belonging to no tenant.
+///   The RLS policy compares `org_id = current_setting('app.current_org', true)`,
+///   which is NULL — not true — for such a row, so a scoped `INSERT` of a
+///   global job is rejected outright by `WITH CHECK`, and a scoped `SELECT` or
+///   `UPDATE` silently skips every existing one. `submit` is reached from the
+///   admin API with `global: true` precisely to create those rows, so scoping
+///   it would break the feature rather than harden it.
+/// - **`claim_next` is a runner draining the queue for every org at once.** It
+///   has no org in hand; it takes whichever approved job is due next, exactly
+///   like `index-engine-rs`'s deletion-outbox drainer. A scoped transaction
+///   would quietly restrict the runner to one tenant and strand everyone
+///   else's rebuilds.
+///
+/// The `org_id`/`job_id` predicates written into each statement below are what
+/// isolate this surface today, backed by the admin authorization in `auth.rs`.
 #[derive(Clone)]
 pub struct PgAdminJobStore {
     pool: PgPool,

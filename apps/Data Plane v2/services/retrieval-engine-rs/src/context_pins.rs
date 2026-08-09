@@ -52,11 +52,17 @@ fn delete_pin_sql() -> &'static str {
 
 /// Org's pins, priority-first (lower number = more important = packed first).
 pub async fn list_pins(pool: &PgPool, org_id: &str, limit: i64) -> anyhow::Result<Vec<ContextPin>> {
+    // Phase 1 RLS: pins are per-org by construction (org comes from the
+    // verified `AuthContext`), so this reads through an org-scoped transaction.
+    // The SQL still binds `org_id` itself — the database policy is a backstop
+    // against that filter being dropped or mis-edited later, not a replacement.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, String, i32)>(list_pins_sql())
         .bind(org_id)
         .bind(limit.clamp(1, MAX_PINS))
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(rows
         .into_iter()
         .map(|(pin_id, title, content, priority)| ContextPin {
@@ -81,6 +87,10 @@ pub async fn upsert_pin(
     priority: i32,
     pinned_by: Option<&str>,
 ) -> anyhow::Result<bool> {
+    // Phase 1 RLS: single-org write. RLS's `WITH CHECK` is a second, independent
+    // reason a cross-org pin_id collision cannot become an overwrite — the SQL's
+    // own `WHERE context_pins.org_id = EXCLUDED.org_id` guard stays in place.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let result = sqlx::query(upsert_pin_sql())
         .bind(pin_id)
         .bind(org_id)
@@ -88,18 +98,22 @@ pub async fn upsert_pin(
         .bind(content)
         .bind(priority)
         .bind(pinned_by)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
 /// Deletes an org's pin. Returns whether a row was removed.
 pub async fn delete_pin(pool: &PgPool, org_id: &str, pin_id: &str) -> anyhow::Result<bool> {
+    // Phase 1 RLS: single-org delete, same rationale as `upsert_pin` above.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let result = sqlx::query(delete_pin_sql())
         .bind(org_id)
         .bind(pin_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

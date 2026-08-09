@@ -342,6 +342,13 @@ impl RetrievalService for RetrievalSvc {
         }
 
         let grants = self.grants(&ctx).await;
+        // Phase 1 RLS: the org comes from the authorized `AuthContext`, so this
+        // reads through an org-scoped transaction. The SQL still binds `org_id`
+        // itself — the database policy is a backstop against that filter being
+        // dropped or mis-edited later, not a replacement for it.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pipeline.pool, &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let rows = sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT document_id, title, source, type FROM documents
              WHERE document_id = ANY($1) AND org_id = $2 AND deleted_at IS NULL
@@ -351,9 +358,12 @@ impl RetrievalService for RetrievalSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_all(&self.pipeline.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let sources = rows
             .into_iter()
@@ -379,6 +389,15 @@ impl RetrievalService for RetrievalSvc {
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
+        // Phase 1 RLS: both lookup variants below serve the same org (from the
+        // authorized `AuthContext`), so they share ONE scoped transaction. The
+        // SQL still binds `org_id` itself — the database policy is a backstop,
+        // not a replacement. Note the `documents` join carries no org predicate
+        // of its own; RLS now supplies one for that side too.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pipeline.pool, &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         let chunks = if !req.knowledge_ids.is_empty() {
             sqlx::query_as::<_, (String, String, String, i32, String, String)>(
                 "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index, ku.content_hash, ku.embedding_status
@@ -392,7 +411,7 @@ impl RetrievalService for RetrievalSvc {
             .bind(&ctx.org_id)
             .bind(ctx.user_id.as_deref())
             .bind(&grants)
-            .fetch_all(&self.pipeline.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
         } else if let Some(doc_id) = &req.document_id {
@@ -408,14 +427,19 @@ impl RetrievalService for RetrievalSvc {
             .bind(&ctx.org_id)
             .bind(ctx.user_id.as_deref())
             .bind(&grants)
-            .fetch_all(&self.pipeline.pool)
+            .fetch_all(&mut *tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
         } else {
+            // Dropping `tx` here rolls the (read-only) transaction back.
             return Err(Status::invalid_argument(
                 "provide knowledge_ids or document_id",
             ));
         };
+
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let result: Vec<Candidate> = chunks
             .into_iter()
@@ -446,6 +470,12 @@ impl RetrievalService for RetrievalSvc {
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
+        // Phase 1 RLS: single-org read, same rationale as `get_chunks` above.
+        // Committed before `join_sources`, which opens its own scoped
+        // transaction for the same org.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pipeline.pool, &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let rows = sqlx::query_as::<_, (String, String, String, i32)>(
             "SELECT ku.knowledge_id, ku.document_id, ku.text, ku.chunk_index
              FROM knowledge_units ku
@@ -457,9 +487,12 @@ impl RetrievalService for RetrievalSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_all(&self.pipeline.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let candidates: Vec<crate::pipeline::types::ScoredCandidate> = rows
             .into_iter()
@@ -480,7 +513,7 @@ impl RetrievalService for RetrievalSvc {
 
         let sources = self
             .pipeline
-            .join_sources(&candidates)
+            .join_sources(&ctx.org_id, &candidates)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 

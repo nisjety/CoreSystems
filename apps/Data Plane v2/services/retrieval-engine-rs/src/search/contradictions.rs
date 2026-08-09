@@ -107,6 +107,12 @@ pub async fn search_contradictions(
     viewer: Option<&str>,
     granted_ids: &[String],
 ) -> anyhow::Result<Vec<ContradictionResult>> {
+    // Phase 1 RLS: a contradiction search serves exactly one org (taken from
+    // the verified caller claims), so it reads through an org-scoped
+    // transaction. The SQL still binds `org_id` itself — the database policy
+    // is a backstop against that filter being dropped or mis-edited later,
+    // not a replacement for it.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<
         _,
         (
@@ -123,8 +129,9 @@ pub async fn search_contradictions(
     .bind(granted_ids)
     .bind(query)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()

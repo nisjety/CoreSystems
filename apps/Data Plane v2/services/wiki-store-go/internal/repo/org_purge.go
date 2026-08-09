@@ -86,6 +86,25 @@ func (r PurgeResult) Total() int64 {
 // DELETE with no compensating INSERT (no audit-log row, no tombstone), so a
 // redelivery after the first successful purge simply matches zero rows on
 // every table and returns a zero-value PurgeResult, nil error.
+//
+// Phase 1 RLS: deliberately NOT wrapped in orgscope.WithOrgScope, unlike
+// every request-scoped path in wiki_repo.go. This is the GDPR erasure path
+// the helper's own "when NOT to use this" section names, and the reasoning
+// holds even though this particular purge targets a single org:
+//
+//   - Under RLS a DELETE can only remove rows the policy lets the role see.
+//     Any row whose org_id drifted — legacy, NULL, mis-backfilled — would
+//     survive the purge silently while PurgeResult still reported success.
+//     An erasure that under-deletes and reports OK is a worse failure than
+//     one that runs unfiltered, because nothing downstream would notice.
+//   - The isolation RLS would add is already present statically: every
+//     statement below is a literal `DELETE ... WHERE org_id = $1` with no
+//     code path that can filter on anything else (see the Safety note
+//     above). There is no filter here for a policy to backstop.
+//
+// The counterpart consumer (internal/gdpr/org_purge.go) passes org_id
+// straight from the event payload, so the single bound parameter is the
+// whole tenant boundary — audited, not assumed.
 func (r *WikiRepo) HardPurgeByOrg(ctx context.Context, orgID string) (PurgeResult, error) {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {

@@ -127,7 +127,18 @@ pub async fn process_document(
     if event.zdr {
         anyhow::bail!("restrictive-ZDR document cannot enter durable indexing");
     }
-    let mut tx = pool.begin().await?;
+    // Phase 1 RLS: one indexing event names exactly one org, so every read and
+    // write below shares ONE org-scoped transaction rather than paying the
+    // set_config/SET LOCAL ROLE round trip per statement. This build was already
+    // one transaction for atomicity; scoping it changes only the role it runs
+    // as. Each statement still binds `org_id` itself — the database policy is a
+    // backstop against that filter being dropped or mis-edited later, not a
+    // replacement for it. Two statements in this transaction carry no `org_id`
+    // of their own and gain their isolation purely from the policy: the
+    // `parent_window_text` refresh below (keyed by `knowledge_id` alone) and the
+    // `chunk_lineage` insert, which the child-table migration isolates through
+    // its `documents` parent.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, &event.org_id).await?;
 
     // The event is only a notification. Re-authorize the current canonical row
     // while holding its row lock, then keep every chunk/outbox read and write in
@@ -411,6 +422,80 @@ mod tests {
         }
     }
 
+    /// Creates the RLS runtime role and grants it the fixture's schema.
+    ///
+    /// # Why a test fixture needs a database role at all
+    ///
+    /// `process_document` opens its transaction through
+    /// `pg_org_scope::begin_org_scoped` (see `services/pg-org-scope-rs`), which
+    /// issues `SET LOCAL ROLE dataplane_app` — so every DB-gated test below
+    /// runs its whole build as that role.
+    ///
+    /// In production the role is created by
+    /// `infra/postgres/migrations/20260809120000_org_rls_isolation.sql`. These
+    /// tests, however, build their own minimal schema with `CREATE TABLE` on a
+    /// bare disposable database and never run the migrations — so without this
+    /// helper every one of them fails at runtime with:
+    ///
+    /// ```text
+    /// error returned from database: role "dataplane_app" does not exist
+    /// ```
+    ///
+    /// That failure is invisible to a normal `cargo test` run, because every
+    /// test that would hit it is `#[ignore]`d behind `TEST_DATABASE_URL`. Do not
+    /// delete this as boilerplate: removing it silently disables the integration
+    /// tests that cover stale-event refusal, embedding reuse, and parent-window
+    /// refresh.
+    ///
+    /// # Grants only — deliberately
+    ///
+    /// This creates the role and grants it access, but does **not** enable
+    /// row-level security or install any policy. That is the point: these
+    /// fixtures keep asserting exactly what they asserted before RLS existed —
+    /// that each query's own `org_id` predicate does the filtering. Having them
+    /// enforce RLS too would be a strictly stronger test, but it changes what
+    /// the suite covers, so it belongs in its own deliberate change.
+    ///
+    /// # Ordering
+    ///
+    /// Must be called **after** the fixture's `CREATE TABLE` statements:
+    /// `GRANT ... ON ALL TABLES` applies to the tables that exist when it runs,
+    /// not to ones created later.
+    async fn grant_rls_runtime_role(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(
+            r#"
+            -- Roles are cluster-wide, so a concurrent test in the same binary
+            -- may win the race to create it, and a plain IF NOT EXISTS check has
+            -- a TOCTOU window. BOTH handlers are required, and this was verified
+            -- against a real database rather than assumed:
+            --   * duplicate_object (42710) is what a *sequential* re-run raises,
+            --     once the role is already committed.
+            --   * unique_violation (23505) is what an actual *concurrent* race
+            --     raises — the losing backend faults on pg_authid_rolname_index
+            --     before the duplicate_object check is ever reached. Catching
+            --     only duplicate_object leaves the exact race this guard exists
+            --     for unhandled; with the role absent and tests running
+            --     multi-threaded it fails with `duplicate key value violates
+            --     unique constraint "pg_authid_rolname_index"`.
+            DO $role$
+            BEGIN
+                CREATE ROLE dataplane_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+            EXCEPTION WHEN duplicate_object OR unique_violation THEN
+                NULL;
+            END
+            $role$;
+
+            GRANT USAGE ON SCHEMA public TO dataplane_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE
+                ON ALL TABLES IN SCHEMA public TO dataplane_app;
+            GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dataplane_app;
+            "#,
+        )
+        .execute(pool)
+        .await
+        .expect("create and grant the RLS runtime role");
+    }
+
     #[test]
     fn canonical_document_gate_fails_closed_for_deleted_restricted_and_unknown_rows() {
         for classification in ["internal", "public", "sensitive"] {
@@ -457,6 +542,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("minimal disposable schema");
+        grant_rls_runtime_role(&pool).await;
 
         for document_id in ["fixture-restricted", "fixture-unknown", "fixture-deleted"] {
             let result = process_document(
@@ -532,6 +618,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("disposable reuse schema");
+        grant_rls_runtime_role(&pool).await;
 
         // Two paragraphs, tiny budget → exactly two chunks: "alpha" (0), "beta" (1).
         let cfg = ChunkConfig {
@@ -713,6 +800,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("disposable parent-window schema");
+        grant_rls_runtime_role(&pool).await;
 
         // Tight chunk budget, huge parent budget: three one-sentence chunks,
         // each one's parent window pulls in both neighbors.

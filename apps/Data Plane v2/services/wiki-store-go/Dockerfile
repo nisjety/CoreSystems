@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build for wiki-store-go.
-# Build context: repository root. This module uses ../../gen/go via go.mod
-# replace, so the generated module must be available during dependency fetch.
+# Build context: repository root. This module uses ../../gen/go and
+# ../../shared/go via go.mod replace, so both sibling modules must be
+# available during dependency fetch AND during the build itself.
 
 FROM golang:1.26.5-bookworm AS builder
 WORKDIR /workspace/services/wiki-store-go
@@ -9,6 +10,7 @@ ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 COPY services/wiki-store-go/go.mod services/wiki-store-go/go.sum ./
 COPY gen/go/go.mod gen/go/go.sum /workspace/gen/go/
+COPY shared/go/go.mod shared/go/go.sum /workspace/shared/go/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     set -e; \
     for i in 1 2 3 4 5; do \
@@ -20,6 +22,7 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     done; \
     exit 1
 COPY gen/go /workspace/gen/go
+COPY shared/go /workspace/shared/go
 COPY services/wiki-store-go ./
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOFLAGS="-trimpath" \

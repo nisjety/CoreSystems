@@ -55,6 +55,13 @@ impl KnowledgeService for KnowledgeSvc {
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
+        // Phase 1 RLS: the org comes from the authorized `AuthContext`, so this
+        // reads through an org-scoped transaction. The SQL still binds `org_id`
+        // itself — the database policy is a backstop against that filter being
+        // dropped or mis-edited later, not a replacement for it.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool.as_ref(), &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let row = sqlx::query_as::<_, (String,)>(
             "SELECT zdr_classification FROM documents
              WHERE document_id = $1 AND org_id = $2 AND deleted_at IS NULL
@@ -64,9 +71,12 @@ impl KnowledgeService for KnowledgeSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         match row {
             Some((classification,)) => {
@@ -90,6 +100,12 @@ impl KnowledgeService for KnowledgeSvc {
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
+        // Phase 1 RLS: single-org read, same rationale as `check_permissions`
+        // above. Note the `documents` join carries no org predicate of its own —
+        // RLS now supplies one for that side too.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool.as_ref(), &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let rows = sqlx::query_as::<_, (String, String, String, i32, String, String, String)>(
             "SELECT ku.knowledge_id, ku.document_id, ku.org_id, ku.chunk_index,
                     ku.text, ku.embedding_status, ku.content_hash
@@ -103,9 +119,12 @@ impl KnowledgeService for KnowledgeSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_all(self.pool.as_ref())
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let units: Vec<KnowledgeUnit> = rows
             .into_iter()

@@ -159,7 +159,20 @@ impl PurgeSummary {
 /// Returns an error if the transaction fails to begin, either statement
 /// fails, or the commit fails. On error nothing is purged — the transaction
 /// rolls back, so a NAK'd redelivery retries the whole purge cleanly.
+///
+/// Phase 1 RLS: this purge deliberately keeps running on the plain (unscoped,
+/// superuser) pool while `builder::process_document` moved onto an org-scoped
+/// transaction. **Failure here would be silent.** Under a scoped transaction a
+/// mis-scoped `DELETE` matches zero rows and reports success —
+/// indistinguishable from "nothing left to purge", which the idempotency
+/// contract above says is the *normal* outcome of a redelivered event. An
+/// erasure that quietly deletes nothing and returns `Ok` is a GDPR compliance
+/// failure no caller would notice, so converting it earns its own change with
+/// dedicated verification against a real database rather than riding along in a
+/// sweep. This mirrors the same decision, for the same reason, in
+/// `graph-index-rs/src/store.rs` and `retrieval-engine-rs/src/gdpr/purge.rs`.
 pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Result<PurgeSummary> {
+    // Phase 1 RLS: unscoped on purpose — see the doc comment above.
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
 
     // Bound to locals rather than assigned onto a `default()` struct (clippy's

@@ -2,6 +2,8 @@ use sqlx::PgPool;
 
 use retrieval_engine::search::{contradictions, graph, timeline, wiki};
 
+mod common;
+
 fn test_db_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL").ok()
 }
@@ -143,6 +145,11 @@ async fn seed(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed isolated auxiliary visibility fixture");
+
+    // Every search path below runs org-scoped now (`SET LOCAL ROLE
+    // dataplane_app`), so the fixture has to provide that role. See
+    // `common::grant_rls_runtime_role`. Must follow the CREATE TABLEs above.
+    common::grant_rls_runtime_role(pool).await;
 }
 
 #[tokio::test]

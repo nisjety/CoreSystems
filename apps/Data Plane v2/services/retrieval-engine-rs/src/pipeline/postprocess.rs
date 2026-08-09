@@ -430,6 +430,13 @@ impl NodePostprocessor for RecencyDecay {
 /// query failed would leak deleted or non-visible documents.
 pub struct VisibilityGate<'a> {
     pub pool: &'a PgPool,
+    /// Phase 1 RLS: the requesting org. Neither query in this stage has ever
+    /// carried an org predicate of its own — they were safe only because the
+    /// candidate list arrived pre-filtered by org from the retrieval arms. The
+    /// org-scoped transaction makes the database supply that missing predicate,
+    /// so a candidate that somehow leaked in from another tenant cannot be
+    /// confirmed live here.
+    pub org_id: &'a str,
     /// `None` means the legacy org-scoped path (or an audited org-admin
     /// bypass), which applies liveness only.
     pub viewer: Option<&'a str>,
@@ -462,6 +469,11 @@ impl NodePostprocessor for VisibilityGate<'_> {
         // Pass 1 + 2 fused into one query: liveness AND (when a viewer is
         // present) per-user ownership. The `$2::text IS NULL` branch makes the
         // ownership predicate a no-op for the no-viewer legacy path.
+        //
+        // Phase 1 RLS: this query has no org predicate of its own — see the
+        // `org_id` field docs. Running it in an org-scoped transaction is what
+        // supplies one.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
         let mut live: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
             r#"
             SELECT document_id
@@ -477,11 +489,12 @@ impl NodePostprocessor for VisibilityGate<'_> {
         .bind(&doc_ids)
         .bind(self.viewer)
         .bind(self.granted)
-        .fetch_all(self.pool)
+        .fetch_all(&mut *tx)
         .await?
         .into_iter()
         .map(|(id,)| id)
         .collect();
+        tx.commit().await?;
 
         // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
         // page_id, which is canonical in wiki_pages, not documents. Treat a
@@ -489,16 +502,29 @@ impl NodePostprocessor for VisibilityGate<'_> {
         // every wiki hit as "missing from canonical documents". Best-effort:
         // a failure here just means wiki candidates fall back to being gated
         // by the documents table alone (i.e. filtered out).
-        match sqlx::query_as::<_, (String,)>(
-            r#"
+        //
+        // Phase 1 RLS: same missing-org-predicate story as the query above, so
+        // this is scoped too — but on its OWN transaction, deliberately. In
+        // Postgres a failed statement aborts the entire transaction, so sharing
+        // one with the enforcement query would turn this tolerated failure into
+        // a hard error at COMMIT, which is exactly what this `match` exists to
+        // avoid.
+        match async {
+            let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
+            let rows: Vec<(String,)> = sqlx::query_as(
+                r#"
             SELECT page_id
             FROM wiki_pages
             WHERE page_id = ANY($1)
               AND page_status = 'published'
             "#,
-        )
-        .bind(&doc_ids)
-        .fetch_all(self.pool)
+            )
+            .bind(&doc_ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok::<_, anyhow::Error>(rows)
+        }
         .await
         {
             Ok(rows) => live.extend(rows.into_iter().map(|(id,)| id)),
@@ -549,6 +575,10 @@ impl NodePostprocessor for VisibilityGate<'_> {
 /// Enforcement: errors propagate.
 pub struct ZdrFilter<'a> {
     pub pool: &'a PgPool,
+    /// Phase 1 RLS: the requesting org. The restricted-document lookup below
+    /// has never carried an org predicate of its own; the org-scoped
+    /// transaction supplies it. Same rationale as [`VisibilityGate::org_id`].
+    pub org_id: &'a str,
 }
 
 #[async_trait]
@@ -569,15 +599,19 @@ impl NodePostprocessor for ZdrFilter<'_> {
                 if candidate_doc_ids.is_empty() {
                     return Ok(nodes);
                 }
+                // Phase 1 RLS: no org predicate in the SQL — the scoped
+                // transaction supplies it (see the `org_id` field docs).
+                let mut tx = pg_org_scope::begin_org_scoped(self.pool, self.org_id).await?;
                 let restricted: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
                     "SELECT document_id FROM documents WHERE document_id = ANY($1) AND zdr_classification = 'restricted'"
                 )
                 .bind(&candidate_doc_ids)
-                .fetch_all(self.pool)
+                .fetch_all(&mut *tx)
                 .await?
                 .into_iter()
                 .map(|(id,)| id)
                 .collect();
+                tx.commit().await?;
 
                 if restricted.is_empty() {
                     ctx.zdr_actions_applied

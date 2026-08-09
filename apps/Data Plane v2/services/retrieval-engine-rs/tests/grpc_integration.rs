@@ -20,6 +20,8 @@ use retrieval_engine::grpc::pb_knowledge::knowledge_service_server::KnowledgeSer
 
 const TEST_ORG: &str = "org-integration-test";
 
+mod common;
+
 fn test_db_url() -> Option<String> {
     std::env::var("TEST_DATABASE_URL").ok()
 }
@@ -66,6 +68,11 @@ async fn setup_schema(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("create knowledge_units table");
+
+    // The gRPC document/knowledge handlers exercised below read org-scoped now
+    // (`SET LOCAL ROLE dataplane_app`), so the fixture has to provide that role.
+    // See `common::grant_rls_runtime_role`. Must follow the CREATE TABLEs above.
+    common::grant_rls_runtime_role(pool).await;
 }
 
 async fn cleanup(pool: &PgPool) {

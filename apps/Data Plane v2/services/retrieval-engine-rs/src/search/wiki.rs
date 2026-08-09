@@ -58,6 +58,18 @@ pub async fn wiki_search(
     allowed_workspaces: &[String],
     granted_ids: &[String],
 ) -> anyhow::Result<Vec<WikiSearchResult>> {
+    // Phase 1 RLS: a wiki search serves exactly one org (taken from the
+    // verified caller claims), so it reads through an org-scoped transaction.
+    // The SQL still binds `org_id` itself — the database policy is a backstop
+    // against that filter being dropped or mis-edited later, not a replacement.
+    //
+    // This statement also joins `wiki_page_versions`, which carries no `org_id`
+    // of its own. `20260809180000_org_rls_child_tables.sql` is what makes that
+    // side both reachable and isolated: it grants the runtime role access AND
+    // gives the table a policy deriving the org from its `wiki_pages` parent via
+    // `page_id`. So the version rows are filtered to this org too, rather than
+    // riding along unchecked on the parent's filter.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<
         _,
         (
@@ -75,8 +87,9 @@ pub async fn wiki_search(
     .bind(allowed_workspaces)
     .bind(granted_ids)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()

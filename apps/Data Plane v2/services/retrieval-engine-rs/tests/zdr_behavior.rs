@@ -14,6 +14,8 @@ use retrieval_engine::pipeline::types::{
 };
 use retrieval_engine::trace::persist_trace;
 
+mod common;
+
 const TEST_ORG: &str = "org-zdr-test";
 
 fn test_db_url() -> Option<String> {
@@ -84,6 +86,11 @@ async fn setup_schema(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("create retrieval_candidates");
+
+    // `persist_trace` writes org-scoped now (`SET LOCAL ROLE dataplane_app`),
+    // so the fixture has to provide that role. See
+    // `common::grant_rls_runtime_role`. Must follow the CREATE TABLEs above.
+    common::grant_rls_runtime_role(pool).await;
 }
 
 async fn cleanup(pool: &PgPool) {

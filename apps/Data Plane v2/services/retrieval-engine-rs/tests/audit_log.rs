@@ -9,6 +9,8 @@ use sqlx::PgPool;
 use retrieval_engine::audit::{record_access, AccessEvent};
 use retrieval_engine::authz::{AuthContext, AuthMethod, EffectiveAcl};
 
+mod common;
+
 const TEST_ORG: &str = "org-audit-test";
 
 fn test_db_url() -> Option<String> {
@@ -34,6 +36,12 @@ async fn setup_schema(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("create access_audit_log");
+
+    // `record_access` writes org-scoped now (`SET LOCAL ROLE dataplane_app`),
+    // so the fixture has to provide that role — and because the write is
+    // best-effort, a missing role would surface here as a silently empty table
+    // rather than an error. See `common::grant_rls_runtime_role`.
+    common::grant_rls_runtime_role(pool).await;
 }
 
 async fn cleanup(pool: &PgPool) {

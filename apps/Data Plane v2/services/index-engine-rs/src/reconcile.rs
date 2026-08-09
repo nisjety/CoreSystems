@@ -157,6 +157,14 @@ pub async fn run_once(
     signer: &EventSigner,
     config: &ReconcileConfig,
 ) -> anyhow::Result<usize> {
+    // Phase 1 RLS: unscoped on purpose. This reconciler is a background loop
+    // that heals the corpus for EVERY org — `claim_stranded` below picks the
+    // oldest eligible units plane-wide with `FOR UPDATE ... SKIP LOCKED` and
+    // has no org in hand at all (each claimed row's `org_id` is an *output*,
+    // read back to address the re-drive event). An org-scoped transaction here
+    // would not fail; it would silently reduce the reconciler to a single
+    // tenant and leave every other org's failed embeddings stranded — exactly
+    // the gap this module exists to close.
     let mut tx = pool.begin().await?;
     let claimed = claim_stranded(&mut tx, config).await?;
     if claimed.is_empty() {

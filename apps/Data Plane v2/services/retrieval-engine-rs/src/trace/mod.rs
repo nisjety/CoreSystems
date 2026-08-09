@@ -111,6 +111,26 @@ pub async fn persist_trace(
         })
     });
 
+    // Phase 1 RLS: `retrieval_runs` is org-scoped and `req.org_id` is the
+    // verified requesting org, so this INSERT runs in an org-scoped
+    // transaction. The statement still binds `org_id` itself — the database
+    // policy's WITH CHECK is a backstop against that column being dropped or
+    // mis-bound later, not a replacement for it.
+    //
+    // The per-candidate INSERTs below share this SAME transaction. They write
+    // `retrieval_candidates`, which carries no `org_id`;
+    // `20260809180000_org_rls_child_tables.sql` makes it both reachable and
+    // isolated by deriving the org from its `retrieval_runs` parent via
+    // `trace_id`. That child policy's WITH CHECK looks the parent up inside this
+    // transaction, where the run row inserted just above is already visible —
+    // which is precisely why the two statements must stay on one transaction
+    // rather than the candidates opening their own.
+    //
+    // Sharing it also makes the run and its candidates atomic: a mid-loop
+    // failure now rolls the run row back too, so the caller's
+    // "trace persistence failed; returning unpersisted trace_id" is literally
+    // true instead of leaving a run with a truncated candidate list.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, &req.org_id).await?;
     sqlx::query(trace_insert_sql())
         .bind(&trace_id)
         .bind(&req.org_id)
@@ -133,7 +153,7 @@ pub async fn persist_trace(
         .bind(zdr_actions_json)
         .bind(mode_mix_applied_json)
         .bind(&req.user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     // Persist individual candidates
@@ -156,9 +176,11 @@ pub async fn persist_trace(
         .bind(candidate.rerank_score)
         .bind(candidate.final_score)
         .bind(&candidate.knowledge_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+
+    tx.commit().await?;
 
     tracing::debug!(trace_id = %trace_id, candidates = candidates.len(), "trace persisted");
     Ok(trace_id)
@@ -170,14 +192,27 @@ pub async fn get_trace(
     org_id: &str,
     actor_user_id: Option<&str>,
 ) -> anyhow::Result<Option<TraceDetail>> {
+    // Phase 1 RLS: `retrieval_runs` is org-scoped and `org_id` is the verified
+    // requesting org, so both reads below share one org-scoped transaction.
+    //
+    // The candidate read carries no org predicate of its own — it selects purely
+    // by `trace_id`. `20260809180000_org_rls_child_tables.sql` is what makes
+    // that safe rather than merely convenient: `retrieval_candidates` now has a
+    // policy deriving the org from its `retrieval_runs` parent, so a guessed
+    // `trace_id` belonging to another tenant returns nothing instead of that
+    // tenant's candidate list. Actor scoping still comes from the run lookup
+    // (the child policy checks org, not `actor_user_id`), which is why the early
+    // return below must stay ahead of the candidate read.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let run = sqlx::query_as::<_, TraceRun>(trace_lookup_sql())
         .bind(trace_id)
         .bind(org_id)
         .bind(actor_user_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
     let Some(run) = run else {
+        // Dropping `tx` here rolls the (read-only) transaction back.
         return Ok(None);
     };
 
@@ -191,8 +226,9 @@ pub async fn get_trace(
         "#,
     )
     .bind(trace_id)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(Some(TraceDetail { run, candidates }))
 }

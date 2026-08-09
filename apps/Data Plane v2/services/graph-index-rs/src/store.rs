@@ -256,7 +256,13 @@ impl GraphStore {
         org_id: &str,
         document_id: &str,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(sqlx::query_as(
+        // Phase 1 RLS: this path serves exactly one org (taken from the
+        // verified caller claims), so it reads through an org-scoped
+        // transaction. The SQL still binds `org_id` itself — the database
+        // policy is a backstop against that filter being dropped or mis-edited
+        // later, not a replacement for it.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+        let rows = sqlx::query_as(
             "SELECT ku.knowledge_id, ku.text
              FROM knowledge_units AS ku
              JOIN documents AS d
@@ -266,8 +272,10 @@ impl GraphStore {
         )
         .bind(document_id)
         .bind(org_id)
-        .fetch_all(&self.pool)
-        .await?)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
     }
 
     async fn knowledge_unit_is_org_visible(
@@ -275,6 +283,9 @@ impl GraphStore {
         org_id: &str,
         knowledge_id: &str,
     ) -> anyhow::Result<bool> {
+        // Phase 1 RLS: single-org visibility probe, same rationale as
+        // `load_org_visible_chunks` above.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let (visible,): (bool,) = sqlx::query_as(
             "SELECT EXISTS (
                 SELECT 1 FROM knowledge_units AS ku
@@ -286,8 +297,9 @@ impl GraphStore {
         )
         .bind(knowledge_id)
         .bind(org_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(visible)
     }
 
@@ -307,6 +319,14 @@ impl GraphStore {
             return Ok(PersistedExtraction::default());
         }
         let source_ref = serde_json::json!([knowledge_id]);
+
+        // Phase 1 RLS: every write below belongs to the single org this
+        // extraction was produced for, so they all share ONE scoped
+        // transaction rather than paying the set_config/SET LOCAL ROLE round
+        // trip per entity, relationship and claim. Each statement still binds
+        // `org_id` itself — the database policy is a backstop, not a
+        // replacement for the explicit column.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
 
         let mut entity_ids = Vec::new();
         let mut mirror_entities = Vec::new();
@@ -346,7 +366,7 @@ impl GraphStore {
             .bind(&e.entity_text)
             .bind(e.confidence)
             .bind(&source_ref)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             mirror_entities.push(MirrorEntity {
                 entity_id: id.clone(),
@@ -404,7 +424,7 @@ impl GraphStore {
             .bind(&r.relation_type)
             .bind(r.confidence)
             .bind(&source_ref)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             mirror_relationships.push(MirrorRelationship {
                 rel_id: id.clone(),
@@ -458,10 +478,12 @@ impl GraphStore {
             .bind(serde_json::json!(linked))
             .bind(c.confidence)
             .bind(&source_ref)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
             claim_ids.push(id);
         }
+
+        tx.commit().await?;
 
         // Deterministic identity means one extraction can now yield the same id
         // twice — e.g. an LLM returning both "Sarah" and "sarah" normalises to a
@@ -498,6 +520,10 @@ impl GraphStore {
         {
             return Ok(());
         }
+        // Phase 1 RLS: one scoped transaction for all three mapping loops —
+        // they write the same org's rows, so there is no reason to re-enter
+        // the scope per id. Same backstop rationale as `persist_extraction`.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         for eid in entity_ids {
             sqlx::query(
                 "INSERT INTO graph_text_units (org_id, knowledge_id, entity_id, rel_id, claim_id)
@@ -507,7 +533,7 @@ impl GraphStore {
             .bind(org_id)
             .bind(knowledge_id)
             .bind(eid)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
         for rid in relationship_ids {
@@ -519,7 +545,7 @@ impl GraphStore {
             .bind(org_id)
             .bind(knowledge_id)
             .bind(rid)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
         for cid in claim_ids {
@@ -531,9 +557,10 @@ impl GraphStore {
             .bind(org_id)
             .bind(knowledge_id)
             .bind(cid)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -550,13 +577,19 @@ impl GraphStore {
         if knowledge_ids.is_empty() {
             return Ok(0);
         }
+        // Phase 1 RLS: a re-chunk event carries exactly one org, so this
+        // targeted mapping delete runs inside an org-scoped transaction. Note
+        // the contrast with `purge_organization_data` below, which stays
+        // unscoped on purpose — see its doc comment.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let result = sqlx::query(
             "DELETE FROM graph_text_units WHERE org_id = $1 AND knowledge_id = ANY($2)",
         )
         .bind(org_id)
         .bind(knowledge_ids)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(result.rows_affected())
     }
 
@@ -576,7 +609,21 @@ impl GraphStore {
     /// time — not an error. Every statement binds `org_id` as a parameter;
     /// none is ever string-interpolated, so a purge for one org can never
     /// touch another org's rows.
+    ///
+    /// Phase 1 RLS: this purge deliberately keeps running on the plain
+    /// (unscoped, superuser) pool while the rest of this file moved onto
+    /// org-scoped transactions. **Failure here would be silent.** Under a
+    /// scoped transaction a mis-scoped `DELETE` matches zero rows and reports
+    /// success — indistinguishable from "nothing left to purge", which the
+    /// idempotency contract above says is the *normal* outcome of a
+    /// redelivered event. An erasure that quietly deletes nothing and returns
+    /// `Ok` is a GDPR compliance failure no caller would notice, so converting
+    /// it earns its own change with dedicated verification against a real
+    /// database rather than riding along in a sweep. This mirrors the same
+    /// decision, for the same reason, in
+    /// `retrieval-engine-rs/src/gdpr/purge.rs`.
     pub async fn purge_organization_data(&self, org_id: &str) -> anyhow::Result<GdprPurgeSummary> {
+        // Phase 1 RLS: unscoped on purpose — see the doc comment above.
         let mut tx = self.pool.begin().await?;
 
         // Bound to locals (rather than assigned onto a `default()` struct) so
@@ -636,6 +683,9 @@ impl GraphStore {
         org_id: &str,
         entity_id: &str,
     ) -> anyhow::Result<Option<Entity>> {
+        // Phase 1 RLS: single-org read, same rationale as
+        // `load_org_visible_chunks` above.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let row = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
             "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
              FROM graph_entities AS ge WHERE ge.entity_id = $1 AND ge.org_id = $2
@@ -649,8 +699,9 @@ impl GraphStore {
         )
         .bind(entity_id)
         .bind(org_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        tx.commit().await?;
 
         Ok(
             row.map(|(eid, oid, etype, etext, conf, prov, refs)| Entity {
@@ -675,6 +726,12 @@ impl GraphStore {
         limit_nodes: i32,
         limit_edges: i32,
     ) -> anyhow::Result<(Vec<Entity>, Vec<Relationship>, i64, i64)> {
+        // Phase 1 RLS: one snapshot is one org's graph. All four statements
+        // (node count, edge count, node page, edge page) share ONE scoped
+        // transaction, which also means the totals and the returned pages are
+        // read from a single consistent view instead of four separate ones.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+
         let (n_total,): (i64,) =
             sqlx::query_as(
                 "SELECT COUNT(*) FROM graph_entities AS ge WHERE ge.org_id = $1
@@ -687,7 +744,7 @@ impl GraphStore {
                  )",
             )
                 .bind(org_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await?;
 
         let (e_total,): (i64,) =
@@ -702,7 +759,7 @@ impl GraphStore {
                  )",
             )
                 .bind(org_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await?;
 
         let node_rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
@@ -719,7 +776,7 @@ impl GraphStore {
         )
         .bind(org_id)
         .bind(limit_nodes)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         let edge_rows = sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
@@ -736,8 +793,10 @@ impl GraphStore {
         )
         .bind(org_id)
         .bind(limit_edges)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         let nodes = node_rows
             .into_iter()
@@ -776,6 +835,11 @@ impl GraphStore {
         limit: i32,
         offset: i32,
     ) -> anyhow::Result<(Vec<Entity>, i64)> {
+        // Phase 1 RLS: single-org listing. The count and the page it describes
+        // share ONE scoped transaction, so the reported total cannot come from
+        // a different snapshot than the rows.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM graph_entities AS ge WHERE ge.org_id = $1 AND ge.entity_type = $2
              AND EXISTS (
@@ -788,7 +852,7 @@ impl GraphStore {
         )
         .bind(org_id)
         .bind(entity_type)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         let rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
@@ -807,8 +871,10 @@ impl GraphStore {
         .bind(entity_type)
         .bind(limit)
         .bind(offset)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         let entities = rows
             .into_iter()
@@ -832,6 +898,10 @@ impl GraphStore {
         entity_id: &str,
         relation_type: Option<&str>,
     ) -> anyhow::Result<Vec<Relationship>> {
+        // Phase 1 RLS: single-org read. The two branches below are the same
+        // query with and without a relation-type filter, so exactly one of
+        // them runs inside this scoped transaction.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let rows = if let Some(rt) = relation_type {
             sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
                 "SELECT gr.rel_id, gr.org_id, gr.entity_a_id, gr.entity_b_id, gr.relation_type, COALESCE(gr.confidence, 0), COALESCE(gr.provenance, ''), COALESCE(gr.source_refs, '[]')
@@ -848,7 +918,7 @@ impl GraphStore {
             .bind(org_id)
             .bind(entity_id)
             .bind(rt)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?
         } else {
             sqlx::query_as::<_, (String, String, String, String, String, f64, String, serde_json::Value)>(
@@ -865,9 +935,10 @@ impl GraphStore {
             )
             .bind(org_id)
             .bind(entity_id)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?
         };
+        tx.commit().await?;
 
         Ok(rows
             .into_iter()
@@ -929,7 +1000,12 @@ impl GraphStore {
         for p in &params {
             query = query.bind(p);
         }
-        let rows = query.fetch_all(&self.pool).await?;
+        // Phase 1 RLS: single-org read. The optional entity/status filters are
+        // appended as bind parameters above; `org_id` is always `$1`, and the
+        // database policy backstops it either way.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+        let rows = query.fetch_all(&mut *tx).await?;
+        tx.commit().await?;
 
         Ok(rows
             .into_iter()
@@ -985,6 +1061,15 @@ impl GraphStore {
             return Ok(0);
         }
 
+        // Phase 1 RLS: the candidate-generation loop below is all reads for a
+        // single org, so it shares ONE scoped transaction instead of
+        // re-entering the scope twice per claim. It is committed before the
+        // write transaction opens rather than merged into it: the existing
+        // shape only takes a write transaction when there is actually
+        // something to record, and folding the two together would hold a
+        // read-write transaction open across the whole detection pass.
+        let mut read_tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+
         let mut pairs: Vec<crate::contradiction::DetectedPair> = Vec::new();
         for claim_id in claim_ids {
             // The claim under test, with its entity links.
@@ -994,7 +1079,7 @@ impl GraphStore {
             )
             .bind(claim_id)
             .bind(org_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *read_tx)
             .await?
             else {
                 continue;
@@ -1030,7 +1115,7 @@ impl GraphStore {
             .bind(claim_id)
             .bind(&entity_list)
             .bind(MAX_CANDIDATES_PER_CLAIM)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *read_tx)
             .await?;
 
             pairs.extend(crate::contradiction::detect_against_candidates(
@@ -1041,11 +1126,16 @@ impl GraphStore {
             ));
         }
 
+        read_tx.commit().await?;
+
         if pairs.is_empty() {
             return Ok(0);
         }
 
-        let mut tx = self.pool.begin().await?;
+        // Phase 1 RLS: the symmetric contradiction writes below are all for
+        // this one org, so the transaction they already shared is now the
+        // scoped one.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         for pair in &pairs {
             for (subject, other) in [
                 (&pair.claim_a, &pair.claim_b),
@@ -1081,6 +1171,10 @@ impl GraphStore {
         limit: i32,
         offset: i32,
     ) -> anyhow::Result<(Vec<Claim>, i64)> {
+        // Phase 1 RLS: single-org listing. Count and page share ONE scoped
+        // transaction, same rationale as `list_entities_by_type` above.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM graph_claims AS gc
              WHERE gc.org_id = $1 AND jsonb_array_length(COALESCE(gc.contradicted_by_claim_ids, '[]')) > 0
@@ -1093,7 +1187,7 @@ impl GraphStore {
                )"
         )
         .bind(org_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
         let rows = sqlx::query_as::<_, (String, String, String, serde_json::Value, f64, String, serde_json::Value, serde_json::Value, String)>(
@@ -1112,8 +1206,10 @@ impl GraphStore {
         .bind(org_id)
         .bind(limit)
         .bind(offset)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         let claims = rows
             .into_iter()
@@ -1139,6 +1235,8 @@ impl GraphStore {
     /// `graph_text_units` → `documents` gate every read uses). One bulk query —
     /// community detection must not do a per-entity N+1.
     pub async fn list_visible_entity_ids(&self, org_id: &str) -> anyhow::Result<Vec<String>> {
+        // Phase 1 RLS: single-org bulk read backing community detection.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let rows = sqlx::query_as::<_, (String,)>(
             "SELECT ge.entity_id FROM graph_entities AS ge
              WHERE ge.org_id = $1
@@ -1152,8 +1250,9 @@ impl GraphStore {
              LIMIT 10000",
         )
         .bind(org_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
@@ -1163,7 +1262,10 @@ impl GraphStore {
         &self,
         org_id: &str,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        Ok(sqlx::query_as::<_, (String, String)>(
+        // Phase 1 RLS: single-org bulk read, paired with
+        // `list_visible_entity_ids` above.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+        let rows = sqlx::query_as::<_, (String, String)>(
             "SELECT gr.entity_a_id, gr.entity_b_id FROM graph_relationships AS gr
              WHERE gr.org_id = $1
                AND EXISTS (
@@ -1176,8 +1278,10 @@ impl GraphStore {
              LIMIT 50000",
         )
         .bind(org_id)
-        .fetch_all(&self.pool)
-        .await?)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows)
     }
 
     /// Atomically replaces the org's derived communities with a fresh detection
@@ -1192,7 +1296,12 @@ impl GraphStore {
         org_id: &str,
         communities: &[Community],
     ) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+        // Phase 1 RLS: this method already ran everything in one transaction
+        // for atomicity; it is now the org-scoped one. The advisory lock, the
+        // upserts and the prune below are all this org's rows, and each
+        // statement still binds `org_id` itself — the database policy is a
+        // backstop, not a replacement.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         // Per-org transaction advisory lock: serializes concurrent recomputes
         // (post-extraction consumer + rebuild endpoint, possibly across
         // replicas). Still required with deterministic ids — two overlapping
@@ -1265,6 +1374,10 @@ impl GraphStore {
         org_id: &str,
         limit: i64,
     ) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        // Phase 1 RLS: single-org read. The correlated member-label subquery
+        // joins `graph_entities` on `c.org_id`, which is the same org the
+        // scope pins, so the policy narrows both sides consistently.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let rows = sqlx::query_as::<_, (String, Vec<String>)>(
             "SELECT c.community_id,
                     COALESCE(
@@ -1286,8 +1399,9 @@ impl GraphStore {
         )
         .bind(org_id)
         .bind(limit)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
         // A community whose members have all been deleted has nothing to
         // summarise; skip rather than sending an empty prompt.
         Ok(rows.into_iter().filter(|(_, l)| !l.is_empty()).collect())
@@ -1304,6 +1418,11 @@ impl GraphStore {
         community_id: &str,
         summary: &str,
     ) -> anyhow::Result<bool> {
+        // Phase 1 RLS: single-org write. The `rows_affected() > 0` result stays
+        // meaningful under the scope — the row is this org's or it does not
+        // exist, which is exactly what the `summary IS NULL` guard already
+        // treats as "someone else got there first".
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let result = sqlx::query(
             "UPDATE graph_communities SET summary = $3
              WHERE community_id = $2 AND org_id = $1 AND summary IS NULL",
@@ -1311,8 +1430,9 @@ impl GraphStore {
         .bind(org_id)
         .bind(community_id)
         .bind(summary)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -1372,6 +1492,13 @@ impl GraphStore {
             return Ok((Vec::new(), Vec::new()));
         }
 
+        // Phase 1 RLS: this is the gate that keeps Neo4j a pure topology
+        // accelerator — the entity and relationship re-joins below both read
+        // canonical Postgres for one org, so they share ONE scoped transaction
+        // and the visibility set the edges are filtered against comes from the
+        // same snapshot as the entities themselves.
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+
         let entity_rows = sqlx::query_as::<_, (String, String, String, String, f64, String, serde_json::Value)>(
             "SELECT ge.entity_id, ge.org_id, ge.entity_type, ge.entity_text, COALESCE(ge.confidence, 0), COALESCE(ge.provenance, ''), COALESCE(ge.source_refs, '[]')
              FROM graph_entities AS ge
@@ -1386,7 +1513,7 @@ impl GraphStore {
         )
         .bind(org_id)
         .bind(entity_ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         let entities: Vec<Entity> = entity_rows
@@ -1420,8 +1547,10 @@ impl GraphStore {
         )
         .bind(org_id)
         .bind(entity_ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         let relationships: Vec<Relationship> = rel_rows
             .into_iter()
@@ -1760,6 +1889,92 @@ mod visibility_tests {
             ('org-b', 'k-other', 'c-other');
     "#;
 
+    /// Creates the RLS runtime role and grants it the fixture's schema.
+    ///
+    /// # Why a test fixture needs a database role at all
+    ///
+    /// Production code in this file opens org-scoped transactions through
+    /// `pg_org_scope::begin_org_scoped` (see `services/pg-org-scope-rs`), which
+    /// issues `SET LOCAL ROLE dataplane_app` on every scoped path — which is now
+    /// every `GraphStore` method except `purge_organization_data`.
+    ///
+    /// In production that role is created by
+    /// `infra/postgres/migrations/20260809120000_org_rls_isolation.sql`. These
+    /// tests, however, build their own minimal schema with `CREATE TABLE` on a
+    /// bare disposable database and never run the migrations — so without this
+    /// helper every scoped path fails at runtime with:
+    ///
+    /// ```text
+    /// error returned from database: role "dataplane_app" does not exist
+    /// ```
+    ///
+    /// That failure is invisible to a normal `cargo test` run, because every
+    /// test that would hit it is `#[ignore]`d behind `GRAPH_TEST_DATABASE_URL`.
+    /// Do not delete this as boilerplate: removing it silently disables the
+    /// integration tests that cover graph provenance and visibility.
+    ///
+    /// # Grants only — deliberately
+    ///
+    /// This creates the role and grants it access, but does **not** enable
+    /// row-level security or install any policy. That is the point: these
+    /// fixtures keep asserting exactly what they asserted before RLS existed —
+    /// that each query's own `org_id` predicate does the filtering. Having them
+    /// enforce RLS too would be a strictly stronger test, but it changes what
+    /// the suite covers, so it belongs in its own deliberate change.
+    ///
+    /// # Two deviations from `retrieval-engine-rs/tests/common/mod.rs`
+    ///
+    /// 1. **Grants target `schema`, not `public`.** That fixture builds its
+    ///    tables in `public`; this one creates a per-test
+    ///    `graph_visibility_<uuid>` schema and `SET search_path` to it, so
+    ///    granting `public` would leave every scoped path failing with
+    ///    `permission denied for schema graph_visibility_…` instead.
+    /// 2. **`ALTER DEFAULT PRIVILEGES` as well as `ON ALL TABLES`.** The latter
+    ///    only covers tables that exist when it runs, and
+    ///    `community_summaries_survive_recompute_and_stale_ones_are_pruned`
+    ///    creates `graph_communities` itself *after* `fixture()` returns. The
+    ///    default-privileges grants cover that later table; the `ON ALL TABLES`
+    ///    grants cover the six `FIXTURE_SQL` creates above.
+    async fn grant_rls_runtime_role(pool: &PgPool, schema: &str) {
+        sqlx::raw_sql(&format!(
+            r#"
+            -- Roles are cluster-wide, so a concurrent test in the same binary
+            -- may win the race to create it, and a plain IF NOT EXISTS check
+            -- has a TOCTOU window. BOTH handlers are required, and this was
+            -- verified against a real database rather than assumed:
+            --   * duplicate_object (42710) is what a *sequential* re-run
+            --     raises, once the role is already committed.
+            --   * unique_violation (23505) is what an actual *concurrent*
+            --     race raises — the losing backend faults on
+            --     pg_authid_rolname_index before the duplicate_object check
+            --     is ever reached. Catching only duplicate_object leaves the
+            --     exact race this guard exists for unhandled; with the role
+            --     absent and tests running multi-threaded it fails with
+            --     `duplicate key value violates unique constraint
+            --     "pg_authid_rolname_index"`.
+            DO $role$
+            BEGIN
+                CREATE ROLE dataplane_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+            EXCEPTION WHEN duplicate_object OR unique_violation THEN
+                NULL;
+            END
+            $role$;
+
+            GRANT USAGE ON SCHEMA {schema} TO dataplane_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE
+                ON ALL TABLES IN SCHEMA {schema} TO dataplane_app;
+            GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO dataplane_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO dataplane_app;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA {schema}
+                GRANT USAGE, SELECT ON SEQUENCES TO dataplane_app;
+            "#
+        ))
+        .execute(pool)
+        .await
+        .expect("create and grant the dataplane_app RLS runtime role");
+    }
+
     async fn fixture() -> (GraphStore, PgPool, String) {
         let database_url = std::env::var("GRAPH_TEST_DATABASE_URL")
             .expect("GRAPH_TEST_DATABASE_URL must point to disposable PostgreSQL");
@@ -1793,6 +2008,8 @@ mod visibility_tests {
             .execute(&pool)
             .await
             .expect("create graph visibility fixture");
+        // Must come after the CREATE TABLEs above — see the helper's doc.
+        grant_rls_runtime_role(&pool, &schema).await;
         (GraphStore::new(pool.clone()), pool, schema)
     }
 

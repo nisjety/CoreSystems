@@ -70,6 +70,13 @@ impl DocumentService for DocumentSvc {
         let ctx = self.authorize(&request, &request.get_ref().org_id).await?;
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
+        // Phase 1 RLS: the org comes from the authorized `AuthContext`, so this
+        // reads through an org-scoped transaction. The SQL still binds `org_id`
+        // itself — the database policy is a backstop against that filter being
+        // dropped or mis-edited later, not a replacement for it.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool.as_ref(), &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let row = sqlx::query_as::<
             _,
             (
@@ -91,9 +98,12 @@ impl DocumentService for DocumentSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_optional(self.pool.as_ref())
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         match row {
             Some((did, oid, source, dtype, title, content, status, zdr)) => {
@@ -129,6 +139,13 @@ impl DocumentService for DocumentSvc {
         let limit = if req.limit > 0 { req.limit } else { 50 };
         let offset = req.offset;
 
+        // Phase 1 RLS: all three statements below (the page, either variant, and
+        // the total count) serve the same org, so they share ONE scoped
+        // transaction — which also makes the count consistent with the page.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool.as_ref(), &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         let rows = if req.r#type.is_empty() {
             sqlx::query_as::<
                 _,
@@ -153,7 +170,7 @@ impl DocumentService for DocumentSvc {
             .bind(offset)
             .bind(ctx.user_id.as_deref())
             .bind(&grants)
-            .fetch_all(self.pool.as_ref())
+            .fetch_all(&mut *tx)
             .await
         } else {
             sqlx::query_as::<
@@ -180,7 +197,7 @@ impl DocumentService for DocumentSvc {
             .bind(&req.r#type)
             .bind(ctx.user_id.as_deref())
             .bind(&grants)
-            .fetch_all(self.pool.as_ref())
+            .fetch_all(&mut *tx)
             .await
         }
         .map_err(|e| Status::internal(e.to_string()))?;
@@ -192,9 +209,13 @@ impl DocumentService for DocumentSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let documents: Vec<Document> = rows
             .into_iter()
@@ -267,6 +288,12 @@ impl DocumentService for DocumentSvc {
         let req = request.into_inner();
         let grants = self.grants(&ctx).await;
 
+        // Phase 1 RLS: single-org read, same rationale as `get_document` above.
+        // Note the `documents` join carries no org predicate of its own — RLS
+        // now supplies one for that side too.
+        let mut tx = pg_org_scope::begin_org_scoped(self.pool.as_ref(), &ctx.org_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let chunk_row = sqlx::query_as::<_, (i64, i64, i64)>(
             // embedding-engine writes status 'done' (batch/mod.rs mark_units_done);
             // the prior 'completed' literal never matched, so the embedded count
@@ -284,9 +311,12 @@ impl DocumentService for DocumentSvc {
         .bind(&ctx.org_id)
         .bind(ctx.user_id.as_deref())
         .bind(&grants)
-        .fetch_one(self.pool.as_ref())
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
         let (total, synced, failed) = chunk_row;
         let embed_status = if failed > 0 {

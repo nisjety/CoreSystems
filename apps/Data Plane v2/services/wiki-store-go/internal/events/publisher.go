@@ -49,9 +49,18 @@ func NewPublisher(nc *nats.Conn, signer interface {
 	info, err := js.StreamInfo(WikiStream)
 	if errors.Is(err, nats.ErrStreamNotFound) {
 		info, err = js.AddStream(&nats.StreamConfig{
-			Name:      WikiStream,
-			Subjects:  []string{SubjectWikiPublished},
-			Retention: nats.WorkQueuePolicy,
+			Name:     WikiStream,
+			Subjects: []string{SubjectWikiPublished},
+			// Interest, NOT WorkQueue. WorkQueue permits exactly one consumer
+			// per subject, which is wrong here: `dataplane.wiki.version.published`
+			// fans out to more than one reader (embedding-engine-rs's
+			// `wiki_consumer` write-through, plus the lexical adapter). Under
+			// WorkQueue the second reader is silently refused and its work is
+			// simply never done. This matches the retention
+			// `embedding-engine-rs/src/wiki_consumer.rs::ensure_wiki_stream`
+			// asserts, and the same Interest-over-WorkQueue correction already
+			// applied to DATAPLANE_DOCUMENTS and DATAPLANE_KNOWLEDGE.
+			Retention: nats.InterestPolicy,
 			Storage:   nats.FileStorage,
 			MaxAge:    7 * 24 * time.Hour,
 		})
@@ -65,9 +74,17 @@ func NewPublisher(nc *nats.Conn, signer interface {
 	if err != nil {
 		return nil, fmt.Errorf("initialize wiki JetStream stream: %w", err)
 	}
-	if info == nil || info.Config.Retention != nats.WorkQueuePolicy ||
+	// Retention is IMMUTABLE once a stream exists, so this check decides
+	// whether the service can boot at all against an already-created stream.
+	// It previously demanded WorkQueue and would fatal on the Interest stream
+	// the wiki consumer legitimately creates — a latent crash that only
+	// surfaced on the next restart, long after the retention was corrected.
+	if info == nil || info.Config.Retention != nats.InterestPolicy ||
 		!slices.Contains(info.Config.Subjects, SubjectWikiPublished) {
-		return nil, fmt.Errorf("wiki JetStream stream contract mismatch")
+		return nil, fmt.Errorf(
+			"wiki JetStream stream contract mismatch: want retention=interest with subject %q, got retention=%v subjects=%v",
+			SubjectWikiPublished, info.Config.Retention, info.Config.Subjects,
+		)
 	}
 	return &Publisher{js: js, signer: signer}, nil
 }

@@ -37,6 +37,10 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<PgPool> {
     Ok(pool)
 }
 
+/// Phase 1 RLS: deliberately unscoped. There is no org here — this runs at
+/// boot, before any request exists, and its `SELECT 1` touches no table. An
+/// org-scoped transaction would need an org_id it cannot have, and
+/// `begin_org_scoped` rejects an empty one.
 async fn warmup_pool(pool: &PgPool, min_conns: u32) {
     if min_conns <= 1 {
         return;

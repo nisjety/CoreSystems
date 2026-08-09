@@ -121,6 +121,23 @@ func sanitizeOutboxError(err error) string {
 	return message
 }
 
+// postgresOutboxStore is the cross-org drain behind OutboxPublisher's poll
+// loop.
+//
+// Phase 1 RLS: every query in this type deliberately stays on the unscoped
+// pool. One wiki-store-go process drains the outbox for EVERY org, so a
+// scoped transaction would narrow Claim to a single tenant's rows and
+// silently stop publishing everyone else's wiki events — a failure with no
+// error to notice, since a short claim batch is indistinguishable from an
+// idle queue. MarkDelivered and Retry act on outbox_id values Claim already
+// returned, so they are equally org-agnostic by construction.
+//
+// The org boundary on the write side is enforced where the rows are created
+// instead: enqueueWikiPublished (internal/repo/wiki_repo.go) inserts each
+// intent inside the publishing org's scoped transaction, and the table's
+// wiki_event_outbox_payload_check constraint requires payload->>'org_id' to
+// equal the row's org_id — so a row cannot be enqueued under the wrong
+// tenant for this loop to later pick up.
 type postgresOutboxStore struct {
 	pool *pgxpool.Pool
 }

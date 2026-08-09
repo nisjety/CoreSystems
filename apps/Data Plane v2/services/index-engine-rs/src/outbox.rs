@@ -33,6 +33,16 @@ pub async fn delete_and_enqueue(
     if zdr {
         anyhow::bail!("restrictive-ZDR deletion cannot create durable state or event intent");
     }
+    // Phase 1 RLS: unscoped on purpose. This is the write half of the deletion
+    // outbox whose drainer below (`claim`/`mark_delivered`/`mark_failed`) is
+    // cross-org by construction, and the two halves share
+    // `enqueue_intent`'s conflict probe, which reads
+    // `index_deletion_outbox WHERE idempotency_key = $1` with no `org_id` — a
+    // deliberately CROSS-ORG uniqueness check (the column is globally UNIQUE).
+    // Under a scoped transaction another org's colliding row would simply be
+    // invisible, so this stays on the plain pool and keeps the whole outbox
+    // consistent about which role it runs as. The explicit `org_id = $1`
+    // predicate on both statements below is what isolates this path today.
     let mut tx = pool.begin().await?;
     let knowledge_ids = sqlx::query_scalar::<_, String>(
         "SELECT knowledge_id FROM knowledge_units WHERE org_id=$1 AND document_id=$2 ORDER BY knowledge_id FOR UPDATE",
@@ -69,6 +79,16 @@ pub async fn delete_and_enqueue(
     Ok(knowledge_ids.len())
 }
 
+/// Phase 1 RLS: this function opens no transaction of its own — it inherits
+/// the caller's, so its scope is whatever the caller chose. Both callers are
+/// correct as written: `delete_and_enqueue` above passes an unscoped
+/// transaction (see its comment), and `builder::process_document` passes an
+/// org-scoped one, where the INSERT's `org_id` bind matches the transaction's
+/// org and therefore satisfies the policy's `WITH CHECK`. Note the conflict
+/// probe below reads by `idempotency_key` alone: on the scoped path a
+/// colliding row belonging to *another* org is invisible, so `existing`
+/// is `None` and the comparison still bails — same refusal, arrived at through
+/// the policy rather than through the compare.
 pub async fn enqueue_intent(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
@@ -129,6 +149,14 @@ pub async fn claim(
     if lease_owner.trim().is_empty() || lease_seconds <= 0 {
         anyhow::bail!("valid outbox lease owner and duration required");
     }
+    // Phase 1 RLS: unscoped on purpose, and this one is not a judgement call.
+    // `run_publisher` is a background worker draining the outbox for EVERY org
+    // — it has no org in hand and picks whichever intent is due next. Wrapping
+    // this in an org-scoped transaction would not fail; it would silently
+    // restrict the drainer to one tenant and leave every other org's deletion
+    // intents undelivered forever, so their purged chunks would stay live in
+    // Qdrant. `mark_delivered` and `mark_failed` below settle the row this
+    // claim returned and are unscoped for the same reason.
     let row: Option<IntentRow> = sqlx::query_as(
         "WITH candidate AS (
            SELECT outbox_id FROM index_deletion_outbox

@@ -762,6 +762,20 @@ struct SemanticCachePruneRequest {
     idempotency_key: Option<String>,
 }
 
+/// Phase 1 RLS: deliberately left unscoped for now — a follow-up, not an
+/// oversight. Two reasons, both specific to this handler:
+///
+/// 1. It already runs inside its own explicit transaction held open across an
+///    idempotency check and the prune, taken out with
+///    `pg_try_advisory_xact_lock`. That lock's lifetime is tied to the enclosing
+///    transaction, so re-homing these statements onto a scoped transaction
+///    changes the concurrency contract, not just the visibility one. That
+///    deserves its own change with its own reasoning about the lock.
+/// 2. Its idempotency probe reads `admin_audit_log`, whose `org_id` is NULLABLE
+///    precisely because some rows there are platform-wide (see `record_admin`).
+///
+/// This is admin maintenance behind `authorize_admin_mutation`, not a tenant
+/// request path, so it is not the highest-value place to start.
 async fn semantic_cache_prune(
     State(pipeline): State<AppState>,
     auth: axum::extract::Extension<crate::authz::AuthContext>,
@@ -1161,13 +1175,20 @@ async fn retrieve_sources(
     }
     // Per-user ownership: only return metadata for docs the viewer may see.
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    // Phase 1 RLS: `pin_request_org` above has already replaced any
+    // caller-supplied org with the verified one, so this reads through an
+    // org-scoped transaction. The SQL still binds `org_id` itself — the
+    // database policy is a backstop against that filter being dropped or
+    // mis-edited later, not a replacement for it.
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(SOURCES_SQL)
         .bind(&req.document_ids)
         .bind(&req.org_id)
         .bind(&viewer)
         .bind(&granted)
-        .fetch_all(&pipeline.pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     let sources: Vec<serde_json::Value> = rows
         .into_iter()
@@ -1200,13 +1221,16 @@ async fn retrieve_freshness(
 ) -> Result<impl IntoResponse, AppError> {
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    // Phase 1 RLS: single-org read, same rationale as `retrieve_sources` above.
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, String, String)>(FRESHNESS_SQL)
         .bind(&req.document_ids)
         .bind(&req.org_id)
         .bind(&viewer)
         .bind(&granted)
-        .fetch_all(&pipeline.pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     let now = chrono::Utc::now();
     let freshness: Vec<serde_json::Value> = rows
@@ -1376,13 +1400,19 @@ async fn list_index_versions(
     State(pipeline): State<AppState>,
     auth: axum::extract::Extension<crate::authz::AuthContext>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Phase 1 RLS: the org comes straight from the verified `AuthContext`, so
+    // this reads through an org-scoped transaction. The SQL still binds
+    // `org_id` itself — the database policy is a backstop against that filter
+    // being dropped or mis-edited later, not a replacement for it.
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &auth.org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<i32>, Option<i32>, Option<String>, String)>(
         "SELECT version_id, org_id, description, document_count, chunk_count, embedding_model, created_at::TEXT
          FROM index_versions WHERE org_id = $1 ORDER BY created_at DESC LIMIT 50"
     )
     .bind(&auth.org_id)
-    .fetch_all(&pipeline.pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     let versions: Vec<serde_json::Value> = rows
         .into_iter()
@@ -1451,8 +1481,15 @@ async fn retrieve_chunks(
     // Per-user ownership: gate at the SQL level so chunk TEXT for a document the
     // viewer cannot see is never even fetched (this endpoint returns raw content).
     let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    // Phase 1 RLS: `pin_request_org` above has already replaced any
+    // caller-supplied org with the verified one. The two branches below are
+    // mutually exclusive — exactly one statement runs per request — so each
+    // opens its own scoped transaction rather than one being opened up front on
+    // the path that issues no query at all. The SQL still binds `org_id` itself;
+    // the database policy is a backstop, not a replacement.
     if let Some(kids) = &req.knowledge_ids {
         if !kids.is_empty() {
+            let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
             let rows = sqlx::query_as::<_, (String, String, String, i32, String, String)>(
                 chunk_by_ids_sql(),
             )
@@ -1460,8 +1497,9 @@ async fn retrieve_chunks(
             .bind(&req.org_id)
             .bind(&viewer)
             .bind(&granted)
-            .fetch_all(&pipeline.pool)
+            .fetch_all(&mut *tx)
             .await?;
+            tx.commit().await?;
 
             let chunks: Vec<serde_json::Value> = rows
                 .into_iter()
@@ -1479,6 +1517,7 @@ async fn retrieve_chunks(
     }
 
     if let Some(did) = &req.document_id {
+        let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
         let rows = sqlx::query_as::<_, (String, String, String, i32, String, String)>(
             chunk_by_document_sql(),
         )
@@ -1488,8 +1527,9 @@ async fn retrieve_chunks(
         .bind(req.offset)
         .bind(&viewer)
         .bind(&granted)
-        .fetch_all(&pipeline.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
 
         let chunks: Vec<serde_json::Value> = rows
             .into_iter()
@@ -1606,12 +1646,18 @@ async fn retrieve_compare(
         "entities" => {
             let (viewer, granted) =
                 resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+            // Phase 1 RLS: `pin_request_org` above has already replaced any
+            // caller-supplied org with the verified one. Both statements in
+            // this arm serve that same org, so they share ONE scoped
+            // transaction. The SQL still binds `org_id` itself — the database
+            // policy is a backstop, not a replacement.
+            let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
             let rows = sqlx::query_as::<_, EntityCompareRow>(entity_compare_sql())
                 .bind(&req.ids)
                 .bind(&req.org_id)
                 .bind(&viewer)
                 .bind(&granted)
-                .fetch_all(&pipeline.pool)
+                .fetch_all(&mut *tx)
                 .await?;
 
             // Relationships are constrained to both the visible entity set and
@@ -1639,7 +1685,7 @@ async fn retrieve_compare(
                 .bind(&visible_entity_ids)
                 .bind(&viewer)
                 .bind(&granted)
-                .fetch_all(&pipeline.pool)
+                .fetch_all(&mut *tx)
                 .await?
                 .into_iter()
                 .map(|(rid, a, b, rt, conf)| serde_json::json!({"rel_id": rid, "entity_a_id": a, "entity_b_id": b, "relation_type": rt, "confidence": conf}))
@@ -1647,6 +1693,8 @@ async fn retrieve_compare(
             } else {
                 vec![]
             };
+
+            tx.commit().await?;
 
             Ok(Json(serde_json::json!({
                 "compare_type": "entities",
@@ -1658,12 +1706,15 @@ async fn retrieve_compare(
             // Per-user ownership: only compare docs the viewer may see.
             let (viewer, granted) =
                 resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+            // Phase 1 RLS: same rationale as the `entities` arm above — one
+            // scoped transaction covering both of this arm's statements.
+            let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
             let rows = sqlx::query_as::<_, DocumentCompareRow>(DOCUMENT_COMPARE_SQL)
                 .bind(&req.ids)
                 .bind(&req.org_id)
                 .bind(&viewer)
                 .bind(&granted)
-                .fetch_all(&pipeline.pool)
+                .fetch_all(&mut *tx)
                 .await?;
 
             // Count chunks only for rows already admitted by the canonical
@@ -1685,8 +1736,9 @@ async fn retrieve_compare(
             )
             .bind(&visible_document_ids)
             .bind(&req.org_id)
-            .fetch_all(&pipeline.pool)
+            .fetch_all(&mut *tx)
             .await?;
+            tx.commit().await?;
             let counts: std::collections::HashMap<String, i64> = chunk_counts.into_iter().collect();
 
             Ok(Json(serde_json::json!({
@@ -1778,6 +1830,14 @@ fn authorize_admin_mutation(
     })
 }
 
+/// Phase 1 RLS: deliberately left unscoped for now — a follow-up, not an
+/// oversight. This is admin maintenance behind `authorize_admin_mutation`, not
+/// a tenant request path, and the non-dry-run arm already runs inside its own
+/// explicit multi-statement transaction that ends by writing `admin_audit_log`
+/// — a table whose `org_id` is NULLABLE by design, so a scoped transaction
+/// could not write every shape of row it may need to (see `record_admin`).
+/// Converting it means deciding where the scoped boundary stops relative to
+/// that audit write, which is its own change.
 async fn cleanup_orphans(
     State(pipeline): State<AppState>,
     auth: axum::extract::Extension<crate::authz::AuthContext>,
@@ -1948,6 +2008,11 @@ async fn health() -> impl IntoResponse {
     Json(serde_json::json!({"status": "ok", "service": "retrieval-engine-rs"}))
 }
 
+/// Phase 1 RLS: deliberately unscoped. A liveness probe has no org and touches
+/// no table; scoping it would need an org_id it cannot have, and would make the
+/// probe report "not ready" whenever the RLS role or GUC misbehaved rather than
+/// when Postgres itself is unreachable — which is the opposite of what a
+/// readiness check should measure.
 async fn readyz(State(pipeline): State<AppState>) -> impl IntoResponse {
     let pg_ok = sqlx::query("SELECT 1")
         .fetch_one(&pipeline.pool)

@@ -37,13 +37,25 @@ pub async fn lookup(pool: &PgPool, org_id: &str, agent_id: &str) -> Option<Agent
     if let Some(cached) = CACHE.get(&key).await {
         return cached;
     }
-    let row: Result<Option<(serde_json::Value, bool)>, _> = sqlx::query_as(
-        "SELECT weights, rerank FROM agent_retrieval_configs
-         WHERE org_id = $1 AND agent_id = $2",
-    )
-    .bind(org_id)
-    .bind(agent_id)
-    .fetch_optional(pool)
+    // Phase 1 RLS: config is per-(org, agent) and the org comes from the
+    // verified caller claims, so the lookup reads through an org-scoped
+    // transaction. The SQL still binds `org_id` itself — the database policy
+    // is a backstop, not a replacement. Error handling is unchanged: anything
+    // that fails here (including opening the scoped transaction) still
+    // degrades to `None` so the caller falls back to its own defaults.
+    let row = async {
+        let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+        let row: Option<(serde_json::Value, bool)> = sqlx::query_as(
+            "SELECT weights, rerank FROM agent_retrieval_configs
+             WHERE org_id = $1 AND agent_id = $2",
+        )
+        .bind(org_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(row)
+    }
     .await;
 
     let val = match row {

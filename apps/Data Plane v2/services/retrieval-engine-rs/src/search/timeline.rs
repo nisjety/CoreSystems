@@ -60,7 +60,13 @@ pub async fn temporal_search(
     }
     query = query.bind(i64::from(limit));
 
-    let rows = query.fetch_all(pool).await?;
+    // Phase 1 RLS: a timeline search serves exactly one org (taken from the
+    // verified caller claims), so it reads through an org-scoped transaction.
+    // The SQL still binds `org_id` itself — the database policy is a backstop
+    // against that filter being dropped or mis-edited later, not a replacement.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+    let rows = query.fetch_all(&mut *tx).await?;
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()

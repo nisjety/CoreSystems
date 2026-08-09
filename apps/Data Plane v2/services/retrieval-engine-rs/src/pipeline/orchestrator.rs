@@ -965,6 +965,7 @@ impl RetrievalPipeline {
         };
         let visibility_stage = postprocess::VisibilityGate {
             pool: &self.pool,
+            org_id: &req.org_id,
             viewer: effective_viewer,
             granted: &granted_docs,
         };
@@ -972,7 +973,10 @@ impl RetrievalPipeline {
             limit: top_n,
             label: postprocess::STAGE_TRUNCATE_TOP_N,
         };
-        let zdr_stage = postprocess::ZdrFilter { pool: &self.pool };
+        let zdr_stage = postprocess::ZdrFilter {
+            pool: &self.pool,
+            org_id: &req.org_id,
+        };
         let chain: [&dyn postprocess::NodePostprocessor; 7] = [
             &visual_stage,
             &overfetch_trim,
@@ -1069,7 +1073,7 @@ impl RetrievalPipeline {
 
         // 9. Source join from Postgres
         let source_start = Instant::now();
-        let sources = self.join_sources(&reranked).await?;
+        let sources = self.join_sources(&req.org_id, &reranked).await?;
         let source_join_ms = source_start.elapsed().as_millis() as u64;
 
         let total_ms = pipeline_start.elapsed().as_millis() as u64;
@@ -1209,6 +1213,14 @@ impl RetrievalPipeline {
         })
     }
 
+    /// Resolves candidate `document_id`s to citation metadata.
+    ///
+    /// `org_id` is Phase 1 RLS: neither query below has ever carried an org
+    /// predicate of its own — they were safe only because the candidate list
+    /// arrives pre-filtered by org from the retrieval arms. Running them in an
+    /// org-scoped transaction makes the database supply that missing predicate,
+    /// so a `document_id` that somehow leaked in from another tenant resolves to
+    /// nothing instead of to a real title.
     #[tracing::instrument(
         name = "postgres.join_sources",
         skip_all,
@@ -1216,6 +1228,7 @@ impl RetrievalPipeline {
     )]
     pub async fn join_sources(
         &self,
+        org_id: &str,
         candidates: &[ScoredCandidate],
     ) -> anyhow::Result<Vec<SourceRef>> {
         let doc_ids: Vec<String> = candidates
@@ -1229,6 +1242,7 @@ impl RetrievalPipeline {
             return Ok(vec![]);
         }
 
+        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
         let mut rows = sqlx::query_as::<_, SourceRow>(
             r#"
             SELECT document_id, title, source, type
@@ -1238,22 +1252,34 @@ impl RetrievalPipeline {
             "#,
         )
         .bind(&doc_ids)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
 
         // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
         // page_id, which lives in wiki_pages, not documents. Look those up too
         // so wiki citations get a real title + path + type="wiki" instead of a
         // bare id. Best-effort: a failure here just omits the wiki title.
-        match sqlx::query_as::<_, SourceRow>(
-            r#"
+        //
+        // Scoped on its OWN transaction, deliberately: in Postgres a failed
+        // statement aborts the entire transaction, so sharing one with the
+        // query above would turn this tolerated failure into a hard error at
+        // COMMIT — exactly what this `match` exists to avoid.
+        match async {
+            let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+            let wiki_rows = sqlx::query_as::<_, SourceRow>(
+                r#"
             SELECT page_id AS document_id, title, path AS source, 'wiki' AS type
             FROM wiki_pages
             WHERE page_id = ANY($1)
             "#,
-        )
-        .bind(&doc_ids)
-        .fetch_all(&self.pool)
+            )
+            .bind(&doc_ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok::<_, anyhow::Error>(wiki_rows)
+        }
         .await
         {
             Ok(wiki_rows) => rows.extend(wiki_rows),

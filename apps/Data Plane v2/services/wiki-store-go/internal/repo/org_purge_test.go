@@ -129,6 +129,11 @@ func setupPurgeTestPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, string(operatingMapsSQL)); err != nil {
 		t.Fatalf("apply operating maps migration: %v", err)
 	}
+	// HardPurgeByOrg is deliberately NOT org-scoped (see org_purge.go), so
+	// nothing in this file needs dataplane_app today. Granted anyway so that
+	// adding any scoped WikiRepo call to this fixture later fails on the
+	// assertion under test rather than on a missing role.
+	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 	return pool
 }
 

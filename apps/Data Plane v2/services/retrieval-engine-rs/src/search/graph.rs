@@ -94,12 +94,18 @@ pub async fn seed_entities_for_query(
     org_id: &str,
     limit: i64,
 ) -> anyhow::Result<Vec<String>> {
+    // Phase 1 RLS: a retrieval request serves exactly one org (taken from the
+    // verified caller claims), so this reads through an org-scoped transaction.
+    // The SQL still binds `org_id` itself — the database policy is a backstop
+    // against that filter being dropped or mis-edited later, not a replacement.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, (String,)>(seed_entity_sql())
         .bind(org_id)
         .bind(query)
         .bind(limit)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
@@ -116,13 +122,17 @@ pub async fn chunks_for_entities(
     }
     let ids: Vec<String> = entities.iter().map(|(id, _)| id.clone()).collect();
     let hops: Vec<i32> = entities.iter().map(|(_, h)| i32::from(*h)).collect();
+    // Phase 1 RLS: single-org retrieval path, same rationale as
+    // `seed_entities_for_query` above.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, String, i32)>(chunks_for_entities_sql())
         .bind(org_id)
         .bind(&ids)
         .bind(&hops)
         .bind(limit)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(rows
         .into_iter()
         .map(|(knowledge_id, document_id, text, _hop)| ScoredCandidate {
@@ -149,12 +159,16 @@ pub async fn graph_arm_candidates(
     org_id: &str,
     limit: i64,
 ) -> anyhow::Result<Vec<ScoredCandidate>> {
+    // Phase 1 RLS: single-org retrieval path, same rationale as
+    // `seed_entities_for_query` above.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, String)>(graph_arm_sql())
         .bind(org_id)
         .bind(query)
         .bind(limit)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()
@@ -338,13 +352,20 @@ pub async fn graph_expansion_search(
     viewer: Option<&str>,
     granted_ids: &[String],
 ) -> anyhow::Result<Vec<GraphExpansionResult>> {
+    // Phase 1 RLS: single-org expansion. All three queries below (entities,
+    // their relationships, their claims) share one org, so they share ONE
+    // scoped transaction rather than paying the set_config/SET ROLE round trip
+    // per entity. The SQL still binds `org_id` itself — the database policy is
+    // a backstop, not a replacement for the explicit filter.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+
     let entity_rows = sqlx::query_as::<_, (String, String, String, f64)>(graph_entity_sql())
         .bind(org_id)
         .bind(query)
         .bind(max_entities)
         .bind(viewer)
         .bind(granted_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
 
     let mut results = Vec::new();
@@ -357,7 +378,7 @@ pub async fn graph_expansion_search(
         .bind(org_id)
         .bind(viewer)
         .bind(granted_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         let relationships: Vec<GraphRelationshipHit> = rels
@@ -379,7 +400,7 @@ pub async fn graph_expansion_search(
             .bind(serde_json::json!([eid]))
             .bind(viewer)
             .bind(granted_ids)
-            .fetch_all(pool)
+            .fetch_all(&mut *tx)
             .await?;
 
         let claims: Vec<GraphClaimHit> = claim_rows
@@ -402,6 +423,8 @@ pub async fn graph_expansion_search(
         });
     }
 
+    tx.commit().await?;
+
     Ok(results)
 }
 
@@ -414,6 +437,10 @@ pub async fn community_summary_search(
         return Ok(vec![]);
     }
 
+    // Phase 1 RLS: single-org lookup. The per-entity loop below shares one
+    // scoped transaction rather than opening one per entity.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+
     let mut summaries = Vec::new();
     for eid in entity_ids {
         let rows = sqlx::query_as::<_, (String, String, serde_json::Value, Option<String>, i32)>(
@@ -422,7 +449,7 @@ pub async fn community_summary_search(
         .bind(org_id)
         .bind(serde_json::json!([eid]))
         .bind(entity_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         for (cid, _oid, eids, summary, level) in rows {
@@ -434,6 +461,8 @@ pub async fn community_summary_search(
             });
         }
     }
+
+    tx.commit().await?;
 
     summaries.sort_by(|a, b| a.community_id.cmp(&b.community_id));
     summaries.dedup_by(|a, b| a.community_id == b.community_id);

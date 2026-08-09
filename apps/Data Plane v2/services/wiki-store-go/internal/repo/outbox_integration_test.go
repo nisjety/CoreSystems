@@ -59,6 +59,9 @@ func TestWikiPageCommitAndEventIntentAreAtomic(t *testing.T) {
 	if _, err := pool.Exec(ctx, string(migration)); err != nil {
 		t.Fatalf("apply wiki outbox migration: %v", err)
 	}
+	// CreatePage below runs through orgscope.WithOrgScope — including the
+	// wiki_event_outbox insert, whose BIGSERIAL needs the sequence grant.
+	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 
 	repository := NewWikiRepo(pool)
 	page, version, err := repository.CreatePage(ctx, model.CreatePageInput{

@@ -91,6 +91,15 @@ async fn ingest_and_checkpoint_batch(
         BatchObservation::AlreadyComplete => {}
     }
 
+    // Phase 1 RLS: unscoped on purpose, for two independent reasons. This
+    // checkpoints the admin rebuild job that is driving the batch, and
+    // `quickwit_admin_jobs.org_id` is NULLABLE — a NULL means a platform-wide
+    // job belonging to no tenant, and `org_id = current_setting(...)` is NULL
+    // (not true) for such a row, so a scoped UPDATE would silently match zero
+    // rows and this function would then bail with "rebuild batch lease changed
+    // before checkpoint" on every platform-wide rebuild. Second, the batch
+    // being checkpointed is itself cross-org whenever the job carries no
+    // `org_id` (see `rebuild_knowledge_units` below).
     let updated = sqlx::query(
         "UPDATE quickwit_admin_jobs
          SET batch_stage=$3,batch_cursor=$4,updated_at=NOW()
@@ -203,6 +212,14 @@ pub async fn index_knowledge_unit_by_id(
     org_id: &str,
     knowledge_id: &str,
 ) -> anyhow::Result<bool> {
+    // Phase 1 RLS: this is an event-driven path — `stream.rs` calls it with the
+    // org taken from a verified event envelope — so it serves exactly one org
+    // and reads through an org-scoped transaction. The SQL still binds `org_id`
+    // itself; the database policy is a backstop against that filter being
+    // dropped or mis-edited later, not a replacement for it. Note the contrast
+    // with `rebuild_knowledge_units` below, which runs the same join for
+    // *every* org and must stay unscoped — see its comment.
+    let mut tx = pg_org_scope::begin_org_scoped(&ctx.pool, org_id).await?;
     let row = sqlx::query_as::<_, KnowledgeRow>(
         r#"
         SELECT
@@ -229,8 +246,9 @@ pub async fn index_knowledge_unit_by_id(
     )
     .bind(knowledge_id)
     .bind(org_id)
-    .fetch_optional(&ctx.pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     if let Some(row) = row {
         let doc = knowledge_row_to_document(row);
@@ -246,6 +264,9 @@ pub async fn index_document_knowledge_units(
     org_id: &str,
     document_id: &str,
 ) -> anyhow::Result<usize> {
+    // Phase 1 RLS: single-org event-driven path, same rationale as
+    // `index_knowledge_unit_by_id` above.
+    let mut tx = pg_org_scope::begin_org_scoped(&ctx.pool, org_id).await?;
     let rows = sqlx::query_as::<_, KnowledgeRow>(
         r#"
         SELECT
@@ -273,8 +294,9 @@ pub async fn index_document_knowledge_units(
     )
     .bind(document_id)
     .bind(org_id)
-    .fetch_all(&ctx.pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     let docs: Vec<_> = rows.into_iter().map(knowledge_row_to_document).collect();
     let count = docs.len();
@@ -287,6 +309,9 @@ pub async fn index_source_object_by_id(
     org_id: &str,
     source_object_id: &str,
 ) -> anyhow::Result<bool> {
+    // Phase 1 RLS: single-org event-driven path, same rationale as
+    // `index_knowledge_unit_by_id` above.
+    let mut tx = pg_org_scope::begin_org_scoped(&ctx.pool, org_id).await?;
     let row = sqlx::query_as::<_, SourceObjectRow>(
         r#"
         SELECT
@@ -301,8 +326,9 @@ pub async fn index_source_object_by_id(
     )
     .bind(source_object_id)
     .bind(org_id)
-    .fetch_optional(&ctx.pool)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     if let Some(row) = row {
         ctx.quickwit
@@ -362,6 +388,15 @@ async fn rebuild_knowledge_units(
     let mut cursor = run.and_then(|run| run.start_cursor).map(str::to_owned);
     let mut total = 0_usize;
 
+    // Phase 1 RLS: unscoped on purpose, and this applies to every `rebuild_*`
+    // stage below as well as this one. Their `org_id` is an `Option`, and the
+    // predicate is `($1::TEXT IS NULL OR ku.org_id = $1)` — a whole-corpus
+    // rebuild passes `None` and must sweep EVERY org. An org-scoped
+    // transaction cannot express "no org": it would need some concrete value
+    // for `app.current_org`, and whatever was chosen would silently reduce a
+    // full rebuild to one tenant while still reporting success, leaving every
+    // other org's keyword index stale with nothing to indicate it. The
+    // single-org `index_*` entry points above are the scoped counterparts.
     loop {
         let rows = sqlx::query_as::<_, KnowledgeRow>(
             r#"
@@ -417,6 +452,7 @@ async fn rebuild_wiki_versions(
     let mut cursor = run.and_then(|run| run.start_cursor).map(str::to_owned);
     let mut total = 0_usize;
 
+    // Phase 1 RLS: unscoped, same rationale as `rebuild_knowledge_units` above.
     loop {
         let rows = sqlx::query_as::<_, WikiVersionRow>(
             r#"
@@ -468,6 +504,7 @@ async fn rebuild_source_objects(
     let mut cursor = run.and_then(|run| run.start_cursor).map(str::to_owned);
     let mut total = 0_usize;
 
+    // Phase 1 RLS: unscoped, same rationale as `rebuild_knowledge_units` above.
     loop {
         let rows = sqlx::query_as::<_, SourceObjectRow>(
             r#"
@@ -518,6 +555,7 @@ async fn rebuild_retrieval_logs(
     let mut cursor = run.and_then(|run| run.start_cursor).map(str::to_owned);
     let mut total = 0_usize;
 
+    // Phase 1 RLS: unscoped, same rationale as `rebuild_knowledge_units` above.
     loop {
         let rows = sqlx::query_as::<_, RetrievalRunRow>(
             r#"
@@ -626,6 +664,81 @@ mod zdr_rebuild_tests {
         assert!(observed_batch_action(4, 3).is_err());
     }
 
+    /// Creates the RLS runtime role and grants it the fixture's schema.
+    ///
+    /// # Why a test fixture needs a database role at all
+    ///
+    /// `index_knowledge_unit_by_id` and `index_document_knowledge_units` — both
+    /// exercised by the test below — read through
+    /// `pg_org_scope::begin_org_scoped` (see `services/pg-org-scope-rs`), which
+    /// issues `SET LOCAL ROLE dataplane_app`.
+    ///
+    /// In production the role is created by
+    /// `infra/postgres/migrations/20260809120000_org_rls_isolation.sql`. This
+    /// test, however, builds its own minimal schema with `CREATE TABLE` on a
+    /// bare disposable database and never runs the migrations — so without this
+    /// helper it fails at runtime with:
+    ///
+    /// ```text
+    /// error returned from database: role "dataplane_app" does not exist
+    /// ```
+    ///
+    /// That failure is invisible to a normal `cargo test` run, because the test
+    /// is `#[ignore]`d behind `TEST_DATABASE_URL`. Do not delete this as
+    /// boilerplate: removing it silently disables the only integration test
+    /// covering the restricted/deleted/unknown-document exclusions on every
+    /// knowledge ingest source.
+    ///
+    /// # Grants only — deliberately
+    ///
+    /// This creates the role and grants it access, but does **not** enable
+    /// row-level security or install any policy. That is the point: the fixture
+    /// keeps asserting exactly what it asserted before RLS existed — that each
+    /// query's own `org_id` predicate and ZDR/deleted filters do the work.
+    /// Having it enforce RLS too would be a strictly stronger test, but it
+    /// changes what the suite covers, so it belongs in its own deliberate
+    /// change.
+    ///
+    /// # Ordering
+    ///
+    /// Must be called **after** the fixture's `CREATE TABLE` statements:
+    /// `GRANT ... ON ALL TABLES` applies to the tables that exist when it runs,
+    /// not to ones created later.
+    async fn grant_rls_runtime_role(pool: &sqlx::PgPool) {
+        sqlx::raw_sql(
+            r#"
+            -- Roles are cluster-wide, so a concurrent test in the same binary
+            -- may win the race to create it, and a plain IF NOT EXISTS check has
+            -- a TOCTOU window. BOTH handlers are required, and this was verified
+            -- against a real database rather than assumed:
+            --   * duplicate_object (42710) is what a *sequential* re-run raises,
+            --     once the role is already committed.
+            --   * unique_violation (23505) is what an actual *concurrent* race
+            --     raises — the losing backend faults on pg_authid_rolname_index
+            --     before the duplicate_object check is ever reached. Catching
+            --     only duplicate_object leaves the exact race this guard exists
+            --     for unhandled; with the role absent and tests running
+            --     multi-threaded it fails with `duplicate key value violates
+            --     unique constraint "pg_authid_rolname_index"`.
+            DO $role$
+            BEGIN
+                CREATE ROLE dataplane_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+            EXCEPTION WHEN duplicate_object OR unique_violation THEN
+                NULL;
+            END
+            $role$;
+
+            GRANT USAGE ON SCHEMA public TO dataplane_app;
+            GRANT SELECT, INSERT, UPDATE, DELETE
+                ON ALL TABLES IN SCHEMA public TO dataplane_app;
+            GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dataplane_app;
+            "#,
+        )
+        .execute(pool)
+        .await
+        .expect("create and grant the RLS runtime role");
+    }
+
     #[tokio::test]
     #[ignore = "requires TEST_DATABASE_URL pointing to disposable PostgreSQL"]
     async fn every_knowledge_ingest_source_excludes_restricted_deleted_and_unknown_documents() {
@@ -663,6 +776,7 @@ mod zdr_rebuild_tests {
         .execute(&pool)
         .await
         .expect("minimal disposable schema");
+        grant_rls_runtime_role(&pool).await;
 
         for (suffix, classification, deleted) in [
             ("allowed", "internal", false),
@@ -761,6 +875,7 @@ async fn rebuild_wiki_source_logs(
     let mut cursor = run.and_then(|run| run.start_cursor).map(str::to_owned);
     let mut total = 0_usize;
 
+    // Phase 1 RLS: unscoped, same rationale as `rebuild_knowledge_units` above.
     loop {
         let rows = sqlx::query_as::<_, WikiSourceLogRow>(
             r#"

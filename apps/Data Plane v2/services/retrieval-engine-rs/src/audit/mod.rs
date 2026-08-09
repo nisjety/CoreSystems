@@ -36,24 +36,38 @@ pub struct AccessEvent<'a> {
     ),
 )]
 pub async fn record_access(pool: &PgPool, event: AccessEvent<'_>) {
-    let result = sqlx::query(
-        r#"
+    // Phase 1 RLS: `access_audit_log.org_id` is NOT NULL and the value comes
+    // from the verified `AuthContext`, so this write goes through an org-scoped
+    // transaction — the policy's WITH CHECK then makes it impossible to file an
+    // access record under a different tenant. Best-effort semantics are
+    // unchanged: any failure (including opening the scoped transaction) still
+    // only logs + metrics, never touching the user-visible response.
+    //
+    // Contrast `record_admin` below, which must stay unscoped.
+    let result = async {
+        let mut tx = pg_org_scope::begin_org_scoped(pool, &event.ctx.org_id).await?;
+        sqlx::query(
+            r#"
         INSERT INTO access_audit_log
             (request_id, user_id, org_id, endpoint, http_status,
              latency_ms, auth_method, document_ids, cause)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
-    )
-    .bind(&event.ctx.request_id)
-    .bind(event.ctx.user_id.as_deref())
-    .bind(&event.ctx.org_id)
-    .bind(event.endpoint)
-    .bind(event.http_status as i32)
-    .bind(event.latency_ms as i32)
-    .bind(event.ctx.auth_method.as_str())
-    .bind(&event.document_ids)
-    .bind(event.cause)
-    .execute(pool)
+        )
+        .bind(&event.ctx.request_id)
+        .bind(event.ctx.user_id.as_deref())
+        .bind(&event.ctx.org_id)
+        .bind(event.endpoint)
+        .bind(event.http_status as i32)
+        .bind(event.latency_ms as i32)
+        .bind(event.ctx.auth_method.as_str())
+        .bind(&event.document_ids)
+        .bind(event.cause)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    }
     .await;
 
     if let Err(e) = result {
@@ -99,6 +113,12 @@ pub struct AdminEvent<'a> {
     ),
 )]
 pub async fn record_admin(pool: &PgPool, event: AdminEvent<'_>) {
+    // Phase 1 RLS: deliberately UNSCOPED. `admin_audit_log.org_id` is NULLABLE
+    // because some admin actions are platform-wide and belong to no tenant, and
+    // a NULL never satisfies `org_id = current_setting('app.current_org')`. A
+    // scoped INSERT of such a row is rejected by WITH CHECK, so wrapping this
+    // would break platform-admin auditing outright — which is exactly the
+    // exception `20260809120000_org_rls_isolation.sql` documents for this table.
     let result = sqlx::query(
         r#"
         INSERT INTO admin_audit_log

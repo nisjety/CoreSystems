@@ -174,6 +174,12 @@ pub async fn bm25_search(
     // §16.3.3 — uses the precomputed `content_tsv` generated column (GIN
     // indexed) instead of re-tokenizing per query. The query planner picks
     // the GIN index over the previous expression index automatically.
+    //
+    // Phase 1 RLS: a retrieval request serves exactly one org (taken from the
+    // verified caller claims), so this reads through an org-scoped transaction.
+    // The SQL still binds `org_id` itself — the database policy is a backstop
+    // against that filter being dropped or mis-edited later, not a replacement.
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
     let rows = sqlx::query_as::<_, BM25Row>(
         r#"
         SELECT
@@ -199,8 +205,9 @@ pub async fn bm25_search(
     .bind(query)
     .bind(org_id)
     .bind(top_k as i64)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(rows
         .into_iter()

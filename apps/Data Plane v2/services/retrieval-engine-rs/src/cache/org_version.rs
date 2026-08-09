@@ -32,15 +32,26 @@ pub async fn current(pool: &PgPool, org_id: &str) -> i64 {
     if let Some(v) = CACHE.get(org_id).await {
         return v;
     }
-    let row: Result<(i64,), _> = sqlx::query_as(
-        r#"
+    // Phase 1 RLS: the counter is per-org and the org comes from the verified
+    // caller claims, so the read/lazy-insert runs in an org-scoped transaction.
+    // Error handling is unchanged: anything that fails here (including opening
+    // the scoped transaction) still degrades to version 1, i.e. "no versioning",
+    // rather than failing the request.
+    let row = async {
+        let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+        let row: (i64,) = sqlx::query_as(
+            r#"
         INSERT INTO org_versions (org_id) VALUES ($1)
         ON CONFLICT (org_id) DO UPDATE SET org_id = EXCLUDED.org_id
         RETURNING version
         "#,
-    )
-    .bind(org_id)
-    .fetch_one(pool)
+        )
+        .bind(org_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(row)
+    }
     .await;
     let v = row.map(|r| r.0).unwrap_or(1);
     CACHE.insert(org_id.to_string(), v).await;
@@ -50,8 +61,14 @@ pub async fn current(pool: &PgPool, org_id: &str) -> i64 {
 /// Bump the org's version. Returns the new value. Best-effort: a failure
 /// here logs and returns 0 — the caller's primary write should not fail.
 pub async fn bump(pool: &PgPool, org_id: &str) -> i64 {
-    let row: Result<(i64,), _> = sqlx::query_as(
-        r#"
+    // Phase 1 RLS: single-org write, same rationale as `current` above. Best
+    // effort is preserved exactly — a failure (including opening the scoped
+    // transaction) logs and returns 0 so the caller's primary write still
+    // succeeds.
+    let row = async {
+        let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+        let row: (i64,) = sqlx::query_as(
+            r#"
         INSERT INTO org_versions (org_id, version, bumped_at)
             VALUES ($1, 2, NOW())
         ON CONFLICT (org_id) DO UPDATE
@@ -59,9 +76,13 @@ pub async fn bump(pool: &PgPool, org_id: &str) -> i64 {
                 bumped_at = NOW()
         RETURNING version
         "#,
-    )
-    .bind(org_id)
-    .fetch_one(pool)
+        )
+        .bind(org_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(row)
+    }
     .await;
     match row {
         Ok((v,)) => {

@@ -128,6 +128,9 @@ func TestWikiSchemaMigrationSupportsLegacyRowsAndRepository(t *testing.T) {
 	if _, err := pool.Exec(ctx, readWikiSchemaMigration(t)); err != nil {
 		t.Fatalf("reapply idempotent wiki migration: %v", err)
 	}
+	// Every WikiRepo call below runs through orgscope.WithOrgScope, so the
+	// scoped runtime role must exist and hold grants on this schema's tables.
+	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 
 	wikiRepo := NewWikiRepo(pool)
 	pages, total, err := wikiRepo.ListPages(ctx, "org-1", "", "", 20, 0)
@@ -205,6 +208,62 @@ func TestWikiSchemaMigrationSupportsLegacyRowsAndRepository(t *testing.T) {
 			t.Fatal("CreateMaintenanceLog accepted another tenant's page")
 		}
 	})
+}
+
+// grantScopedRuntimeRoleIn makes `dataplane_app` usable inside an isolated
+// test schema.
+//
+// Why a test fixture needs a database ROLE at all: production code in this
+// package now runs its queries through orgscope.WithOrgScope, which issues
+// `SET LOCAL ROLE dataplane_app` on every scoped transaction. That role is
+// created by infra/postgres/migrations/20260809120000_org_rls_isolation.sql,
+// which these fixtures never run — they build their tables from
+// legacyWikiSchema plus the specific migrations under test. Without this
+// helper, the first repository call to traverse a scoped path fails with
+// `role "dataplane_app" does not exist`, and because every test here is
+// gated on WIKI_TEST_DATABASE_URL a plain `go test ./...` would never
+// surface it.
+//
+// Grants only — no policies. Enabling RLS here would test the migration
+// rather than the repository, and each fixture deliberately builds a
+// reduced schema that the real policies do not match.
+//
+// Both exception codes are required on the CREATE ROLE. Roles are cluster-
+// wide, so parallel packages/binaries sharing one server race here; with the
+// role absent, the losing backend raises unique_violation on
+// pg_authid_rolname_index before duplicate_object is ever considered.
+func grantScopedRuntimeRoleIn(ctx context.Context, t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	// schema is a locally generated "<prefix>_<uuid hex>" identifier, never
+	// caller input; %I quotes it regardless.
+	if _, err := pool.Exec(ctx, `
+		DO $role$
+		BEGIN
+		    CREATE ROLE dataplane_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+		EXCEPTION WHEN duplicate_object OR unique_violation THEN
+		    NULL;
+		END
+		$role$;
+
+		DO $grants$
+		BEGIN
+		    EXECUTE format('GRANT USAGE ON SCHEMA %I TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		END
+		$grants$;
+	`); err != nil {
+		t.Fatalf("grant scoped runtime role in %s: %v", schema, err)
+	}
+}
+
+// quoteSQLLiteral renders a Go string as a single-quoted SQL literal. Needed
+// because the grants above run inside a DO block, which cannot take bind
+// parameters.
+func quoteSQLLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func readWikiSchemaMigration(t *testing.T) string {

@@ -29,6 +29,26 @@
 //! Safety: every statement is scoped strictly by the caller-supplied
 //! `org_id`, bound as a query parameter (never string-interpolated), so a
 //! purge for one org can never touch another org's rows.
+//!
+//! Phase 1 RLS: this module deliberately keeps running on the plain
+//! (unscoped, superuser) pool, and converting it is its own change rather than
+//! part of a sweep. Three reasons, in order of severity:
+//!
+//! 1. **Failure here is silent.** Under a scoped transaction a mis-scoped
+//!    `DELETE` matches zero rows and reports success — indistinguishable from
+//!    "nothing to purge", which this module's own idempotency contract above
+//!    says is the normal second-delivery outcome. An erasure that quietly
+//!    deletes nothing and returns Ok is a GDPR compliance failure that no
+//!    caller would notice. That risk profile earns dedicated verification
+//!    against a real database, not a bundled change.
+//! 2. **`admin_audit_log.org_id` is NULLABLE.** The scoped role cannot see or
+//!    delete a NULL-org row, so a scoped purge would leave exactly the
+//!    platform-wide admin records behind while reporting a clean run.
+//! 3. **The `retrieval_candidates` cascade is out of reach.** That table has no
+//!    `org_id`, so it is absent from the 35-table array in
+//!    `20260809120000_org_rls_isolation.sql` and `dataplane_app` holds no
+//!    DELETE grant on it — the `ON DELETE CASCADE` documented above would fail
+//!    under the scoped role.
 
 use sqlx::{PgPool, Postgres, Transaction};
 
