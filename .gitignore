@@ -16,6 +16,17 @@ bin/
 **/bin/
 **/dist/
 
+# ...but Rust's `src/bin/` is SOURCE, not build output. The `**/bin/` rule above
+# (intended for Go/compiled artifacts) silently swallowed every Cargo
+# multi-binary source file, while the `[[bin]]` entries in Cargo.toml and the
+# `COPY`/`cargo build --bin` lines in the Dockerfiles were committed as normal —
+# so a clean checkout could not build the affected crates at all, even though
+# `git status` looked clean in a working tree that still had the files.
+# A directory must be re-included before anything inside it can be, hence both
+# lines. Verify with `git archive HEAD | tar -x`, never `git status`.
+!**/src/bin/
+!**/src/bin/**
+
 # Next.js / Node
 .next/
 **/.next/
