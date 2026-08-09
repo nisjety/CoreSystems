@@ -122,6 +122,37 @@ mod tests {
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
     }
 
+    #[tokio::test]
+    async fn rejects_invalid_url() {
+        // Unparseable input is a caller mistake, not an attack: it must be
+        // BadRequest, so a typo is never reported as a security block.
+        let err = guard_navigation_target("not a url")
+            .await
+            .expect_err("an unparseable target must be rejected");
+
+        assert_eq!(err.code, ErrorCode::BadRequest);
+    }
+
+    #[tokio::test]
+    async fn rejects_literal_private_ip() {
+        let err = guard_navigation_target("http://10.0.0.5/")
+            .await
+            .expect_err("RFC1918 targets must be blocked");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn rejects_cloud_metadata_endpoint() {
+        // The link-local metadata service is the highest-value SSRF target in
+        // any cloud environment, so it gets its own guard test.
+        let err = guard_navigation_target("http://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("the cloud metadata endpoint must be blocked");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
     #[test]
     fn rejects_an_empty_resolution() {
         // A name that resolves to nothing must fail closed. Without this the
