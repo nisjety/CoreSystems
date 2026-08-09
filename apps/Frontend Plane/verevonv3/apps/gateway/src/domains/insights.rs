@@ -16,16 +16,18 @@
 //! / `not_connected` state. The gateway does not invent a `live` label.
 
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::{
     config::AppState,
+    contracts::ActionActor,
     middleware::{require_session, AuthenticatedUser},
     upstream::{authorized_org_id, proxy_json},
 };
@@ -35,6 +37,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/insights/connectors", get(list_connectors))
         .route("/api/v1/insights/overview", get(overview))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+// Insight Core receives the user identity only from the validated session. This
+// makes `scope=me` a server-enforced narrowing of the already authorized active
+// organization, never a browser-supplied user or tenant selector.
+fn insight_actor(user: &AuthenticatedUser) -> ActionActor {
+    ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    }
 }
 
 /// Normalize an insight-core `ConnectorSlot` to the SPA's compact shape. Missing
@@ -67,9 +81,18 @@ async fn list_connectors(
     }
 
     let url = format!("{}/api/v1/insights/connectors", state.insight_core_url);
+    let actor = insight_actor(&user);
     // proxy_json injects the shared internal-api-key + the server-set x-org-id.
-    let (status, Json(body)) =
-        proxy_json(&state, Method::GET, &url, None, Some(&org_id), None, None).await;
+    let (status, Json(body)) = proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
@@ -150,6 +173,7 @@ fn normalize_overview(overview: &Value) -> Value {
 async fn overview(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let org_id = authorized_org_id(&state, &user).await;
 
@@ -159,10 +183,28 @@ async fn overview(
         return Json(json!({ "data": empty_overview(), "error": null })).into_response();
     }
 
-    let url = format!("{}/api/v1/insights/overview", state.insight_core_url);
+    let url = match overview_url(&state.insight_core_url, &params) {
+        Ok(url) => url,
+        Err(message) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(json!({ "error": { "code": "invalid_insights_query", "message": message } })),
+            )
+                .into_response();
+        }
+    };
+    let actor = insight_actor(&user);
     // proxy_json injects the shared internal-api-key + the server-set x-org-id.
-    let (status, Json(body)) =
-        proxy_json(&state, Method::GET, &url, None, Some(&org_id), None, None).await;
+    let (status, Json(body)) = proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
@@ -173,6 +215,64 @@ async fn overview(
         .unwrap_or_else(empty_overview);
 
     Json(json!({ "data": normalized, "error": null })).into_response()
+}
+
+// The browser may narrow an Insights overview to a known reporting surface and
+// a time window, but must never choose an organization or relay arbitrary
+// upstream query fields. Organization scope remains server-owned via
+// `authorized_org_id`; Insight Core validates the RFC3339/date values.
+fn overview_url(base: &str, params: &HashMap<String, String>) -> Result<String, &'static str> {
+    const SURFACES: [&str; 8] = [
+        "social",
+        "inbox",
+        "agents",
+        "chat",
+        "knowledge",
+        "ingestion",
+        "campaigns",
+        "external_analytics",
+    ];
+
+    let mut query = Vec::new();
+    if let Some(surface) = params
+        .get("surface")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if !SURFACES.contains(&surface) {
+            return Err("surface must be a supported Insights reporting surface");
+        }
+        query.push(format!("surface={}", urlencoding::encode(surface)));
+    }
+    for key in ["from", "to"] {
+        if let Some(value) = params
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            query.push(format!("{key}={}", urlencoding::encode(value)));
+        }
+    }
+
+    if let Some(scope) = params
+        .get("scope")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        if !matches!(scope, "organization" | "me") {
+            return Err("scope must be organization or me");
+        }
+        if scope == "me" {
+            query.push("scope=me".to_string());
+        }
+    }
+
+    let path = format!("{}/api/v1/insights/overview", base.trim_end_matches('/'));
+    Ok(if query.is_empty() {
+        path
+    } else {
+        format!("{}?{}", path, query.join("&"))
+    })
 }
 
 #[cfg(test)]
@@ -279,5 +379,57 @@ mod tests {
         // empty_overview is the same honest shape for the no-org path.
         assert_eq!(empty_overview()["source_count"], json!(0));
         assert_eq!(empty_overview()["scorecards"], json!([]));
+    }
+
+    #[test]
+    fn overview_url_forwards_only_allowlisted_measurement_filters() {
+        let params = HashMap::from([
+            ("surface".to_string(), "inbox".to_string()),
+            ("from".to_string(), "2026-08-01T00:00:00Z".to_string()),
+            ("to".to_string(), "2026-08-05T00:00:00Z".to_string()),
+            ("org_id".to_string(), "forged-org".to_string()),
+        ]);
+
+        assert_eq!(
+            overview_url("http://insight-core:3163/", &params),
+            Ok("http://insight-core:3163/api/v1/insights/overview?surface=inbox&from=2026-08-01T00%3A00%3A00Z&to=2026-08-05T00%3A00%3A00Z".to_string())
+        );
+    }
+
+    #[test]
+    fn overview_url_allows_only_the_verified_user_scope_selector() {
+        let params = HashMap::from([
+            ("surface".to_string(), "chat".to_string()),
+            ("scope".to_string(), "me".to_string()),
+            ("user_id".to_string(), "forged-user".to_string()),
+        ]);
+
+        assert_eq!(
+            overview_url("http://insight-core:3163", &params),
+            Ok(
+                "http://insight-core:3163/api/v1/insights/overview?surface=chat&scope=me"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn overview_url_rejects_an_unknown_scope_selector() {
+        let params = HashMap::from([("scope".to_string(), "user-2".to_string())]);
+
+        assert_eq!(
+            overview_url("http://insight-core:3163", &params),
+            Err("scope must be organization or me")
+        );
+    }
+
+    #[test]
+    fn overview_url_rejects_unknown_surface_instead_of_proxying_it() {
+        let params = HashMap::from([("surface".to_string(), "experiments".to_string())]);
+
+        assert_eq!(
+            overview_url("http://insight-core:3163", &params),
+            Err("surface must be a supported Insights reporting surface")
+        );
     }
 }

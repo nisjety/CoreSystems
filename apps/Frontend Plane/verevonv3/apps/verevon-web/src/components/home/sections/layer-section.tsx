@@ -15,41 +15,58 @@ type LayerDefinition = {
 	framerLayer: 1 | 2 | 3 | 4;
 	id: LayerId;
 	image: string;
+	/** Where this layer sits in the stack — spoken, so the copy reads the visual. */
+	position: string;
 	title: string;
 };
 
+// The visual here is literally four plates stacked in depth, but the copy used
+// to be four interchangeable feature blurbs that never referred to the stack
+// at all — you could shuffle them and nothing would read as wrong. Each layer
+// now names its own position and says what it rests on, so the words and the
+// picture describe the same object.
+//
+// orchestration/infrastructure use "-v2" mockups: the originals baked in real
+// third-party logos (OpenAI's mark, AWS's wordmark, a third vendor-style
+// icon) on tiles meant to be generic tool/integration slots. Those marks were
+// inpainted out and replaced with unbranded chip/cloud/hub icons in the same
+// isometric perspective — see IMAGE-DIRECTION.md §6.
 const layers: LayerDefinition[] = [
 	{
 		id: "management",
 		title: "Kontroll",
+		position: "Øverste lag",
 		description:
-			"Policy, godkjenning og revisjon gjør hvert viktig steg synlig og etterprøvbart.",
+			"Ligger over alt det andre, fordi ingenting skal kunne skje under det uten at det er synlig her. Policy, godkjenning og revisjon.",
 		framerLayer: 1,
 		image: "/verevon-layers/management-layer.png",
 	},
 	{
 		id: "orchestration",
 		title: "Agentarbeid",
+		position: "Andre lag",
 		description:
-			"Agenter planlegger arbeid og bruker modeller, MCP, plugins og godkjente verktøy.",
+			"Her gjøres selve arbeidet. Agenter planlegger stegene og bruker modeller, MCP og godkjente verktøy — innenfor rammene laget over setter.",
 		framerLayer: 2,
-		image: "/verevon-layers/orchestration-layer.png",
+		image: "/verevon-layers/orchestration-layer-v2.png",
 	},
 	{
 		id: "business-context",
 		title: "Kunnskap",
+		position: "Tredje lag",
 		description:
-			"Kilder, regler og tidligere arbeid blir til søkbar kontekst med synlige kildespor.",
+			"Laget agentene henter fra. Kilder, regler og tidligere arbeid er gjort søkbart, med kildespor som peker ned til laget under.",
 		framerLayer: 3,
 		image: "/verevon-layers/business-context-layer.png",
 	},
 	{
 		id: "infrastructure",
 		title: "Kilder",
+		position: "Nederste lag",
 		description:
-			"Dokumenter, nettsteder, norske datakilder og systemkoblinger gir arbeidet riktig grunnlag.",
+			"Grunnen resten hviler på. Dokumenter, nettsteder, norske datakilder og systemkoblinger — det arbeidet til slutt kan spores tilbake til.",
 		framerLayer: 4,
-		image: "/verevon-layers/infrastructure-layer.png",
+		image: "/verevon-layers/infrastructure-layer-v2.png",
 	},
 ];
 
@@ -296,6 +313,15 @@ function LayerCallout({
 				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
 			/>
 
+			<motion.span
+				animate={{ opacity: active ? 0.72 : 0.32 }}
+				className="mb-2 block font-protokoll text-[10px] font-medium uppercase tracking-[0.2em] text-verevon-text-muted"
+				initial={false}
+				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+			>
+				{layer.position}
+			</motion.span>
+
 			<motion.h3
 				animate={{ opacity: active ? 1 : 0.4 }}
 				className="font-arbeit text-[clamp(1.12rem,0.96vw,1.35rem)] font-light leading-[1.08] tracking-[-0.05em] text-verevon-j-text"
@@ -354,12 +380,13 @@ export function LayerSection() {
 
 					<div className="md:col-span-2">
 						<h2 className="font-arbeit text-[clamp(2.25rem,2.9vw,3.8rem)] font-light leading-[0.96] tracking-[-0.068em] text-verevon-j-text">
-							Under hver arbeidsflate ligger samme kontroll.
+							Fire lag. Ingen av dem skjuler de andre.
 						</h2>
 
 						<p className="mt-4 max-w-[580px] font-protokoll text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-verevon-text-muted">
-							Kilder, kunnskap, agentarbeid og styring henger sammen i én plattform —
-							slik at arbeidet kan gå fra grunnlag til godkjent handling.
+							Kontroll øverst, kilder nederst, arbeidet i mellom. Velg et lag for å
+							se det løftet ut av stabelen — og hvordan et svar kan følges hele
+							veien ned til grunnlaget det kom fra.
 						</p>
 					</div>
 				</header>

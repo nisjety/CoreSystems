@@ -52,6 +52,18 @@ export type InsightScorecard = {
   value: number
 }
 
+// The browser may narrow an Insights read to a reporting surface and time
+// window, but never chooses the organization. The gateway derives that from
+// the authenticated session before forwarding the request to insight-core.
+export type InsightOverviewQuery = {
+  from?: string
+  // A reporting selector only. "me" is resolved to the authenticated session
+  // actor by the gateway; the browser cannot name another user or tenant.
+  scope?: 'organization' | 'me'
+  surface?: string
+  to?: string
+}
+
 // The compact per-org metric overview the gateway assembles from insight-core.
 // `sourceCount` is the number of REAL scorecards (produced rows); the SPA uses
 // it to decide a `live` vs honest-`empty` state — `live` never attaches to an
@@ -108,7 +120,13 @@ function normalizeScorecard(value: unknown): InsightScorecard {
 // org is resolved from the session server-side; the SPA sends no org scope and
 // no internal key. Resolves to the normalized overview, or an honest empty
 // overview when the backend is unavailable handling is left to the caller.
-export async function getInsightsOverview(): Promise<InsightOverview> {
-  const raw = await requestJson<unknown>('/api/v1/insights/overview')
+export async function getInsightsOverview(query: InsightOverviewQuery = {}): Promise<InsightOverview> {
+  const params = new URLSearchParams()
+  if (query.surface?.trim()) params.set('surface', query.surface.trim())
+  if (query.scope === 'me') params.set('scope', 'me')
+  if (query.from?.trim()) params.set('from', query.from.trim())
+  if (query.to?.trim()) params.set('to', query.to.trim())
+  const suffix = params.size ? `?${params.toString()}` : ''
+  const raw = await requestJson<unknown>(`/api/v1/insights/overview${suffix}`)
   return normalizeInsightOverview(raw)
 }

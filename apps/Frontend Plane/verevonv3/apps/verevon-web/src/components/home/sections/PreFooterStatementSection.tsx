@@ -1,7 +1,55 @@
 "use client";
 
+import Image from "next/image";
 import { Fragment, useEffect, useRef } from "react";
 import { ArrowButton } from "@/components/ui/ArrowButton";
+
+/**
+ * The five stills that drift in behind the closing statement.
+ *
+ * These were previously drawn entirely in CSS — radial gradients, a couple of
+ * dots and hairlines per tile. Read together they looked like generic UI
+ * confetti rather than anything Verevon does, and they made this section the
+ * second fully abstract moment in a row after ProblemSection. Real
+ * photographs, small and rotated, keep the same quiet drift while giving the
+ * closing frame something with weight in it.
+ *
+ * Purely decorative: the wrapper is aria-hidden, so no alt text is needed.
+ * Positions/sizes are unchanged from the CSS version, and each tile keeps its
+ * `data-prefooter-card` hook so the existing GSAP timeline still drives them.
+ */
+const closingStills = [
+	{
+		src: "/verevon-mood/stair-descent-warm.jpg",
+		className:
+			"absolute -left-[6%] top-[12%] aspect-square w-20 md:left-[2%] md:top-[10%] md:w-[100px] lg:w-[10%]",
+		width: 120,
+	},
+	{
+		src: "/verevon-mood/hand-through-fabric.jpg",
+		className:
+			"absolute left-[34%] top-[2%] aspect-[0.91] w-[72px] md:left-[32%] md:top-0 md:w-[88px] lg:w-[8%]",
+		width: 110,
+	},
+	{
+		src: "/verevon-mood/hourglass-shadow.jpg",
+		className:
+			"absolute -right-[4%] top-[4%] aspect-square w-20 md:right-[14%] md:top-[2%] md:w-[88px] lg:w-[8%]",
+		width: 110,
+	},
+	{
+		src: "/verevon-mood/seated-cream-terracotta.jpg",
+		className:
+			"absolute bottom-[6%] left-[4%] aspect-[1.08] w-24 md:bottom-[8%] md:left-[18%] md:w-[100px] lg:w-[8%]",
+		width: 120,
+	},
+	{
+		src: "/verevon-mood/peach-arch-walk.jpg",
+		className:
+			"absolute top-[64%] right-[16%] aspect-square w-[100px] md:bottom-[3%] md:right-[26%] md:w-[110px] lg:w-[10%]",
+		width: 130,
+	},
+] as const;
 
 const preFooterTitleLines = [
 	["Fra", "kunnskap", "til", "handling."],
@@ -365,52 +413,22 @@ export function PreFooterStatementSection() {
 					aria-hidden="true"
 					className="pointer-events-none absolute inset-0 z-[2]"
 				>
-					<div
-						className="absolute -left-[6%] top-[12%] aspect-square w-20 overflow-hidden rounded-[2px] bg-verevon-bg-mist shadow-[0_10px_28px_rgba(23,23,23,0.035)] md:left-[2%] md:top-[10%] md:w-[100px] lg:w-[10%]"
-						data-prefooter-card
-					>
-						<div className="absolute inset-0 bg-[radial-gradient(circle_at_34%_28%,rgba(238,122,80,0.32),transparent_28%),linear-gradient(135deg,#f8f8f7,#d9e3e4)]" />
-						<div className="absolute inset-x-[18%] bottom-[24%] h-px bg-verevon-j-text/25" />
-						<div className="absolute left-[28%] top-[26%] size-7 rounded-full border border-verevon-j-text/20" />
-					</div>
-
-					<div
-						className="absolute left-[34%] top-[2%] aspect-[0.91] w-[72px] overflow-hidden rounded-[2px] bg-verevon-bg-mist shadow-[0_10px_28px_rgba(23,23,23,0.035)] md:left-[32%] md:top-0 md:w-[88px] lg:w-[8%]"
-						data-prefooter-card
-					>
-						<div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(23,23,23,0.08)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.08)_1px,transparent_1px),linear-gradient(145deg,#ffffff,#ecebea)] bg-[length:24px_24px,24px_24px,100%_100%]" />
-						<div className="absolute bottom-[18%] left-[18%] h-[42%] w-[22%] bg-verevon-j-text/20 blur-[1px]" />
-						<div className="absolute bottom-[18%] right-[24%] h-[34%] w-[18%] bg-verevon-j-text/16 blur-[1px]" />
-					</div>
-
-					<div
-						className="absolute -right-[4%] top-[4%] aspect-square w-20 overflow-hidden rounded-full bg-verevon-coral-soft shadow-[0_10px_28px_rgba(23,23,23,0.035)] md:right-[14%] md:top-[2%] md:w-[88px] lg:w-[8%]"
-						data-prefooter-card
-					>
-						<div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(238,122,80,0.44),transparent_30%),radial-gradient(circle_at_46%_52%,rgba(121,56,25,0.18),transparent_46%)]" />
-						<div className="absolute left-1/2 top-[18%] h-[62%] w-px -translate-x-1/2 bg-verevon-a-earth/30" />
-						<div className="absolute left-[28%] top-[42%] h-px w-[44%] rotate-[-28deg] bg-verevon-a-earth/30" />
-					</div>
-
-					<div
-						className="absolute bottom-[6%] left-[4%] aspect-[1.08] w-24 overflow-hidden rounded-[2px] bg-verevon-coral shadow-[0_10px_28px_rgba(23,23,23,0.035)] md:bottom-[8%] md:left-[18%] md:w-[100px] lg:w-[8%]"
-						data-prefooter-card
-					>
-						<div className="absolute inset-0 bg-[linear-gradient(145deg,rgba(238,122,80,0.94),rgba(247,200,168,0.88))]" />
-						<div className="absolute left-[28%] top-[34%] size-2 rounded-full bg-verevon-j-text/55" />
-						<div className="absolute right-[28%] top-[34%] size-2 rounded-full bg-verevon-j-text/55" />
-						<div className="absolute left-[30%] top-[58%] h-px w-[40%] rounded-full bg-verevon-j-text/55" />
-					</div>
-
-					<div
-						className="absolute top-[64%] right-[16%] aspect-square w-[100px] overflow-hidden rounded-[2px] bg-verevon-bg-mist shadow-[0_10px_28px_rgba(23,23,23,0.035)] md:bottom-[3%] md:right-[26%] md:w-[110px] lg:w-[10%]"
-						data-prefooter-card
-					>
-						<div className="absolute inset-0 bg-[linear-gradient(180deg,#eef4ff,#f8f8f7)]" />
-						<div className="absolute bottom-[12%] left-1/2 h-[70%] w-px -translate-x-1/2 bg-verevon-h-teal-deep/35" />
-						<div className="absolute left-[20%] top-[28%] h-px w-[48%] rotate-[28deg] bg-verevon-h-teal-deep/35" />
-						<div className="absolute right-[18%] top-[38%] h-px w-[42%] rotate-[-18deg] bg-verevon-h-teal-deep/35" />
-					</div>
+					{closingStills.map((still) => (
+						<div
+							className={`${still.className} overflow-hidden rounded-[2px] bg-verevon-bg-mist shadow-[0_10px_28px_rgba(23,23,23,0.035)]`}
+							data-prefooter-card
+							key={still.src}
+						>
+							<Image
+								alt=""
+								className="select-none object-cover saturate-[0.7] contrast-[1.02]"
+								draggable={false}
+								fill
+								sizes={`${still.width}px`}
+								src={still.src}
+							/>
+						</div>
+					))}
 				</div>
 
 				<div className="absolute inset-0 z-[3] grid place-items-center overflow-hidden px-[clamp(24px,4vw,72px)]">

@@ -61,6 +61,25 @@ describe('insights-client', () => {
     expect(init?.credentials).toBe('include')
   })
 
+  it('scopes an overview through gateway-owned surface and time filters only', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ scorecards: [], surfaces: [], generated_at: '', source_count: 0 })))
+
+    await getInsightsOverview({
+      surface: 'inbox',
+      from: '2026-08-01T00:00:00.000Z',
+      to: '2026-08-05T00:00:00.000Z',
+    })
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0]!
+    const headers = init?.headers as Headers
+
+    expect(String(url)).toBe('/api/v1/insights/overview?surface=inbox&from=2026-08-01T00%3A00%3A00.000Z&to=2026-08-05T00%3A00%3A00.000Z')
+    // Scope stays server-owned: only the allowed reporting filters travel from
+    // the browser, never an organization identity or an internal credential.
+    expect(headers.has('x-verevon-org-id')).toBe(false)
+    expect(headers.has('x-internal-api-key')).toBe(false)
+  })
+
   it('normalizes the gateway overview into real camelCase scorecards', async () => {
     vi.stubGlobal(
       'fetch',

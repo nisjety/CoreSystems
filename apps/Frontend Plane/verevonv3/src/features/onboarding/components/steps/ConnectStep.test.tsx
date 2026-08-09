@@ -76,7 +76,7 @@ describe('ConnectStepVisual', () => {
     expect(screen.getByText('Slack')).toBeTruthy()
     expect(screen.getByText('Microsoft 365')).toBeTruthy()
     expect(screen.getByText('Ima Fernandes')).toBeTruthy()
-    expect(screen.queryByText('aquatiq.com + integrations')).toBeNull()
+    expect(screen.queryByText('coresystem.com + integrations')).toBeNull()
     expect(screen.queryByText('5 connected sources')).toBeNull()
   })
 

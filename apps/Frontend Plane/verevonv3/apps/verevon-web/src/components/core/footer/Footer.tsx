@@ -49,8 +49,8 @@ export function Footer() {
 						</a>
 
 						<p className="m-0 max-w-[320px] font-protokoll text-[clamp(0.9rem,0.95vw,1.08rem)] font-light uppercase leading-[1.32] tracking-[0.02em] text-verevon-j-text/48">
-							Verevon hjelper teamet å svare raskere, handle tryggere og vise
-							hvor AI-en fant grunnlaget.
+							Verevon hjelper teamet å svare raskere, handle
+							tryggere og vise hvor AI-en fant grunnlaget.
 						</p>
 					</div>
 
@@ -139,7 +139,9 @@ export function Footer() {
 									>
 										{link}
 									</a>
-									{index < socialLinks.length - 1 ? " / " : ""}
+									{index < socialLinks.length - 1
+										? " / "
+										: ""}
 								</span>
 							))}
 						</div>

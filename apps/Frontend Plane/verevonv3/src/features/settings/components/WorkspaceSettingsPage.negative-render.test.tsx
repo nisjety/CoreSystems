@@ -20,7 +20,7 @@ import { workspaceSettingsSections } from '@/features/settings/lib/settings-sect
 // elsewhere (e.g. TrustCenterSection's "Connected apps" card title) are
 // excluded so this guards the removed fabrications, not real content.
 const FABRICATED_POSTURE = [
-  'aquatiq.no is ready',
+  'coresystem.no is ready',
   'All new workspace data is stored in EU infrastructure',
   'Default inbox ownership is assigned',
   'Connected apps 2 / 4',

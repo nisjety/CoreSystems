@@ -8,7 +8,7 @@ describe('browser omnibox target', () => {
   })
 
   it('normalizes host-like input to direct navigation urls', () => {
-    expect(browserOmniboxTarget('aquatiq.com')).toBe('https://aquatiq.com')
+    expect(browserOmniboxTarget('coresystem.com')).toBe('https://coresystem.com')
     expect(browserOmniboxTarget('www.vg.no/nyheter')).toBe('https://www.vg.no/nyheter')
     expect(browserOmniboxTarget('localhost:5174')).toBe('http://localhost:5174')
   })

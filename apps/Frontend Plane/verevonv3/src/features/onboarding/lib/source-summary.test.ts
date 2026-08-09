@@ -4,7 +4,7 @@ import { summarizeOnboardingSources } from '@/features/onboarding/lib/source-sum
 describe('summarizeOnboardingSources', () => {
   it('counts connector source streams separately from the website source', () => {
     const summary = summarizeOnboardingSources({
-      websiteUrl: 'https://aquatiq.com',
+      websiteUrl: 'https://coresystem.com',
       connectors: [
         {
           id: 'microsoft365',

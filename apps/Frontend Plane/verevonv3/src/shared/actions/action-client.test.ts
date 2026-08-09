@@ -11,7 +11,7 @@ afterEach(() => {
 // Every action here has a real gateway dispatcher, so executeAction must reach
 // the gateway rather than throwing the honest "not available" client guard.
 const wiredCases: Array<{ actionId: Parameters<typeof executeAction>[0]; input: unknown }> = [
-  { actionId: 'brreg.lookup_organization', input: { q: 'aquatiq as', size: 5 } },
+  { actionId: 'brreg.lookup_organization', input: { q: 'coresystem as', size: 5 } },
   {
     actionId: 'social.create_draft',
     input: { title: 'Launch note', body: 'Body copy', platforms: ['linkedin'], sourceKind: 'manual' },

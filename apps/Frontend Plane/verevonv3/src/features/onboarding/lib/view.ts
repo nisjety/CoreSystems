@@ -51,7 +51,7 @@ export function hasBrandSignals(branding: BrandingSignals | undefined): boolean 
 /**
  * Derive a likely organization name to seed the Brreg lookup from the website
  * crawl — the detected brand/site name first, falling back to the registrable
- * label of the host (e.g. `www.aquatiq.com` → `Aquatiq`). Ported from verevon v2
+ * label of the host (e.g. `www.coresystem.com` → `Aquatiq`). Ported from verevon v2
  * so the organization step auto-fills suggestions from the website findings.
  */
 export function inferOrganizationQuery(website: OnboardingState['website']): string {

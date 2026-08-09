@@ -1001,13 +1001,27 @@ async fn proxy_json_with_client_and_headers(
                 (status, Json(if body.is_null() { json!({}) } else { body }))
             }
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "upstream_unavailable",
-                "The upstream service is unavailable.",
-            )),
-        ),
+        Err(err) => {
+            // The concrete reqwest error is the ONLY signal that distinguishes
+            // connect-refused from timeout from a malformed response. Discarding
+            // it turned a one-line diagnosis into hours of inference.
+            tracing::error!(
+                error = %err,
+                is_connect = err.is_connect(),
+                is_timeout = err.is_timeout(),
+                is_request = err.is_request(),
+                is_body = err.is_body(),
+                url = %url,
+                "upstream request failed before a response was received"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The upstream service is unavailable.",
+                )),
+            )
+        }
     }
 }
 
@@ -1053,13 +1067,27 @@ async fn proxy_json_bytes_with_client_and_headers(
                 (status, Json(if body.is_null() { json!({}) } else { body }))
             }
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "upstream_unavailable",
-                "The upstream service is unavailable.",
-            )),
-        ),
+        Err(err) => {
+            // The concrete reqwest error is the ONLY signal that distinguishes
+            // connect-refused from timeout from a malformed response. Discarding
+            // it turned a one-line diagnosis into hours of inference.
+            tracing::error!(
+                error = %err,
+                is_connect = err.is_connect(),
+                is_timeout = err.is_timeout(),
+                is_request = err.is_request(),
+                is_body = err.is_body(),
+                url = %url,
+                "upstream request failed before a response was received"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The upstream service is unavailable.",
+                )),
+            )
+        }
     }
 }
 
@@ -1134,14 +1162,25 @@ pub(crate) async fn proxy_auth_with_headers(
             }
             response
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "upstream_unavailable",
-                "The upstream service is unavailable.",
-            )),
-        )
-            .into_response(),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                is_connect = err.is_connect(),
+                is_timeout = err.is_timeout(),
+                is_request = err.is_request(),
+                is_body = err.is_body(),
+                url = %url,
+                "upstream request failed before a response was received"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The upstream service is unavailable.",
+                )),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1414,13 +1453,27 @@ pub(crate) async fn proxy_bearer_json(
             let b = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
             (status, Json(b))
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "upstream_unavailable",
-                "The upstream service is unavailable.",
-            )),
-        ),
+        Err(err) => {
+            // The concrete reqwest error is the ONLY signal that distinguishes
+            // connect-refused from timeout from a malformed response. Discarding
+            // it turned a one-line diagnosis into hours of inference.
+            tracing::error!(
+                error = %err,
+                is_connect = err.is_connect(),
+                is_timeout = err.is_timeout(),
+                is_request = err.is_request(),
+                is_body = err.is_body(),
+                url = %url,
+                "upstream request failed before a response was received"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The upstream service is unavailable.",
+                )),
+            )
+        }
     }
 }
 
@@ -1617,14 +1670,25 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
                 .body(body)
                 .expect("infallible static headers")
         }
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(error(
-                "upstream_unavailable",
-                "The upstream service is unavailable.",
-            )),
-        )
-            .into_response(),
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                is_connect = err.is_connect(),
+                is_timeout = err.is_timeout(),
+                is_request = err.is_request(),
+                is_body = err.is_body(),
+                url = %url,
+                "upstream request failed before a response was received"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "upstream_unavailable",
+                    "The upstream service is unavailable.",
+                )),
+            )
+                .into_response()
+        }
     }
 }
 

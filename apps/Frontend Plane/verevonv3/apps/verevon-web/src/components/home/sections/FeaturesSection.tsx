@@ -12,10 +12,9 @@ import { createPortal } from "react-dom";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ArrowLeft, ArrowRight, Hand } from "lucide-react";
-import { FeatureFilmGroup } from "./FeatureCardFilms";
 import {
-	FeatureWorkflowCard,
-	platformCards,
+	ModuleWorkflowCard,
+	moduleCards,
 } from "./FeatureWorkflowCards";
 
 gsap.registerPlugin(ScrollTrigger);
@@ -193,7 +192,9 @@ export function FeaturesSection() {
 		const carousel = carouselRef.current;
 		if (!carousel) return;
 
-		const distance = (event.pageX - dragStartXRef.current) * 1.35;
+		// 1:1 tracking. The old 1.35 multiplier made the strip outrun the
+		// pointer, which reads as slippage rather than weight on a trackpad.
+		const distance = event.pageX - dragStartXRef.current;
 		if (Math.abs(distance) <= 5) return;
 
 		hasDraggedRef.current = true;
@@ -232,6 +233,15 @@ export function FeaturesSection() {
 			const rect = viewport.getBoundingClientRect();
 			setCursorMode(event.clientX - rect.left < rect.width / 2 ? "nav-left" : "nav-right");
 		}
+	};
+
+	const handleViewportKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+		if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+
+		event.preventDefault();
+		scrollToCard(
+			activeCardIndexRef.current + (event.key === "ArrowLeft" ? -1 : 1),
+		);
 	};
 
 	const handleViewportClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -349,10 +359,21 @@ export function FeaturesSection() {
 								scrub: true,
 								invalidateOnRefresh: true,
 								onUpdate: (self) => {
-									cardStage.style.scrollSnapType =
+									// Only write when the value actually flips.
+									// Re-assigning scroll-snap-type on every
+									// scrub frame re-snaps the strip mid-drag
+									// and shows up as a stutter.
+									const nextSnap =
 										self.progress >= 0.995
 											? "x mandatory"
 											: "none";
+									if (
+										cardStage.style.scrollSnapType !==
+										nextSnap
+									) {
+										cardStage.style.scrollSnapType =
+											nextSnap;
+									}
 								},
 							},
 					});
@@ -418,15 +439,16 @@ export function FeaturesSection() {
 					className="mx-auto mb-[clamp(48px,8vh,104px)] max-w-[760px] text-center md:invisible"
 					data-features-intro=""
 				>
-					<p className="verevon-eyebrow text-verevon-coral">04 / Plattformen</p>
+					<p className="verevon-eyebrow text-verevon-coral">04 / Modulene</p>
 					<h2
 						className="mt-4 font-arbeit text-[clamp(2.75rem,5vw,6.1rem)] font-light leading-[0.9] tracking-[-0.07em] text-verevon-j-text text-balance"
 						id="features-title"
 					>
-						Én plattform. Flere arbeidsflater.
+						Finn. Forstå. Få gjort.
 					</h2>
-					<p className="mx-auto mt-5 max-w-[620px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
-						Fra kilder og kunnskap til agenter, arbeidsflater og kontroll — samlet i Verevon.
+					<p className="mx-auto mt-5 max-w-[600px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
+						Seks moduler, én sammenheng. Dere kan starte med én og ta resten
+						når arbeidet krever det.
 					</p>
 				</header>
 
@@ -449,25 +471,27 @@ export function FeaturesSection() {
 						>
 							<div
 								className="relative flex w-full snap-x snap-mandatory gap-x-[clamp(12.4px,1.2875vw,22.66px)] overflow-x-auto overscroll-x-contain pb-4 pt-2 [--feature-card-width:clamp(250px,22vw,280px)] [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden touch-pan-x"
+								aria-label="Verevon-modulene"
 								data-features-cards-stage=""
 								ref={carouselRef}
 								onClickCapture={handleViewportClick}
+								onKeyDown={handleViewportKeyDown}
 								onPointerDown={handleDragStart}
 								onPointerMove={handleDragMove}
 								onPointerCancel={handleDragEnd}
 								onPointerUp={handleDragEnd}
+								role="group"
+								tabIndex={0}
 							>
-								<FeatureFilmGroup controlClassName="right-3 top-3">
-									{platformCards.map((card, index) => (
-										<FeatureWorkflowCard
-											card={card}
-											className="w-[var(--feature-card-width)] shrink-0 snap-start"
-											index={index}
-											key={card.title}
-											total={platformCards.length}
-										/>
-									))}
-								</FeatureFilmGroup>
+								{moduleCards.map((card, index) => (
+									<ModuleWorkflowCard
+										card={card}
+										className="w-[var(--feature-card-width)] shrink-0 snap-start"
+										index={index}
+										key={card.module}
+										total={moduleCards.length}
+									/>
+								))}
 							</div>
 						</div>
 					</div>

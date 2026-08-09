@@ -25,11 +25,13 @@ import {
   SidebarPanelTitle,
   SidebarSearchField,
 } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { supportProviderIcon, type SupportProvider } from '@/features/support/components/SupportProviderIcon'
 import { deriveConnectedEmailAccounts, deriveConnectedInboxSources, type ConnectedEmailAccount, type EmailAccountSyncHealth } from '@/features/inbox/lib/inbox-sources'
-import { listConnections, type IntegrationConnection } from '@/shared/api/integrations-client'
+import { listConnections, startConnectSession, type IntegrationConnection } from '@/shared/api/integrations-client'
+import { ApiError } from '@/shared/api/http'
+import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
 import { getSession } from '@/shared/session/session-store'
 
 type SupportIcon = Component<LucideProps>
@@ -83,6 +85,47 @@ export function SupportExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const connections = () => connectionCatalog()?.connections ?? []
   const connectionStatusUnavailable = () => connectionCatalog()?.unavailable ?? false
   const emailAccounts = createMemo(() => deriveConnectedEmailAccounts(connections()))
+  const [connectingEmailProvider, setConnectingEmailProvider] = createSignal<'google' | 'microsoft' | null>(null)
+  const [emailConnectNotice, setEmailConnectNotice] = createSignal<{ message: string; upgrade?: boolean } | null>(null)
+  const navigate = useNavigate()
+
+  const connectEmail = async (provider: 'google' | 'microsoft') => {
+    const id = orgId()
+    if (!id || connectingEmailProvider()) return
+    setConnectingEmailProvider(provider)
+    setEmailConnectNotice(null)
+    try {
+      // Same scoped, user-initiated full inbox grant Inbox itself uses
+      // (InboxPage.connectInbox) — duplicated rather than shared because this
+      // panel and Inbox sit in separate component trees with their own
+      // connection-list resources; both call the identical gateway action.
+      const session = await startConnectSession(id, provider, { bundles: ['full'] })
+      const connectUrl = session.connectUrl || session.redirectUrl
+      const sessionToken = session.sessionToken || session.id
+      if (!connectUrl || !sessionToken) throw new Error(i18n.tr('Tilkoblingen kunne ikke startes.', 'The connection could not be started.'))
+      await runDirectOauthWindow({ connectUrl, sessionToken })
+      await refetchConnections()
+    } catch (reason) {
+      // integration-corev2 gates the full-inbox grant behind a "pro" plan
+      // (auth.RequirePlan) and this workspace may genuinely be on Free — a
+      // real 403, not a bug, but nothing surfaced it beyond a bare failed
+      // fetch in the console. Route it to the actual upgrade path instead of
+      // the generic connect-failed message.
+      if (reason instanceof ApiError && reason.code === 'PLAN_REQUIRED') {
+        setEmailConnectNotice({
+          message: i18n.tr(
+            'Å koble til e-post krever Advanced-planen eller høyere.',
+            'Connecting email requires the Advanced plan or higher.',
+          ),
+          upgrade: true,
+        })
+      } else {
+        setEmailConnectNotice({ message: translateApiError(reason, i18n.tr, { no: 'Tilkoblingen kunne ikke fullføres.', en: 'The connection could not be completed.' }) })
+      }
+    } finally {
+      setConnectingEmailProvider(null)
+    }
+  }
   const mode = (): SupportMode => {
     const surface = new URLSearchParams(location.search).get('surface')
     if (surface === 'outbound') return 'outbound'
@@ -203,7 +246,16 @@ export function SupportExpandedSidebarPanel(props: { onCollapse: () => void }) {
           <Show when={mode() === 'conversations'}>
             <SupportFilterGroup defaultOpen items={matchesSearch(conversationQueues())} label={i18n.tr('Køer', 'Queues')} activeHref={isActive} searching={Boolean(filterQuery())} />
             <SupportFilterGroup defaultOpen items={matchesSearch(conversationStatuses())} label={i18n.tr('Status', 'Status')} activeHref={isActive} searching={Boolean(filterQuery())} />
-            <EmailAccountFilter accounts={emailAccounts()} activeHref={isActive} searching={Boolean(filterQuery())} searchQuery={filterQuery()} />
+            <EmailAccountFilter
+              accounts={emailAccounts()}
+              activeHref={isActive}
+              searching={Boolean(filterQuery())}
+              searchQuery={filterQuery()}
+              connectingProvider={connectingEmailProvider()}
+              connectNotice={emailConnectNotice()}
+              onConnect={connectEmail}
+              onUpgrade={() => void navigate('/settings/billing')}
+            />
             <SupportFilterGroup defaultOpen items={matchesSearch(conversationChannels())} label={i18n.tr('Kanaler', 'Channels')} activeHref={isActive} searching={Boolean(filterQuery())} />
           </Show>
 
@@ -229,6 +281,10 @@ function EmailAccountFilter(props: {
   activeHref: (href: string) => boolean
   searching: boolean
   searchQuery: string
+  connectingProvider: 'google' | 'microsoft' | null
+  connectNotice: { message: string; upgrade?: boolean } | null
+  onConnect: (provider: 'google' | 'microsoft') => void
+  onUpgrade: () => void
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(true)
@@ -236,16 +292,63 @@ function EmailAccountFilter(props: {
     ? props.accounts.filter((account) => `${account.label} ${account.providerKey} ${account.sharedMailboxes.join(' ')}`.toLocaleLowerCase().includes(props.searchQuery))
     : props.accounts
   const expanded = () => props.searching || open()
+  // The E-post group is ALWAYS visible, connected or not — it is the entry
+  // point to connect email, not just a filter over an existing connection.
+  // It used to render only when `accounts.length > 0`, which hid it
+  // completely on a fresh workspace and made connecting email from Support
+  // possible only by going through Integrations first.
   return (
-    <Show when={matchingAccounts().length > 0}>
-      <section class="core-sidebar-group core-sidebar-email-group">
-        <div class="core-sidebar-group__header">
-          <button type="button" aria-expanded={expanded()} onClick={() => setOpen((value) => !value)}>
-            <span class="verevon-sidebar-group-title">{i18n.tr('E-post', 'Email')}</span>
-            <ChevronDown class={cn('size-3.5', !expanded() && '-rotate-90')} strokeWidth={1.8} />
-          </button>
-        </div>
-        <Show when={expanded()}>
+    <section class="core-sidebar-group core-sidebar-email-group">
+      <div class="core-sidebar-group__header">
+        <button type="button" aria-expanded={expanded()} onClick={() => setOpen((value) => !value)}>
+          <span class="verevon-sidebar-group-title">{i18n.tr('E-post', 'Email')}</span>
+          <ChevronDown class={cn('size-3.5', !expanded() && '-rotate-90')} strokeWidth={1.8} />
+        </button>
+      </div>
+      <Show when={expanded()}>
+        <Show
+          when={matchingAccounts().length > 0}
+          fallback={
+            <div class="core-sidebar-email-connect">
+              <Show when={!props.searching}>
+                <p class="core-sidebar-email-connect__hint">
+                  {i18n.tr('Ingen e-postkonto tilkoblet ennå.', 'No email account connected yet.')}
+                </p>
+                <div class="core-sidebar-email-connect__actions">
+                  <button
+                    type="button"
+                    class="verevon-inbox-button verevon-inbox-button--primary verevon-inbox-button--sm"
+                    disabled={Boolean(props.connectingProvider)}
+                    onClick={() => props.onConnect('google')}
+                  >
+                    {props.connectingProvider === 'google' ? i18n.tr('Åpner Gmail …', 'Opening Gmail...') : i18n.tr('Koble til Gmail', 'Connect Gmail')}
+                  </button>
+                  <button
+                    type="button"
+                    class="verevon-inbox-button verevon-inbox-button--secondary verevon-inbox-button--sm"
+                    disabled={Boolean(props.connectingProvider)}
+                    onClick={() => props.onConnect('microsoft')}
+                  >
+                    {props.connectingProvider === 'microsoft' ? i18n.tr('Åpner Outlook …', 'Opening Outlook...') : i18n.tr('Koble til Outlook', 'Connect Outlook')}
+                  </button>
+                </div>
+                <Show when={props.connectNotice}>
+                  {(notice) => (
+                    <p class="core-sidebar-email-connect__notice" role="alert">
+                      {notice().message}
+                      <Show when={notice().upgrade}>
+                        {' '}
+                        <button type="button" class="core-sidebar-email-connect__upgrade-link" onClick={props.onUpgrade}>
+                          {i18n.tr('Se planer', 'View plans')}
+                        </button>
+                      </Show>
+                    </p>
+                  )}
+                </Show>
+              </Show>
+            </div>
+          }
+        >
           <div class="core-sidebar-email-accounts">
             <For each={matchingAccounts()}>
               {(account) => {
@@ -270,8 +373,8 @@ function EmailAccountFilter(props: {
             </For>
           </div>
         </Show>
-      </section>
-    </Show>
+      </Show>
+    </section>
   )
 }
 

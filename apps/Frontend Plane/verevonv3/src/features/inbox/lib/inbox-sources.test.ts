@@ -191,8 +191,8 @@ describe('deriveConnectedInboxSources', () => {
         status: 'active',
         capabilities: ['mail.read'],
         metadata: {
-          mailbox_address: 'ima.dacosta@aquatiq.com',
-          shared_mailboxes: 'testbruker@aquatiq.com',
+          mailbox_address: 'ima.dacosta@coresystem.com',
+          shared_mailboxes: 'testbruker@coresystem.com',
         },
       },
       {
@@ -205,7 +205,7 @@ describe('deriveConnectedInboxSources', () => {
       {
         id: 'conn-not-mail',
         providerKey: 'microsoft',
-        userEmail: 'teams-only@aquatiq.com',
+        userEmail: 'teams-only@coresystem.com',
         status: 'active',
         capabilities: ['teams.messages.read'],
       },
@@ -213,8 +213,8 @@ describe('deriveConnectedInboxSources', () => {
       {
         id: 'conn-outlook',
         providerKey: 'microsoft',
-        label: 'ima.dacosta@aquatiq.com',
-        sharedMailboxes: ['testbruker@aquatiq.com'],
+        label: 'ima.dacosta@coresystem.com',
+        sharedMailboxes: ['testbruker@coresystem.com'],
         syncHealth: 'unknown',
       },
       {

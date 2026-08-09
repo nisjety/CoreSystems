@@ -20,7 +20,7 @@ describe('listConnections', () => {
       },
     }), { headers: { 'Content-Type': 'application/json' } })))
 
-    const connections = await listConnections('org-aquatiq')
+    const connections = await listConnections('org-coresystem')
 
     expect(connections).toEqual([expect.objectContaining({
       id: 'conn-meta',
@@ -33,7 +33,7 @@ describe('listConnections', () => {
     const request = vi.mocked(fetch).mock.calls[0]
     if (!request) throw new Error('Expected a connections request')
     expect(String(request[0])).toContain('/api/v1/integrations/connections')
-    expect(new Headers(request[1]?.headers).get('x-verevon-org-id')).toBe('org-aquatiq')
+    expect(new Headers(request[1]?.headers).get('x-verevon-org-id')).toBe('org-coresystem')
   })
 })
 
@@ -43,7 +43,7 @@ describe('extendInboxHistory', () => {
       data: { history: { channel: 'teams', historyDays: 60, queued: true } },
     }), { headers: { 'Content-Type': 'application/json' } })))
 
-    await expect(extendInboxHistory('org-aquatiq', 'conn-microsoft')).resolves.toEqual({
+    await expect(extendInboxHistory('org-coresystem', 'conn-microsoft')).resolves.toEqual({
       channel: 'teams',
       historyDays: 60,
       queued: true,
@@ -53,7 +53,7 @@ describe('extendInboxHistory', () => {
     if (!request) throw new Error('Expected a history-extension request')
     expect(String(request[0])).toBe('/api/v1/integrations/connections/conn-microsoft/inbox-history')
     expect(request[1]?.method).toBe('POST')
-    expect(new Headers(request[1]?.headers).get('x-verevon-org-id')).toBe('org-aquatiq')
+    expect(new Headers(request[1]?.headers).get('x-verevon-org-id')).toBe('org-coresystem')
   })
 })
 
@@ -63,7 +63,7 @@ describe('triggerInboxSync', () => {
       data: { syncJob: { id: 'sync-inbox-1', connectionId: 'conn-google', status: 'waiting_provider' } },
     }), { headers: { 'Content-Type': 'application/json' } })))
 
-    await expect(triggerInboxSync('org-aquatiq', 'conn-google', 'email')).resolves.toEqual({
+    await expect(triggerInboxSync('org-coresystem', 'conn-google', 'email')).resolves.toEqual({
       syncJob: expect.objectContaining({ id: 'sync-inbox-1', connectionId: 'conn-google' }),
     })
 
@@ -72,6 +72,6 @@ describe('triggerInboxSync', () => {
     expect(String(request[0])).toBe('/api/v1/integrations/connections/conn-google/inbox-sync')
     expect(request[1]?.method).toBe('POST')
     expect(request[1]?.body).toBe(JSON.stringify({ channel: 'email' }))
-    expect(new Headers(request[1]?.headers).get('x-verevon-org-id')).toBe('org-aquatiq')
+    expect(new Headers(request[1]?.headers).get('x-verevon-org-id')).toBe('org-coresystem')
   })
 })

@@ -641,10 +641,10 @@ mod tests {
             authorized_membership: None,
         };
         assert_eq!(
-            verified_company_domain(&user("Ima@Aquatiq.com", true)).as_deref(),
-            Some("aquatiq.com")
+            verified_company_domain(&user("Ima@Coresystem.com", true)).as_deref(),
+            Some("coresystem.com")
         );
-        assert!(verified_company_domain(&user("ima@aquatiq.com", false)).is_none());
+        assert!(verified_company_domain(&user("ima@coresystem.com", false)).is_none());
         assert!(verified_company_domain(&user("ima@gmail.com", true)).is_none());
     }
 }

@@ -140,7 +140,7 @@ usage() {
   printf 'Usage: %s [options]\n' "$0"
   printf '%s\n' \
     '  --dry-run             Render and validate selected Compose files; no daemon calls' \
-    '  --from PLANE          Start at data|control|ingestion|model|application|frontend' \
+    '  --from PLANE          Start at data|control|ingestion|model|application|frontend|infra' \
     '  --resume              Skip planes whose runtime services are already ready' \
     '  --skip-build          Start existing images without rebuilding' \
     '  --no-cache            Rebuild all selected images without Docker layer cache' \
@@ -236,30 +236,51 @@ fi
 COMPOSE_FILES=(
   "apps/Control Plane/docker-compose.yml"
   "apps/Data Plane v2/docker-compose.yml"
-  "apps/Ingestion Plane/docker-compose.yml"
   "apps/Model Plane/deploy/docker-compose.yml"
   "apps/Application Plane/docker-compose.yml"
+  "apps/Ingestion Plane/docker-compose.yml"
   "apps/Frontend Plane/verevonv3/docker-compose.yml"
+  "apps/Infra Plane/docker-compose.yml"
 )
 
+# INGESTION MOVED AFTER APPLICATION (2026-08-06). Ingestion's integration-api
+# calls fatal at startup if it cannot resolve `application-nats`
+# ("initialize event publisher" → FTL, container restart-loops, and the whole
+# plane fails with "dependency failed to start"). Application Plane owns that
+# broker, so it has to exist first. Verified there is no cycle before moving:
+# Application references integration-api ONLY as lazy URL env vars
+# (INTEGRATION_BASE_URL / INTEGRATION_CORE_URL) with zero depends_on entries,
+# and Model Plane likewise has zero depends_on on any Ingestion service. The
+# same direction shows up in the secrets: Ingestion consumes
+# APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD, which Application owns.
 STACK_NAMES=(
   "Control Plane"
   "Data Plane v2"
-  "Ingestion Plane"
   "Model Plane"
   "Application Plane"
+  "Ingestion Plane"
   "Frontend Plane Verevon v3"
+  "Infra Plane"
 )
 
 # One-shot services are removed after they exit successfully so `docker ps -a`
 # stays focused on long-running servers.
+# Every service listed here runs to completion and exits, so it must NOT be
+# treated as a long-running runtime service — `wait_for_stack_ready` requires
+# runtime services to be *running*, and a correctly-completed one-shot never is.
+# Omitting one guarantees a timeout on every single build of that plane.
+#
+# The authoritative way to find these is a `depends_on` entry with
+# `condition: service_completed_successfully`, plus any provisioner that simply
+# exits 0 without anything depending on it (audit-extra-nats-provisioner).
 BOOTSTRAP_SERVICES=(
-  "lago-migrate"
-  "minio-init migrate"
-  ""
-  ""
-  "affine-runtime-migration"
-  ""
+  "lago-migrate audit-nats-provisioner audit-extra-nats-provisioner"  # Control
+  "minio-init migrate"                                                # Data Plane v2
+  ""                                                                  # Model
+  "affine-runtime-migration jetstream-provisioner"                    # Application
+  ""                                                                  # Ingestion
+  ""                                                                  # Frontend
+  ""                                                                  # Infra
 )
 # Model Plane (index 3) historically had three one-shots
 # (capability-migrations, minio-bootstrap, temporal-bootstrap) — they were
@@ -277,27 +298,36 @@ BOOTSTRAP_SERVICES=(
 # (verevon v1) before standing up `frontend-plane-verevonv3` so the two cannot
 # fight over host port 3000 or the `verevon-nats` container name.
 OLD_PROJECTS=(
-  ""
-  ""
-  ""
-  "deploy"
-  ""
-  "frontend-plane-verevon"
+  ""                        # Control
+  ""                        # Data Plane v2
+  "deploy"                  # Model — was derived from the deploy/ folder name
+  ""                        # Application
+  ""                        # Ingestion
+  "frontend-plane-verevon"  # Frontend — verevon v1, fights for :3000 / verevon-nats
+  ""                        # Infra
 )
 
 # Per-stack post-build hooks (run after one-shots clear, before moving to the
 # next stack). Keep entries short — long hooks belong in their own function.
 # Format: comma-separated function names; empty string skips.
 POST_BUILD_HOOKS=(
-  "seed_dev_account,verify_controlplane_db_auth"
-  "apply_dataplane_migrations,verify_ownership_phase"
-  "ensure_finspo_database"
-  ""
-  "wait_for_convex_gateway_ready"
-  ""
+  "seed_dev_account,verify_controlplane_db_auth"        # Control
+  "apply_dataplane_migrations,verify_ownership_phase"   # Data Plane v2
+  ""                                                    # Model
+  "wait_for_convex_gateway_ready"                       # Application
+  "ensure_finspo_database"                              # Ingestion
+  ""                                                    # Frontend
+  "verify_infra_plane_edge"                             # Infra
 )
 
+# FRONTEND_STACK_INDEX marks the frontend plane itself — it drives the
+# frontend-only service subset (nats/gateway/frontend) and the "core planes the
+# frontend depends on" prerequisite loops. LAST_STACK_INDEX is the separate
+# "iterate every plane" bound. These were the same number until the Infra Plane
+# was appended after the frontend; conflating them silently skipped the last
+# plane in every full-fleet loop.
 FRONTEND_STACK_INDEX=5
+LAST_STACK_INDEX=$(( ${#COMPOSE_FILES[@]} - 1 ))
 START_STACK_INDEX=0
 WAIT_TIMEOUT_SECONDS="${WAIT_TIMEOUT_SECONDS:-900}"
 WAIT_INTERVAL_SECONDS="${WAIT_INTERVAL_SECONDS:-3}"
@@ -341,12 +371,13 @@ resolve_stack_index() {
   case "$requested" in
     control|control-plane|controlplane) printf '0' ;;
     data|data-plane|data-plane-v2|dataplane) printf '1' ;;
-    ingestion|ingestion-plane) printf '2' ;;
-    model|model-plane) printf '3' ;;
-    application|application-plane|app) printf '4' ;;
+    model|model-plane) printf '2' ;;
+    application|application-plane|app) printf '3' ;;
+    ingestion|ingestion-plane) printf '4' ;;
     frontend|frontend-plane|verevon|verevonv3) printf '5' ;;
+    infra|infra-plane|edge) printf '6' ;;
     *)
-      printf 'Unknown plane for --from: %s (use data, control, ingestion, model, application, or frontend)\n' "$1" >&2
+      printf 'Unknown plane for --from: %s (use data, control, ingestion, model, application, frontend, or infra)\n' "$1" >&2
       return 2
       ;;
   esac
@@ -388,6 +419,256 @@ run() {
   "$@"
 }
 
+# plane_env_files — print the dotenv files Compose should load for a plane, in
+# ASCENDING precedence order (later --env-file wins in Compose interpolation).
+#
+# The planes do not share one env layout, and assuming a single `.env` silently
+# broke three of them: Control, Ingestion, and Application have NO `.env` at
+# all — they keep interpolation values in a gitignored `.env.generated-secrets`
+# (Control) plus a legacy `.env.pre-per-service-bak` base (Ingestion,
+# Application), which is exactly the composition their own
+# `scripts/run-*-plane.sh` launchers use. Data Plane v2, Model Plane, Frontend,
+# and Infra use a plain `.env`. Encoding the ORDER here rather than a per-plane
+# file list keeps this from drifting as planes are added:
+#
+#   1. .env.pre-per-service-bak   legacy shared base, lowest precedence
+#   2. .env                       the plane's own committed/local values
+#   3. .env.generated-secrets     locally generated secrets, must win
+#
+# A few planes also consume secrets that ANOTHER plane owns and issues, so the
+# owner's file is loaded first (lowest precedence — the consuming plane's own
+# explicit value always still wins). Ingestion's integration-api authenticates
+# to Control Plane cores with tokens Control issues
+# (INTEGRATION_{ORG,BILLING,AUDIT}_CORE_SERVICE_TOKEN) and publishes to the
+# Application Plane's NATS account with a password Application owns
+# (APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD). Those secrets are
+# deliberately NOT copied into Ingestion's own file: duplicating them is how
+# this repo's rotation-drift bugs start.
+# plane_overlay_files — extra Compose files to layer onto a plane's base file
+# for a full-fleet build, printed in the order they must be passed.
+#
+# Data Plane v2's base file deliberately maps its `inter-plane-bus` network KEY
+# to a PRIVATE local bridge (`dpv2-cross-plane`) so the plane can boot with no
+# Control/Model Plane present. docker-compose.cross-plane.yml re-points that
+# same key at the real external `inter-plane-bus`. Without it, every DPv2
+# service that declares `inter-plane-bus` lands on an isolated bridge — and the
+# three Go services (documents-api, data-orchestrator, data-quality) then
+# crash-loop on `lookup control-shared-nats: no such host`, because each one
+# treats its scoped GDPR NATS connection as REQUIRED and calls fatal without it.
+# The plane never reaches ready and the build burns a full timeout.
+#
+# Layering it here is safe precisely because this script is the full-fleet
+# path: ensure_verevon_network has already created the deployment-owned bus
+# before any plane starts, which is the overlay's own stated precondition.
+plane_overlay_files() {
+  local plane_dir="$1"
+  local overlay
+
+  case "$(basename "$plane_dir")" in
+    "Data Plane v2")
+      overlay="$plane_dir/docker-compose.cross-plane.yml"
+      [[ -f "$overlay" ]] && printf '%s\n' "$overlay"
+      ;;
+    # Model Plane's compose file lives in deploy/, so basename is "deploy".
+    # Its own scripts/compose.sh layers docker-compose.override.yml whenever
+    # MODEL_PLANE_DEV != 0 — and that variable DEFAULTS TO 1, so the dev
+    # profile is the canonical local configuration, not an opt-in. It sets
+    # RUST_LOG=debug, relaxed rate limits, and FINETUNE_ENABLED=1. Building
+    # from the base file alone silently produced a production-ish Model Plane
+    # with finetune routes off. Skipped under --production, where the script
+    # already layers docker-compose.production.yml instead.
+    "deploy")
+      if [[ "$PRODUCTION" != "true" && "${MODEL_PLANE_DEV:-1}" != "0" ]]; then
+        overlay="$plane_dir/docker-compose.override.yml"
+        [[ -f "$overlay" ]] && printf '%s\n' "$overlay"
+      fi
+      ;;
+  esac
+}
+
+plane_env_files() {
+  local plane_dir="$1"
+  local owner core_env
+
+  case "$(basename "$plane_dir")" in
+    "Ingestion Plane")
+      for owner in "$CORE_ROOT/apps/Control Plane/.env.generated-secrets" \
+                   "$CORE_ROOT/apps/Application Plane/.env.generated-secrets"; do
+        [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      done
+      ;;
+  esac
+
+  # NOTE: `.env.pre-per-service-bak` is deliberately NOT loaded. It is the
+  # retired pre-per-service monolith, and the canonical launchers
+  # (run-ingestion-plane.sh, run-application-plane.sh) reference it zero times.
+  # Loading it would let stale retired values satisfy any key the per-core files
+  # no longer define — silently reintroducing config this repo already migrated
+  # away from.
+
+  # PER-CORE env files — the actual convention. Each core under a plane owns its
+  # own `.env`, plus optional `.env.docker` / `.env.local` overrides, and the
+  # multi-core planes have no plane-root `.env` at all. This mirrors the
+  # `env_files=(...)` arrays in scripts/run-<plane>-plane.sh — including
+  # convex-core/.env.local, which run-application-plane.sh loads explicitly.
+  # Sorted for determinism; `.env` sorts before both `.env.docker` and
+  # `.env.local`, so a per-core override correctly wins within its core.
+  while IFS= read -r core_env; do
+    [[ -n "$core_env" ]] || continue
+    printf '%s\n' "$core_env"
+  done < <(
+    find "$plane_dir" -mindepth 2 -maxdepth 2 \
+      \( -name node_modules -o -name target -o -name dist \) -prune -o \
+      \( -name '.env' -o -name '.env.docker' -o -name '.env.local' \) -print 2>/dev/null | LC_ALL=C sort
+  )
+
+  # 3. A plane-level `.env`, for the single-core/deploy-style planes that do use
+  #    one (Data Plane v2, Model Plane's deploy dir, Frontend, Infra). Disjoint
+  #    from case 2 in practice — no plane has both.
+  if [[ -f "$plane_dir/.env" && "$plane_dir/.env" != "$CORE_ROOT/.env" ]]; then
+    printf '%s\n' "$plane_dir/.env"
+  fi
+
+  # 4. Locally generated secrets last, so they win — matching the
+  #    "read back last" ordering in run-control-plane.sh.
+  if [[ -f "$plane_dir/.env.generated-secrets" ]]; then
+    printf '%s\n' "$plane_dir/.env.generated-secrets"
+  fi
+}
+
+# verify_plane_env_contract — guard against this script's env resolution
+# drifting from the per-plane launchers, which are the canonical definition of
+# what a plane needs.
+#
+# Control, Ingestion, and Application each own a scripts/run-<plane>-plane.sh
+# that declares an explicit `env_files=(...)` array. This script resolves the
+# same set by convention instead of by list, which is what lets it stay correct
+# as cores are added — but it also means a file the launcher loads explicitly
+# and the convention does not match can be silently dropped. That exact bug
+# occurred with convex-core/.env.local.
+#
+# Asserts SUBSET, not equality: every file the launcher declares must appear in
+# this script's resolution. Extra files here are legitimate (cross-plane owner
+# secrets the launcher gets another way).
+#
+# Tolerant by default (warn) — set STRICT_ENV_CONTRACT=1 to fail the build.
+# Skip with VERIFY_ENV_CONTRACT=0.
+# verify_oneshot_declarations — catch a plane one-shot that is missing from
+# BOOTSTRAP_SERVICES before it costs a full WAIT_TIMEOUT_SECONDS.
+#
+# A service other services depend on with `condition:
+# service_completed_successfully` is by definition run-to-completion. If it is
+# not declared as a bootstrap service, `runtime_services` classifies it as a
+# long-running server and `wait_for_stack_ready` blocks until timeout waiting
+# for a container that has correctly already exited — a guaranteed, slow, and
+# very confusing failure on every build of that plane. This shipped broken for
+# Control Plane (audit-nats-provisioner) and Application Plane
+# (jetstream-provisioner).
+#
+# Advisory only: it cannot see a provisioner that nothing depends on, so it
+# under-reports rather than blocks. Set STRICT_ONESHOTS=1 to fail on a finding.
+verify_oneshot_declarations() {
+  if [[ "${VERIFY_ONESHOTS:-1}" == "0" ]]; then
+    return 0
+  fi
+
+  local index compose_file declared found_any=0 service
+
+  for ((index = 0; index <= LAST_STACK_INDEX; index++)); do
+    compose_file="${COMPOSE_FILES[$index]}"
+    [[ -f "$compose_file" ]] || continue
+    declared="${BOOTSTRAP_SERVICES[$index]}"
+
+    while IFS= read -r service; do
+      [[ -n "$service" ]] || continue
+      # `condition` itself is matched when a depends_on block lists several
+      # services; it is a YAML key, never a service name.
+      [[ "$service" == "condition" ]] && continue
+      if ! service_in_list "$service" "$declared"; then
+        printf '[one-shots] WARN: %s: %s completes-and-exits but is not in BOOTSTRAP_SERVICES — readiness wait will time out\n' \
+          "${STACK_NAMES[$index]}" "$service" >&2
+        found_any=1
+      fi
+    done < <(
+      grep -B1 'condition:[[:space:]]*service_completed_successfully' "$compose_file" 2>/dev/null \
+        | grep -oE '^[[:space:]]+[a-z0-9_-]+:' | tr -d ' :' | LC_ALL=C sort -u
+    )
+  done
+
+  if (( found_any == 1 )); then
+    if [[ "${STRICT_ONESHOTS:-0}" == "1" ]]; then
+      return 1
+    fi
+    printf '[one-shots] Continuing (set STRICT_ONESHOTS=1 to fail here).\n' >&2
+    return 0
+  fi
+
+  printf '[one-shots] OK — every completes-and-exits service is declared\n'
+}
+
+verify_plane_env_contract() {
+  if [[ "${VERIFY_ENV_CONTRACT:-1}" == "0" ]]; then
+    log "Plane env-contract verification disabled (VERIFY_ENV_CONTRACT=0)"
+    return 0
+  fi
+
+  local index compose_file plane_dir launcher resolved declared missing_any=0
+  local launcher_name
+
+  for ((index = 0; index <= LAST_STACK_INDEX; index++)); do
+    compose_file="${COMPOSE_FILES[$index]}"
+    plane_dir="$CORE_ROOT/$(dirname "$compose_file")"
+
+    launcher=""
+    for launcher_name in run-control-plane.sh run-ingestion-plane.sh run-application-plane.sh; do
+      if [[ -f "$plane_dir/scripts/$launcher_name" ]]; then
+        launcher="$plane_dir/scripts/$launcher_name"
+        break
+      fi
+    done
+    [[ -n "$launcher" ]] || continue
+
+    resolved="$(plane_env_files "$plane_dir")"
+
+    # Pull the "$root/<core>/.env*" entries out of the launcher's env_files
+    # array and resolve $root to the plane directory.
+    while IFS= read -r declared; do
+      [[ -n "$declared" ]] || continue
+      if ! grep -Fxq "$declared" <<<"$resolved"; then
+        printf '[env-contract] WARN: %s loads %s but this script does not resolve it\n' \
+          "$(basename "$launcher")" "${declared#"$CORE_ROOT/"}" >&2
+        missing_any=1
+      fi
+    done < <(
+      # Two forms must both be captured: the `env_files=( ... )` literal, and
+      # any later conditional `env_files+=("$root/...")` append. Scanning only
+      # the array literal missed convex-core/.env.local, which
+      # run-application-plane.sh appends on its own line — the precise gap this
+      # guard exists to catch. `env_files+=("$secrets_file")` uses a variable,
+      # not a "$root/" literal, so it is correctly ignored.
+      {
+        sed -n '/^env_files=(/,/^)/p' "$launcher" 2>/dev/null
+        grep -E '^[^#]*env_files\+=\(' "$launcher" 2>/dev/null
+      } \
+        | grep -oE '"\$root/[^"]+"' \
+        | tr -d '"' \
+        | sed "s|^\$root|$plane_dir|" \
+        | LC_ALL=C sort -u
+    )
+  done
+
+  if (( missing_any == 1 )); then
+    printf '[env-contract] Resolution has drifted from the canonical launchers.\n' >&2
+    if [[ "${STRICT_ENV_CONTRACT:-0}" == "1" ]]; then
+      return 1
+    fi
+    printf '[env-contract] Continuing (set STRICT_ENV_CONTRACT=1 to fail here).\n' >&2
+    return 0
+  fi
+
+  printf '[env-contract] OK — every launcher-declared env file is resolved\n'
+}
+
 compose() {
   local original_args=("$@")
   local compose_args=()
@@ -403,6 +684,22 @@ compose() {
     if [[ "${original_args[$index]}" == "-f" && $((index + 1)) -lt ${#original_args[@]} ]]; then
       compose_file="${original_args[$((index + 1))]}"
       compose_args+=("-f" "$compose_file")
+
+      # Cross-plane / shared-network overlays. Layered for EVERY compose call,
+      # not just `up`: a `ps` or `config` rendered without the same overlay set
+      # resolves different networks and would disagree with what was started.
+      if [[ "$(basename "$compose_file")" == "docker-compose.yml" ]]; then
+        local plane_overlay plane_overlay_dir
+        if [[ "$compose_file" == /* ]]; then
+          plane_overlay_dir="$(dirname "$compose_file")"
+        else
+          plane_overlay_dir="$CORE_ROOT/$(dirname "$compose_file")"
+        fi
+        while IFS= read -r plane_overlay; do
+          [[ -n "$plane_overlay" ]] || continue
+          compose_args+=("-f" "$plane_overlay")
+        done < <(plane_overlay_files "$plane_overlay_dir")
+      fi
 
       if [[ "$PRODUCTION" == "true" && "$(basename "$compose_file")" == "docker-compose.yml" ]]; then
         production_override="$(dirname "$compose_file")/docker-compose.production.yml"
@@ -428,14 +725,16 @@ compose() {
     env_args+=("--env-file" "$CORE_ROOT/.env")
   fi
   if [[ -n "$compose_file" ]]; then
+    local plane_dir
     if [[ "$compose_file" == /* ]]; then
-      plane_env="$(dirname "$compose_file")/.env"
+      plane_dir="$(dirname "$compose_file")"
     else
-      plane_env="$CORE_ROOT/$(dirname "$compose_file")/.env"
+      plane_dir="$CORE_ROOT/$(dirname "$compose_file")"
     fi
-    if [[ -f "$plane_env" && "$plane_env" != "$CORE_ROOT/.env" ]]; then
+    while IFS= read -r plane_env; do
+      [[ -n "$plane_env" ]] || continue
       env_args+=("--env-file" "$plane_env")
-    fi
+    done < <(plane_env_files "$plane_dir")
   fi
 
   if (( ${#env_args[@]} > 0 )); then
@@ -576,7 +875,7 @@ report_launcher_error() {
 
   printf '\n[launcher] ERROR: command failed at line %s (exit %s).\n' "$line" "$exit_code" >&2
   if (( ACTIVE_STACK_INDEX >= 0 )); then
-    local resume_aliases=(control data ingestion model application frontend)
+    local resume_aliases=(control data model application ingestion frontend infra)
     printf '[launcher] Active plane: %s. Resume with: %q --from %q' \
       "${STACK_NAMES[$ACTIVE_STACK_INDEX]}" "$SCRIPT_DIR/build-verevon-services.sh" \
       "${resume_aliases[$ACTIVE_STACK_INDEX]}" >&2
@@ -634,6 +933,48 @@ ensure_verevon_network() {
 
   log "Creating shared Docker network: inter-plane-bus"
   run docker network create inter-plane-bus >/dev/null
+}
+
+# ensure_external_volumes — create any `external: true` volumes the selected
+# planes declare but that do not exist yet.
+#
+# Compose auto-creates ordinary named volumes; it refuses to create EXTERNAL
+# ones and hard-fails with `external volume "X" not found`. The frontend plane
+# declares `verevon-nats-data` external on purpose (Docker cannot rename a
+# volume, so the rename kept the established JetStream store under a new
+# logical name) — which means a genuinely cold host, or any host after a
+# volume prune, could not start the fleet at all until the volume was created
+# by hand. This is the volume-level counterpart to ensure_verevon_network.
+#
+# `docker volume create` is idempotent, so this is safe to re-run.
+ensure_external_volumes() {
+  local first_index="$1"
+  local last_index="$2"
+  local index compose_file volume_name
+
+  for ((index = first_index; index <= last_index; index++)); do
+    compose_file="${COMPOSE_FILES[$index]}"
+    [[ -f "$compose_file" ]] || continue
+
+    while IFS= read -r volume_name; do
+      [[ -n "$volume_name" ]] || continue
+      if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+        continue
+      fi
+      if [[ "$DRY_RUN" == "true" ]]; then
+        printf '[volumes] dry-run: would create missing external volume %s (%s)\n' \
+          "$volume_name" "${STACK_NAMES[$index]}"
+        continue
+      fi
+      log "Creating missing external volume: $volume_name (${STACK_NAMES[$index]})"
+      run docker volume create "$volume_name" >/dev/null
+    done < <(
+      compose -f "$compose_file" config --format json 2>/dev/null \
+        | jq -r '(.volumes // {}) | to_entries[]
+                 | select(.value.external == true)
+                 | (.value.name // .key)' 2>/dev/null || true
+    )
+  done
 }
 
 validate_compose() {
@@ -973,7 +1314,7 @@ preflight_skip_build_images() {
 
   local index compose_file config_json image
   local missing=()
-  for ((index = START_STACK_INDEX; index <= FRONTEND_STACK_INDEX; index++)); do
+  for ((index = START_STACK_INDEX; index <= LAST_STACK_INDEX; index++)); do
     compose_file="${COMPOSE_FILES[$index]}"
     config_json="$(compose -f "$compose_file" config --format json)"
     while IFS= read -r image; do
@@ -1055,6 +1396,61 @@ wait_for_convex_gateway_ready() {
   # and only then starts `convex dev`. Its healthcheck depends on that dev
   # process, so readiness here also means the function registry is loaded.
   wait_for_services_ready "$compose_file" "convex-gateway"
+}
+
+# verify_infra_plane_edge — prove the Infra Plane's edge actually routes, not
+# merely that its three containers report healthy. Container health only tells
+# us each process is alive; it does not exercise Traefik's file-provider
+# routing table, which is where a bad `dynamic.yml` silently breaks ingress.
+#
+# Probes both configured routers through the published entrypoint:
+#   /            → core-infra-home    → nginx:8080
+#   /infra/health → stripPrefix       → core-infra-gateway:7500/health
+#
+# Tolerant by default (warn, continue) — set STRICT_INFRA_EDGE=1 to fail the
+# build when the edge does not route. Skip entirely with VERIFY_INFRA_EDGE=0.
+verify_infra_plane_edge() {
+  if [[ "${VERIFY_INFRA_EDGE:-1}" == "0" ]]; then
+    log "Infra Plane edge verification disabled (VERIFY_INFRA_EDGE=0)"
+    return 0
+  fi
+  if [[ "$DRY_RUN" == "true" ]]; then
+    printf '[infra-edge] dry-run: would probe / and /infra/health through Traefik\n'
+    return 0
+  fi
+
+  local port="${CORE_INFRA_HTTP_PORT:-8090}"
+  local base="http://127.0.0.1:${port}"
+  local failed=()
+  local code
+
+  log "Verifying Infra Plane edge routing through Traefik (port $port)"
+
+  code="$(curl --connect-timeout 3 --max-time 10 -s -o /dev/null -w '%{http_code}' "$base/" 2>/dev/null || true)"
+  if [[ "$code" == "200" ]]; then
+    printf '[infra-edge] /            → nginx OK (200)\n'
+  else
+    printf '[infra-edge] WARN: /            → nginx returned %s (want 200)\n' "${code:-no-response}" >&2
+    failed+=("nginx-home")
+  fi
+
+  # core-infra-gateway is a plain Go health endpoint behind stripPrefix.
+  code="$(curl --connect-timeout 3 --max-time 10 -s -o /dev/null -w '%{http_code}' "$base/infra/health" 2>/dev/null || true)"
+  if [[ "$code" == "200" ]]; then
+    printf '[infra-edge] /infra/health → core-infra-gateway OK (200)\n'
+  else
+    printf '[infra-edge] WARN: /infra/health → core-infra-gateway returned %s (want 200)\n' "${code:-no-response}" >&2
+    failed+=("core-infra-gateway")
+  fi
+
+  if (( ${#failed[@]} > 0 )); then
+    printf '[infra-edge] FAILED to route: %s\n' "${failed[*]}" >&2
+    if [[ "${STRICT_INFRA_EDGE:-0}" == "1" ]]; then
+      return 1
+    fi
+    printf '[infra-edge] Continuing (set STRICT_INFRA_EDGE=1 to fail the build here).\n' >&2
+  fi
+  return 0
 }
 
 # apply_dataplane_migrations — idempotently apply the Per-User Data Ownership
@@ -1232,7 +1628,7 @@ seed_dev_account() {
   esac
 
   # Promote to superadmin + mark verified so the login is usable immediately.
-  if ! docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -v "seed_email=$email" -U aquatiq -d auth_service -c \
+  if ! docker exec -i "$pg" psql -v ON_ERROR_STOP=1 -v "seed_email=$email" -U coresystem -d auth_service -c \
       "UPDATE \"user\" SET role='superadmin', email_verified=true WHERE email=:'seed_email';" >/dev/null 2>&1; then
     printf '[seed] WARN: could not promote %s to superadmin (continuing)\n' "$email" >&2
   fi
@@ -1320,7 +1716,7 @@ verify_ownership_phase() {
   fi
 
   local cp_container="${SEED_PG_CONTAINER:-controlplane-postgres}"
-  local cp_user="${CONTROLPLANE_PG_USER:-aquatiq}"
+  local cp_user="${CONTROLPLANE_PG_USER:-coresystem}"
   local dp_container
   dp_container="$(compose -f "$CORE_ROOT/apps/Data Plane v2/docker-compose.yml" ps -q postgres)"
   local dp_user="${DPV2_PG_USER:-dataplane}"
@@ -1407,9 +1803,30 @@ verify_internal_api_key_consistency() {
   local strict_internal_key_check="${STRICT_INTERNAL_KEY_CHECK:-0}"
   [[ "$PRODUCTION" == "true" ]] && strict_internal_key_check=1
 
-  local canonical_file="$CORE_ROOT/apps/Control Plane/.env"
-  if [[ ! -f "$canonical_file" ]]; then
-    printf '[internal-key] WARN: %s not found; consistency cannot be verified\n' "$canonical_file" >&2
+  # Control Plane owns identity, so its env is authoritative — but that plane
+  # has no plain `.env` (its values live in `.env.generated-secrets`). Resolving
+  # the file rather than hardcoding one keeps this check from silently passing:
+  # it previously looked only for `Control Plane/.env`, never found it, and so
+  # verified nothing across the entire fleet.
+  local canonical_file="" candidate
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    if grep -q '^INTERNAL_API_KEY=' "$candidate" 2>/dev/null; then
+      canonical_file="$candidate"
+    fi
+  done < <(plane_env_files "$CORE_ROOT/apps/Control Plane")
+
+  # Control Plane owns identity and is the intended home for this key, but it
+  # does not currently define it — the fleet's shared value lives in the root
+  # `.env` (verified byte-identical across all 8 planes that set it). Fall back
+  # there so the drift check still runs; without this it verified nothing.
+  if [[ -z "$canonical_file" && -f "$CORE_ROOT/.env" ]] \
+      && grep -q '^INTERNAL_API_KEY=' "$CORE_ROOT/.env" 2>/dev/null; then
+    canonical_file="$CORE_ROOT/.env"
+  fi
+
+  if [[ -z "$canonical_file" ]]; then
+    printf '[internal-key] WARN: no Control Plane env file defines INTERNAL_API_KEY; consistency cannot be verified\n' >&2
     [[ "$strict_internal_key_check" == "1" ]] && return 1
     return 0
   fi
@@ -1510,10 +1927,13 @@ validate_runtime_secrets() {
   if [[ "$MODE" == "build" ]]; then
     first_index="$START_STACK_INDEX"
   fi
-  for ((index = first_index; index <= FRONTEND_STACK_INDEX; index++)); do
+  for ((index = first_index; index <= LAST_STACK_INDEX; index++)); do
     compose_file="${COMPOSE_FILES[$index]}"
     selected_compose_files+=("$compose_file")
-    runtime_env_files+=("$CORE_ROOT/$(dirname "$compose_file")/.env")
+    while IFS= read -r env_file; do
+      [[ -n "$env_file" ]] || continue
+      runtime_env_files+=("$env_file")
+    done < <(plane_env_files "$CORE_ROOT/$(dirname "$compose_file")")
     if [[ "$PRODUCTION" == "true" ]]; then
       production_file="$(dirname "$compose_file")/docker-compose.production.yml"
       [[ -f "$production_file" ]] && selected_compose_files+=("$production_file")
@@ -1694,13 +2114,22 @@ validate_required_environment() {
       production_file="$(dirname "$compose_file")/docker-compose.production.yml"
       [[ -f "$production_file" ]] && source_files+=("$production_file")
     fi
-    plane_env="$CORE_ROOT/$(dirname "$compose_file")/.env"
+    local plane_env_list=()
+    while IFS= read -r plane_env; do
+      [[ -n "$plane_env" ]] || continue
+      plane_env_list+=("$plane_env")
+    done < <(plane_env_files "$CORE_ROOT/$(dirname "$compose_file")")
 
     while IFS= read -r key; do
       [[ -n "$key" ]] || continue
       value="$(printenv "$key" 2>/dev/null || true)"
+      # Any of the plane's dotenv files may carry the value; precedence only
+      # matters for the value Compose ends up using, not for presence.
       if [[ -z "$value" ]]; then
-        value="$(dotenv_value "$plane_env" "$key" 2>/dev/null || true)"
+        for plane_env in "${plane_env_list[@]+"${plane_env_list[@]}"}"; do
+          value="$(dotenv_value "$plane_env" "$key" 2>/dev/null || true)"
+          [[ -n "$value" ]] && break
+        done
       fi
       if [[ -z "$value" ]]; then
         value="$(dotenv_value "$CORE_ROOT/.env" "$key" 2>/dev/null || true)"
@@ -1727,6 +2156,7 @@ compose_bootstrap() {
   local index
 
   ensure_verevon_network
+  ensure_external_volumes 0 "$FRONTEND_STACK_INDEX"
   ensure_frontend_bus
 
   if [[ "$DRY_RUN" == "true" ]]; then
@@ -1753,13 +2183,15 @@ main() {
   preflight_compose_cli
 
   if [[ "$MODE" != "prune" && "$MODE" != "status" ]]; then
+    verify_oneshot_declarations
+    verify_plane_env_contract
     verify_internal_api_key_consistency
     validate_runtime_secrets
   fi
 
   if [[ "$MODE" == "build" ]]; then
-    validate_required_environment "$START_STACK_INDEX" "$FRONTEND_STACK_INDEX"
-    validate_stack_configs "$START_STACK_INDEX" "$FRONTEND_STACK_INDEX"
+    validate_required_environment "$START_STACK_INDEX" "$LAST_STACK_INDEX"
+    validate_stack_configs "$START_STACK_INDEX" "$LAST_STACK_INDEX"
   elif [[ "$MODE" == "compose-bootstrap" ]]; then
     validate_required_environment 0 "$FRONTEND_STACK_INDEX"
     validate_stack_configs 0 "$FRONTEND_STACK_INDEX"
@@ -1791,10 +2223,11 @@ main() {
   esac
 
   ensure_verevon_network
+  ensure_external_volumes "$START_STACK_INDEX" "$LAST_STACK_INDEX"
   ensure_frontend_bus
 
   local index
-  for ((index = START_STACK_INDEX; index <= FRONTEND_STACK_INDEX; index++)); do
+  for ((index = START_STACK_INDEX; index <= LAST_STACK_INDEX; index++)); do
     if [[ "$RESUME_READY_STACKS" == "true" ]] && stack_runtime_ready "$index"; then
       log "Skipping ${STACK_NAMES[$index]}: every runtime service is already ready"
       ACTIVE_STACK_INDEX="$index"

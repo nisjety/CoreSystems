@@ -155,7 +155,7 @@ export type ChatKnowledgeGrounding = {
  * answer that is fluent but NOT grounded in this org's knowledge base gets
  * flagged, while a real grounded answer does not.
  *
- * Incident (2026-07-20): "tell me about aquatiq what do they do and sell"
+ * Incident (2026-07-20): "tell me about coresystem what do they do and sell"
  * returned a confidently wrong, uncited answer scored exactly 0.72; that
  * score was computed but only ever visible by opening the Reasoning popover
  * and clicking into its "Oversikt" tab — never in the actual chat bubble.

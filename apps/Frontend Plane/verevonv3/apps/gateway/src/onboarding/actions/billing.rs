@@ -37,9 +37,18 @@ pub(crate) async fn set_plan(
     // A paywall selection is not an entitlement grant. The selected plan is
     // acknowledged for UI continuity; Billing Core may activate it only after
     // provider-confirmed checkout.
+    //
+    // `id` + `plan` are the client contract (planSetSchema requires both;
+    // setPlan is typed Promise<{id, plan}>). This response used to carry only
+    // orgId/selectedPlan, so the SPA's zod parse rejected every 200 and the
+    // free/trial path failed with a user-facing error despite a clean network
+    // tab — the worst kind of "nothing is wrong anywhere" failure. The old
+    // keys stay for any other reader; zod's default object mode ignores them.
     (
         StatusCode::OK,
         Json(ok(json!({
+            "id": input.org_id.trim(),
+            "plan": input.plan,
             "orgId": input.org_id.trim(),
             "selectedPlan": input.plan,
             "reason": input.reason.unwrap_or_else(|| "onboarding".into()),

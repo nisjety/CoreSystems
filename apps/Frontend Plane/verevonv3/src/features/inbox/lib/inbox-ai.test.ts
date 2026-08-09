@@ -19,9 +19,9 @@ describe("runAssist", () => {
 			async (input: RequestInfo | URL, _init?: RequestInit) => {
 				void _init;
 				const url = String(input);
-				if (url === "/api/v1/orgs/org-aquatiq") {
+				if (url === "/api/v1/orgs/org-coresystem") {
 					return jsonResponse({
-						id: "org-aquatiq",
+						id: "org-coresystem",
 						metadata: { interactiveRetention: { zdr: false } },
 					});
 				}
@@ -46,7 +46,7 @@ describe("runAssist", () => {
 
 		await expect(
 			runAssist(
-				"org-aquatiq",
+				"org-coresystem",
 				"draft",
 				[
 					{
@@ -99,7 +99,7 @@ describe("runAssist", () => {
 
 		expect(url).toBe("/api/v1/chat/invoke");
 		expect(init.method).toBe("POST");
-		expect(headers.get("x-verevon-org-id")).toBe("org-aquatiq");
+		expect(headers.get("x-verevon-org-id")).toBe("org-coresystem");
 		expect(body.zdr).toBe(false);
 		expect(body.features).toEqual(["tools"]);
 		expect(body.content).toContain("the customer (Maya Solberg)");

@@ -46,7 +46,7 @@ export function Navbar({
 				className="pointer-events-auto justify-self-start font-arbeit text-[0.98rem] font-normal uppercase leading-none tracking-[0.18em] max-[760px]:text-[0.86rem] max-[760px]:tracking-[0.16em]"
 				href="#top"
 			>
-				Verevon
+				VEREVON
 			</a>
 
 			<nav
@@ -85,17 +85,17 @@ export function Navbar({
 					</svg>
 				</a>
 
-					<button
-						aria-expanded={isMenuOpen}
-						aria-label="Åpne meny"
-						className="group grid w-[50px] cursor-pointer gap-1.5 border-0 bg-transparent py-2.5 text-[color-mix(in_srgb,currentColor_68%,transparent)] transition-colors hover:text-current max-[760px]:w-11"
-						onClick={onOpen}
-						type="button"
-					>
-						<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-[0.76]" />
-						<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-90" />
-					</button>
-				</div>
-			</header>
-		);
-	}
+				<button
+					aria-expanded={isMenuOpen}
+					aria-label="Åpne meny"
+					className="group grid w-[50px] cursor-pointer gap-1.5 border-0 bg-transparent py-2.5 text-[color-mix(in_srgb,currentColor_68%,transparent)] transition-colors hover:text-current max-[760px]:w-11"
+					onClick={onOpen}
+					type="button"
+				>
+					<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-[0.76]" />
+					<span className="block h-px w-full origin-right bg-current transition-transform group-hover:scale-x-90" />
+				</button>
+			</div>
+		</header>
+	);
+}

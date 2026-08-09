@@ -32,7 +32,7 @@ const articles: ZammadArticle[] = [{
 
 const supportTicket = {
   id: 'ticket-42',
-  org_id: 'org-aquatiq',
+  org_id: 'org-coresystem',
   conversation_id: 'conversation-42',
   ticket_key: 'TCK-42',
   status: 'open',
@@ -65,7 +65,7 @@ describe('InboxAside Verevon actions', () => {
   it('exposes Details, Verevon, Actions, and Audit as direct local tabs', () => {
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -73,7 +73,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -87,7 +87,7 @@ describe('InboxAside Verevon actions', () => {
   it('shows the selected conversation context in the Verevon rail', () => {
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -95,7 +95,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -109,8 +109,8 @@ describe('InboxAside Verevon actions', () => {
     window.localStorage.setItem('verevon.chat.threadId', 'unrelated-thread')
     let invokeBody: Record<string, unknown> | null = null
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input) === '/api/v1/orgs/org-aquatiq') {
-        return new Response(JSON.stringify({ data: { id: 'org-aquatiq', metadata: {} } }), { headers: { 'Content-Type': 'application/json' } })
+      if (String(input) === '/api/v1/orgs/org-coresystem') {
+        return new Response(JSON.stringify({ data: { id: 'org-coresystem', metadata: {} } }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (String(input) === '/api/v1/chat/invoke') {
         invokeBody = JSON.parse(String(init?.body)) as Record<string, unknown>
@@ -120,7 +120,7 @@ describe('InboxAside Verevon actions', () => {
     }))
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -128,7 +128,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -167,7 +167,7 @@ describe('InboxAside Verevon actions', () => {
     }))
 
     const [context, setContext] = createSignal<{ orgId: string; ticket: ZammadTicket }>({
-      orgId: 'org-aquatiq',
+      orgId: 'org-coresystem',
       ticket: { ...ticket, conversationId: 'conversation-42', supportTicket },
     })
     render(() => (
@@ -180,7 +180,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={context().ticket}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -205,7 +205,7 @@ describe('InboxAside Verevon actions', () => {
   it('shows the canonical linked-ticket SLA risk and deadline in Inbox context', () => {
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -213,7 +213,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -228,7 +228,7 @@ describe('InboxAside Verevon actions', () => {
       const url = String(input)
       if (url.endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease')) {
         return new Response(JSON.stringify({ data: {
-          org_id: 'org-aquatiq', conversation_id: 'conversation-42', user_id: 'user-aquatiq',
+          org_id: 'org-coresystem', conversation_id: 'conversation-42', user_id: 'user-coresystem',
           expires_at: '2026-08-02T18:15:00.000Z', updated_at: '2026-08-02T18:14:00.000Z',
         } }), { headers: { 'Content-Type': 'application/json' } })
       }
@@ -238,7 +238,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -246,14 +246,14 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
     openConversationActivity()
 
     expect((await screen.findByText('Du skriver et utkast')).textContent).toBe('Du skriver et utkast')
-    expect(screen.queryByText(/user-aquatiq/i)).toBeNull()
+    expect(screen.queryByText(/user-coresystem/i)).toBeNull()
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith('/api/v1/inbox/conversations/conversation-42/draft-lease'))).toBe(true)
   })
 
@@ -270,7 +270,7 @@ describe('InboxAside Verevon actions', () => {
           return new Response(JSON.stringify({ error: { code: 'not_found', message: 'Not followed' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
         }
         return new Response(JSON.stringify({ data: {
-          org_id: 'org-aquatiq', conversation_id: 'conversation-42', user_id: 'user-aquatiq', created_at: '2026-08-03T10:00:00.000Z',
+          org_id: 'org-coresystem', conversation_id: 'conversation-42', user_id: 'user-coresystem', created_at: '2026-08-03T10:00:00.000Z',
         } }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/api/v1/actions/execute')) {
@@ -286,7 +286,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -294,7 +294,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -321,8 +321,8 @@ describe('InboxAside Verevon actions', () => {
       }
       if (url.endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference')) {
         return new Response(JSON.stringify({ data: {
-          org_id: 'org-aquatiq', conversation_id: 'conversation-42', contact_id: 'contact-42', opted_in: optedIn,
-          updated_by: 'user-aquatiq', updated_at: '2026-08-03T10:00:00.000Z',
+          org_id: 'org-coresystem', conversation_id: 'conversation-42', contact_id: 'contact-42', opted_in: optedIn,
+          updated_by: 'user-coresystem', updated_at: '2026-08-03T10:00:00.000Z',
         } }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/api/v1/actions/execute')) {
@@ -338,7 +338,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -346,7 +346,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -551,11 +551,11 @@ describe('InboxAside Verevon actions', () => {
         return new Response(JSON.stringify({ error: { code: 'not_found', message: 'Not followed' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference')) {
-        return new Response(JSON.stringify({ data: { org_id: 'org-aquatiq', conversation_id: 'conversation-42', contact_id: 'contact-42', opted_in: true } }), { headers: { 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ data: { org_id: 'org-coresystem', conversation_id: 'conversation-42', contact_id: 'contact-42', opted_in: true } }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/api/v1/tickets/ticket-42/csat-outcome')) {
         if (recordedScore === null) return new Response(JSON.stringify({ error: { code: 'not_found', message: 'No score' } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
-        return new Response(JSON.stringify({ data: { org_id: 'org-aquatiq', ticket_id: 'ticket-42', conversation_id: 'conversation-42', score: recordedScore } }), { headers: { 'Content-Type': 'application/json' } })
+        return new Response(JSON.stringify({ data: { org_id: 'org-coresystem', ticket_id: 'ticket-42', conversation_id: 'conversation-42', score: recordedScore } }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (url.endsWith('/api/v1/tickets/csat-scorecard')) {
         return new Response(JSON.stringify({ data: { rated_tickets: recordedScore === null ? 0 : 1, positive_ratings: recordedScore !== null && recordedScore >= 4 ? 1 : 0 } }), { headers: { 'Content-Type': 'application/json' } })
@@ -571,7 +571,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -579,7 +579,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket: { ...supportTicket, status: 'resolved' } }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -607,7 +607,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -615,7 +615,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -643,7 +643,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -652,8 +652,8 @@ describe('InboxAside Verevon actions', () => {
         onOpenModal={vi.fn()}
         filter={{ activeTab: 'open', assigned: 'unassigned', channel: 'email', label: 'Unassigned email' }}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-		ticketTeams={[{ id: 'team_delivery', org_id: 'org-aquatiq', name: 'Delivery', active: true, created_at: '', updated_at: '' }]}
-        userId="user-aquatiq"
+		ticketTeams={[{ id: 'team_delivery', org_id: 'org-coresystem', name: 'Delivery', active: true, created_at: '', updated_at: '' }]}
+        userId="user-coresystem"
         visibleTickets={[
           { ...ticket, conversationId: 'conversation-42' },
           { ...ticket, id: 43, number: '43', title: 'Private customer title', conversationId: 'conversation-43' },
@@ -715,7 +715,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -723,8 +723,8 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
-		ticketTeams={[{ id: 'team_delivery', org_id: 'org-aquatiq', name: 'Delivery', active: true, created_at: '', updated_at: '' }]}
-        userId="user-aquatiq"
+		ticketTeams={[{ id: 'team_delivery', org_id: 'org-coresystem', name: 'Delivery', active: true, created_at: '', updated_at: '' }]}
+        userId="user-coresystem"
       />
     ))
 
@@ -764,7 +764,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -772,7 +772,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -830,7 +830,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={selection().articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -838,7 +838,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={selection().ticket}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -890,7 +890,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -898,7 +898,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -936,7 +936,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -944,7 +944,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -961,7 +961,7 @@ describe('InboxAside Verevon actions', () => {
 
   it('keeps a valid triage result transient when the organization is in ZDR mode', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input) === '/api/v1/orgs/org-aquatiq') {
+      if (String(input) === '/api/v1/orgs/org-coresystem') {
         return new Response(JSON.stringify({ data: { metadata: { interactiveRetention: { zdr: true } } } }), { headers: { 'Content-Type': 'application/json' } })
       }
       if (String(input) === '/api/v1/chat/invoke') {
@@ -975,7 +975,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -983,7 +983,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -1013,7 +1013,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -1021,7 +1021,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -1038,7 +1038,7 @@ describe('InboxAside Verevon actions', () => {
   it('prepares a bounded resolution plan without creating any proposal until the operator stages an item', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init
-      if (String(input) === '/api/v1/orgs/org-aquatiq') {
+      if (String(input) === '/api/v1/orgs/org-coresystem') {
         return new Response(JSON.stringify({ data: {
           metadata: { interactiveRetention: { zdr: false }, supportAi: { mode: 'assist' } },
         } }), { headers: { 'Content-Type': 'application/json' } })
@@ -1065,7 +1065,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -1074,7 +1074,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42' }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -1114,7 +1114,7 @@ describe('InboxAside Verevon actions', () => {
 
   it('keeps a source-backed reply in Assist mode instead of offering it for review', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input) === '/api/v1/orgs/org-aquatiq') {
+      if (String(input) === '/api/v1/orgs/org-coresystem') {
         return new Response(JSON.stringify({ data: {
           metadata: { interactiveRetention: { zdr: false }, supportAi: { mode: 'assist' } },
         } }), { headers: { 'Content-Type': 'application/json' } })
@@ -1131,7 +1131,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -1139,7 +1139,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, conversationId: 'conversation-42', supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -1164,7 +1164,7 @@ describe('InboxAside Verevon actions', () => {
 
   it('runs an Inbox macro through the audited ticket action and returns the canonical ticket', async () => {
     const macro = {
-      id: 'macro-route', org_id: 'org-aquatiq', name: 'Route billing', active: true,
+      id: 'macro-route', org_id: 'org-coresystem', name: 'Route billing', active: true,
       visibility: 'team', actions: { team_name: 'Billing' }, conditions: {},
       created_at: '2026-08-02T10:00:00.000Z', updated_at: '2026-08-02T10:00:00.000Z',
     }
@@ -1181,7 +1181,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -1189,7 +1189,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={onMacroExecuted}
         onOpenModal={vi.fn()}
         selectedTicket={{ ...ticket, supportTicket }}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -1230,7 +1230,7 @@ describe('InboxAside Verevon actions', () => {
 
     render(() => (
       <InboxAside
-        orgId="org-aquatiq"
+        orgId="org-coresystem"
         articles={articles}
         recent={[]}
         onSelectRecent={vi.fn()}
@@ -1238,7 +1238,7 @@ describe('InboxAside Verevon actions', () => {
         onMacroExecuted={vi.fn()}
         onOpenModal={vi.fn()}
         selectedTicket={ticket}
-        userId="user-aquatiq"
+        userId="user-coresystem"
       />
     ))
 
@@ -1261,7 +1261,7 @@ describe('InboxAside Verevon actions', () => {
       }
       return new Response(JSON.stringify({ data: {} }), { headers: { 'Content-Type': 'application/json' } })
     }))
-    render(() => <InboxAside orgId="org-aquatiq" articles={articles} recent={[]} onSelectRecent={vi.fn()} onQueueDraftReply={vi.fn(async () => true)} onQueueInternalNote={onQueueInternalNote} onMacroExecuted={vi.fn()} onOpenModal={vi.fn()} selectedTicket={{ ...ticket, conversationId: 'conversation-42' }} userId="user-aquatiq" />)
+    render(() => <InboxAside orgId="org-coresystem" articles={articles} recent={[]} onSelectRecent={vi.fn()} onQueueDraftReply={vi.fn(async () => true)} onQueueInternalNote={onQueueInternalNote} onMacroExecuted={vi.fn()} onOpenModal={vi.fn()} selectedTicket={{ ...ticket, conversationId: 'conversation-42' }} userId="user-coresystem" />)
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
     const noteCard = screen.getByText('Internt handlingsnotat').closest('.verevon-inbox-action-suggestion')
     if (!noteCard) throw new Error('Expected internal-note card')

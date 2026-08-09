@@ -3448,7 +3448,8 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
         }
         "evaluate" => Err((
             "browser_action_denied",
-            "Raw browser script evaluation is not exposed through the Verevon UI facade.".to_owned(),
+            "Raw browser script evaluation is not exposed through the Verevon UI facade."
+                .to_owned(),
         )),
         _ => Err((
             "invalid_browser_action",

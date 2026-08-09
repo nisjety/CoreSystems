@@ -14,7 +14,7 @@ const { listOrganizationOutboundIntents, runAssist } = vi.hoisted(() => ({
 vi.mock('@/shared/api/inbox-client', () => ({ listOrganizationOutboundIntents }))
 vi.mock('@/features/inbox/lib/inbox-ai', () => ({ runAssist: runAssist }))
 vi.mock('@/shared/session/session-store', () => ({
-  getSession: () => ({ activeOrg: { id: 'org-aquatiq' }, user: { id: 'user-aquatiq' } }),
+  getSession: () => ({ activeOrg: { id: 'org-coresystem' }, user: { id: 'user-coresystem' } }),
 }))
 
 afterEach(cleanup)
@@ -79,7 +79,7 @@ describe('SupportOutboundPage', () => {
       </I18nProvider>
     ))
 
-    await vi.waitFor(() => expect(listOrganizationOutboundIntents).toHaveBeenCalledWith('org-aquatiq', {
+    await vi.waitFor(() => expect(listOrganizationOutboundIntents).toHaveBeenCalledWith('org-coresystem', {
       provider: 'whatsapp', deliveryStatus: 'failed', limit: 100,
     }))
   })
@@ -155,7 +155,7 @@ describe('SupportOutboundPage', () => {
     fireEvent.click(await screen.findByRole('button', { name: /explain receipt|forklar kvittering/i }))
 
     await waitFor(() => expect(runAssist).toHaveBeenCalledWith(
-      'org-aquatiq',
+      'org-coresystem',
       'outbound',
       [],
       expect.objectContaining({

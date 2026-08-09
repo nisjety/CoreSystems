@@ -1158,3 +1158,106 @@ canvas {
 		transition: none;
 	}
 }
+
+/* ---------------------------------------------------------------------
+ * SensesSection guideline — continuous marching-dash + traveling-glow
+ * shimmer, matching titangatequity.com's .svg-guideline treatment.
+ * Position, length, and thickness all still come from the same Tailwind
+ * classes the original plain span used (passed in via className) — this
+ * CSS only adds the animated dashed rendering, nothing structural.
+ * ------------------------------------------------------------------- */
+
+@keyframes verevon-senses-guideline-stroke {
+	0% {
+		stroke-dashoffset: 0;
+	}
+	to {
+		stroke-dashoffset: 4px;
+	}
+}
+
+@keyframes verevon-senses-guideline-bg-x {
+	to {
+		background-position: var(--verevon-senses-guideline-bg-size) 0;
+	}
+}
+
+@keyframes verevon-senses-guideline-bg-y {
+	to {
+		background-position: 0 var(--verevon-senses-guideline-bg-size);
+	}
+}
+
+.verevon-senses-guideline {
+	overflow: visible;
+}
+
+.verevon-senses-guideline__svg {
+	--verevon-senses-guideline-bg-size: 200%;
+	display: block;
+	width: 100%;
+	height: 100%;
+	color: color-mix(in srgb, var(--verevon-j-text) 12%, transparent);
+	animation: verevon-senses-guideline-stroke 0.45s linear infinite;
+	animation-delay: var(--verevon-senses-guideline-delay, 0s);
+}
+
+.verevon-senses-guideline--horizontal .verevon-senses-guideline__svg {
+	background: linear-gradient(
+				to right,
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 20%,
+				color-mix(in srgb, var(--verevon-j-text) 45%, transparent),
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 80%
+			)
+			0 0 / var(--verevon-senses-guideline-bg-size) 100% border-box;
+	animation-name: verevon-senses-guideline-stroke, verevon-senses-guideline-bg-x;
+	animation-duration: 0.45s, 2.25s;
+	animation-timing-function: linear, linear;
+	animation-iteration-count: infinite, infinite;
+}
+
+.verevon-senses-guideline--vertical .verevon-senses-guideline__svg {
+	background: linear-gradient(
+				to bottom,
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 20%,
+				color-mix(in srgb, var(--verevon-j-text) 45%, transparent),
+				color-mix(in srgb, var(--verevon-j-text) 0%, transparent) 80%
+			)
+			0 0 / 100% var(--verevon-senses-guideline-bg-size) border-box;
+	animation-name: verevon-senses-guideline-stroke, verevon-senses-guideline-bg-y;
+	animation-duration: 0.45s, 2.25s;
+	animation-timing-function: linear, linear;
+	animation-iteration-count: infinite, infinite;
+	/* Same fade as the original static line: transparent at both ends,
+	   fully visible from 15% to 85% — masks the animation too, not just
+	   the stroke, so the shimmer fades out at the tips instead of cutting
+	   off hard. */
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		black 15%,
+		black 85%,
+		transparent 100%
+	);
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0%,
+		black 15%,
+		black 85%,
+		transparent 100%
+	);
+}
+
+.verevon-senses-guideline__path {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1;
+	stroke-dasharray: 2px 2px 4px;
+	vector-effect: non-scaling-stroke;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.verevon-senses-guideline__svg {
+		animation: none;
+	}
+}

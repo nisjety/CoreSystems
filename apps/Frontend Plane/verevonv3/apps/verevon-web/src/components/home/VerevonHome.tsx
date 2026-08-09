@@ -5,6 +5,7 @@ import { Footer } from "@/components/core/footer/Footer";
 import { Navbar } from "@/components/core/navbar/Navbar";
 import { MenuModal } from "@/components/ui/MenuModal";
 import { HeroSection } from "./sections/HeroSection";
+import { BrandLogosSection } from "./sections/BrandLogosSection";
 import { ProblemSection } from "./sections/ProblemSection";
 import { FeaturesSection } from "./sections/FeaturesSection";
 import { LayerSection } from "./sections/layer-section";
@@ -294,6 +295,7 @@ export function VerevonHome() {
 							.join(" ")}
 					/>
 				</div>
+				<BrandLogosSection />
 				<ProblemSection />
 				<ProductLoopSection />
 				<SensesSection />

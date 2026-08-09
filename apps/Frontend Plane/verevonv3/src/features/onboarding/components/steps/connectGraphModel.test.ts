@@ -17,7 +17,7 @@ const disconnectedContext = {
     },
   ],
   graphEdges: [{ a: 'org', b: 'knowledge-1' }],
-  websiteUrl: 'https://aquatiq.com',
+  websiteUrl: 'https://coresystem.com',
 }
 
 describe('buildSourceGraphModel', () => {

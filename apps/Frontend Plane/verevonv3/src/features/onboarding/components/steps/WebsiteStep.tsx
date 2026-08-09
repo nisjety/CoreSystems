@@ -34,7 +34,7 @@ export function WebsiteStepContent(props: WebsiteStepContentProps) {
               const raw = event.currentTarget.value.replace(/^https?:\/\//, '').replace(/\s+/g, '')
               props.onUrlInput(raw ? `https://${raw}` : '')
             }}
-            placeholder="aquatiq.com"
+            placeholder="coresystem.com"
             inputMode="url"
           />
         </div>

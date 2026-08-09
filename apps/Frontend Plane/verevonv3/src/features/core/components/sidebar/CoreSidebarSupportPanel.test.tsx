@@ -5,21 +5,31 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EmailAccountHealthBadge, SupportExpandedSidebarPanel } from './CoreSidebarSupportPanel'
 import { I18nProvider } from '@/shared/i18n'
+import { ApiError } from '@/shared/api/http'
 
-const { listConnectionsMock } = vi.hoisted(() => ({
+const { listConnectionsMock, startConnectSessionMock, runDirectOauthWindowMock } = vi.hoisted(() => ({
   listConnectionsMock: vi.fn(),
+  startConnectSessionMock: vi.fn(),
+  runDirectOauthWindowMock: vi.fn(),
 }))
 
 vi.mock('@/shared/api/integrations-client', () => ({
   listConnections: listConnectionsMock,
+  startConnectSession: startConnectSessionMock,
+}))
+
+vi.mock('@/shared/integrations/provider-auth-window', () => ({
+  runDirectOauthWindow: runDirectOauthWindowMock,
 }))
 
 vi.mock('@/shared/session/session-store', () => ({
-  getSession: () => ({ activeOrg: { id: 'org-aquatiq', name: 'Aquatiq', role: 'owner' } }),
+  getSession: () => ({ activeOrg: { id: 'org-coresystem', name: 'Aquatiq', role: 'owner' } }),
 }))
 
 beforeEach(() => {
   listConnectionsMock.mockResolvedValue([])
+  startConnectSessionMock.mockReset()
+  runDirectOauthWindowMock.mockReset().mockResolvedValue(undefined)
 })
 
 afterEach(() => {
@@ -107,7 +117,7 @@ describe('SupportExpandedSidebarPanel', () => {
         <EmailAccountHealthBadge account={{
           id: 'conn-outlook',
           providerKey: 'microsoft',
-          label: 'ima.dacosta@aquatiq.com',
+          label: 'ima.dacosta@coresystem.com',
           sharedMailboxes: [],
           syncHealth: 'synced',
           lastSyncAt: '2026-08-05T11:00:00.000Z',
@@ -125,7 +135,7 @@ describe('SupportExpandedSidebarPanel', () => {
         id: 'conn-outlook',
         providerId: 'microsoft',
         providerKey: 'microsoft',
-        providerEmail: 'ima.dacosta@aquatiq.com',
+        providerEmail: 'ima.dacosta@coresystem.com',
         status: 'connected',
         scopes: ['mail.read'],
         lastSyncStatus: 'synced',
@@ -144,7 +154,7 @@ describe('SupportExpandedSidebarPanel', () => {
     ])
     renderSupportSidebar('/support?view=all&channel=email&connection_id=conn-gmail')
 
-    const outlook = await screen.findByRole('link', { name: 'ima.dacosta@aquatiq.com' })
+    const outlook = await screen.findByRole('link', { name: 'ima.dacosta@coresystem.com' })
     const gmail = screen.getByRole('link', { name: 'imamzambi64@gmail.com' })
 
     expect(outlook.getAttribute('aria-current')).toBeNull()
@@ -161,5 +171,55 @@ describe('SupportExpandedSidebarPanel', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /retry|prøv igjen/i }))
     await waitFor(() => expect(listConnectionsMock).toHaveBeenCalledTimes(2))
+  })
+
+  it('shows the Email group with connect actions when no mailbox is connected, not hidden entirely', async () => {
+    listConnectionsMock.mockResolvedValueOnce([])
+    renderSupportSidebar('/support?view=mine')
+
+    expect(await screen.findByRole('button', { name: /email|e-post/i })).toBeTruthy()
+    expect(screen.getByText(/no email account connected yet|ingen e-postkonto tilkoblet ennå/i)).toBeTruthy()
+    expect(screen.getByRole('button', { name: /connect gmail|koble til gmail/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /connect outlook|koble til outlook/i })).toBeTruthy()
+  })
+
+  it('starts the OAuth connect flow and refreshes the connection list on success', async () => {
+    listConnectionsMock.mockResolvedValue([])
+    startConnectSessionMock.mockResolvedValueOnce({ connectUrl: 'https://accounts.google.test/auth', sessionToken: 'sess_123' })
+    renderSupportSidebar('/support?view=mine')
+
+    fireEvent.click(await screen.findByRole('button', { name: /connect gmail|koble til gmail/i }))
+
+    await waitFor(() => expect(runDirectOauthWindowMock).toHaveBeenCalledWith({ connectUrl: 'https://accounts.google.test/auth', sessionToken: 'sess_123' }))
+    expect(startConnectSessionMock).toHaveBeenCalledWith('org-coresystem', 'google', { bundles: ['full'] })
+    await waitFor(() => expect(listConnectionsMock).toHaveBeenCalledTimes(2))
+  })
+
+  it('routes a PLAN_REQUIRED connect failure to an upgrade prompt instead of a generic error', async () => {
+    listConnectionsMock.mockResolvedValue([])
+    startConnectSessionMock.mockRejectedValueOnce(new ApiError('plan required', 403, 'PLAN_REQUIRED'))
+    renderSupportSidebar('/support?view=mine')
+
+    fireEvent.click(await screen.findByRole('button', { name: /connect gmail|koble til gmail/i }))
+
+    const notice = await screen.findByRole('alert')
+    expect(notice.textContent).toMatch(/requires the advanced plan|krever advanced-planen/i)
+    const upgradeLink = screen.getByRole('button', { name: /view plans|se planer/i })
+    expect(upgradeLink).toBeTruthy()
+    // runDirectOauthWindow must NOT have been reached — the failure happened
+    // before any provider window would have opened.
+    expect(runDirectOauthWindowMock).not.toHaveBeenCalled()
+  })
+
+  it('shows a generic connect-failed notice for a non-plan error, without an upgrade link', async () => {
+    listConnectionsMock.mockResolvedValue([])
+    startConnectSessionMock.mockRejectedValueOnce(new Error('network unreachable'))
+    renderSupportSidebar('/support?view=mine')
+
+    fireEvent.click(await screen.findByRole('button', { name: /connect outlook|koble til outlook/i }))
+
+    const notice = await screen.findByRole('alert')
+    expect(notice.textContent).toMatch(/could not be completed|kunne ikke fullføres/i)
+    expect(screen.queryByRole('button', { name: /view plans|se planer/i })).toBeNull()
   })
 })

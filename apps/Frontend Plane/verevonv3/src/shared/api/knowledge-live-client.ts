@@ -1,4 +1,3 @@
-import { getSessionContext } from './auth-client'
 import { requestJson } from './http'
 
 export type LiveKnowledgeCollection = {
@@ -215,23 +214,18 @@ export type KnowledgeSidebarLiveData = {
 }
 
 /**
- * Load the aggregated knowledge workspace. The gateway scopes the payload by the
- * `x-verevon-org-id` header (the active org), matching every other v3 client. When
- * the caller already has the org id (e.g. KnowledgePage) it passes it through;
- * otherwise we resolve it from the session context so callers like the sidebar
- * panel stay one-liners.
+ * Load the aggregated knowledge workspace. Tenant and user scope are resolved
+ * exclusively from the validated gateway session and its delegated Data Plane
+ * token. Callers may retain the legacy second argument during migration, but it
+ * is intentionally ignored: the browser must never select an organization with
+ * a request header.
  */
 export async function loadKnowledgeSources(
   signal?: AbortSignal,
-  orgId?: string,
+  _legacyOrgId?: string,
 ): Promise<LiveKnowledgePayload> {
-  let resolvedOrgId = orgId
-  if (!resolvedOrgId) {
-    const ctx = await getSessionContext().catch(() => null)
-    resolvedOrgId = ctx?.orgs?.[0]?.id ?? ''
-  }
-  const headers = resolvedOrgId ? { 'x-verevon-org-id': resolvedOrgId } : undefined
-  return requestJson<LiveKnowledgePayload>('/api/v1/knowledge/sources', { signal, headers })
+  void _legacyOrgId
+  return requestJson<LiveKnowledgePayload>('/api/v1/knowledge/sources', { signal })
 }
 
 export function buildKnowledgeSidebarLiveData(payload: LiveKnowledgePayload): KnowledgeSidebarLiveData {

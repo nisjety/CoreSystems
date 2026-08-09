@@ -70,11 +70,11 @@
 
   /* Design system colors for the interface */
   --Brand: #151F6C;
-  --aquatiq-blue: #151F6D;
-  --aquatiq-blue-dark: #0d1444;
-  --aquatiq-orange: #F6AF6E;
-  --aquatiq-orange-light: #FDEAD8;
-  --aquatiq-dark: #333333;
+  --coresystem-blue: #151F6D;
+  --coresystem-blue-dark: #0d1444;
+  --coresystem-orange: #F6AF6E;
+  --coresystem-orange-light: #FDEAD8;
+  --coresystem-dark: #333333;
   --blue-50: #eff6ff;
   --blue-100: #dbeafe;
   --blue-200: #bfdbfe;

@@ -35,10 +35,16 @@ const FILMS: Record<
 		poster: "/feature-films/build-poster.jpg",
 		webm: "/feature-films/build.webm",
 	},
+	// "connect" originally had its own recording, but its background texture
+	// (a purple/pink cell-like pattern) doesn't match the brand and the
+	// mockup UI inside it still reads "VELION" from before the rename — both
+	// need a re-record. Until then it reuses "approve" (not "ground" —
+	// "ground" already repeats at "research" right next to this card, and
+	// stacking a third identical card would be worse than the mismatch).
 	connect: {
-		mp4: "/feature-films/connect.mp4",
-		poster: "/feature-films/connect-poster.jpg",
-		webm: "/feature-films/connect.webm",
+		mp4: "/feature-films/approve.mp4",
+		poster: "/feature-films/approve-poster.jpg",
+		webm: "/feature-films/approve.webm",
 	},
 	ground: {
 		mp4: "/feature-films/ground.mp4",

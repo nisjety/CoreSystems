@@ -32,17 +32,18 @@ import { KnowledgeAddSourceModal } from '@/features/knowledge/components/Knowled
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
 // The Graf tab renders a 2D scene (knowledgeGraph2D.ts) styled to match the
 // Polygres/react-flow reference exactly: dark dotted canvas, pill nodes,
-// straight animated edges. `GRAPH_CORE_COLOR`/`hueForKey`/the visual node
-// and edge types are still the onboarding Connect step's shared vocabulary —
-// only the rendering engine (createConnectGraphScene) was swapped out.
-import {
-  GRAPH_CORE_COLOR,
-  hueForKey,
-  type SourceGraphSceneController,
-  type SourceGraphVisualEdge,
-  type SourceGraphVisualNode,
-} from '@/features/onboarding/components/steps/connectGraphScene'
+// straight animated edges. The scene still speaks the onboarding Connect step's
+// shared visual vocabulary; knowledgeGraphHierarchy.ts maps the workspace tree
+// onto it, and only the rendering engine (createConnectGraphScene) was swapped.
+import { type SourceGraphSceneController } from '@/features/onboarding/components/steps/connectGraphScene'
 import { createKnowledgeGraph2DScene } from '@/features/knowledge/components/knowledgeGraph2D'
+import {
+  buildKnowledgeHierarchy,
+  collapseHierarchyToScene,
+  isExpandable,
+  KNOWLEDGE_GRAPH_ROOT_ID,
+  type KnowledgeHierarchy,
+} from '@/features/knowledge/components/knowledgeGraphHierarchy'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
 import {
@@ -252,6 +253,14 @@ function filterKnowledgePayload(
   }
 }
 
+/**
+ * How often the workspace re-reads itself so the graph's top level reflects
+ * newly-ingested data without the user pressing Sync. Slow enough to stay
+ * invisible in request volume, fast enough that a finished ingest shows up
+ * while the user is still looking at the page.
+ */
+const KNOWLEDGE_REFRESH_INTERVAL_MS = 45_000
+
 export default function KnowledgePage() {
   const i18n = useI18n()
   const [activeView, setActiveView] = createSignal<KnowledgeView>('overview')
@@ -300,9 +309,44 @@ export default function KnowledgePage() {
   const selectedSource = createMemo(() =>
     visibleKnowledge()?.sources.find((source) => source.id === selectedSourceId()) ?? visibleKnowledge()?.sources[0] ?? null,
   )
-  const selectedGraphNode = createMemo(() =>
-    visibleKnowledge()?.graph.nodes.find((node) => node.id === selectedGraphNodeId()) ?? visibleKnowledge()?.graph.nodes[0] ?? null,
-  )
+  const graphHierarchy = createMemo(() => {
+    const knowledge = visibleKnowledge()
+    if (!knowledge) return null
+    return buildKnowledgeHierarchy(knowledge, {
+      root: i18n.tr('Kunnskapsbase', 'Knowledge base'),
+      documents: (count) =>
+        i18n.tr(
+          `${count} ${count === 1 ? 'dokument' : 'dokumenter'}`,
+          `${count} ${count === 1 ? 'document' : 'documents'}`,
+        ),
+      chunks: (count) =>
+        i18n.tr(`${count} utdrag`, `${count} ${count === 1 ? 'chunk' : 'chunks'}`),
+    })
+  })
+
+  /**
+   * The inspector still speaks `LiveKnowledgeGraphNode`. Entity tiers carry the
+   * real payload node; the synthetic root/provider/document tiers are projected
+   * onto the same shape so one inspector serves every tier.
+   */
+  const selectedGraphNode = createMemo<LiveKnowledgeGraphNode | null>(() => {
+    const hierarchy = graphHierarchy()
+    if (!hierarchy) return null
+    const node = hierarchy.byId.get(selectedGraphNodeId() ?? hierarchy.rootId)
+    if (!node) return null
+    if (node.liveNode) return node.liveNode
+    return {
+      group: node.detail,
+      id: node.id,
+      label: node.label,
+      radius: 1,
+      sourceIds: node.sourceIds,
+      sourceRefs: [],
+      tone: node.tier === 'root' ? 'core' : node.tier === 'provider' ? 'support' : 'product',
+      x: 0,
+      y: 0,
+    }
+  })
   const relatedGraphSources = createMemo(() => {
     const knowledge = visibleKnowledge()
     const node = selectedGraphNode()
@@ -338,6 +382,27 @@ export default function KnowledgePage() {
     onCleanup(() => controller.abort())
   })
 
+  // Keep the graph's top level current without user action: re-read the
+  // workspace on a slow interval and whenever the tab regains focus. Deeper
+  // tiers are projections of the same payload, so one quiet refresh keeps the
+  // whole tree honest while only the top level is on screen by default.
+  onMount(() => {
+    const controller = new AbortController()
+    const refresh = () => {
+      if (document.visibilityState !== 'visible') return
+      // Never race a user-initiated mutation; its own reload lands after it.
+      if (busyAction() !== null) return
+      void loadKnowledgeWorkspace(controller.signal, { quiet: true })
+    }
+    const timer = window.setInterval(refresh, KNOWLEDGE_REFRESH_INTERVAL_MS)
+    document.addEventListener('visibilitychange', refresh)
+    onCleanup(() => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refresh)
+      controller.abort()
+    })
+  })
+
   createEffect(() => {
     const payload = liveKnowledge()
     if (!payload) return
@@ -352,8 +417,11 @@ export default function KnowledgePage() {
     if (!selectedSourceId() || !knowledge.sources.some((source) => source.id === selectedSourceId())) {
       setSelectedSourceId(knowledge.sources[0]?.id ?? null)
     }
-    if (!selectedGraphNodeId() || !knowledge.graph.nodes.some((node) => node.id === selectedGraphNodeId())) {
-      setSelectedGraphNodeId(knowledge.graph.nodes[0]?.id ?? null)
+    // Default the inspector to the workspace root so the tab opens with real
+    // context instead of an empty "no node selected" panel.
+    const hierarchy = graphHierarchy()
+    if (hierarchy && (!selectedGraphNodeId() || !hierarchy.byId.has(selectedGraphNodeId()!))) {
+      setSelectedGraphNodeId(hierarchy.rootId)
     }
   })
 
@@ -374,20 +442,28 @@ export default function KnowledgePage() {
     }
   })
 
-  async function loadKnowledgeWorkspace(signal?: AbortSignal) {
-    setLoading(true)
+  /**
+   * `quiet` drives the background refresh that keeps the graph's top level
+   * current. It must never flash the loading panel or, on a transient network
+   * blip, tear down a workspace the user is reading — so it leaves the existing
+   * payload and notice untouched on failure and simply retries on the next tick.
+   */
+  async function loadKnowledgeWorkspace(signal?: AbortSignal, options?: { quiet?: boolean }) {
+    const quiet = options?.quiet === true
+    if (!quiet) setLoading(true)
     try {
       const nextKnowledge = await loadKnowledgeSources(signal, activeOrgId)
       setLiveKnowledge(nextKnowledge)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
+      if (quiet) return
       setLiveKnowledge(null)
       setNotice({
         tone: 'warn',
         message: translateApiError(error, i18n.tr, { no: 'Kunnskapsområdet kunne ikke lastes.', en: 'Knowledge workspace could not be loaded.' }),
       })
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }
 
@@ -849,7 +925,7 @@ export default function KnowledgePage() {
           </Show>
           <Show when={activeView() === 'graph'}>
             <GraphCanvas
-              graph={visibleKnowledge()!.graph}
+              hierarchy={graphHierarchy()}
               relatedSources={relatedGraphSources()}
               selectedNode={selectedGraphNode()}
               onSelectNode={setSelectedGraphNodeId}
@@ -1573,14 +1649,14 @@ function MetricPanel(props: { metrics: LiveKnowledgeMetric[] }) {
 }
 
 function GraphCanvas(props: {
-  graph: LiveKnowledgePayload['graph']
+  hierarchy: KnowledgeHierarchy | null
   relatedSources: LiveKnowledgeSource[]
   selectedNode: LiveKnowledgeGraphNode | null
   onSelectNode: (nodeId: string) => void
 }) {
   return (
     <main class="knowledge-graph-layout">
-      <GraphPanel graph={props.graph} selectedNode={props.selectedNode} onSelectNode={props.onSelectNode} />
+      <GraphPanel hierarchy={props.hierarchy} selectedNode={props.selectedNode} onSelectNode={props.onSelectNode} />
       <GraphInspectorPanel selectedNode={props.selectedNode} relatedSources={props.relatedSources} />
     </main>
   )
@@ -1622,52 +1698,8 @@ function ChunksCanvas(props: {
   )
 }
 
-/// Degree map + radius scale drive the role/size mapping onto the onboarding
-/// scene's visual vocabulary: the highest-degree node anchors as `core`,
-/// well-connected nodes render as `hub`s, the rest as `leaf`s.
-function buildKnowledgeGraphSceneData(graph: LiveKnowledgePayload['graph']): {
-  nodes: SourceGraphVisualNode[]
-  edges: SourceGraphVisualEdge[]
-} {
-  const degrees = new Map<string, number>()
-  for (const link of graph.links) {
-    degrees.set(link.from, (degrees.get(link.from) ?? 0) + 1)
-    degrees.set(link.to, (degrees.get(link.to) ?? 0) + 1)
-  }
-  const maxRadius = Math.max(1, ...graph.nodes.map((node) => node.radius))
-  const maxDegree = Math.max(1, ...degrees.values())
-  const coreId = graph.nodes.reduce<{ id: string; degree: number } | undefined>((best, node) => {
-    const degree = degrees.get(node.id) ?? 0
-    return !best || degree > best.degree ? { id: node.id, degree } : best
-  }, undefined)?.id
-
-  const nodes = graph.nodes.map<SourceGraphVisualNode>((node) => {
-    const degree = degrees.get(node.id) ?? 0
-    const role: SourceGraphVisualNode['role'] =
-      node.id === coreId && degree > 0 ? 'core' : degree >= 2 ? 'hub' : degree === 0 ? 'standalone' : 'leaf'
-    return {
-      id: node.id,
-      label: node.label,
-      detail: node.group,
-      kind: 'knowledge',
-      strength: Math.min(1, degree / maxDegree),
-      connected: degree > 0,
-      color: node.tone === 'core' ? GRAPH_CORE_COLOR : hueForKey(node.group),
-      sizeWeight: node.radius / maxRadius,
-      role,
-      clusterKey: node.group,
-    }
-  })
-  const edges = graph.links.map<SourceGraphVisualEdge>((link) => ({
-    from: link.from,
-    to: link.to,
-    label: link.label,
-  }))
-  return { nodes, edges }
-}
-
 function GraphPanel(props: {
-  graph: LiveKnowledgePayload['graph']
+  hierarchy: KnowledgeHierarchy | null
   selectedNode: LiveKnowledgeGraphNode | null
   onSelectNode: (nodeId: string) => void
 }) {
@@ -1677,8 +1709,33 @@ function GraphPanel(props: {
   let sceneController: SourceGraphSceneController | undefined
   const [zoomPercent, setZoomPercent] = createSignal(100)
   const [hoveringNode, setHoveringNode] = createSignal(false)
-  const sceneData = createMemo(() => buildKnowledgeGraphSceneData(props.graph))
-  const hasNodes = createMemo(() => sceneData().nodes.length > 0)
+  // Only the root starts expanded, so the first paint is the top tier alone;
+  // every deeper tier is opened by an explicit click.
+  const [expandedIds, setExpandedIds] = createSignal<ReadonlySet<string>>(new Set([KNOWLEDGE_GRAPH_ROOT_ID]))
+
+  // A node is worth drawing only once the workspace has something under the
+  // root — a lone root pill would read as broken rather than as "no data".
+  const hasNodes = createMemo(() => {
+    const hierarchy = props.hierarchy
+    return (hierarchy?.byId.get(hierarchy.rootId)?.childIds.length ?? 0) > 0
+  })
+  const sceneData = createMemo(() => {
+    const hierarchy = props.hierarchy
+    if (!hierarchy || !hasNodes()) return { nodes: [], edges: [] }
+    return collapseHierarchyToScene(hierarchy, expandedIds())
+  })
+
+  const activateNode = (nodeId: string) => {
+    props.onSelectNode(nodeId)
+    const hierarchy = props.hierarchy
+    if (!hierarchy || !isExpandable(hierarchy, nodeId)) return
+    setExpandedIds((current) => {
+      const next = new Set(current)
+      if (next.has(nodeId)) next.delete(nodeId)
+      else next.add(nodeId)
+      return next
+    })
+  }
 
   onMount(() => {
     const reducedMotion = typeof window.matchMedia === 'function'
@@ -1688,7 +1745,7 @@ function GraphPanel(props: {
       reducedMotion,
       onHoverNode: (node) => setHoveringNode(Boolean(node)),
       onSelectNode: (pick) => {
-        if (pick) props.onSelectNode(pick.node.id)
+        if (pick) activateNode(pick.node.id)
       },
       onZoomChange: setZoomPercent,
     })
@@ -1720,6 +1777,8 @@ function GraphPanel(props: {
     if (next) setZoomPercent(next)
   }
   const reset = () => {
+    // Reset returns the view to how the tab opens: top tier only, default zoom.
+    setExpandedIds(new Set([KNOWLEDGE_GRAPH_ROOT_ID]))
     const next = sceneController?.reset()
     if (next) setZoomPercent(next)
   }
@@ -1729,7 +1788,7 @@ function GraphPanel(props: {
       <div class="knowledge-graph-panel__header">
         <div>
           <h2>{i18n.tr('RAGGraph-relasjonskart', 'RAGGraph relationship map')}</h2>
-          <p>{i18n.tr('Entitetsrelasjoner forankret i kildeutdrag fra Data Plane v2.', 'Entity relationships grounded in source chunks from Data Plane v2.')}</p>
+          <p>{i18n.tr('Klikk en node for å utvide den. Øverste nivå holdes oppdatert automatisk.', 'Click a node to expand it. The top level stays up to date automatically.')}</p>
         </div>
         <GitBranch class="size-5" />
       </div>
@@ -1751,6 +1810,20 @@ function GraphPanel(props: {
           role="group"
         />
         <div class="onboarding-source-graph__glow" aria-hidden="true" />
+        <Show when={!hasNodes()}>
+          <div class="onboarding-source-graph__empty-state" aria-hidden="true">
+            <Network class="onboarding-source-graph__empty-state-icon" size={28} />
+            <p class="onboarding-source-graph__empty-state-title">
+              {i18n.tr('Ingen graf-data ennå', 'No graph data yet')}
+            </p>
+            <p class="onboarding-source-graph__empty-state-body">
+              {i18n.tr(
+                'Synkroniser kunnskapskilder for å bygge relasjonskartet.',
+                'Sync your knowledge sources to build the relationship map.',
+              )}
+            </p>
+          </div>
+        </Show>
         <Show when={hasNodes()}>
           <div class="onboarding-source-graph__controls">
             <VerevonIconButton aria-label={i18n.tr('Zoom ut', 'Zoom out')} size="sm" shape="rounded" tone="inverted" onClick={() => zoom(-1)}>

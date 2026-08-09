@@ -29,7 +29,7 @@ describe('plan recommendation localization', () => {
       reason: 'Behov for flere kilder og automasjon peker mot Advanced.',
       summary: '10 kilder og 93 ansatte gir best start med Advanced.',
       proofPoints: ['9 tilkoblede kilder valgt.'],
-      scopeSignals: ['aquatiq.com'],
+      scopeSignals: ['coresystem.com'],
       opportunities: ['Automatiser første sortering'],
       generatedAt: '2026-07-05T00:00:00Z',
       source: 'model',
@@ -40,7 +40,7 @@ describe('plan recommendation localization', () => {
       reason: 'Multiple sources and automation needs point to Advanced.',
       summary: '10 sources and 93 employees make Advanced the best starting point.',
       proofPoints: ['9 connected sources selected.'],
-      scopeSignals: ['aquatiq.com'],
+      scopeSignals: ['coresystem.com'],
       opportunities: ['Automate first triage'],
     })
 

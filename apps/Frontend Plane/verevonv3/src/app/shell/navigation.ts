@@ -87,7 +87,7 @@ export const navItems: readonly NavItem[] = [
     id: 'insights',
     href: '/insights',
     label: 'Insights',
-    description: 'Measure social, inbox, agent, campaign, and experiment performance.',
+    description: 'Measure recorded support, social, agent, campaign, and external-source activity.',
     icon: BarChart3,
   },
   {

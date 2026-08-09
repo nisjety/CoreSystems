@@ -19576,6 +19576,10 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
   gap: 16px;
+  /* The inspector column grows with its chunk list. Without `start`, the graph
+     panel stretches to match it and the scene centres itself hundreds of pixels
+     below the fold. */
+  align-items: start;
 }
 
 .knowledge-graph-panel {
@@ -19608,15 +19612,42 @@ textarea:focus-visible {
   height: 560px;
 }
 
-/* Graf tab reuses the onboarding 3D scene (.onboarding-source-graph);
-   this modifier just fits it into the light knowledge panel: rounded
-   corners against the panel body and the same 560px canvas height the
-   old static layout occupied. The dark background is intentional — the
-   design brief is to match the onboarding graph 1:1. */
-.knowledge-graph-scene {
+/* Graf tab reuses the onboarding scene (.onboarding-source-graph); this
+   modifier just fits it into the light knowledge panel: rounded corners against
+   the panel body and the same 560px canvas height the old static layout
+   occupied. The dark background is intentional — the design brief is to match
+   the onboarding graph 1:1.
+
+   Both class names are in the selector on purpose: `.onboarding-source-graph`
+   sets `height: 100%` and is declared later in this file, so a single-class
+   selector here would lose and the canvas would stretch to the inspector's
+   full height — pushing the force-layout's centre far below the fold. */
+.onboarding-source-graph.knowledge-graph-scene {
   min-height: 560px;
   height: 560px;
   border-radius: 14px;
+  /* The Graf tab is a light canvas with terracotta edges. The onboarding host
+     ships a dark gradient plus a dotted ::before and a vignette ::after that
+     paints ABOVE the engine — all three have to be neutralised here, or they
+     wash a white canvas grey. kg2d draws its own dot grid, so dropping the
+     host's is not a visual loss. The dark theme keeps the original treatment. */
+  background: linear-gradient(160deg, #fff 0%, #fdfbfa 46%, #f6f2ef 100%);
+  border: 1px solid rgb(23 20 18 / 8%);
+}
+
+.onboarding-source-graph.knowledge-graph-scene::before,
+.onboarding-source-graph.knowledge-graph-scene::after {
+  content: none;
+}
+
+.onboarding-source-graph.knowledge-graph-scene .onboarding-source-graph__glow,
+.onboarding-source-graph.knowledge-graph-scene .onboarding-source-graph__scanline {
+  display: none;
+}
+
+.dark .onboarding-source-graph.knowledge-graph-scene {
+  background: linear-gradient(160deg, #151517 0%, #121214 46%, #0e0e10 100%);
+  border-color: rgb(255 255 255 / 8%);
 }
 
 .knowledge-graph-grid {
@@ -19643,9 +19674,13 @@ textarea:focus-visible {
   overflow: hidden;
   width: 100%;
   height: 100%;
-  background: #131316;
+  background: linear-gradient(160deg, #fff 0%, #fdfbfa 46%, #f6f2ef 100%);
   cursor: grab;
   touch-action: none;
+}
+
+.dark .kg2d {
+  background: linear-gradient(160deg, #151517 0%, #121214 46%, #0e0e10 100%);
 }
 
 .kg2d:active {
@@ -19661,6 +19696,10 @@ textarea:focus-visible {
 }
 
 .kg2d__dot {
+  fill: rgb(23 20 18 / 9%);
+}
+
+.dark .kg2d__dot {
   fill: rgb(255 255 255 / 6%);
 }
 
@@ -19686,7 +19725,7 @@ textarea:focus-visible {
 
 .kg2d__edge-path {
   fill: none;
-  stroke: #2be198;
+  stroke: var(--verevon-coral, #ee7a50);
   stroke-width: 1.8;
   stroke-dasharray: 5 5;
   animation: kg2d-edge-dash 0.6s linear infinite;
@@ -19705,8 +19744,8 @@ textarea:focus-visible {
 }
 
 .kg2d__arrowhead {
-  stroke: #2be198;
-  fill: #2be198;
+  stroke: var(--verevon-coral, #ee7a50);
+  fill: var(--verevon-coral, #ee7a50);
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -19734,17 +19773,17 @@ textarea:focus-visible {
   user-select: none;
   cursor: pointer;
   touch-action: none;
-  background: rgb(28 28 31 / 95%);
-  border: 1px solid rgb(255 255 255 / 6%);
-  color: #a1a1aa;
-  box-shadow: 0 10px 25px -8px rgb(0 0 0 / 55%);
+  background: rgb(255 255 255 / 96%);
+  border: 1px solid rgb(23 20 18 / 10%);
+  color: #4b4540;
+  box-shadow: 0 8px 20px -10px rgb(60 40 30 / 30%);
   backdrop-filter: blur(12px);
   transition: color 0.2s, border-color 0.2s, transform 0.2s;
 }
 
 .kg2d__node-pill:hover {
-  border-color: rgb(255 255 255 / 20%);
-  color: #fff;
+  border-color: var(--verevon-coral, #ee7a50);
+  color: #1c1917;
   transform: scale(1.03);
 }
 
@@ -19753,24 +19792,37 @@ textarea:focus-visible {
 }
 
 .kg2d__node-pill:focus-visible {
-  outline: 2px solid #2be198;
+  outline: 2px solid var(--verevon-coral, #ee7a50);
   outline-offset: 2px;
 }
 
 .kg2d__node--active .kg2d__node-pill {
-  border-color: #2be198;
-  color: #fff;
+  border-color: var(--verevon-coral, #ee7a50);
+  color: #1c1917;
+  box-shadow: 0 8px 22px -8px rgb(238 122 80 / 45%);
 }
 
 .kg2d__node-icon {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  color: #71717a;
+  color: #8a827b;
 }
 
 .kg2d__node--active .kg2d__node-icon {
-  color: #2be198;
+  color: var(--verevon-coral, #ee7a50);
+}
+
+.dark .kg2d__node-pill {
+  background: rgb(28 28 31 / 95%);
+  border-color: rgb(255 255 255 / 8%);
+  color: #a1a1aa;
+  box-shadow: 0 10px 25px -8px rgb(0 0 0 / 55%);
+}
+
+.dark .kg2d__node-pill:hover,
+.dark .kg2d__node--active .kg2d__node-pill {
+  color: #fff;
 }
 
 .kg2d__node-label {
@@ -28054,6 +28106,65 @@ textarea:focus-visible {
   background-size: 100% 160px;
   opacity: 0.24;
   animation: onboarding-graph-scan 7.5s linear infinite;
+}
+
+.onboarding-source-graph__empty-state {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 32px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.onboarding-source-graph__empty-state-icon {
+  color: rgb(247 244 238 / 32%);
+  margin-bottom: 4px;
+}
+
+.onboarding-source-graph__empty-state-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: rgb(247 244 238 / 72%);
+  margin: 0;
+}
+
+.onboarding-source-graph__empty-state-body {
+  font-size: 13px;
+  color: rgb(247 244 238 / 44%);
+  margin: 0;
+  max-width: 320px;
+}
+
+/* The Graf tab's canvas is light, so its empty state needs dark-on-white text
+   rather than the onboarding host's light-on-dark treatment above. */
+.knowledge-graph-scene .onboarding-source-graph__empty-state-icon {
+  color: rgb(23 20 18 / 28%);
+}
+
+.knowledge-graph-scene .onboarding-source-graph__empty-state-title {
+  color: rgb(23 20 18 / 76%);
+}
+
+.knowledge-graph-scene .onboarding-source-graph__empty-state-body {
+  color: rgb(23 20 18 / 48%);
+}
+
+.dark .knowledge-graph-scene .onboarding-source-graph__empty-state-icon {
+  color: rgb(247 244 238 / 32%);
+}
+
+.dark .knowledge-graph-scene .onboarding-source-graph__empty-state-title {
+  color: rgb(247 244 238 / 72%);
+}
+
+.dark .knowledge-graph-scene .onboarding-source-graph__empty-state-body {
+  color: rgb(247 244 238 / 44%);
 }
 
 .onboarding-source-graph__controls {

@@ -161,8 +161,8 @@ mod tests {
         let request: RecommendPlanRequest = serde_json::from_value(json!({
             "context": {
                 "organization": { "name": "AQUATIQ AS", "employeeCount": 93 },
-                "website": { "url": "https://aquatiq.com" },
-                "websites": [{ "url": "https://aquatiq.com" }],
+                "website": { "url": "https://coresystem.com" },
+                "websites": [{ "url": "https://coresystem.com" }],
                 "sourceCount": 4,
                 "connectors": [
                     {

@@ -1,4 +1,5 @@
 import type { InsightScorecard } from '@/shared/api/insights-client'
+import type { CostSummary } from '@/shared/api/cost-client'
 import type { MeasurementState, ResourceResult } from '@/shared/read-data'
 
 // The exact `surface.metric` scorecard ids insight-core's buildScorecards
@@ -11,7 +12,7 @@ const TICKETS_RESOLVED_ID = 'inbox.tickets_resolved'
 const AI_DRAFTS_APPROVED_ID = 'inbox.ai_actions_approved'
 const AI_DRAFTS_REJECTED_ID = 'inbox.ai_actions_rejected'
 
-export type HeadlineMetricId = 'conversations_handled' | 'ai_draft_acceptance' | 'cost_per_resolution'
+export type HeadlineMetricId = 'conversations_handled' | 'ai_draft_acceptance' | 'ai_usage_cost'
 
 // One of the pilot's "three honest numbers on one page" (verevon-feature-map.md
 // 1.9 done-enough gate). Each metric resolves its OWN state independently —
@@ -44,34 +45,46 @@ function unavailableMetric(id: HeadlineMetricId, label: string): HeadlineMetric 
   }
 }
 
-// Cost-per-resolution has NO real data path today: insight-core does not
-// consume cost-core's ledger (no push event, no pull client wired between the
-// two services), and cost-core's AggregateFilter has no per-surface /
-// per-conversation dimension to isolate inbox-resolution cost from other AI
-// usage. Dividing an unattributed org-wide cost total by tickets_resolved
-// would mislabel unrelated spend as inbox cost, which the honesty contract
-// forbids just as much as inventing a number outright. This stays an honest
-// `planned` state — matching the vocabulary the rest of Insights already uses
-// for "backend dependency not built yet" — until that wiring exists.
-function costPerResolutionMetric(): HeadlineMetric {
+// Cost Core owns the durable AI ledger. It is not attributed to individual
+// support resolutions, so this must remain an org-level AI usage cost rather
+// than a misleading "cost per resolution" estimate.
+function aiUsageCostMetric(cost: ResourceResult<CostSummary>): HeadlineMetric {
+  if (cost.state === 'unavailable') {
+    return unavailableMetric('ai_usage_cost', 'AI usage cost')
+  }
+
+  const entryCount = cost.data.entryCount
+  if (entryCount <= 0) {
+    return {
+      id: 'ai_usage_cost',
+      label: 'AI usage cost',
+      state: 'empty',
+      value: '—',
+      detail: 'Cost Core has not recorded any AI usage for this organization yet.',
+    }
+  }
+
   return {
-    id: 'cost_per_resolution',
-    label: 'Cost per resolution',
-    state: 'planned',
-    value: '—',
-    detail: 'insight-core does not yet consume cost-core data, and cost-core has no per-surface cost attribution. No estimate is shown until that wiring exists.',
+    id: 'ai_usage_cost',
+    label: 'AI usage cost',
+    state: 'live',
+    value: `$${cost.data.totalCostUsd.toFixed(4)}`,
+    detail: `${formatCount(entryCount)} cost-bearing AI request${entryCount === 1 ? '' : 's'} recorded by Cost Core (${formatCount(cost.data.totalInputTokens)} input / ${formatCount(cost.data.totalOutputTokens)} output tokens).`,
   }
 }
 
 // buildHeadlineMetrics derives the pilot's three headline numbers from the
 // real overview scorecards. Pure and synchronous so it is unit-testable
 // without a network call.
-export function buildHeadlineMetrics(overview: ResourceResult<InsightScorecard[]>): HeadlineMetric[] {
+export function buildHeadlineMetrics(
+  overview: ResourceResult<InsightScorecard[]>,
+  cost: ResourceResult<CostSummary>,
+): HeadlineMetric[] {
   if (overview.state === 'unavailable') {
     return [
       unavailableMetric('conversations_handled', 'Conversations handled'),
       unavailableMetric('ai_draft_acceptance', 'AI draft acceptance'),
-      costPerResolutionMetric(),
+      aiUsageCostMetric(cost),
     ]
   }
 
@@ -100,6 +113,6 @@ export function buildHeadlineMetrics(overview: ResourceResult<InsightScorecard[]
         ? `${formatCount(approved ?? 0)} of ${formatCount(reviewed)} reviewed AI drafts were approved.`
         : 'No AI draft has been approved or rejected yet.',
     },
-    costPerResolutionMetric(),
+    aiUsageCostMetric(cost),
   ]
 }

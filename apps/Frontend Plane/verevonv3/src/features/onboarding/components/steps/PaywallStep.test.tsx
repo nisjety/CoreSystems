@@ -123,7 +123,7 @@ describe('PaywallStep', () => {
         checkoutReturnUrl="https://verevon.test/onboarding"
         identity={{
           orgName: 'AQUATIQ AS',
-          websiteUrl: 'https://aquatiq.com',
+          websiteUrl: 'https://coresystem.com',
           websitePages: 6,
           connectedSourceCount: 10,
         }}
@@ -134,7 +134,7 @@ describe('PaywallStep', () => {
       />
     ))
 
-    expect(screen.getByText('6 sider fra aquatiq.com')).toBeTruthy()
+    expect(screen.getByText('6 sider fra coresystem.com')).toBeTruthy()
     expect(screen.getByText('10 tilkoblede kilder')).toBeTruthy()
   })
 
@@ -321,7 +321,7 @@ describe('PaywallStep', () => {
           checkoutReturnUrl="https://verevon.test/onboarding"
           identity={{
             orgName: 'AQUATIQ AS',
-            websiteUrl: 'https://aquatiq.com',
+            websiteUrl: 'https://coresystem.com',
             websitePages: 6,
             connectedSourceCount: 10,
           }}
@@ -334,7 +334,7 @@ describe('PaywallStep', () => {
     ))
 
     expect(screen.getByText('Best match for AQUATIQ AS')).toBeTruthy()
-    expect(screen.getByText('6 pages from aquatiq.com')).toBeTruthy()
+    expect(screen.getByText('6 pages from coresystem.com')).toBeTruthy()
     expect(screen.getByText('10 connected sources')).toBeTruthy()
     expect(screen.getByText('For larger support teams with reporting and controls.')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Continue to setup' })).toBeTruthy()

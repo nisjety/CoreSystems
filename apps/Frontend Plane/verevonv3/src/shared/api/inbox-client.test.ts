@@ -9,7 +9,7 @@ describe('toLiveTicket', () => {
   it('preserves the provider-backed latest message preview', () => {
     const ticket = toLiveTicket({
       id: 'conversation-1',
-      org_id: 'org-aquatiq',
+      org_id: 'org-coresystem',
       inbox_id: 'outlook-main',
       title: 'Quarterly report',
       status: 'open',
@@ -37,7 +37,7 @@ describe('toLiveTicket', () => {
   ])('preserves %s identity on the %s channel', (provider, channel) => {
     const ticket = toLiveTicket({
       id: `conversation-${provider}`,
-      org_id: 'org-aquatiq',
+      org_id: 'org-coresystem',
       inbox_id: `${provider}-main`,
       title: `${provider} conversation`,
       status: 'open',
@@ -69,7 +69,7 @@ describe('listConversations', () => {
     const fetchMock = vi.fn(async () => jsonResponse([]))
     vi.stubGlobal('fetch', fetchMock)
 
-    await listConversations('org-aquatiq', { channel: 'slack', limit: 50 })
+    await listConversations('org-coresystem', { channel: 'slack', limit: 50 })
 
     const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(new URL(url, 'http://verevon.local').searchParams.get('channel')).toBe('slack')
@@ -78,7 +78,7 @@ describe('listConversations', () => {
   it('forwards the pagination cursor and derives the next page from the last conversation', async () => {
     const rows = [
       {
-        id: 'conversation-older', org_id: 'org-aquatiq', inbox_id: 'inbox-email', title: 'Older mail',
+        id: 'conversation-older', org_id: 'org-coresystem', inbox_id: 'inbox-email', title: 'Older mail',
         status: 'open', priority: 'normal', channel: 'email', provider: 'microsoft',
         created_at: '2026-07-10T08:00:00.000Z', updated_at: '2026-07-10T09:00:00.000Z',
       },
@@ -86,7 +86,7 @@ describe('listConversations', () => {
     const fetchMock = vi.fn(async () => jsonResponse(rows))
     vi.stubGlobal('fetch', fetchMock)
 
-    const result = await listConversations('org-aquatiq', {
+    const result = await listConversations('org-coresystem', {
       limit: 1,
       cursorUpdated: '2026-07-11T09:00:00.000Z',
       cursorId: 'conversation-newer',
@@ -108,7 +108,7 @@ describe('listOrganizationOutboundIntents', () => {
     const fetchMock = vi.fn(async () => jsonResponse([]))
     vi.stubGlobal('fetch', fetchMock)
 
-    await listOrganizationOutboundIntents('org-aquatiq', { status: 'submitted', provider: 'whatsapp', deliveryStatus: 'unconfirmed', limit: 25 })
+    await listOrganizationOutboundIntents('org-coresystem', { status: 'submitted', provider: 'whatsapp', deliveryStatus: 'unconfirmed', limit: 25 })
 
     const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     const params = new URL(url, 'http://verevon.local').searchParams

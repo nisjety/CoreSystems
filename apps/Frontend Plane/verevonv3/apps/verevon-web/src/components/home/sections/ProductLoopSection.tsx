@@ -36,9 +36,9 @@ const loopStages: LoopStage[] = [
 		kind: "media",
 		media: {
 			kind: "image",
-			src: "/human-haze.png",
-			alt: "Mennesker i et lyst, abstrakt arbeidsrom — kunnskap og mennesker i samme flyt.",
-			objectPosition: "center 48%",
+			src: "/verevon-mood/shared-surface-amber.jpg",
+			alt: "To personer holder den samme opplyste flaten mellom seg.",
+			objectPosition: "center 50%",
 		},
 	},
 	{
@@ -49,8 +49,8 @@ const loopStages: LoopStage[] = [
 		kind: "media",
 		media: {
 			kind: "image",
-			src: "/man-talking-and-delegating.jpg",
-			alt: "En person som forklarer et arbeid i et varmt, lyst arbeidsrom.",
+			src: "/verevon-mood/operator-calm-warm.jpg",
+			alt: "En person arbeider rolig gjennom en oppgave i et lyst, dempet rom.",
 			objectPosition: "center 42%",
 		},
 	},
@@ -103,7 +103,7 @@ function LoopComposerContent() {
 					className="object-cover"
 					fill
 					sizes="90vw"
-					src="/soft-orb.png"
+					src="/verevon-mood/peach-wash.jpg"
 				/>
 			</div>
 			<div
@@ -211,10 +211,6 @@ function LoopFrameChrome() {
 			className="pointer-events-none absolute inset-0 z-20 text-verevon-j-text/14"
 			data-product-loop-frame-chrome=""
 		>
-			<span className="absolute inset-x-0 top-0 h-px bg-current" />
-			<span className="absolute inset-x-0 bottom-0 h-px bg-current" />
-			<span className="absolute inset-y-0 left-0 w-px bg-current" />
-			<span className="absolute inset-y-0 right-0 w-px bg-current" />
 			<span className="absolute left-4 top-4 size-[6px] border border-current bg-background/60" />
 			<span className="absolute right-4 top-4 size-[6px] border border-current bg-background/60" />
 			<span className="absolute bottom-4 left-4 size-[6px] border border-current bg-background/60" />
@@ -311,6 +307,12 @@ export function ProductLoopSection() {
 					const frame = section.querySelector<HTMLElement>(
 						"[data-product-loop-frame]",
 					);
+					const circle = section.querySelector<HTMLElement>(
+						"[data-product-loop-circle]",
+					);
+					const connector = section.querySelector<HTMLElement>(
+						"[data-product-loop-connector]",
+					);
 					const chrome = section.querySelector<HTMLElement>(
 						"[data-product-loop-frame-chrome]",
 					);
@@ -365,6 +367,8 @@ export function ProductLoopSection() {
 					if (
 						!viewport ||
 						!frame ||
+						!circle ||
+						!connector ||
 						!chrome ||
 						!header ||
 						!copyFloat ||
@@ -437,6 +441,22 @@ export function ProductLoopSection() {
 						top: () => entranceFrame().top,
 						width: () => entranceFrame().width,
 					});
+					// A single ring that grows and rotates behind the frame as the
+					// timeline moves through each stage — the section's own "loop"
+					// motif (lightweight.info-style morphing circle), independent of
+					// SignalPathLayer. Sized as a ratio of the viewport's own height
+					// (kept square) and offset as a ratio of viewport width/height, so
+					// it stays responsive the same way dynamicFramePosition does.
+					const dynamicCircleGeometry = (
+						sizeRatio: number,
+						xRatio: number,
+						yRatio: number,
+					) => ({
+						height: () => viewport.getBoundingClientRect().height * sizeRatio,
+						width: () => viewport.getBoundingClientRect().height * sizeRatio,
+						x: () => viewport.getBoundingClientRect().width * xRatio,
+						y: () => viewport.getBoundingClientRect().height * yRatio,
+					});
 
 					let timeline: gsap.core.Timeline | null = null;
 
@@ -451,6 +471,15 @@ export function ProductLoopSection() {
 						});
 						gsap.set(header, { autoAlpha: 1, y: 0 });
 						gsap.set(chrome, { autoAlpha: 0 });
+						gsap.set(circle, {
+							autoAlpha: 0.5,
+							force3D: true,
+							rotation: -20,
+							xPercent: -50,
+							yPercent: -50,
+							...dynamicCircleGeometry(0.3, 0, 0.15),
+						});
+						gsap.set(connector, { autoAlpha: 1 });
 						gsap.set(copyFloat, {
 							...placeCopy(0),
 							autoAlpha: 0,
@@ -607,6 +636,21 @@ export function ProductLoopSection() {
 								0,
 							)
 							.to(
+								circle,
+								{
+									...dynamicCircleGeometry(0.62, 0.14, -0.08),
+									duration: PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
+									ease: "power3.out",
+									rotation: 0,
+								},
+								0,
+							)
+							.to(
+								connector,
+								{ autoAlpha: 0, duration: 0.3, ease: "power1.in" },
+								0,
+							)
+							.to(
 								header,
 								{ autoAlpha: 0, y: -18, duration: 0.28, ease: "power2.in" },
 								0.5,
@@ -630,7 +674,35 @@ export function ProductLoopSection() {
 							);
 
 						transition(0, 1, 1, 0, 1, 0.92);
+						loopTimeline.to(
+							circle,
+							{
+								...dynamicCircleGeometry(0.78, -0.16, 0.1),
+								duration: 0.52,
+								rotation: 45,
+							},
+							0.92,
+						);
 						transition(1, 2, 2, 1, 2, 1.82);
+						loopTimeline.to(
+							circle,
+							{
+								...dynamicCircleGeometry(0.9, 0.18, -0.12),
+								duration: 0.52,
+								rotation: 90,
+							},
+							1.82,
+						);
+
+						loopTimeline.to(
+							circle,
+							{
+								...dynamicCircleGeometry(1.05, 0, 0.05),
+								duration: 0.58,
+								rotation: 135,
+							},
+							2.72,
+						);
 
 						loopTimeline
 							.to(
@@ -704,6 +776,16 @@ export function ProductLoopSection() {
 								composerCopy,
 								{ autoAlpha: 0, y: -14, duration: 0.36, ease: "power2.in" },
 								3.62,
+							)
+							.to(
+								circle,
+								{
+									...dynamicCircleGeometry(1.3, 0, 0),
+									autoAlpha: 0,
+									duration: 0.6,
+									rotation: 180,
+								},
+								3.72,
 							)
 							.to(
 								frame,
@@ -887,7 +969,7 @@ export function ProductLoopSection() {
 	return (
 		<section
 			aria-labelledby="product-loop-title"
-			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible border-t border-verevon-j-text/8 bg-background text-verevon-j-text motion-reduce:mt-0 motion-reduce:h-auto motion-reduce:overflow-hidden max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
+			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text motion-reduce:mt-0 motion-reduce:h-auto motion-reduce:overflow-hidden max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
 			data-product-loop
 			id="flyt"
 			ref={sectionRef}
@@ -904,7 +986,6 @@ export function ProductLoopSection() {
 					className="relative min-h-svh overflow-hidden motion-reduce:grid motion-reduce:min-h-0 motion-reduce:gap-12 motion-reduce:px-[var(--verevon-page-pad)] motion-reduce:py-24 max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
 					data-product-loop-viewport=""
 				>
-					<div aria-hidden="true" className="absolute inset-0 bg-[linear-gradient(90deg,rgba(23,23,23,0.045)_1px,transparent_1px),linear-gradient(180deg,rgba(23,23,23,0.035)_1px,transparent_1px)] bg-[length:calc(100%/4)_calc(100%/3),calc(100%/4)_calc(100%/3)] max-[899px]:bg-[length:92px_92px]" />
 					<div aria-hidden="true" className="absolute inset-0 bg-[radial-gradient(circle_at_78%_28%,rgba(238,122,80,0.08),transparent_27%),radial-gradient(circle_at_14%_74%,rgba(41,64,74,0.07),transparent_28%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.78))]" />
 
 					<div
@@ -917,7 +998,14 @@ export function ProductLoopSection() {
 						</h2>
 					</div>
 
-					<div aria-hidden="true" className="pointer-events-none absolute inset-x-4 top-0 bottom-0 border-x border-verevon-j-text/6 max-[899px]:hidden" />
+					{/* Connects down from ProblemSection's 3 cards above — fades out
+					    as the entrance plays, right as the loop circle takes over,
+					    so the line reads as becoming the circle. */}
+						<div
+							aria-hidden="true"
+							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] motion-reduce:hidden max-[899px]:hidden"
+							data-product-loop-connector=""
+						/>
 
 					<div aria-hidden="true" className="absolute inset-0 motion-reduce:hidden max-[899px]:hidden">
 						<div className="absolute left-[22%] top-[24%] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
@@ -931,6 +1019,14 @@ export function ProductLoopSection() {
 						<div className="absolute left-[clamp(72px,7vw,142px)] top-[clamp(214px,27vh,310px)] h-[360px] w-[min(38vw,620px)]" data-product-loop-copy-marker="" />
 						<div className="absolute right-[clamp(86px,8vw,168px)] top-[clamp(236px,34vh,374px)] h-[320px] w-[min(42vw,680px)]" data-product-loop-copy-marker="" />
 					</div>
+
+					{/* Loop motif: one ring behind the frame, growing/rotating through
+					    each stage (see the circle tweens in the timeline above). */}
+					<div
+						aria-hidden="true"
+						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border border-verevon-j-text/10 motion-reduce:hidden max-[899px]:hidden"
+						data-product-loop-circle=""
+					/>
 
 					<div
 						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] motion-reduce:hidden max-[899px]:hidden"

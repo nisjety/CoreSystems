@@ -18,6 +18,8 @@ type IndexCard = {
 	body: string;
 	href: string;
 	image: string;
+	/** Object-position for the crop — needed for the tall portrait renders. */
+	imagePosition?: string;
 	kicker: string;
 	label: string;
 	title: string;
@@ -34,14 +36,19 @@ type GalaxyImage = {
 	width: number;
 };
 
-// A Wolverine-style "image galaxy" scattered THROUGH the credo's full pinned
-// frame (not clustered in the margins) — one grounded anchor photo (a lone
-// door on a hillside, a threshold/decision image, not a stock "office"
-// cliché) plus small faded stills that echo the brand's own abstract
-// renders (soft-orb.png, a winter light-path, a twisted ribbon, a backlit
-// bird, dune light, clouds). Desktop-only (max-[760px]:hidden below) —
-// there isn't room to scatter imagery once the statement wraps to full
-// width and the pin gives way to a plain stacked layout.
+// A Wolverine-style "image galaxy" scattered THROUGH the credo's frame (not
+// clustered in the margins): photos threaded through big statement type.
+//
+// Thinned from 8 stills to 5 deliberately. The old set was almost entirely
+// abstract renders (soft-orb, dune light, clouds, a twisted ribbon) AND it
+// double-printed the backlit bird — /27aab72a…jpg here and /warm-flight.png
+// on card 02 below are the same photograph. Abstraction only reads as
+// premium while it stays rare, and this section sits next to an already very
+// abstract PreFooter, so the scatter now leans on grounded stills and keeps
+// exactly one soft render for air.
+//
+// Desktop-only (max-[760px]:hidden below) — there isn't room to scatter
+// imagery once the statement wraps to full width.
 const galaxyImages: GalaxyImage[] = [
 	{
 		src: "/a95a19e05613baa759395e7dfc3241e5.jpg",
@@ -53,7 +60,7 @@ const galaxyImages: GalaxyImage[] = [
 		className: "right-[6%] top-[4%] opacity-90",
 	},
 	{
-		src: "/0c49ef4d22d3f1ad1b49e59e374e1921.jpg",
+		src: "/verevon-mood/desk-vast-white.jpg",
 		alt: "",
 		width: 100,
 		aspect: "aspect-[3/4]",
@@ -61,20 +68,12 @@ const galaxyImages: GalaxyImage[] = [
 		className: "left-[13%] top-[8%] opacity-45",
 	},
 	{
-		src: "/b41e54607ac9cc5f6424268082c19bec.jpg",
+		src: "/verevon-mood/window-city-dusk.jpg",
 		alt: "",
 		width: 95,
 		aspect: "aspect-[3/4]",
 		rotate: -4,
-		className: "right-[19%] top-[24%] opacity-40",
-	},
-	{
-		src: "/00631c87cef97a24798fbee7c406201d.jpg",
-		alt: "",
-		width: 60,
-		aspect: "aspect-square",
-		rotate: -7,
-		className: "left-[45%] top-[3%] opacity-25",
+		className: "right-[19%] top-[24%] opacity-38",
 	},
 	{
 		src: "/soft-orb.png",
@@ -82,7 +81,7 @@ const galaxyImages: GalaxyImage[] = [
 		width: 75,
 		aspect: "aspect-[4/3]",
 		rotate: 4,
-		className: "left-[5%] top-[46%] opacity-30",
+		className: "left-[5%] top-[46%] opacity-28",
 	},
 	{
 		src: "/agent-run-console-running.jpg",
@@ -90,23 +89,7 @@ const galaxyImages: GalaxyImage[] = [
 		width: 85,
 		aspect: "aspect-[3/4]",
 		rotate: 5,
-		className: "right-[13%] top-[48%] opacity-28",
-	},
-	{
-		src: "/27aab72a25a11d3d63d1302d8d310515.jpg",
-		alt: "",
-		width: 90,
-		aspect: "aspect-[3/4]",
-		rotate: 6,
-		className: "bottom-[10%] left-[23%] opacity-25",
-	},
-	{
-		src: "/71fc97238af756817bf76c9ad6230a99.jpg",
-		alt: "",
-		width: 80,
-		aspect: "aspect-[4/3]",
-		rotate: -5,
-		className: "bottom-[8%] right-[27%] opacity-22",
+		className: "bottom-[10%] right-[13%] opacity-26",
 	},
 ];
 
@@ -145,12 +128,43 @@ function GalaxyThumb({ image }: { image: GalaxyImage }) {
 
 // The 3 index cards below the credo — each one points into a later section
 // (or /trust) instead of restating the thesis, so this section stays a
-// single, uncluttered move: state the problem, then hand off. Rendered as a
-// tab-switched trio (see ProblemSection below): each `image` was picked for
-// its own card's specific claim, not reused from the galaxy above — mist for
-// an answer with no ground underneath it, a bird breaking into flight for
-// action taken on its own, and a quiet, empty desk for knowledge that's
-// sitting there unused.
+// single, uncluttered move: state the problem, then hand off.
+//
+// Third pass on these images. Round 2 leaned into cohere.com's dark
+// generative-render register (light through cloud, a liquid terrain) but
+// that made the cards read as mood rather than explanation — a reader has to
+// decode "smooth liquid = control" before the claim lands, which is exactly
+// the indirection we don't want here. These are the images that carry the
+// argument, so each one now shows a real figure doing the thing the sentence
+// describes — figurative and narrative, not a visual metaphor to solve —
+// while still allowing a stylised or surreal touch (a body dissolving into
+// scattered photo fragments, an oversized floating keycap) rather than plain
+// documentary photography:
+// - 02: a man on a city street with his eyes obscured by a glitching,
+//   iridescent visor — vision itself is blocked, which is the literal
+//   picture "ingen har hele bildet" describes.
+// - 03: a hand pressing Ctrl+Z — undo/rollback is one of Agents' own feature
+//   chips ("Tilbakerulling"), so this is the literal control action the
+//   copy describes, not a mood standing in for "control."
+//
+// Sixth pass, all three cards. The brief changed from "match the title's
+// meaning" to three literal, fully-specified scenes (conveyor belt with one
+// small object; a wall of monitors around one seated person; an analogue
+// control panel with a hand on it) — plus an explicit list of what to avoid
+// (neon-blue "AI," floating UI graphics, smiling office teams, generic
+// laptops, literal puzzle pieces, obvious gears). None of the previously
+// harvested Pinterest boards (curated around abstract/premium/sci-fi) carry
+// industrial or bureaucratic imagery like this, so this round sources from
+// Unsplash instead — see IMAGE-DIRECTION.md Runde 7 for the search trail.
+// - 01: an otherwise-empty airport baggage carousel with exactly one
+//   suitcase on it. The belt is the whole visible world; the object riding
+//   it is small — "the thing itself is simple, the journey is what takes
+//   time," made literal instead of argued for.
+// - 02: a lone operator, back to camera, facing a real wall of ~30
+//   disconnected camera and system feeds (a model-railway control room) —
+//   nobody in that chair has one picture, they have thirty partial ones.
+// - 03: a hand on an analogue pressure-gauge dial, "LINE PRESSURE" labelled
+//   in shot — a real hand on a real control, not a metaphor for control.
 const cards: IndexCard[] = [
 	{
 		kicker: "01",
@@ -158,7 +172,8 @@ const cards: IndexCard[] = [
 		body: "Det er å finne kilden, sjekke reglene, formulere svaret og gjøre neste steg riktig. Et svar uten synlig kilde er ren gjetning med god selvtillit.",
 		href: "#kunnskap",
 		label: "Se hvordan kildene vises",
-		image: "/svar-uten-kilder.webp",
+		image: "/verevon-mood/conveyor-belt-single-suitcase.jpg",
+		imagePosition: "38% 62%",
 	},
 	{
 		kicker: "02",
@@ -166,7 +181,8 @@ const cards: IndexCard[] = [
 		body: "AI kan formulere et svar, men arbeidet krever også søk, dokumenter, interne regler, historikk, vurdering og systemhandlinger før neste steg kan tas. Kunnskap hjelper ingen før den er koblet til arbeidet.",
 		href: "/trust",
 		label: "Se godkjenningsmodellen",
-		image: "/warm-flight.png",
+		image: "/verevon-mood/monitor-wall-lone-operator.jpg",
+		imagePosition: "center 55%",
 	},
 	{
 		kicker: "03",
@@ -174,7 +190,8 @@ const cards: IndexCard[] = [
 		body: "Automatisering som sender selv, er en risiko ingen har bedt om. Når AI bruker verktøy eller endrer noe, må dere kunne se hvor svaret kommer fra, følge stegene og godkjenne før neste handling.",
 		href: "#flyt",
 		label: "Se arbeidsflyten",
-		image: "/DESIGN.jpg",
+		image: "/verevon-mood/aerospace-hand-pressure-gauge.jpg",
+		imagePosition: "68% 38%",
 	},
 ];
 
@@ -535,6 +552,9 @@ export function ProblemSection() {
 										fill
 										sizes="(max-width: 760px) 100vw, 50vw"
 										src={card.image}
+										style={{
+											objectPosition: card.imagePosition ?? "center",
+										}}
 									/>
 
 									<div

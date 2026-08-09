@@ -167,7 +167,12 @@ export default function App() {
         <Route path="/insights/social" component={() => <InsightsPage section="social" />} />
         <Route path="/insights/inbox" component={() => <InsightsPage section="inbox" />} />
         <Route path="/insights/agents" component={() => <InsightsPage section="agents" />} />
+        <Route path="/insights/chat" component={() => <InsightsPage section="chat" />} />
+        <Route path="/insights/knowledge" component={() => <InsightsPage section="knowledge" />} />
+        <Route path="/insights/ingestion" component={() => <InsightsPage section="ingestion" />} />
         <Route path="/insights/campaigns" component={() => <InsightsPage section="campaigns" />} />
+        <Route path="/insights/external" component={() => <InsightsPage section="external_analytics" />} />
+        <Route path="/insights/external_analytics" component={() => <InsightsPage section="external_analytics" />} />
         <Route path="/insights/experiments" component={() => <InsightsPage section="experiments" />} />
         <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/runs" component={AgentRunConsole} />

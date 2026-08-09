@@ -47,6 +47,10 @@ const MAX_ZOOM = 2.5
 const ZOOM_STEP = 1.2
 const DOT_SPACING = 22
 const CLICK_MOVE_THRESHOLD = 4
+/** Half the rendered pill height, used when framing the graph to the canvas. */
+const NODE_HALF_HEIGHT = 14
+/** Breathing room kept between the outermost pills and the canvas edge. */
+const FRAME_PADDING = 36
 
 export function createKnowledgeGraph2DScene(
   graphElement: HTMLElement,
@@ -95,12 +99,20 @@ export function createKnowledgeGraph2DScene(
   // pan by half the container puts that origin at the container's visual
   // center instead of its top-left corner.
   let pan = centerPan()
+  let lastHostSize = hostSize()
   let scale = DEFAULT_ZOOM
   let disposed = false
+  /** Set when the node set changes; cleared once the user takes over the view. */
+  let pendingFit = false
+
+  function hostSize(): { width: number; height: number } {
+    const rect = host.getBoundingClientRect()
+    return { width: rect.width, height: rect.height }
+  }
 
   function centerPan(): { x: number; y: number } {
-    const rect = host.getBoundingClientRect()
-    return { x: rect.width / 2, y: rect.height / 2 }
+    const size = hostSize()
+    return { x: size.width / 2, y: size.height / 2 }
   }
 
   const linkForce = forceLink<SimNode, SimLink>([]).id((node) => node.id).distance(120).strength(0.6)
@@ -117,9 +129,20 @@ export function createKnowledgeGraph2DScene(
     .velocityDecay(0.35)
     .on('tick', renderPositions)
 
+  // The host is measured once at construction, but its box can change long
+  // afterwards — a sibling column growing, a CSS rule resolving, the window
+  // resizing. Shifting the pan by half the size delta keeps whatever point was
+  // centred centred, so a later layout change can never strand the graph
+  // outside the visible area (and it preserves a pan the user chose).
   const resizeObserver = typeof ResizeObserver === 'undefined'
     ? undefined
     : new ResizeObserver(() => {
+        const size = hostSize()
+        pan = {
+          x: pan.x + (size.width - lastHostSize.width) / 2,
+          y: pan.y + (size.height - lastHostSize.height) / 2,
+        }
+        lastHostSize = size
         centerForce.x(0).y(0)
         applyTransform()
       })
@@ -141,7 +164,54 @@ export function createKnowledgeGraph2DScene(
     )
   }
 
+  /**
+   * Frame every node inside the canvas. Expanding a node can multiply the node
+   * count several times over, and the force layout spreads the result well past
+   * a fixed-height canvas — without this the new children land off-screen and
+   * expansion looks like it did nothing.
+   */
+  function frameNodes() {
+    const size = hostSize()
+    if (simNodes.length === 0 || size.width === 0 || size.height === 0) return
+
+    let minX = Infinity
+    let maxX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+    for (const node of simNodes) {
+      const halfWidth = nodeHalfWidth(node)
+      minX = Math.min(minX, node.x - halfWidth)
+      maxX = Math.max(maxX, node.x + halfWidth)
+      minY = Math.min(minY, node.y - NODE_HALF_HEIGHT)
+      maxY = Math.max(maxY, node.y + NODE_HALF_HEIGHT)
+    }
+
+    // Never zoom past 1:1 to fill space — a two-node graph blown up to fit
+    // would look broken. Fitting only ever zooms out.
+    scale = Math.min(
+      MAX_ZOOM,
+      Math.max(
+        MIN_ZOOM,
+        Math.min(
+          DEFAULT_ZOOM,
+          (size.width - FRAME_PADDING * 2) / Math.max(1, maxX - minX),
+          (size.height - FRAME_PADDING * 2) / Math.max(1, maxY - minY),
+        ),
+      ),
+    )
+    pan = {
+      x: size.width / 2 - ((minX + maxX) / 2) * scale,
+      y: size.height / 2 - ((minY + maxY) / 2) * scale,
+    }
+    lastHostSize = size
+    applyTransform()
+    options.onZoomChange?.(zoomPercent())
+  }
+
   function renderPositions() {
+    // Keep re-framing while the layout settles after a change, so the camera
+    // follows the graph into its final shape instead of snapping once.
+    if (pendingFit) frameNodes()
     for (const node of simNodes) {
       const el = nodeEls.get(node.id)
       // The pill is variable-width (label length), so center it on (x, y) by
@@ -168,6 +238,11 @@ export function createKnowledgeGraph2DScene(
     if (disposed) return
     originalEdges = edges
     const previous = new Map(simNodes.map((node) => [node.id, node]))
+    // Re-frame only when the node set actually changed (an expand/collapse), so
+    // the background refresh re-rendering identical data never yanks the view
+    // out from under someone who has panned or zoomed deliberately.
+    pendingFit =
+      nodes.length !== previous.size || nodes.some((node) => !previous.has(node.id))
     simNodes = nodes.map((node) => {
       const prior = previous.get(node.id)
       return {
@@ -248,6 +323,7 @@ export function createKnowledgeGraph2DScene(
     })
     el.addEventListener('pointerdown', (event) => {
       event.stopPropagation()
+      pendingFit = false
       dragging = true
       moved = false
       startClientX = event.clientX
@@ -319,6 +395,7 @@ export function createKnowledgeGraph2DScene(
 
   function reset(): number {
     pan = centerPan()
+    lastHostSize = hostSize()
     setScale(DEFAULT_ZOOM)
     for (const node of simNodes) {
       node.fx = null
@@ -335,6 +412,8 @@ export function createKnowledgeGraph2DScene(
   graphElement.addEventListener('pointerdown', (event) => {
     if (event.target !== graphElement && event.target !== background && event.target !== viewport) return
     panning = true
+    // The user is driving the camera now; stop auto-framing behind them.
+    pendingFit = false
     panStart = { x: event.clientX, y: event.clientY }
     panOrigin = { ...pan }
   })
@@ -353,6 +432,7 @@ export function createKnowledgeGraph2DScene(
     'wheel',
     (event) => {
       event.preventDefault()
+      pendingFit = false
       const direction = event.deltaY < 0 ? 1 : -1
       setScale(direction > 0 ? scale * 1.06 : scale / 1.06)
     },

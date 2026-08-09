@@ -5,6 +5,7 @@ import * as React from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { Section } from "./section";
+import { SensesGuidelines } from "./SensesGuidelines";
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -22,6 +23,11 @@ type SenseChapter = {
 // The three proof moments, rendered top to bottom as <li> items. On desktop
 // each chapter's heading/body is pinned to the viewport and cross-fades into
 // the next as you scroll past it; on mobile they become a plain stacked list.
+//
+// The photographs were already right; the copy just wasn't looking at them.
+// Each chapter's text now opens on the human moment in its own picture — the
+// three colleagues who share the question, the face lit by what it is reading,
+// the hand mid-explanation — and only then says what Verevon does about it.
 const chapters: SenseChapter[] = [
 	{
 		ambientImage: "/3-guys-working.jpg",
@@ -30,7 +36,7 @@ const chapters: SenseChapter[] = [
 		id: "search",
 		subtitle: "Søk",
 		titleLines: ["Finn med", "grunnlag."],
-		text: "Start med oppgaven. Verevon søker i virksomhetens kunnskap, norske datakilder og webben — og samler relevant kontekst før dere må lete selv.",
+		text: "Spørsmålet starter sjelden hos én person. Verevon søker i virksomhetens kunnskap, norske datakilder og webben, og samler relevant kontekst før noen rundt bordet må lete selv.",
 		highlight: "samler relevant kontekst",
 	},
 	{
@@ -40,7 +46,7 @@ const chapters: SenseChapter[] = [
 		id: "trace",
 		subtitle: "Grunnlag",
 		titleLines: ["Se hva", "svaret", "bygger på."],
-		text: "Åpne kilden, utdraget, tidspunktet og regelen bak forslaget. Se hva som er sikkert, hva som mangler og hvorfor Verevon foreslår neste steg.",
+		text: "Grunnlaget skal være lesbart for et menneske, ikke bare for maskinen. Åpne kilden, utdraget, tidspunktet og regelen bak forslaget — og se hva som er sikkert, hva som mangler og hvorfor neste steg foreslås.",
 		highlight: "hva som mangler",
 	},
 	{
@@ -50,8 +56,8 @@ const chapters: SenseChapter[] = [
 		id: "operate",
 		subtitle: "Delegering",
 		titleLines: ["La agenten", "gjøre", "mer."],
-		text: "Gi agenten godkjente verktøy og tydelige rammer. Følg stegene, stopp underveis og godkjenn før noe viktig sendes eller endres.",
-		highlight: "Følg stegene, stopp underveis og godkjenn",
+		text: "Dere forklarer én gang: godkjente verktøy, tydelige rammer, hvor grensen går. Så følger dere stegene, stopper underveis og godkjenner før noe viktig sendes eller endres.",
+		highlight: "Dere forklarer én gang",
 	},
 ];
 
@@ -79,25 +85,6 @@ function renderHighlightText(text: string, highlight: string) {
 	);
 }
 
-// Two faint vertical rules spanning the section, drifting slowly up/down as
-// the whole section scrolls past (see the `grid` scrollTrigger below) —
-// a subtle parallax backdrop behind everything else. Desktop-only motion;
-// on mobile/reduced-motion it just sits still.
-function SensesGrid() {
-	return (
-		<div
-			aria-hidden="true"
-			className="pointer-events-none absolute inset-0 z-0 overflow-hidden text-[color-mix(in_srgb,var(--verevon-j-text)_6%,transparent)]"
-			data-editorial-grid=""
-		>
-			<div className="absolute inset-y-0 left-[var(--verevon-edge)] right-[var(--verevon-edge)] max-[760px]:left-[var(--verevon-page-pad)] max-[760px]:right-[var(--verevon-page-pad)]">
-				<span className="absolute inset-y-0 left-0 w-px bg-current" />
-				<span className="absolute inset-y-0 right-0 w-px bg-current" />
-			</div>
-		</div>
-	);
-}
-
 export function SensesSection() {
 	const containerRef = React.useRef<HTMLDivElement>(null);
 
@@ -109,9 +96,6 @@ export function SensesSection() {
 		}
 
 		const items = gsap.utils.toArray<HTMLElement>(".usp-item", container);
-		const grid = container.querySelector<HTMLElement>(
-			"[data-editorial-grid]",
-		);
 		const contents = items
 			.map((item) => item.querySelector<HTMLElement>(".usp-content"))
 			.filter(
@@ -151,7 +135,7 @@ export function SensesSection() {
 						position: "static",
 						visibility: "inherit",
 					});
-					gsap.set([grid, ...media].filter(Boolean), {
+					gsap.set(media, {
 						clearProps: "transform",
 					});
 					return;
@@ -162,33 +146,10 @@ export function SensesSection() {
 				// any GSAP-applied transform/opacity so nothing here fights that.
 				if (!isDesktop) {
 					gsap.set(
-						[grid, ...contents, ...media].filter(Boolean),
+						[...contents, ...media].filter(Boolean),
 						{ clearProps: "all" },
 					);
 					return;
-				}
-
-				// Desktop: the background rule-lines drift slightly as the section
-				// passes through the viewport (from just before it enters to just
-				// after it fully exits — "top bottom" to "bottom top").
-				if (grid) {
-					gsap.fromTo(
-						grid,
-						{ yPercent: -0.55 },
-						{
-							yPercent: 0.65,
-							ease: "none",
-							force3D: true,
-							scrollTrigger: {
-								trigger: container,
-								start: "top bottom",
-								end: "bottom top",
-								scrub: 0.85,
-								id: "verevon-senses-grid",
-								invalidateOnRefresh: true,
-							},
-						},
-					);
 				}
 
 				items.forEach((item, index) => {
@@ -320,7 +281,7 @@ export function SensesSection() {
 
 	return (
 		<Section
-			containerClassName="p-0 border-t border-verevon-j-text/8"
+			containerClassName="p-0"
 			id="kunnskap"
 			title="Kunnskapen følger arbeidet"
 			titleClassName="sr-only"
@@ -330,8 +291,6 @@ export function SensesSection() {
 				className="relative w-full overflow-clip bg-[color-mix(in_srgb,var(--background)_92%,var(--verevon-bg-soft))] text-verevon-j-text"
 				ref={containerRef}
 			>
-				<SensesGrid />
-
 				{/* This section shifts from what Verevon connects to what working with
 				    Verevon feels like: context follows the task and stays inspectable. */}
 				<div className="relative z-10 px-[var(--verevon-edge)] pb-[clamp(28px,4vw,64px)] pt-[clamp(104px,11vw,154px)] max-[760px]:px-[var(--verevon-page-pad)]">
@@ -462,18 +421,14 @@ export function SensesSection() {
 											/>
 										</div>
 									</div>
-									{/* Thin vertical rule along the image's inner edge (desktop only). */}
-									<span
-										aria-hidden="true"
+									{/* Thin vertical rule along the image's inner edge (desktop only). Same length/thickness as before — now an animated dashed guideline instead of a plain gradient line. */}
+									<SensesGuidelines
 										className={[
 											"pointer-events-none absolute -bottom-[20%] -top-[20%] z-[1] w-[1px]",
 											mediaRuleSide,
 										].join(" ")}
-										data-senses-image-rule="side"
-										style={{
-											background:
-												"linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--verevon-j-text) 12%, transparent) 15%, color-mix(in srgb, var(--verevon-j-text) 12%, transparent) 85%, transparent 100%)",
-										}}
+										delaySeconds={index * 0.15}
+										orientation="vertical"
 									/>
 								</figure>
 							</li>
