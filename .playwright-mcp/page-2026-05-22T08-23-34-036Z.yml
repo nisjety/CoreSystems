@@ -23,7 +23,7 @@
             - generic [ref=e40]:
               - generic [ref=e41]: Steg 4 av 6 · Kilder
               - heading "Koble Til Kunnskapen Din." [level=1] [ref=e42]
-              - paragraph [ref=e43]: Velg systemene Velion skal lære fra. Hver kilde blir en klynge med noder i grafen til høyre.
+              - paragraph [ref=e43]: Velg systemene Verevon skal lære fra. Hver kilde blir en klynge med noder i grafen til høyre.
               - generic [ref=e44]:
                 - generic [ref=e45]:
                   - paragraph [ref=e46]: Chat
@@ -71,8 +71,8 @@
                 - paragraph [ref=e88]: 2 kilder · 2 noder · 1 kanter
             - paragraph [ref=e90]:
               - text: Står du fast?
-              - link "support@velion.com" [ref=e91] [cursor=pointer]:
-                - /url: mailto:support@velion.com
+              - link "support@verevon.com" [ref=e91] [cursor=pointer]:
+                - /url: mailto:support@verevon.com
           - generic [ref=e95]:
             - img [ref=e96]:
               - generic [ref=e100]: org_1779

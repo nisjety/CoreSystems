@@ -14,9 +14,9 @@
                 - img [ref=e25]
             - generic [ref=e27]:
               - img [ref=e28]
-              - link "aquatiq-as Free" [ref=e30] [cursor=pointer]:
+              - link "coresystem-as Free" [ref=e30] [cursor=pointer]:
                 - /url: /dashboard
-                - generic [ref=e31]: aquatiq-as
+                - generic [ref=e31]: coresystem-as
                 - generic [ref=e32]: Free
               - img [ref=e33]
               - link "Inbox" [ref=e35] [cursor=pointer]:
@@ -142,8 +142,8 @@
                       - generic [ref=e206]: Dashboard
                 - generic [ref=e207]:
                   - generic [ref=e208]:
-                    - button "Velion AI Agent" [expanded] [ref=e209] [cursor=pointer]:
-                      - heading "Velion AI Agent" [level=2] [ref=e210]
+                    - button "Verevon AI Agent" [expanded] [ref=e209] [cursor=pointer]:
+                      - heading "Verevon AI Agent" [level=2] [ref=e210]
                       - img [ref=e211]
                     - button "Add velion ai agent" [ref=e213] [cursor=pointer]:
                       - img [ref=e214]
@@ -260,7 +260,7 @@
               - generic [ref=e382]:
                 - generic [ref=e383]:
                   - button "Details" [ref=e384] [cursor=pointer]
-                  - button "Velion" [ref=e385] [cursor=pointer]
+                  - button "Verevon" [ref=e385] [cursor=pointer]
                   - button "Calendar" [ref=e386] [cursor=pointer]
                   - button "Activity" [ref=e387] [cursor=pointer]
                 - button "Open side panel settings" [ref=e388] [cursor=pointer]:

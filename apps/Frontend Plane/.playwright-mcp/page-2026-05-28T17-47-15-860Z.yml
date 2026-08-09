@@ -14,9 +14,9 @@
                 - img [ref=e25]
             - generic [ref=e27]:
               - img [ref=e28]
-              - link "aquatiq-as Free" [ref=e30] [cursor=pointer]:
+              - link "coresystem-as Free" [ref=e30] [cursor=pointer]:
                 - /url: /dashboard
-                - generic [ref=e31]: aquatiq-as
+                - generic [ref=e31]: coresystem-as
                 - generic [ref=e32]: Free
               - img [ref=e33]
               - link "Inbox" [ref=e35] [cursor=pointer]:

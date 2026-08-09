@@ -23,7 +23,7 @@
             - generic [ref=e40]:
               - generic [ref=e41]: Step 4 of 6 · Sources
               - heading "Connect Your Knowledge." [level=1] [ref=e42]
-              - paragraph [ref=e43]: Pick the systems Velion should learn from. Each one becomes a cluster of nodes in the graph on the right.
+              - paragraph [ref=e43]: Pick the systems Verevon should learn from. Each one becomes a cluster of nodes in the graph on the right.
               - generic [ref=e44]:
                 - generic [ref=e45]:
                   - paragraph [ref=e46]: Chat
@@ -77,8 +77,8 @@
                 - paragraph [ref=e94]: 1 sources · 0 nodes · 0 edges
             - paragraph [ref=e96]:
               - text: Stuck?
-              - link "support@velion.com" [ref=e97] [cursor=pointer]:
-                - /url: mailto:support@velion.com
+              - link "support@verevon.com" [ref=e97] [cursor=pointer]:
+                - /url: mailto:support@verevon.com
           - generic [ref=e101]:
             - img [ref=e102]
             - generic:

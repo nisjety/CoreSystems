@@ -42,15 +42,15 @@
             - generic [ref=e40]: Steg 1 av 6
             - heading "Du Er Inne." [level=1] [ref=e41]
             - paragraph [ref=e42]: Vi forbereder arbeidsplassen din. Det tar et øyeblikk.
-            - generic [ref=e45]: Setter opp Velion …
+            - generic [ref=e45]: Setter opp Verevon …
           - paragraph [ref=e47]:
             - text: Stuck?
-            - link "support@velion.com" [ref=e48] [cursor=pointer]:
-              - /url: mailto:support@velion.com
+            - link "support@verevon.com" [ref=e48] [cursor=pointer]:
+              - /url: mailto:support@verevon.com
         - generic [ref=e49]:
           - generic [ref=e51]:
             - generic:
-              - paragraph: Velion · for team som svarer.
+              - paragraph: Verevon · for team som svarer.
               - paragraph: 42 % raskere første svar · 18 språk · alt på din kunnskap.
           - generic [ref=e54]:
             - img [ref=e55]

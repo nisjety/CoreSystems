@@ -11,7 +11,7 @@
           - generic [ref=e19]:
             - generic "Step 3 of 6" [ref=e20]
             - generic [ref=e27]: Step 3 of 6 · Website
-            - heading "Show Velion Where To Learn." [level=1] [ref=e28]
+            - heading "Show Verevon Where To Learn." [level=1] [ref=e28]
             - paragraph [ref=e29]: Paste your company URL. We'll skim the public pages and turn them into the agent's first knowledge base. You can add more sources right after.
             - generic [ref=e30]:
               - generic [ref=e31]:
@@ -19,8 +19,8 @@
                 - generic [ref=e33]:
                   - generic [ref=e34]: https://
                   - textbox "Website URL https://" [active] [ref=e35]:
-                    - /placeholder: aquatiq.com
-                    - text: aquatiq,com
+                    - /placeholder: coresystem.com
+                    - text: coresystem,com
               - generic [ref=e36]:
                 - generic [ref=e37]: What should this agent help with? (optional)
                 - textbox "What should this agent help with? (optional)" [ref=e38]:
@@ -30,8 +30,8 @@
                 - button "Skip for now" [ref=e41]
           - paragraph [ref=e43]:
             - text: Stuck?
-            - link "support@velion.com" [ref=e44] [cursor=pointer]:
-              - /url: mailto:support@velion.com
+            - link "support@verevon.com" [ref=e44] [cursor=pointer]:
+              - /url: mailto:support@verevon.com
         - generic [ref=e45]:
           - generic [ref=e49]:
             - generic [ref=e51]:

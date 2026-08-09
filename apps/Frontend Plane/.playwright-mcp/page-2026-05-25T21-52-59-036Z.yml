@@ -10,9 +10,9 @@
               - img [ref=e13]
           - generic [ref=e15]:
             - img [ref=e16]
-            - link "aquatiq-as Free" [ref=e18] [cursor=pointer]:
+            - link "coresystem-as Free" [ref=e18] [cursor=pointer]:
               - /url: /dashboard
-              - generic [ref=e19]: aquatiq-as
+              - generic [ref=e19]: coresystem-as
               - generic [ref=e20]: Free
             - img [ref=e21]
             - link "Chat" [ref=e23] [cursor=pointer]:
@@ -76,7 +76,7 @@
         - complementary [ref=e129]:
           - generic [ref=e130]:
             - generic [ref=e131]:
-              - paragraph [ref=e132]: Velion Chat
+              - paragraph [ref=e132]: Verevon Chat
               - paragraph [ref=e133]: Tasks and conversations
             - button "New chat" [ref=e135] [cursor=pointer]:
               - img [ref=e136]
@@ -114,8 +114,8 @@
               - generic [ref=e192]:
                 - generic [ref=e193]:
                   - img [ref=e194]
-                  - text: Velion
-                - generic [ref=e197]: Awaiting the live Velion agent stream.
+                  - text: Verevon
+                - generic [ref=e197]: Awaiting the live Verevon agent stream.
                 - generic [ref=e199]:
                   - button "Copy" [ref=e201] [cursor=pointer]:
                     - img [ref=e202]
@@ -152,8 +152,8 @@
                       - generic [ref=e249]: 11:17 PM
                     - paragraph [ref=e250]: Waiting for the production agent stream endpoint. The UI does not generate fallback answers.
           - generic [ref=e253]:
-            - generic [ref=e254]: Message Velion
-            - textbox "Message Velion" [ref=e255]
+            - generic [ref=e254]: Message Verevon
+            - textbox "Message Verevon" [ref=e255]
             - generic [ref=e256]:
               - generic [ref=e257]:
                 - button "Add attachment" [ref=e259] [cursor=pointer]:

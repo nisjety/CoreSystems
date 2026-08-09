@@ -146,9 +146,46 @@ coverage/
 /tmp/
 .scratch/
 
-# Playwright MCP browser-automation artifacts (screenshots/traces)
+# Playwright MCP browser-automation artifacts (screenshots/traces).
+# Also matched at any depth: these get created next to whichever package the
+# run started from, not just at the repo root.
 .playwright-mcp/
+**/.playwright-mcp/
+
+# Playwright's own run output
+test-results/
+**/test-results/
+playwright-report/
+**/playwright-report/
+blob-report/
+**/blob-report/
+.last-run.json
+
+# ──────────────────────────────────────────────────────────────────────
+# Ad-hoc UI screenshots captured while iterating on a design. Real product
+# and marketing assets live under a package's own public/ or assets/ dir
+# and are NOT covered by these rules — only loose captures dropped at a
+# plane or app root.
+# ──────────────────────────────────────────────────────────────────────
+apps/Frontend Plane/*.png
+apps/Frontend Plane/*.jpg
+apps/Frontend Plane/verevonv3/*.png
+apps/Frontend Plane/verevonv3/*.jpg
+**/image copy*.png
+**/screenshot-*.png
+
+# Nested checkout that is its own git repository; `git add` would otherwise
+# stage it as a gitlink with none of its contents.
+apps/Frontend Plane/agenci/
 
 # Screen recordings + compiled Go migrator binary (build artifacts)
 *.mov
 apps/Data Plane v2/tools/migrator/migrator
+
+# ──────────────────────────────────────────────────────────────────────
+# Deployment credentials. These must never be tracked, wherever they land.
+# ──────────────────────────────────────────────────────────────────────
+DEPLOYED_SERVICES_CREDENTIALS.txt
+**/DEPLOYED_SERVICES_CREDENTIALS.txt
+.env.generated-secrets
+**/.env.generated-secrets

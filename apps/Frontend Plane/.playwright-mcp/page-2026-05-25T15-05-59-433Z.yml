@@ -12,9 +12,9 @@
               - img [ref=e15]
           - generic [ref=e17]:
             - img [ref=e18]
-            - link "aquatiq-as Free" [ref=e20] [cursor=pointer]:
+            - link "coresystem-as Free" [ref=e20] [cursor=pointer]:
               - /url: /dashboard
-              - generic [ref=e21]: aquatiq-as
+              - generic [ref=e21]: coresystem-as
               - generic [ref=e22]: Free
             - img [ref=e23]
             - link "Oversikt" [ref=e25] [cursor=pointer]:
@@ -122,8 +122,8 @@
               - button "Innstillinger" [ref=e164] [cursor=pointer]:
                 - img [ref=e165]
           - generic [ref=e166]:
-            - generic [ref=e167]: Message Velion
-            - textbox "Message Velion" [ref=e168]:
+            - generic [ref=e167]: Message Verevon
+            - textbox "Message Verevon" [ref=e168]:
               - /placeholder: How can I help you today?
             - generic [ref=e169]:
               - generic [ref=e170]:

@@ -10,9 +10,9 @@
               - img [ref=e14]
           - generic [ref=e16]:
             - img [ref=e17]
-            - link "aquatiq-as Free" [ref=e19] [cursor=pointer]:
+            - link "coresystem-as Free" [ref=e19] [cursor=pointer]:
               - /url: /dashboard
-              - generic [ref=e20]: aquatiq-as
+              - generic [ref=e20]: coresystem-as
               - generic [ref=e21]: Free
             - img [ref=e22]
             - link "Agenter" [ref=e24] [cursor=pointer]:

@@ -12,9 +12,9 @@
               - img [ref=e18]
           - generic [ref=e20]:
             - img [ref=e21]
-            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+            - link "coresystem-as Free" [ref=e23] [cursor=pointer]:
               - /url: /dashboard
-              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e24]: coresystem-as
               - generic [ref=e25]: Free
             - img [ref=e26]
             - link "Chat" [ref=e28] [cursor=pointer]:

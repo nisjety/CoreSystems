@@ -12,9 +12,9 @@
               - img [ref=e18]
           - generic [ref=e20]:
             - img [ref=e21]
-            - link "aquatiq-as Free" [ref=e23] [cursor=pointer]:
+            - link "coresystem-as Free" [ref=e23] [cursor=pointer]:
               - /url: /dashboard
-              - generic [ref=e24]: aquatiq-as
+              - generic [ref=e24]: coresystem-as
               - generic [ref=e25]: Free
             - img [ref=e26]
             - link "Chat" [ref=e28] [cursor=pointer]:
@@ -78,7 +78,7 @@
         - complementary [ref=e133]:
           - generic [ref=e134]:
             - generic [ref=e135]:
-              - paragraph [ref=e136]: Velion Chat
+              - paragraph [ref=e136]: Verevon Chat
               - paragraph [ref=e137]: Tasks and conversations
             - button "New chat" [ref=e139] [cursor=pointer]:
               - img [ref=e140]
@@ -91,7 +91,7 @@
           - main [ref=e152]:
             - generic [ref=e153]:
               - generic [ref=e154]:
-                - heading "Velion Chat" [level=1] [ref=e155]
+                - heading "Verevon Chat" [level=1] [ref=e155]
                 - paragraph [ref=e156]: ChatGPT-style conversation with Manus-style task feedback
               - generic [ref=e157]:
                 - button "Regenerate latest response" [disabled] [ref=e159]:
@@ -100,11 +100,11 @@
                   - img [ref=e167]
             - generic [ref=e172]:
               - img [ref=e174]
-              - heading "Velion Chat" [level=2] [ref=e177]
+              - heading "Verevon Chat" [level=2] [ref=e177]
               - paragraph [ref=e178]: Start with a prompt below. Conversations you create here stay in your local workspace history.
             - generic [ref=e181]:
-              - generic [ref=e182]: Message Velion
-              - textbox "Message Velion" [ref=e183]
+              - generic [ref=e182]: Message Verevon
+              - textbox "Message Verevon" [ref=e183]
               - generic [ref=e184]:
                 - generic [ref=e185]:
                   - button "Add attachment" [ref=e187] [cursor=pointer]:

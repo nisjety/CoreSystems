@@ -14,9 +14,9 @@
                 - img [ref=e25]
             - generic [ref=e27]:
               - img [ref=e28]
-              - link "aquatiq-as Free" [ref=e30] [cursor=pointer]:
+              - link "coresystem-as Free" [ref=e30] [cursor=pointer]:
                 - /url: /dashboard
-                - generic [ref=e31]: aquatiq-as
+                - generic [ref=e31]: coresystem-as
                 - generic [ref=e32]: Free
               - img [ref=e33]
               - link "Innstillinger" [ref=e35] [cursor=pointer]:
@@ -113,7 +113,7 @@
             - generic [ref=e175]:
               - paragraph [ref=e178]: Primary domain
               - paragraph [ref=e179]: Verified
-              - paragraph [ref=e180]: aquatiq.no is ready for customer-facing links.
+              - paragraph [ref=e180]: coresystem.no is ready for customer-facing links.
             - generic [ref=e181]:
               - paragraph [ref=e184]: Data region
               - paragraph [ref=e185]: Europe
@@ -129,13 +129,13 @@
             - generic [ref=e197]:
               - generic [ref=e198]:
                 - generic [ref=e199]: Workspace name
-                - textbox "Workspace name" [ref=e200]: aquatiq-as
+                - textbox "Workspace name" [ref=e200]: coresystem-as
               - generic [ref=e201]:
                 - generic [ref=e202]: Workspace URL
-                - textbox "Workspace URL" [ref=e203]: aquatiq-as.velion.ai
+                - textbox "Workspace URL" [ref=e203]: coresystem-as.velion.ai
               - generic [ref=e204]:
                 - generic [ref=e205]: Primary domain
-                - textbox "Primary domain" [ref=e206]: aquatiq.no
+                - textbox "Primary domain" [ref=e206]: coresystem.no
               - generic [ref=e207]:
                 - generic [ref=e208]: Data region
                 - generic [ref=e209]:
@@ -164,12 +164,12 @@
                 - generic [ref=e225]:
                   - generic [ref=e226]:
                     - generic [ref=e227]:
-                      - paragraph [ref=e228]: aquatiq.no
+                      - paragraph [ref=e228]: coresystem.no
                       - paragraph [ref=e229]: Customer portal
                     - generic [ref=e230]: Verified
                   - generic [ref=e231]:
                     - generic [ref=e232]:
-                      - paragraph [ref=e233]: support.aquatiq.no
+                      - paragraph [ref=e233]: support.coresystem.no
                       - paragraph [ref=e234]: Help center
                     - generic [ref=e235]: DNS pending
               - generic [ref=e236]:

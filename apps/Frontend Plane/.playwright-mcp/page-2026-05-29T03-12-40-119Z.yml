@@ -14,9 +14,9 @@
                 - img [ref=e25]
             - generic [ref=e27]:
               - img [ref=e28]
-              - link "aquatiq-as Free" [ref=e30] [cursor=pointer]:
+              - link "coresystem-as Free" [ref=e30] [cursor=pointer]:
                 - /url: /dashboard
-                - generic [ref=e31]: aquatiq-as
+                - generic [ref=e31]: coresystem-as
                 - generic [ref=e32]: Free
               - img [ref=e33]
               - link "Agenter" [ref=e35] [cursor=pointer]:
@@ -125,7 +125,7 @@
               - heading "Service agent resolution workspace" [level=1] [ref=e190]
               - paragraph [ref=e191]: Run a Fin, Zendesk, and Ada-inspired service desk where every conversation moves through answer, action, verified review, and handoff states.
               - generic [ref=e192]:
-                - generic [ref=e193]: Velion CX Reasoner
+                - generic [ref=e193]: Verevon CX Reasoner
                 - generic [ref=e194]: Confidence policy required
                 - generic [ref=e195]: Live automation rate appears after launch
             - generic [ref=e196]:
@@ -256,7 +256,7 @@
                         - generic [ref=e367]:
                           - heading "Web messenger" [level=3] [ref=e368]
                           - generic [ref=e369]: Plan
-                        - paragraph [ref=e370]: Answers authenticated and anonymous visitors from the Velion widget.
+                        - paragraph [ref=e370]: Answers authenticated and anonymous visitors from the Verevon widget.
                     - generic [ref=e371]:
                       - img [ref=e373]
                       - generic [ref=e376]:
@@ -308,7 +308,7 @@
                   - generic [ref=e463]:
                     - generic [ref=e465]:
                       - img [ref=e467]
-                      - generic [ref=e470]: Velion Service
+                      - generic [ref=e470]: Verevon Service
                     - generic [ref=e472]: Can you help with my order?
                     - generic [ref=e473]: I found the order and can create a support case if needed.
                   - img [ref=e475]
@@ -320,7 +320,7 @@
                     - button "Create priority ticket" [ref=e482] [cursor=pointer]
                     - button "Show delivery window" [ref=e483] [cursor=pointer]
                     - button "Hand off to support" [ref=e484] [cursor=pointer]
-                - paragraph [ref=e485]: The preview shows how Velion answers with context, cites policy, and escalates when the promise is risky.
+                - paragraph [ref=e485]: The preview shows how Verevon answers with context, cites policy, and escalates when the promise is risky.
               - generic [ref=e486]:
                 - generic [ref=e487]:
                   - generic [ref=e488]:
