@@ -1,0 +1,108 @@
+# Aquatiq Integration Gateway Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 5001
+  grpc_port: 50051
+  read_timeout: "30s"
+  write_timeout: "30s"
+  shutdown_timeout: "30s"
+  apikey: "dev-api-key-change-in-production"
+
+grpc:
+  host: "0.0.0.0"
+  port: 50051
+  tls:
+    enabled: true
+    cert_file: "/certs/server-cert.pem"
+    key_file: "/certs/server-key.pem"
+    ca_file: "/certs/ca-cert.pem"
+
+redis:
+  enabled: true  # Redis is available via docker-compose
+  host: "redis"
+  port: 6379
+  password: ""  # Set via REDIS_PASSWORD env var
+  db: 0
+  poolsize: 10
+  timeout: "10s"
+  tls:
+    enabled: false  # Internal Docker network, no TLS needed
+    insecure_skip_verify: false
+
+ratelimit:
+  global_rps: 100
+  admin_rps: 20
+  burst_size: 50
+  distributed: true
+
+circuitbreaker:
+  max_requests: 100
+  interval: "10s"
+  timeout: "30s"
+  failure_threshold: 5
+
+docker:
+  host: "tcp://docker-socket-proxy:2375"
+  version: "1.41"
+  timeout: "30s"
+
+auth:
+  token_refresh_interval: "30m"
+  token_encryption_key: "change-this-to-a-secure-32-byte-key"
+
+oauth:
+  # Encryption key for OAuth2 tokens stored in Redis (32 bytes minimum)
+  # Set via OAUTH_ENCRYPTION_KEY environment variable
+  encryption_key: ""  # Must be 32+ bytes, generated securely
+  
+  # OAuth2 provider configurations
+  providers:
+    superoffice:
+      enabled: false  # Set to true when credentials are configured
+      client_id: ""  # Set via SUPEROFFICE_CLIENT_ID env var
+      client_secret: ""  # Set via SUPEROFFICE_CLIENT_SECRET env var
+      # OAuth2 endpoints (managed automatically by oauth/superoffice.go)
+      # Authorization: https://sod.superoffice.com/login/common/oauth/authorize
+      # Token: https://sod.superoffice.com/login/common/oauth/tokens
+      # Scopes: openid, profile, WebAPI
+      # Token lifetime: 1 hour access, 90 days refresh
+      # Rate limits: 100 req/min per user, 1000 req/hour per app
+    
+    visma:
+      enabled: false  # Set to true when credentials are configured
+      client_id: ""  # Set via VISMA_CLIENT_ID env var
+      client_secret: ""  # Set via VISMA_CLIENT_SECRET env var
+      # OAuth2 endpoints (managed automatically by oauth/visma.go)
+      # Authorization: https://connect.visma.com/connect/authorize
+      # Token: https://connect.visma.com/connect/token
+      # Scopes: offline_access, financials, projects, customers, inventory, sales
+      # Token lifetime: 1 hour access, 90 days refresh
+      # Multi-tenant: User can access multiple companies
+
+whitelist:
+  traefik_config_path: "/app/configs/traefik-dynamic.yml"
+
+database:
+  postgres_url: ""  # Set via DATABASE_POSTGRESURL env var
+
+integrations:
+  superoffice:
+    base_url: "https://online.superoffice.com"
+    client_id: ""
+    client_secret: ""
+    tenant_id: ""
+    timeout: "30s"
+    retry_max: 3
+  visma:
+    base_url: "https://api.visma.net"
+    client_id: ""
+    client_secret: ""
+    company_id: ""
+    timeout: "30s"
+    retry_max: 3
+
+logging:
+  level: "info"
+  format: "json"
+  output_path: "stdout"

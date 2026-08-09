@@ -1,0 +1,96 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docker-compose.yml'
+      - '*.sh'
+      - 'secrets/**'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            
+            DEPLOY_DIR="/opt/coresystem"
+            REPO_URL="https://github.com/I-Dacosta/Aquatiq-root.git"
+            
+            # Initialize directory if it doesn't exist
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              echo "📁 Creating deployment directory..."
+              mkdir -p "$DEPLOY_DIR"
+              cd "$DEPLOY_DIR"
+              echo "🔄 Cloning repository..."
+              git clone "$REPO_URL" .
+            else
+              cd "$DEPLOY_DIR"
+            fi
+            
+            # Fetch and pull latest changes
+            echo "📥 Fetching latest changes..."
+            git fetch origin main
+            
+            # Get current and new commit hashes
+            CURRENT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+            NEW_COMMIT=$(git rev-parse origin/main)
+            
+            if [ "$CURRENT_COMMIT" = "$NEW_COMMIT" ]; then
+              echo "✅ Already up to date with commit $NEW_COMMIT"
+              exit 0
+            fi
+            
+            echo "🔄 Updating from $CURRENT_COMMIT to $NEW_COMMIT"
+            
+            # Stash any local changes
+            git stash push -m "auto-stash-$(date +%s)" || true
+            
+            # Checkout and reset to latest
+            git checkout main
+            git reset --hard origin/main
+            
+            # Sync certificates and configs
+            echo "🔒 Syncing certificates and configs..."
+            [ -d "cloudflare-certs" ] && chmod 644 cloudflare-certs/* 2>/dev/null || true
+            
+            # Fix permissions on executable scripts
+            chmod +x *.sh 2>/dev/null || true
+            chmod +x coresystem-gateway/*.sh 2>/dev/null || true
+            
+            # Rebuild and restart services
+            echo "🚀 Redeploying services..."
+            docker compose -f docker-compose.yml build --no-cache 2>&1 | grep -E "(Building|Successfully)" || true
+            docker compose -f docker-compose.yml up -d 2>&1 | grep -E "(Creating|Recreate|Starting|Started)" || true
+            
+            # Wait for services to stabilize
+            sleep 10
+            
+            # Verify health
+            echo "✅ Verifying service health..."
+            docker compose -f docker-compose.yml ps --format "table {{.Service}}\t{{.Status}}"
+            
+            echo "🎉 Deployment completed successfully!"
+      
+      - name: Deployment Status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ Deployment successful!"
+          else
+            echo "❌ Deployment failed!"
+            exit 1
+          fi

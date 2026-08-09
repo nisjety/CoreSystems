@@ -1,0 +1,186 @@
+# Traefik dynamic configuration for the CoreSystem Infra Plane edge.
+#
+# Domains: verevon.no is the primary (canonical) domain; verevon.com is a
+# secondary that permanently redirects to it, so there is exactly one canonical
+# origin for links, cookies, and SEO. Both are declared with explicit Host()
+# rules — path-only routing cannot distinguish hostnames, so domain support has
+# to be expressed here rather than in the entrypoint.
+#
+# The localhost path-based routers are kept as a lower-priority fallback so
+# local development on 127.0.0.1:8090 behaves exactly as it did before domains
+# were added.
+#
+# Router priority (higher wins):
+#   400  verevon.com  → 301 redirect to verevon.no
+#   300  verevon.no   /infra → operator gateway
+#   200  verevon.no   /      → nginx landing
+#   100  localhost    /infra → operator gateway
+#     1  localhost    /      → nginx landing
+#
+# NOTE ON SCOPE: per this plane's README it owns the local edge and operator
+# surface only — it deliberately does NOT front the browser-facing Verevon
+# application, which keeps its own same-origin Rust gateway in the Frontend
+# Plane. These routers therefore serve the infra landing page and the bounded
+# operator gateway on the domains. To instead publish the product app here,
+# repoint the `verevon-no-home` service at the Frontend Plane gateway (see the
+# commented `verevon-frontend` service at the bottom) — that is a deliberate
+# ownership change, not a config tweak.
+
+http:
+  middlewares:
+    core-infra-security:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: no-referrer
+        customResponseHeaders:
+          X-Robots-Tag: noindex
+
+    # HSTS is applied only on the domain routers, never on the localhost
+    # fallback: sending Strict-Transport-Security over plain-HTTP localhost
+    # would pin the browser to HTTPS for 127.0.0.1 and break local dev.
+    core-infra-hsts:
+      headers:
+        contentTypeNosniff: true
+        frameDeny: true
+        referrerPolicy: strict-origin-when-cross-origin
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        stsPreload: false
+        forceSTSHeader: true
+
+    core-infra-rate-limit:
+      rateLimit:
+        average: 100
+        period: 1s
+        burst: 50
+
+    core-infra-strip-prefix:
+      stripPrefix:
+        prefixes:
+          - /infra
+
+    # verevon.com (and www) is not served directly — it redirects to the
+    # canonical verevon.no, preserving path and query. permanent: true = 301.
+    verevon-canonical-redirect:
+      redirectRegex:
+        regex: "^https?://(?:www\\.)?verevon\\.com/(.*)"
+        replacement: "https://verevon.no/${1}"
+        permanent: true
+
+    # www.verevon.no → verevon.no, so the apex is the single canonical host.
+    verevon-strip-www:
+      redirectRegex:
+        regex: "^https?://www\\.verevon\\.no/(.*)"
+        replacement: "https://verevon.no/${1}"
+        permanent: true
+
+  routers:
+    # ── verevon.com → verevon.no ──────────────────────────────────────────
+    verevon-com-redirect:
+      entryPoints:
+        - web
+        - websecure
+      rule: "Host(`verevon.com`) || Host(`www.verevon.com`)"
+      priority: 400
+      middlewares:
+        - verevon-canonical-redirect
+      service: core-infra-home
+
+    # ── www.verevon.no → verevon.no ───────────────────────────────────────
+    verevon-no-www-redirect:
+      entryPoints:
+        - web
+        - websecure
+      rule: "Host(`www.verevon.no`)"
+      priority: 350
+      middlewares:
+        - verevon-strip-www
+      service: core-infra-home
+
+    # ── verevon.no (canonical) ────────────────────────────────────────────
+    verevon-no-infra:
+      entryPoints:
+        - web
+        - websecure
+      rule: "Host(`verevon.no`) && PathPrefix(`/infra`)"
+      priority: 300
+      middlewares:
+        - core-infra-strip-prefix
+        - core-infra-hsts
+        - core-infra-rate-limit
+      service: core-infra-gateway
+
+    verevon-no-home:
+      entryPoints:
+        - web
+        - websecure
+      rule: "Host(`verevon.no`)"
+      priority: 200
+      middlewares:
+        - core-infra-hsts
+        - core-infra-rate-limit
+      service: core-infra-home
+
+    # ── localhost fallback (unchanged pre-domain behaviour) ───────────────
+    core-infra-gateway:
+      entryPoints:
+        - web
+      rule: PathPrefix(`/infra`)
+      priority: 100
+      middlewares:
+        - core-infra-strip-prefix
+        - core-infra-security
+        - core-infra-rate-limit
+      service: core-infra-gateway
+
+    core-infra-home:
+      entryPoints:
+        - web
+      rule: PathPrefix(`/`)
+      priority: 1
+      middlewares:
+        - core-infra-security
+        - core-infra-rate-limit
+      service: core-infra-home
+
+  services:
+    core-infra-gateway:
+      loadBalancer:
+        servers:
+          - url: http://core-infra-gateway:7500
+    core-infra-home:
+      loadBalancer:
+        servers:
+          - url: http://nginx:8080
+
+    # Publishing the product app through this plane would be an ownership
+    # change (see NOTE ON SCOPE above). Left here, inert, to document the
+    # single edit it would take — the Frontend Plane gateway is reachable on
+    # inter-plane-bus, which this plane is not attached to today.
+    # verevon-frontend:
+    #   loadBalancer:
+    #     servers:
+    #       - url: http://verevon-gateway:8080
+
+# TLS. No certificate is committed to this repo and `cloudflare-certs/` is
+# empty, so nothing is referenced by default: on the websecure entrypoint
+# Traefik falls back to its own self-signed certificate, which is correct for
+# local/staging and obviously not for public traffic. Supply a real
+# certificate by mounting one and uncommenting the `certificates` block —
+# docker-compose.production.yml already mounts ./cloudflare-certs to /certs.
+tls:
+  options:
+    default:
+      minVersion: VersionTLS12
+      sniStrict: false
+      cipherSuites:
+        - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+  # certificates:
+  #   - certFile: /certs/origin-cert.pem
+  #     keyFile: /certs/origin-key.pem

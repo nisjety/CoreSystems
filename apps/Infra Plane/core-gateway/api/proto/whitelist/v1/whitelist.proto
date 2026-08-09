@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package coresystem.gateway.whitelist.v1;
+
+option go_package = "github.com/coresystem/integration-gateway/api/proto/whitelist/v1;whitelistv1";
+
+import "google/protobuf/timestamp.proto";
+
+// WhitelistService provides IP whitelist/blacklist management for internal microservices
+service WhitelistService {
+  // AddToWhitelist adds an IP/CIDR to the whitelist
+  rpc AddToWhitelist(AddToWhitelistRequest) returns (AddToWhitelistResponse);
+  
+  // RemoveFromWhitelist removes an IP/CIDR from the whitelist
+  rpc RemoveFromWhitelist(RemoveFromWhitelistRequest) returns (RemoveFromWhitelistResponse);
+  
+  // GetWhitelist returns all whitelisted IPs
+  rpc GetWhitelist(GetWhitelistRequest) returns (GetWhitelistResponse);
+  
+  // AddToBlacklist adds an IP/CIDR to the blacklist
+  rpc AddToBlacklist(AddToBlacklistRequest) returns (AddToBlacklistResponse);
+  
+  // RemoveFromBlacklist removes an IP/CIDR from the blacklist
+  rpc RemoveFromBlacklist(RemoveFromBlacklistRequest) returns (RemoveFromBlacklistResponse);
+  
+  // GetBlacklist returns all blacklisted IPs
+  rpc GetBlacklist(GetBlacklistRequest) returns (GetBlacklistResponse);
+  
+  // IsAllowed checks if an IP is allowed (not blacklisted and whitelisted)
+  rpc IsAllowed(IsAllowedRequest) returns (IsAllowedResponse);
+  
+  // CleanupExpired removes expired whitelist/blacklist entries
+  rpc CleanupExpired(CleanupExpiredRequest) returns (CleanupExpiredResponse);
+}
+
+// AddToWhitelistRequest contains IP to whitelist
+message AddToWhitelistRequest {
+  string ip = 1; // IP address or CIDR notation
+  string description = 2;
+  string added_by = 3;
+  google.protobuf.Timestamp expires_at = 4; // Optional expiration
+}
+
+// AddToWhitelistResponse confirms whitelist addition
+message AddToWhitelistResponse {
+  bool success = 1;
+  string message = 2;
+  IPEntry entry = 3;
+}
+
+// RemoveFromWhitelistRequest contains IP to remove
+message RemoveFromWhitelistRequest {
+  string ip = 1;
+}
+
+// RemoveFromWhitelistResponse confirms removal
+message RemoveFromWhitelistResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// GetWhitelistRequest is empty
+message GetWhitelistRequest {}
+
+// GetWhitelistResponse contains all whitelisted IPs
+message GetWhitelistResponse {
+  repeated IPEntry entries = 1;
+}
+
+// AddToBlacklistRequest contains IP to blacklist
+message AddToBlacklistRequest {
+  string ip = 1;
+  string description = 2;
+  string added_by = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+// AddToBlacklistResponse confirms blacklist addition
+message AddToBlacklistResponse {
+  bool success = 1;
+  string message = 2;
+  IPEntry entry = 3;
+}
+
+// RemoveFromBlacklistRequest contains IP to remove
+message RemoveFromBlacklistRequest {
+  string ip = 1;
+}
+
+// RemoveFromBlacklistResponse confirms removal
+message RemoveFromBlacklistResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// GetBlacklistRequest is empty
+message GetBlacklistRequest {}
+
+// GetBlacklistResponse contains all blacklisted IPs
+message GetBlacklistResponse {
+  repeated IPEntry entries = 1;
+}
+
+// IsAllowedRequest checks if IP is allowed
+message IsAllowedRequest {
+  string ip = 1;
+}
+
+// IsAllowedResponse indicates if IP is allowed
+message IsAllowedResponse {
+  bool allowed = 1;
+  string reason = 2; // Explanation if not allowed
+}
+
+// CleanupExpiredRequest is empty
+message CleanupExpiredRequest {}
+
+// CleanupExpiredResponse confirms cleanup
+message CleanupExpiredResponse {
+  int32 whitelist_removed = 1;
+  int32 blacklist_removed = 2;
+  string message = 3;
+}
+
+// IPEntry represents a whitelist or blacklist entry
+message IPEntry {
+  string ip = 1;
+  string description = 2;
+  string added_by = 3;
+  google.protobuf.Timestamp added_at = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  bool expired = 6;
+}

@@ -1,0 +1,72 @@
+# Production overlay for the CoreSystem Infra Plane edge.
+#
+# Layered on top of docker-compose.yml (the build script applies
+# `docker-compose.production.yml` automatically under --production). This is the
+# ONLY place the edge becomes publicly reachable — the base file deliberately
+# stays bound to 127.0.0.1 so a local run can never accidentally serve the
+# internet.
+#
+# What this overlay changes:
+#   - binds :80 and :443 on all interfaces instead of 127.0.0.1:8090
+#   - mounts ./cloudflare-certs read-only at /certs for the TLS certificate
+#   - redirects all plain HTTP to HTTPS at the entrypoint level
+#
+# BEFORE USING THIS you must supply a certificate for verevon.no and
+# verevon.com — none is committed and ./cloudflare-certs is empty:
+#
+#   Option A — Cloudflare Origin Certificate (matches CLOUDFLARE_SETUP.md and
+#   the existing cloudflare-certs/ directory; requires the domains to be
+#   Proxied in Cloudflare with SSL mode Full (Strict)):
+#     1. Cloudflare dashboard → SSL/TLS → Origin Server → Create Certificate
+#        with hostnames: verevon.no, *.verevon.no, verevon.com, *.verevon.com
+#     2. Save as ./cloudflare-certs/origin-cert.pem and origin-key.pem (0600)
+#     3. Uncomment the `certificates:` block in configs/traefik/dynamic.yml
+#
+#   Option B — Let's Encrypt via ACME. Requires public DNS A records for both
+#   domains pointing at this host and inbound :80/:443 reachable. Add an ACME
+#   resolver to the traefik command below and set `certResolver` on the routers
+#   instead of the bare `tls: {}`. Do not combine with Cloudflare proxying on
+#   HTTP-01 — use the DNS-01 challenge if the records stay proxied.
+#
+# Neither option can be completed from inside this repo: both need an action in
+# the Cloudflare/DNS control plane.
+
+services:
+  traefik:
+    command:
+      - --api.dashboard=false
+      - --ping=true
+      - --ping.entrypoint=web
+      - --providers.docker=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:8080
+      - --entrypoints.web.transport.respondingTimeouts.readTimeout=15s
+      - --entrypoints.web.transport.respondingTimeouts.writeTimeout=15s
+      - --entrypoints.web.transport.respondingTimeouts.idleTimeout=60s
+      # Every plain-HTTP request is upgraded; the Host routers then apply the
+      # canonical .com → .no and www → apex redirects over TLS.
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.web.http.redirections.entrypoint.permanent=true
+      - --entrypoints.websecure.address=:8443
+      # TLS is enabled at the ENTRYPOINT, not per-router. A router carrying its
+      # own `tls: {}` matches ONLY TLS connections, so the same router cannot
+      # also serve the plain-HTTP `web` entrypoint — which silently made every
+      # Host() router unmatchable locally and dropped all traffic through to the
+      # localhost catch-all (no redirects, no HSTS). Setting it here keeps one
+      # set of routers correct on both entrypoints.
+      - --entrypoints.websecure.http.tls=true
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=15s
+      - --entrypoints.websecure.transport.respondingTimeouts.writeTimeout=15s
+      - --entrypoints.websecure.transport.respondingTimeouts.idleTimeout=60s
+      - --log.level=INFO
+      - --log.format=json
+      - --accesslog=true
+      - --accesslog.format=json
+    ports:
+      - "${CORE_INFRA_PUBLIC_HTTP_PORT:-80}:8080"
+      - "${CORE_INFRA_PUBLIC_HTTPS_PORT:-443}:8443"
+    volumes:
+      - ./configs/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./cloudflare-certs:/certs:ro

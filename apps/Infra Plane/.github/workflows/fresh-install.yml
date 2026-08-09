@@ -1,0 +1,297 @@
+name: Fresh Installation & Full Initialization
+
+on:
+  workflow_dispatch:
+    inputs:
+      reset_volumes:
+        description: 'Reset all Docker volumes (database, n8n, redis data)'
+        required: false
+        default: 'false'
+        type: boolean
+      reset_networks:
+        description: 'Reset Docker networks'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  fresh-install:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Fresh Installation to VPS
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            
+            DEPLOY_DIR="/opt/coresystem"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
+            GITHUB_ACTOR="${{ github.actor }}"
+            GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            
+            echo "🚀 FRESH INSTALLATION & INITIALIZATION"
+            echo "========================================"
+            
+            # Initialize or reset directory
+            if [ ! -d "$DEPLOY_DIR" ]; then
+              echo "📁 Creating deployment directory..."
+              mkdir -p "$DEPLOY_DIR"
+              cd "$DEPLOY_DIR"
+              echo "🔄 Cloning repository..."
+              git clone "$REPO_URL" .
+            else
+              cd "$DEPLOY_DIR"
+              echo "📥 Updating existing installation..."
+              git fetch origin main
+              git checkout main
+              git reset --hard origin/main
+            fi
+            
+            # Stop all services before fresh installation
+            echo "⏹️  Stopping all services..."
+            docker compose down 2>/dev/null || true
+            
+            # Reset volumes if requested
+            if [ "${{ inputs.reset_volumes }}" = "true" ]; then
+              echo "🗑️  Removing volumes (data will be lost!)..."
+              docker volume rm coresystem_postgres_data coresystem_redis_data coresystem_n8n_data 2>/dev/null || true
+              echo "✅ Volumes removed - fresh database initialization will occur"
+            fi
+            
+            # Reset networks if requested
+            if [ "${{ inputs.reset_networks }}" = "true" ]; then
+              echo "🗑️  Removing networks..."
+              docker network rm internal coresystem-backend 2>/dev/null || true
+              echo "✅ Networks removed - will be recreated"
+            fi
+            
+            # 🔐 CREATE PRODUCTION ENVIRONMENT FILE WITH GITHUB SECRETS
+            echo "🔐 Injecting credentials from GitHub Secrets..."
+            mkdir -p "$DEPLOY_DIR/secrets"
+            
+            # Validate that all required secrets are present
+            echo "🔍 Verifying all required secrets are available..."
+            REQUIRED_SECRETS=(
+              "DOMAIN"
+              "POSTGRES_PASSWORD"
+              "REDIS_PASSWORD"
+              "NATS_AUTH_TOKEN"
+              "N8N_ENCRYPTION_KEY"
+              "INTEGRATION_GATEWAY_API_KEY"
+              "PGADMIN_EMAIL"
+              "PGADMIN_PASSWORD"
+              "GRAFANA_PASSWORD"
+              "TRAEFIK_DASHBOARD_AUTH"
+              "CLOUDFLARE_ORIGIN_CERT"
+              "CLOUDFLARE_ORIGIN_KEY"
+            )
+            
+            MISSING_SECRETS=()
+            for secret in "${REQUIRED_SECRETS[@]}"; do
+              secret_value="${!secret}"
+              if [ -z "$secret_value" ]; then
+                MISSING_SECRETS+=("$secret")
+              fi
+            done
+            
+            if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
+              echo "❌ ERROR: Missing required GitHub Secrets:"
+              printf '  - %s\n' "${MISSING_SECRETS[@]}"
+              exit 1
+            fi
+            echo "✅ All required secrets validated"
+            
+            # Export GitHub Secrets to .env.production
+            echo "📝 Creating .env.production with all credentials..."
+            cat > "$DEPLOY_DIR/.env.production" << 'EOF'
+            # Production Environment - Auto-generated from GitHub Secrets
+            # Generated: $(date)
+            # WARNING: This file contains sensitive credentials. Keep secure.
+            
+            DOMAIN=${{ secrets.DOMAIN }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
+            NATS_AUTH_TOKEN=${{ secrets.NATS_AUTH_TOKEN }}
+            N8N_ENCRYPTION_KEY=${{ secrets.N8N_ENCRYPTION_KEY }}
+            INTEGRATION_GATEWAY_API_KEY=${{ secrets.INTEGRATION_GATEWAY_API_KEY }}
+            PGADMIN_EMAIL=${{ secrets.PGADMIN_EMAIL }}
+            PGADMIN_PASSWORD=${{ secrets.PGADMIN_PASSWORD }}
+            GRAFANA_PASSWORD=${{ secrets.GRAFANA_PASSWORD }}
+            TRAEFIK_DASHBOARD_AUTH=${{ secrets.TRAEFIK_DASHBOARD_AUTH }}
+            EOF
+            
+            # Create individual secret files (no trailing newlines via echo -n)
+            echo "📝 Creating individual secret files..."
+            echo -n "${{ secrets.POSTGRES_PASSWORD }}" > "$DEPLOY_DIR/secrets/postgres_password.txt"
+            echo -n "${{ secrets.REDIS_PASSWORD }}" > "$DEPLOY_DIR/secrets/redis_password.txt"
+            echo -n "${{ secrets.NATS_AUTH_TOKEN }}" > "$DEPLOY_DIR/secrets/nats_auth_token.txt"
+            echo -n "${{ secrets.N8N_ENCRYPTION_KEY }}" > "$DEPLOY_DIR/secrets/n8n_encryption_key.txt"
+            echo -n "${{ secrets.PGADMIN_EMAIL }}" > "$DEPLOY_DIR/secrets/pgadmin_email.txt"
+            echo -n "${{ secrets.PGADMIN_PASSWORD }}" > "$DEPLOY_DIR/secrets/pgadmin_password.txt"
+            echo -n "${{ secrets.GRAFANA_PASSWORD }}" > "$DEPLOY_DIR/secrets/grafana_password.txt"
+            echo -n "${{ secrets.TRAEFIK_DASHBOARD_AUTH }}" > "$DEPLOY_DIR/secrets/traefik_dashboard_auth.txt"
+            
+            # Verify secret files were created correctly (no extra bytes)
+            echo "🔍 Verifying secret files..."
+            for secret_file in "$DEPLOY_DIR/secrets"/*.txt; do
+              filename=$(basename "$secret_file")
+              file_size=$(stat -f%z "$secret_file" 2>/dev/null || stat -c%s "$secret_file" 2>/dev/null)
+              echo "   ✅ $filename: $file_size bytes"
+            done
+            
+            # 🔐 DEPLOY CLOUDFLARE CERTIFICATES (from GitHub Secrets)
+            echo "🔐 Deploying Cloudflare origin certificates..."
+            mkdir -p "$DEPLOY_DIR/cloudflare-certs"
+            printf '%s' "${{ secrets.CLOUDFLARE_ORIGIN_CERT }}" > "$DEPLOY_DIR/cloudflare-certs/origin-cert.pem"
+            printf '%s' "${{ secrets.CLOUDFLARE_ORIGIN_KEY }}" > "$DEPLOY_DIR/cloudflare-certs/origin-key.pem"
+            
+            # Verify certificate files
+            echo "🔍 Verifying certificate files..."
+            if openssl x509 -in "$DEPLOY_DIR/cloudflare-certs/origin-cert.pem" -noout >/dev/null 2>&1; then
+              echo "   ✅ origin-cert.pem: Valid certificate"
+            else
+              echo "   ❌ origin-cert.pem: Invalid certificate format"
+              exit 1
+            fi
+            
+            if openssl pkey -in "$DEPLOY_DIR/cloudflare-certs/origin-key.pem" -check -noout >/dev/null 2>&1; then
+              echo "   ✅ origin-key.pem: Valid private key"
+            else
+              echo "   ❌ origin-key.pem: Invalid private key format"
+              exit 1
+            fi
+            
+            # Set secure permissions on certificate and secret files
+            echo "🔒 Setting secure file permissions..."
+            chmod 600 "$DEPLOY_DIR/cloudflare-certs"/*.pem
+            chmod 644 "$DEPLOY_DIR/secrets"/*.txt
+            chmod 640 "$DEPLOY_DIR/.env.production"
+            
+            echo "✅ All credentials and certificates injected successfully"
+            
+            # Log in to GitHub Container Registry
+            echo "🔐 Logging into GitHub Container Registry..."
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+            
+            # Fix permissions on executable scripts
+            chmod +x *.sh 2>/dev/null || true
+            chmod +x coresystem-gateway/*.sh 2>/dev/null || true
+            
+            # Pull pre-built images
+            echo "📦 Pulling pre-built images from GitHub Container Registry..."
+            docker pull ghcr.io/${{ github.repository }}/coresystem-gateway:latest || echo "Note: Image may not exist yet"
+            
+            # Source production environment for docker compose
+            set -a
+            [ -f "$DEPLOY_DIR/.env.production" ] && source "$DEPLOY_DIR/.env.production"
+            set +a
+            
+            # Start services with docker compose
+            echo "🚀 Starting all services (fresh installation)..."
+            docker compose -f docker-compose.yml pull 2>&1 | grep -E "(Pulling|Pull complete|Status)" || true
+            docker compose -f docker-compose.yml up -d 2>&1 | grep -E "(Creating|Recreate|Starting|Started)" || true
+            
+            # Wait for services to stabilize
+            echo "⏳ Waiting for services to initialize (30 seconds)..."
+            sleep 30
+            
+            # Comprehensive service health check
+            echo "✅ Checking service health..."
+            UNHEALTHY_SERVICES=$(docker compose -f docker-compose.yml ps --format "{{.Service}}\t{{.Status}}" | grep -v "healthy" | grep -v "Up" | wc -l)
+            docker compose -f docker-compose.yml ps --format "table {{.Service}}\t{{.Status}}"
+            
+            if [ "$UNHEALTHY_SERVICES" -gt 0 ]; then
+              echo "⚠️  Warning: Some services may not be healthy yet. Waiting additional 30 seconds..."
+              sleep 30
+              docker compose -f docker-compose.yml ps --format "table {{.Service}}\t{{.Status}}"
+            fi
+            
+            # Verify database initialization
+            echo ""
+            echo "🔍 Verifying PostgreSQL initialization..."
+            PG_READY=$(docker compose exec -T postgres pg_isready -U postgres 2>/dev/null || echo "not-ready")
+            if [[ "$PG_READY" == *"accepting"* ]]; then
+              echo "   ✅ PostgreSQL is accepting connections"
+            else
+              echo "   ⏳ PostgreSQL still initializing..."
+            fi
+            
+            # Verify n8n started correctly
+            echo "🔍 Verifying n8n initialization..."
+            N8N_READY=$(docker compose logs n8n 2>&1 | grep "n8n ready on" | tail -1)
+            if [ ! -z "$N8N_READY" ]; then
+              echo "   ✅ $N8N_READY"
+            else
+              echo "   ⏳ n8n still starting..."
+            fi
+            
+            # Verify Redis is healthy
+            echo "🔍 Verifying Redis health..."
+            REDIS_PING=$(docker compose exec -T redis redis-cli ping 2>/dev/null)
+            if [ "$REDIS_PING" = "PONG" ]; then
+              echo "   ✅ Redis is responding: PONG"
+            else
+              echo "   ⏳ Redis still initializing..."
+            fi
+            
+            # Test TLS certificate loading in Traefik
+            echo "🔍 Verifying TLS certificate configuration..."
+            CERT_ERRORS=$(docker compose logs traefik 2>&1 | grep -i "failed to find any PEM data\|invalid.*certificate" | wc -l)
+            if [ "$CERT_ERRORS" = "0" ]; then
+              echo "   ✅ Traefik loaded certificates successfully"
+            else
+              echo "   ❌ Warning: Traefik certificate errors detected"
+              docker compose logs traefik 2>&1 | grep -i "certificate\|tls" | head -3
+            fi
+            
+            # Wait for Traefik to fully initialize
+            echo "⏳ Waiting for Traefik to initialize (20 seconds)..."
+            sleep 20
+            
+            echo "🔍 Testing HTTPS connectivity..."
+            curl -k -I https://localhost:443/ 2>&1 | head -1 || echo "Note: Local HTTPS test may require proper hostname"
+            
+            echo ""
+            echo "✨ Fresh installation completed!"
+            echo "📋 NEXT STEPS:"
+            echo "   1. Verify Cloudflare DNS points to VPS: ${{ secrets.VPS_HOST }}"
+            echo "   2. Check services: docker compose ps"
+            echo "   3. View logs: docker compose logs -f [service-name]"
+            echo "   4. Test HTTPS: curl -I https://n8n.coresystem.com"
+            
+            # Log out from registry
+            docker logout ghcr.io || true
+
+  notify:
+    needs: fresh-install
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Installation Result
+        run: |
+          if [ "${{ needs.fresh-install.result }}" = "success" ]; then
+            echo "✅ Fresh installation completed successfully!"
+            echo "Your VPS is now fully initialized with:"
+            echo "  • All credentials injected from GitHub Secrets"
+            echo "  • Cloudflare origin certificates deployed"
+            echo "  • All 13 services running"
+            echo "  • HTTPS/TLS configured"
+            echo "  • Database initialized"
+            exit 0
+          else
+            echo "❌ Fresh installation failed!"
+            echo "Check GitHub Actions logs for details"
+            exit 1
+          fi

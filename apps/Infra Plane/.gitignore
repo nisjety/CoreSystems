@@ -1,0 +1,174 @@
+# Aquatiq Root Container - Git Ignore
+
+# ============================================
+# 🔒 CRITICAL - NEVER COMMIT SECRETS!
+# ============================================
+secrets/*.txt
+secrets/*
+!secrets/.gitignore
+!secrets/README.md
+
+# Cloudflare Origin Certificates (Private Keys!)
+cloudflare-certs/*.pem
+cloudflare-certs/origin-cert.pem
+cloudflare-certs/origin-key.pem
+cloudflare-certs/Private_Key.*
+
+# ============================================
+# Environment Files
+# ============================================
+.env
+.env.production
+.env.staging
+.env.*.local
+
+# Keep example and documentation
+!.env.example
+
+# ============================================
+# Docker & Container Runtime
+# ============================================
+*.pid
+*.seed
+*.pid.lock
+docker-compose.override.yml
+
+# Volume data (managed by Docker)
+*_data/
+postgres_data/
+redis_data/
+n8n_data/
+grafana_data/
+prometheus_data/
+
+# ============================================
+# Backups & Archives
+# ============================================
+*.backup
+*_backup_*
+*.tar.gz
+*.tar.gz.gpg
+*.sql
+*.dump
+backups/
+*.gpg
+*.zip
+*.rar
+*.7z
+*.bak
+*.old
+*.orig
+
+# ============================================
+# Logs & Temporary Files
+# ============================================
+*.log
+logs/
+*.tmp
+*.temp
+temp/
+tmp/
+.cache/
+
+# ============================================
+# Build Artifacts & Dependencies
+# ============================================
+# Go (Core Infra gateway)
+core-infra-gateway/bin/
+core-infra-gateway/dist/
+core-infra-gateway/*.exe
+core-infra-gateway/.idea/
+core-infra-gateway/vendor/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+.pnpm-debug.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.venv/
+venv/
+env/
+.Python
+pip-log.txt
+
+# ============================================
+# IDE / Editor
+# ============================================
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+\#*\#
+.\#*
+
+# ============================================
+# OS System Files
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ============================================
+# CI/CD & Testing
+# ============================================
+coverage/
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+test-results/
+
+# ============================================
+# Security Scanning Results
+# ============================================
+trivy-report.json
+snyk-report.json
+security-scan/
+
+# ============================================
+# Documentation (Keep originals)
+# ============================================
+!README.md
+!*/README.md
+!CHANGELOG.md
+!LICENSE
+!docs/**/*.md
+DEPLOYED_SERVICES_CREDENTIALS.txt

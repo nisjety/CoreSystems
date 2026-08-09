@@ -1,0 +1,66 @@
+# Superset Docker Compose Example for Traefik Integration
+# Location: /opt/coresystem-superset/docker-compose.yml
+
+services:
+  superset:
+    image: apache/superset:4.0.1
+    container_name: coresystem-superset-app
+    restart: unless-stopped
+    
+    environment:
+      # Superset configuration
+      - SUPERSET_SECRET_KEY=${SUPERSET_SECRET_KEY}
+      - SUPERSET_ENV=production
+      - DATABASE_DIALECT=postgresql
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_DB=superset
+      - DATABASE_USER=${DB_USER}
+      - DATABASE_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    
+    volumes:
+      - superset_home:/app/superset_home
+    
+    # Connect to Traefik's network
+    networks:
+      - coresystem_default  # Or 'internal' if that's where Traefik is
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # Traefik labels for subdomain routing
+    labels:
+      # Enable Traefik routing
+      - "traefik.enable=true"
+      
+      # HTTPS router - main subdomain
+      - "traefik.http.routers.superset.rule=Host(`superset.coresystem.com`)"
+      - "traefik.http.routers.superset.entrypoints=websecure"
+      - "traefik.http.routers.superset.tls=true"
+      
+      # Service configuration - specify internal port
+      - "traefik.http.services.superset.loadbalancer.server.port=8088"
+      
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.superset-http.rule=Host(`superset.coresystem.com`)"
+      - "traefik.http.routers.superset-http.entrypoints=web"
+      - "traefik.http.routers.superset-http.middlewares=redirect-to-https@file"
+      
+      # Specify which network Traefik should use (if container has multiple networks)
+      - "traefik.docker.network=coresystem_default"
+
+volumes:
+  superset_home:
+    driver: local
+
+# Use external network that Traefik is connected to
+networks:
+  coresystem_default:
+    external: true
+    name: coresystem_default  # Or 'internal' if that's where Traefik is

@@ -1,0 +1,93 @@
+# Generic Service Docker Compose Template for Traefik Integration
+# Copy this template and adjust for your specific service needs
+
+services:
+  your-service:
+    image: your-service-image:latest
+    # Or use: build: .
+    container_name: coresystem-your-service  # Follow naming convention: coresystem-{service-name}
+    restart: unless-stopped
+    
+    environment:
+      # Add your service-specific environment variables here
+      - SERVICE_PORT=8080
+      - SERVICE_ENV=production
+    
+    volumes:
+      # Add your service volumes here
+      - your_service_data:/data
+    
+    # Connect to the same network as Traefik
+    networks:
+      - coresystem_default  # Or 'internal' depending on your Traefik setup
+    
+    # Health check is optional but recommended
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    
+    # Traefik labels for subdomain routing
+    labels:
+      # Enable Traefik routing
+      - "traefik.enable=true"
+      
+      # HTTPS router
+      # Replace 'your-service' with your actual service name (router identifier)
+      # Replace 'yourservice.coresystem.com' with your actual subdomain
+      - "traefik.http.routers.your-service.rule=Host(`yourservice.coresystem.com`)"
+      - "traefik.http.routers.your-service.entrypoints=websecure"
+      - "traefik.http.routers.your-service.tls=true"
+      
+      # Service configuration
+      # Replace '8080' with the port your service listens on internally
+      - "traefik.http.services.your-service.loadbalancer.server.port=8080"
+      
+      # HTTP to HTTPS redirect
+      - "traefik.http.routers.your-service-http.rule=Host(`yourservice.coresystem.com`)"
+      - "traefik.http.routers.your-service-http.entrypoints=web"
+      - "traefik.http.routers.your-service-http.middlewares=redirect-to-https@file"
+      
+      # Specify network (important if container is on multiple networks)
+      - "traefik.docker.network=coresystem_default"
+      
+      # ===== OPTIONAL MIDDLEWARES =====
+      
+      # Add rate limiting (protects against abuse)
+      # - "traefik.http.routers.your-service.middlewares=admin-ratelimit@file"
+      
+      # Add IP whitelist (restricts access to specific IPs)
+      # - "traefik.http.routers.your-service.middlewares=dynamic-ipwhitelist@file"
+      
+      # Add basic authentication
+      # - "traefik.http.routers.your-service.middlewares=traefik-auth@file"
+      
+      # Chain multiple middlewares (comma-separated)
+      # - "traefik.http.routers.your-service.middlewares=dynamic-ipwhitelist@file,admin-ratelimit@file"
+
+volumes:
+  your_service_data:
+    driver: local
+
+# Use external network that Traefik is connected to
+networks:
+  coresystem_default:
+    external: true
+    name: coresystem_default  # Or 'internal' if that's where Traefik is
+
+# ===== CONFIGURATION CHECKLIST =====
+# 
+# Before deploying:
+# 
+# 1. [ ] Replace 'your-service' with actual service name (must be unique)
+# 2. [ ] Replace 'yourservice.coresystem.com' with actual subdomain
+# 3. [ ] Update service port (8080) to match your application
+# 4. [ ] Configure health check endpoint if available
+# 5. [ ] Add service-specific environment variables
+# 6. [ ] Add DNS A record in Cloudflare: subdomain → VPS IP
+# 7. [ ] Verify network name matches Traefik's network
+# 8. [ ] Test deployment: docker compose up -d
+# 9. [ ] Check Traefik logs: docker logs coresystem-traefik | grep your-service
+# 10. [ ] Test access: curl -I https://yourservice.coresystem.com

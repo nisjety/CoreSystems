@@ -1,0 +1,108 @@
+name: coresystem-infra-local
+
+services:
+  traefik:
+    image: traefik:v3.6.1
+    container_name: coresystem-infra-traefik-local
+    restart: unless-stopped
+    command:
+      - --api.dashboard=false
+      - --ping=true
+      - --ping.entrypoint=web
+      - --providers.docker=false
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+      - --providers.file.watch=true
+      - --entrypoints.web.address=:8080
+      - --entrypoints.web.transport.respondingTimeouts.readTimeout=15s
+      - --entrypoints.web.transport.respondingTimeouts.writeTimeout=15s
+      - --entrypoints.web.transport.respondingTimeouts.idleTimeout=60s
+      # websecure exists so the verevon.no / verevon.com Host routers have a TLS
+      # entrypoint to attach to. It is defined unconditionally (harmless when no
+      # certificate is mounted — Traefik simply serves its default self-signed
+      # cert), but only PUBLISHED by docker-compose.production.yml. Local runs
+      # stay HTTP-only on 127.0.0.1, exactly as before.
+      - --entrypoints.websecure.address=:8443
+      - --entrypoints.websecure.transport.respondingTimeouts.readTimeout=15s
+      - --entrypoints.websecure.transport.respondingTimeouts.writeTimeout=15s
+      - --entrypoints.websecure.transport.respondingTimeouts.idleTimeout=60s
+      - --log.level=INFO
+      - --log.format=json
+      - --accesslog=true
+      - --accesslog.format=json
+    ports:
+      - 127.0.0.1:${CORE_INFRA_HTTP_PORT:-8090}:8080
+    volumes:
+      - ./configs/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - coresystem-edge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: [CMD, traefik, healthcheck, --ping]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: coresystem-infra-nginx-local
+    restart: unless-stopped
+    user: "101:101"
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    volumes:
+      - ./app:/usr/share/nginx/html:ro
+      - ./configs/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - coresystem-edge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+    healthcheck:
+      test: [CMD-SHELL, wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  core-infra-gateway:
+    build:
+      context: ./core-infra-gateway
+    container_name: coresystem-core-infra-gateway-local
+    restart: unless-stopped
+    environment:
+      CORE_INFRA_GATEWAY_ADDR: :7500
+      CORE_INFRA_OPERATOR_TOKEN: ${CORE_INFRA_OPERATOR_TOKEN:-}
+    networks:
+      - coresystem-edge
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: [CMD-SHELL, wget -q -O /dev/null http://127.0.0.1:7500/health || exit 1]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+networks:
+  coresystem-edge:
+    name: coresystem-edge
+    driver: bridge
