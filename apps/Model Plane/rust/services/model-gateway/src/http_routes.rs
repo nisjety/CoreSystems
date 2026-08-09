@@ -23,14 +23,15 @@ use mp_contracts::model_plane::v1::{
     CreateEmbeddingRequest, CreateRealtimeSessionRequest, CreateVideoGenerationJobRequest,
     DecideApprovalRequest, DetectTextLanguageRequest, ExtractImageTextRequest,
     GenerateImageRequest, GetApprovalRequest, GetPlanRequest, GetRunProofBundleRequest,
-    GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVideoGenerationJobRequest,
-    ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest, ListPlansRequest,
-    ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
-    ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep, PlanStepState,
-    RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail, RunProofBundle,
-    StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole, SynthesizeSpeechRequest,
-    Todo, TodoPriority, TodoState, TranscribeSpeechRequest, TransitionPlanRequest,
-    TransitionTodoRequest, TranslateTextRequest, TranslationInput, VerificationStatus,
+    GetRunRequest, GetSubagentLineageRequest, GetTodoRequest, GetVerificationMetricsRequest,
+    GetVideoGenerationJobRequest, ListApprovalsRequest, ListMcpServersRequest, ListModelsRequest,
+    ListPlansRequest, ListRunsRequest, ListSpeechVoicesRequest, ListSystemRunsRequest,
+    ListTodosRequest, ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep,
+    PlanStepState, RegisterMcpServerRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
+    RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
+    SynthesizeSpeechRequest, Todo, TodoPriority, TodoState, TranscribeSpeechRequest,
+    TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
+    VerificationMetrics, VerificationStatus,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -207,6 +208,10 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/runs/:run_id/proof-bundle",
             get(get_run_proof_bundle),
+        )
+        .route(
+            "/v1/orchestration/verification-metrics",
+            get(get_verification_metrics),
         )
         .route(
             "/v1/orchestration/approvals/:approval_id",
@@ -818,6 +823,65 @@ async fn get_run_proof_bundle(
         .map(proof_bundle_value)
         .unwrap_or(Value::Null);
     Ok(Json(json!({ "bundle": bundle })))
+}
+
+/// `since`, an RFC 3339 timestamp, windows the metrics to continuations
+/// finalized (or approvals requested) at or after that instant. Omitted means
+/// all-time. Deliberately a plain timestamp rather than a `days=7|30|90`
+/// enum: the caller (today, the verevonv3 gateway; eventually a dashboard)
+/// computes the boundary itself, so this endpoint carries no opinion about
+/// which windows are meaningful.
+#[derive(Debug, Default, Deserialize)]
+struct VerificationMetricsQuery {
+    since: Option<String>,
+}
+
+async fn get_verification_metrics(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<VerificationMetricsQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let since = query
+        .since
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map(|parsed| prost_types::Timestamp {
+                    seconds: parsed.timestamp(),
+                    nanos: parsed.timestamp_subsec_nanos() as i32,
+                })
+                .map_err(|_| -> HttpJsonError {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "since must be an RFC 3339 timestamp" })),
+                    )
+                })
+        })
+        .transpose()?;
+
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_verification_metrics(authenticated_session_request(
+            GetVerificationMetricsRequest {
+                org_id: claims.org_id.clone(),
+                since,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    let metrics = response
+        .metrics
+        .as_ref()
+        .map(verification_metrics_value)
+        .unwrap_or(Value::Null);
+    Ok(Json(json!({ "metrics": metrics })))
 }
 
 async fn get_approval(
@@ -5081,6 +5145,37 @@ fn proof_bundle_value(bundle: &RunProofBundle) -> Value {
         })),
         "approvals": bundle.approvals.iter().map(proof_approval_value).collect::<Vec<_>>(),
         "unavailable": bundle.unavailable.iter().map(|section| json!({
+            "section": section.section,
+            "reason": section.reason,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// Render `VerificationMetrics` on the wire. Every count is passed through
+/// verbatim from the proto - no rate/percentage is pre-computed here, so a
+/// reader always sees the raw numerator and denominator together rather than
+/// a ratio that could be misread once either side is zero.
+fn verification_metrics_value(metrics: &VerificationMetrics) -> Value {
+    json!({
+        "org_id": metrics.org_id,
+        "since": metrics.since.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "generated_at": metrics.generated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        "total_completed": metrics.total_completed,
+        "total_failed": metrics.total_failed,
+        "total_cancelled": metrics.total_cancelled,
+        "verified_success_count": metrics.verified_success_count,
+        "false_success_count": metrics.false_success_count,
+        "partially_verified_count": metrics.partially_verified_count,
+        "unverified_count": metrics.unverified_count,
+        "unknown_verification_count": metrics.unknown_verification_count,
+        "structural_method_count": metrics.structural_method_count,
+        "postcondition_method_count": metrics.postcondition_method_count,
+        "approvals_requested": metrics.approvals_requested,
+        "approvals_granted": metrics.approvals_granted,
+        "approvals_denied": metrics.approvals_denied,
+        "median_seconds_receipt_to_outcome": metrics.median_seconds_receipt_to_outcome,
+        "median_seconds_approval_decision": metrics.median_seconds_approval_decision,
+        "unavailable": metrics.unavailable.iter().map(|section| json!({
             "section": section.section,
             "reason": section.reason,
         })).collect::<Vec<_>>(),

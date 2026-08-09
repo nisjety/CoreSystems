@@ -38,13 +38,14 @@
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Extension, Json, Router,
 };
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
@@ -73,6 +74,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orchestration/runs/:run_id/proof-bundle",
             get(get_run_proof_bundle),
+        )
+        .route(
+            "/api/v1/orchestration/verification-metrics",
+            get(get_verification_metrics),
         )
         .route(
             "/api/v1/orchestration/approvals/:approval_id",
@@ -384,6 +389,41 @@ async fn get_run_proof_bundle(
     .await
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct VerificationMetricsQuery {
+    since: Option<String>,
+}
+
+/// Aggregate Verified Outcome Foundation metrics for the caller's own org —
+/// verified completion, false success, verification coverage, human approval
+/// effort. Read-only; model-gateway scopes it to the caller's verified org,
+/// same as the proof bundle above. `since` (RFC 3339) is forwarded verbatim;
+/// model-gateway rejects it if malformed, this proxy does not pre-validate.
+async fn get_verification_metrics(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(query): Query<VerificationMetricsQuery>,
+) -> impl IntoResponse {
+    let path = verification_metrics_path(query.since.as_deref());
+    mg_get(&state, &user, &headers, &path).await
+}
+
+/// Blank or absent `since` forwards no query string at all - `since=` (an
+/// explicit empty value) reaching model-gateway would fail its RFC 3339
+/// parse and 400, rather than being silently treated as "all time."
+fn verification_metrics_path(since: Option<&str>) -> String {
+    match since.map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            format!(
+                "/v1/orchestration/verification-metrics?since={}",
+                enc(value)
+            )
+        }
+        _ => "/v1/orchestration/verification-metrics".to_string(),
+    }
+}
+
 async fn get_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -534,8 +574,29 @@ mod tests {
 
     use super::{
         is_retryable_decide_status, mg_post_decide_with_retry_bounded,
-        requires_execution_delegation,
+        requires_execution_delegation, verification_metrics_path,
     };
+
+    #[test]
+    fn verification_metrics_path_omits_the_query_entirely_when_since_is_absent_or_blank() {
+        assert_eq!(
+            verification_metrics_path(None),
+            "/v1/orchestration/verification-metrics"
+        );
+        assert_eq!(
+            verification_metrics_path(Some("   ")),
+            "/v1/orchestration/verification-metrics",
+            "a blank since must not become an explicit since= that model-gateway would 400 on"
+        );
+    }
+
+    #[test]
+    fn verification_metrics_path_percent_encodes_a_real_since_value() {
+        assert_eq!(
+            verification_metrics_path(Some("2026-08-01T00:00:00+00:00")),
+            "/v1/orchestration/verification-metrics?since=2026-08-01T00%3A00%3A00%2B00%3A00",
+        );
+    }
 
     #[test]
     fn execution_delegation_is_required_only_for_execution_mutations() {
