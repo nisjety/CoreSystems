@@ -188,4 +188,17 @@ mod tests {
             .expect_err("private addresses must not enter the pinned resolver");
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
     }
+
+    #[tokio::test]
+    async fn resolve_public_url_blocks_loopback_same_as_guard_url() {
+        // The two entry points must agree: a caller that preflights through
+        // resolve_public_url cannot end up with a target guard_url would have
+        // refused. No DNS needed - the literal is already an address.
+        let url: Url = "http://127.0.0.1/foo".parse().expect("valid url");
+        let err = resolve_public_url(&url)
+            .await
+            .expect_err("loopback must be blocked on the resolve path too");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
 }

@@ -153,6 +153,36 @@ mod tests {
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
     }
 
+    #[tokio::test]
+    async fn rejects_localhost_hostname() {
+        // Reaches the guard by name rather than by literal address, so this
+        // covers the DNS-resolution path the literal-IP tests never touch.
+        let err = guard_navigation_target("http://localhost:9999/")
+            .await
+            .expect_err("localhost by name must be blocked");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn page_request_allows_blob_scheme() {
+        guard_page_request_target("blob:https://example.com/uuid")
+            .await
+            .expect("blob resources have no network destination");
+    }
+
+    #[tokio::test]
+    async fn page_request_rejects_private_target_same_as_navigation() {
+        // The sub-resource path must be exactly as strict as the top-level
+        // one; a page that cannot navigate to a private host must not be able
+        // to fetch from it either.
+        let err = guard_page_request_target("http://192.168.1.1/")
+            .await
+            .expect_err("private sub-resource targets must be blocked");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
     #[test]
     fn rejects_an_empty_resolution() {
         // A name that resolves to nothing must fail closed. Without this the
