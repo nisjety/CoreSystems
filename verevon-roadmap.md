@@ -452,7 +452,31 @@ The following order is authoritative where it conflicts with older Phase A wordi
    github `issues.comment.create`), which cannot be verified without adding an
    operation to a contract that is frozen.
 4. Add stateful provider/browser simulators, fault injection, shadow replay, and CI release gates.
-5. Establish core metrics: verified completion, false success, cost/time/human effort per verified outcome, evidence support, intervention, unnecessary approval, and rollback rate.
+5. **Landed 2026-08-09 (server + wiring) — the first Verified Outcome Foundation
+   metrics.** `GetVerificationMetrics` aggregates, per organization: verified
+   completion, **false success** (the headline this whole layer exists to
+   produce — a continuation the dispatcher recorded `completed`, but whose
+   own postcondition check came back `verified_failure`), verification
+   coverage (structural vs. postcondition method, plus an `unknown` bucket
+   distinct from a NULL "predates this instrumentation" bucket), human
+   approval effort (requested/granted/denied, median decision latency), and
+   median time-to-verified-outcome. Every count is computed from
+   `approval_continuation_receipts`/`outcomes`/`approvals` — the same tables
+   the Proof Bundle reads, so the two are provably consistent rather than a
+   second, divergent notion of the same facts. Reachable at
+   `GET /v1/orchestration/verification-metrics` (model-gateway) and
+   `GET /api/v1/orchestration/verification-metrics` (verevonv3 gateway),
+   both org-scoped through the caller's verified session; optional
+   `?since=<RFC3339>` windows the result, omitted means all-time.
+   **Still not claimed, same discipline as the Proof Bundle's `unavailable`:**
+   cost per verified outcome (owned by cost-core, a separate database —
+   `cost_entries` does carry a `run_id`, so a future cross-service join is
+   possible, not fabricated here), whether an approval was truly *necessary*
+   (no data source exists for that counterfactual), and rollback rate (no
+   rollback mechanism exists yet — that's item 4 above).
+   11 new tests (9 session-core, 2 gateway); full Model Plane Rust workspace
+   1770 passed / 0 failed; all archive-build checks (Rust workspace, Go
+   orchestrator-core, verevonv3 gateway) pass from a clean checkout.
 6. Add Surface/API/Agent parity tests for material actions.
 
 #### P2 — quality, usability, and performance
