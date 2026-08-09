@@ -4,10 +4,42 @@ name: Quarry-v2 CI
 # executes workflows from the repository-root .github/workflows, so this
 # lives at the monorepo root but is path-scoped to Quarry-v2 so it does not
 # fire on unrelated plane changes. Mirrors the gating pattern used by
-# apps/Frontend Plane/verevonv3's verevonv3-ci.yml. Existing Quarry-v2 checks
-# (coverage.yml, security.yml under apps/Ingestion Plane/Quarry-v2/.github/
-# workflows/) are left untouched; this adds the cargo check + cargo test
-# gate (compile-check alone previously let non-compiling test suites merge).
+# apps/Frontend Plane/verevonv3's verevonv3-ci.yml.
+#
+# 2026-08-06: absorbed the checks previously defined in
+# apps/Ingestion Plane/Quarry-v2/.github/workflows/coverage.yml and
+# security.yml. Those lived in a nested .github/workflows/ directory (a
+# leftover from when Quarry-v2 was a standalone repo), which GitHub Actions
+# never executes — so cargo-audit, govulncheck, and both coverage floors
+# were not actually running anywhere. coverage.yml's `make coverage-rust`/
+# `coverage-go` targets didn't exist in the Makefile either; rust-coverage
+# and go-coverage below use working commands instead of restoring that
+# reference.
+#
+# cargo-audit ignores 3 pre-existing advisories: RUSTSEC-2023-0071 (rsa —
+# Marvin Attack timing side-channel; dev-only via quarry-edge, no fixed
+# upgrade available upstream), RUSTSEC-2025-0134 and RUSTSEC-2026-0192
+# (rustls-pemfile / ttf-parser — "unmaintained" warnings, not exploits).
+# Revisit if upstream ships fixes.
+#
+# govulncheck, rust-coverage, and go-coverage run as report-only
+# (continue-on-error) rather than hard-blocking: quarry-control and
+# quarry-orchestrator currently carry real, pre-existing govulncheck
+# findings (11 and 8 respectively, mostly fixed by a Go toolchain patch bump
+# plus a few dependency bumps) and sit well under the 80% coverage floor
+# (47.6% / 37.2%); pkg/quarrycontracts is already clean on both counts.
+# Hard-blocking today would immediately jam every future PR on this plane.
+# Ratchet these to blocking once the debt is paid down. rust-coverage is
+# report-only for a different reason: the actual percentage was never
+# locally confirmed against a clean instrumented build (disk constraints in
+# the verifying dev environment), so it ships in observe-only mode until a
+# real CI run establishes a baseline.
+#
+# cargo-check also gained a chromiumoxide feature check/test step:
+# quarry-browser's chromiumoxide feature isn't a default feature, so plain
+# `cargo check/test --workspace` silently skips it — the exact gap that once
+# let an unresolved-import compile break in quarry-browser merge and sit
+# undetected.
 on:
   pull_request:
     branches: [main]
@@ -19,6 +51,12 @@ on:
     paths:
       - 'apps/Ingestion Plane/Quarry-v2/**'
       - '.github/workflows/quarry-v2-ci.yml'
+  schedule:
+    # Weekly Monday 06:00 UTC, matching the old security.yml cadence —
+    # advisory-database scans can find new CVEs against unchanged code.
+    # Only cargo-audit/govulncheck run on this trigger (see each job's
+    # `if:`); the compile/test/coverage jobs stay push+PR only, as before.
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
@@ -29,6 +67,7 @@ env:
 jobs:
   cargo-check:
     name: Cargo check + test (workspace)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -47,3 +86,112 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace
+
+      - name: Check quarry-browser (chromiumoxide feature)
+        run: cargo check -p quarry-browser --features chromiumoxide
+
+      - name: Test quarry-browser (chromiumoxide feature)
+        run: cargo test -p quarry-browser --features chromiumoxide
+
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Ingestion Plane/Quarry-v2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Ingestion Plane/Quarry-v2 -> target'
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2026-0192
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - services/quarry-control
+          - services/quarry-orchestrator
+          - pkg/quarrycontracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: 'apps/Ingestion Plane/Quarry-v2/${{ matrix.module }}/go.sum'
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/${{ matrix.module }}'
+        run: govulncheck ./...
+
+  rust-coverage:
+    name: rust-coverage
+    if: github.event_name != 'schedule'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 'apps/Ingestion Plane/Quarry-v2'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Ingestion Plane/Quarry-v2 -> target'
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Enforce Rust coverage floor (80%)
+        run: cargo llvm-cov --workspace --all-features --fail-under-lines 80
+
+  go-coverage:
+    name: go-coverage
+    if: github.event_name != 'schedule'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - services/quarry-control
+          - services/quarry-orchestrator
+          - pkg/quarrycontracts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: 'apps/Ingestion Plane/Quarry-v2/${{ matrix.module }}/go.sum'
+
+      - name: Enforce Go coverage floor (80%)
+        working-directory: 'apps/Ingestion Plane/Quarry-v2/${{ matrix.module }}'
+        run: |
+          go test -coverprofile=coverage.out ./...
+          total=$(go tool cover -func=coverage.out | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { exit (t + 0 >= 80) ? 0 : 1 }'
