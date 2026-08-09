@@ -128,15 +128,17 @@ func main() {
 	log.Info().Msg("Control Session aggregator ready (GET /api/v1/sessions/current)")
 
 	// G34-followup: subscribe to upstream user/org/billing events on the
-	// shared bus so cache entries get busted reactively (not just on
-	// explicit /refresh or TTL expiry). When user-core or billing-core
-	// publish on the same NATS connection, the queue subscriber picks the
-	// event up and invalidates the affected (user, org) snapshot, then
-	// republishes `app.session.entitlements_changed` so notification-core
-	// fires its toast.
+	// LOCAL controlplane-nats bus so cache entries get busted reactively
+	// (not just on explicit /refresh or TTL expiry). user-core, org-core,
+	// and billing-core publish these bare-name subjects locally, not on the
+	// shared bus — only natsShared (below) is used, for the outbound
+	// entitlements_changed republish. When one of those cores publishes,
+	// the queue subscriber picks the event up and invalidates the affected
+	// (user, org) snapshot, then republishes `app.session.entitlements_changed`
+	// so notification-core fires its toast.
 	var upstreamSub *subscribers.UpstreamInvalidator
-	if natsSharedClient != nil && cache != nil {
-		upstreamSub = subscribers.NewUpstreamInvalidator(natsSharedClient, cache, natsShared)
+	if natsLocal != nil && cache != nil {
+		upstreamSub = subscribers.NewUpstreamInvalidator(natsLocal, cache, natsShared)
 		if err := upstreamSub.Start(ctx); err != nil {
 			log.Warn().Err(err).Msg("Failed to start upstream invalidator subscribers")
 		}
