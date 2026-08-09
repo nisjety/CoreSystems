@@ -144,12 +144,172 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
   probe that touches no org table. **Adoption is therefore a per-call-site classification
   exercise, not a mechanical find-and-wrap** — the same judgement org-core's audit applied
   to its admin/GDPR exceptions.
-- **Remaining rollout (not started, tracked here):** 8 services — `retrieval-engine-rs` (66
-  sites), `graph-index-rs` (56), `index-engine-rs` (48), `quickwit-adapter-rs` (26), and the
-  4 Go services `wiki-store-go` (105), `documents-api-go` (55), `data-quality-go` (42),
-  `data-orchestrator-go` (35). Roughly 430 call sites, each needing the scoped-vs-legitimately-
-  unscoped judgement above. Both helpers exist and are proven, so this is now bounded,
-  incremental work rather than a design problem.
+- **`retrieval-engine-rs` ✅ (2026-08-09)** — the service D-A actually needs, since an
+  account-scoped read flows through it. **47 statements scoped, 19 deliberately left, zero
+  unclassified.** Left unscoped, each commented in place: `gdpr/purge.rs` (5 — destructive
+  cross-table erasure where a subtle scoping interaction would silently delete zero rows and
+  *look* like success, i.e. a GDPR failure; deserves its own change with dedicated
+  verification), `api/mod.rs::cleanup_orphans` (8) and `semantic_cache_prune` (3) (admin
+  maintenance; the latter uses `pg_try_advisory_xact_lock`, whose lifetime semantics change
+  inside an explicit transaction), `audit::record_admin` (1 — `admin_audit_log.org_id` is
+  NULLABLE for non-org-scoped admin actions, so a scoped INSERT would be rejected by
+  `WITH CHECK`), plus `warmup_pool` and `readyz` (no org exists).
+  - **Two functions gained an org predicate they never had.**
+    `orchestrator.rs::join_sources` and `pipeline/postprocess.rs` fetched
+    `FROM documents WHERE document_id = ANY($1)` with **no org filter at all** — safe today
+    only because candidates arrive pre-filtered from the org-scoped arms. Both now take the
+    org explicitly and run scoped, so the database supplies the predicate structurally.
+    Several gRPC handlers also join `documents` with no org predicate on the join side; RLS
+    now covers that too.
+- **⚠ A real defect in the first migration, found during this rollout and fixed:**
+  `20260809120000` granted `dataplane_app` privileges only inside its 35-`org_id`-table loop,
+  and `ALTER DEFAULT PRIVILEGES` covers only *future* tables — so a scoped transaction that
+  merely *joined* a table without an `org_id` failed outright (`permission denied for table
+  wiki_page_versions` / `retrieval_candidates`, both reproduced live). Scoping
+  `search/wiki.rs` without noticing would have taken down the entire wiki retrieval arm at
+  runtime while every non-DB test still passed. Fixed by
+  `20260809180000_org_rls_child_tables.sql`, which grants **and** isolates the three
+  transitively org-scoped children via parent-derived policies
+  (`retrieval_candidates`→`retrieval_runs`, `wiki_page_versions`→`wiki_pages`,
+  `chunk_lineage`→`documents`; all three FK columns indexed, so the `EXISTS` is an index
+  probe). Granting without policies was rejected as the wrong fix — it would have left a
+  scoped role able to read any org's children by guessing a key. Verified live: the child
+  `WITH CHECK` correctly resolves a parent written earlier in the *same uncommitted*
+  transaction (which is what makes the merged `persist_trace` transaction correct), and still
+  rejects a foreign-org parent. `schema_migrations` is deliberately excluded — genuine global
+  infrastructure, only ever touched by the superuser migrator.
+- **⚠ Test-fixture regression introduced and fixed in the same pass.** The DB-gated
+  (`#[ignore]`d) suites build their own schema on a bare database and never created the
+  `dataplane_app` role, so once production code called `begin_org_scoped` they all failed with
+  `role "dataplane_app" does not exist` — **invisible to `cargo test`**, which is exactly the
+  silently-disabled-safety-net pattern this phase exists to prevent. Fixed with one shared
+  `tests/common::grant_rls_runtime_role` helper wired into the 5 suites that exercise a scoped
+  path; the 4 that don't were audited and left alone. Grants only, not policies — deliberately,
+  since enabling policies in fixtures would change what each suite asserts. **Worth doing
+  later:** making the fixtures install the real policies would upgrade them from "the SQL's own
+  `org_id` predicate filters correctly" to "the database filters correctly even if that
+  predicate is dropped", which is the actual guarantee this phase buys.
+- **Two PRE-EXISTING DB-gated failures found, verified unrelated, and deliberately not fixed**
+  (fixing them changes what the suites assert): `zdr_behavior::test_persist_trace_creates_row_
+  when_not_ephemeral` fails because the fixture seeds `retrieval_traces` while production writes
+  `retrieval_runs` — confirmed by direct grep, the fixture contains zero occurrences of the real
+  table name; and `grpc_integration::test_document_index_status` fails because the fixture
+  inserts `embedding_status = 'completed'` while production counts `'done'`, a literal that
+  changed in `7d2f7b2f` without the fixture following. Also worth knowing for CI:
+  `cross_org_isolation` and `grpc_integration` **require `--test-threads=1` against an empty
+  database** — their fixtures race on concurrent `CREATE TABLE IF NOT EXISTS`. All three
+  predate this work.
+- **`graph-index-rs` ✅ (2026-08-09)** — the cleanest rollout so far: all 56 sites live in one
+  file (`src/store.rs`), every production method already took `org_id`, and all 7 tables it
+  touches carry an `org_id` and were already granted, so neither the threading nor the grant
+  hazard applied. **33 statements scoped across 18 methods (19 transactions), 5 left** — the
+  `purge_organization_data` erasure, for the identical reason as `retrieval-engine-rs`'s. Two
+  methods already opened `self.pool.begin()` and were *converted* to `begin_org_scoped` rather
+  than nested. One deliberate exception to one-transaction-per-method:
+  `detect_claim_contradictions` keeps its read phase and write phase separate, so it does not
+  hold a read-write transaction open across the whole detection pass or open a write
+  transaction when there is nothing to record.
+  - **Verified live with a real extraction**, not just a healthy boot: entities 768→769,
+    relationships 238→241, claims 329→331, and 31 text-unit mappings written for the processed
+    chunk — all through the scoped write path.
+- **⚠⚠ An operational trap that cost real debugging time, worth reading before the next
+  service.** The first post-deploy extraction returned `entities:0` in 64ms (vs ~4s for a real
+  LLM call) and looked exactly like an RLS regression. It was not. Two compounding causes:
+  1. **`docker compose up -d <service>` silently detaches DPv2 services from the real
+     inter-plane bus.** The base compose file deliberately defaults its `inter-plane-bus`
+     network to a *local* bridge (`dpv2-cross-plane`) so DPv2 can boot without Control/Model
+     Plane; `docker-compose.cross-plane.yml` is the overlay that swaps in the real external
+     `inter-plane-bus`. Recreating a service without that overlay moves it onto the dummy
+     bridge, so every cross-plane call (auth-core token minting, Model Plane inference) starts
+     failing while the container still reports **healthy**. Five services were affected before
+     it was noticed. **Always deploy with
+     `-f docker-compose.yml -f docker-compose.cross-plane.yml`.** Diagnose by comparing
+     `docker inspect <c> --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'`
+     against a service you have not recreated.
+  2. **`stream.rs` calls `load_org_visible_chunks(...).unwrap_or_default()`**, so any failure
+     to load chunks is swallowed into an empty vector and reported as a successful extraction
+     of zero entities. Pre-existing, not introduced here, but it is what turned an
+     infrastructure outage into a silent no-op. The real error was only visible one line
+     earlier (`extraction failed: inference service-token endpoint unavailable`) — worth
+     hardening separately.
+- **⚠ The DB-gated-fixture trap recurred, in a new hiding place.** `graph-index-rs` has no
+  `tests/` directory, which is *not* sufficient evidence that it has no DB-gated fixtures — it
+  keeps them inside `src/store.rs` as `mod visibility_tests`, seeded from
+  `GRAPH_TEST_DATABASE_URL` into a per-test `graph_visibility_<uuid>` schema. Three of its
+  `#[ignore]`d tests began failing with `role "dataplane_app" does not exist`; fixed the same
+  way, with three corrections the `retrieval-engine-rs` version did not need: grants must
+  target the **per-test schema** (not `public`), `ALTER DEFAULT PRIVILEGES` is required because
+  one test creates a table *after* the fixture returns, and — the important one — the
+  role-creation guard must catch **`duplicate_object` OR `unique_violation`**. Catching
+  `duplicate_object` alone does not survive the race it exists for: with the role absent, the
+  losing backend faults on `pg_authid_rolname_index` and raises `unique_violation` (23505)
+  before the duplicate-object path is reached, reproduced verbatim against a real cluster. The
+  `retrieval-engine-rs` helper had that same defect and has been corrected.
+- **`index-engine-rs` + `quickwit-adapter-rs` ✅ (2026-08-09)** — deliberately small scoped
+  surfaces, because most of both services is legitimately cross-org.
+  - `index-engine-rs`: **10 statements under 2 scope entry points** (`builder::process_document`,
+    which converts its existing `pool.begin()` and covers 8 in-function statements plus 2
+    delegated to `outbox::enqueue_intent` on the same transaction; and `reembed-switch`'s
+    operator query). Left unscoped: `outbox.rs` (7 — drains for all orgs), `reconcile.rs` (2 —
+    the D19 reconciler claims stranded units plane-wide, and each row's `org_id` is an *output*
+    of the claim, not an input), `gdpr.rs` (2 — the erasure precedent). Two scoped statements
+    carry no `org_id` of their own and gain isolation purely from policy: the
+    `parent_window_text` refresh (keyed only by `knowledge_id`) and the `chunk_lineage` insert
+    (via its `documents` parent).
+  - `quickwit-adapter-rs`: **3 statements** — the event-driven `index_knowledge_unit_by_id` /
+    `index_document_knowledge_units` / `index_source_object_by_id`, name-for-name the functions
+    already scoped in the sibling `meilisearch-adapter-rs`. Left unscoped: the 5 `rebuild_*`
+    stages (their `org_id` is `Option`, predicate `($1::TEXT IS NULL OR ...)` — a whole-corpus
+    rebuild passes `None`, which a scoped transaction cannot express), `jobs.rs` (13),
+    `ingest_and_checkpoint_batch`, and `gdpr.rs` — the last three all touching
+    `quickwit_admin_jobs`/`quickwit_admin_job_audit`, whose **NULLABLE `org_id`** a scoped
+    write cannot satisfy.
+  - Verified live: a real re-announce drove quickwit-adapter's newly-scoped path to return all
+    **10** real chunks. Separately verified that the scoping is genuinely active rather than
+    inert, by enabling `log_statement=all` on a disposable server and counting
+    `SET LOCAL ROLE dataplane_app` occurrences against each test's known structure.
+- **`wiki-store-go` ✅ (2026-08-09) — first Go adopter, proving the Go helper end to end.**
+  **45 statements under 24 `WithOrgScope` callbacks**; three functions that already opened
+  `pool.Begin` were converted so the scoped transaction *is* that transaction, not a nested
+  second one. Left unscoped: the `wiki_event_outbox` drain (3 — one process serves every org;
+  a short batch is indistinguishable from an idle queue, so scoping would silently stop
+  publishing other tenants' events) and `HardPurgeByOrg` (5 — the erasure precedent, with a
+  sharper articulation worth keeping: **under RLS a `DELETE` can only remove rows the policy
+  lets the role *see*, so a row with drifted or NULL `org_id` would survive erasure while the
+  summary still reported success**). **Structural hardening worth copying to the remaining Go
+  services:** its eight private helpers were converted from `*WikiRepo` methods holding the
+  pool into package-level functions taking `pgx.Tx`, so they can no longer be called unscoped —
+  the compiler now enforces what a comment used to.
+- **⚠ A latent crash surfaced by restarting `wiki-store` — pre-existing, unrelated to RLS, and
+  now fixed.** `internal/events/publisher.go` demanded `DATAPLANE_WIKI` retention be
+  **WorkQueue** and fatally refused to boot otherwise. But that stream is legitimately
+  **Interest** (WorkQueue permits exactly one consumer per subject, and this subject fans out
+  to more than one reader — the same Interest-over-WorkQueue correction already applied to
+  `DATAPLANE_DOCUMENTS` and `DATAPLANE_KNOWLEDGE`). Retention is immutable, so the service could
+  not have started since that correction — it had simply not been restarted in three days, and
+  the RLS deploy is what surfaced it. Fixed by making the publisher create and require
+  `Interest`, with the mismatch error now reporting what it wanted and what it found instead of
+  a bare "contract mismatch". **The general lesson: a long-uptime container can be hiding a
+  boot-time regression; a service that has not restarted is not evidence that it can.**
+- **Go helper ergonomics — feedback from the first real adopter, worth acting on before the
+  remaining 3 Go services:** (1) it hands back a `pgx.Tx` while repos are written against
+  `*pgxpool.Pool`, so adoption is one atomic all-or-nothing refactor — exporting a `Queryer`
+  interface both satisfy would allow incremental migration; (2) `fn func(pgx.Tx) error` forces
+  every read path to declare results outside the closure and assign in, which invites a
+  zero-value bug on early returns — a generic `InOrgScope[T]` variant would remove it; (3)
+  **`pgx.Rows` must be fully drained inside the callback** (returning them out compiles, then
+  fails at runtime because commit closes them) — currently undocumented; (4) nesting a scoped
+  call inside a callback compiles and silently checks out a second pool connection.
+- **Remaining rollout:** 3 Go services — `documents-api-go` (55 sites), `data-quality-go` (42),
+  `data-orchestrator-go` (35). **⚠ Blocked on an infrastructure prerequisite**, not on the RLS
+  work: unlike `wiki-store-go` (whose compose build context is already the repo root and which
+  already carried a sibling-module `replace`), these three build from `context:
+  services/<svc>`, so a `replace ... => ../../shared/go` would resolve for `go build` and then
+  **fail only at image-build time**. Each needs its context widened to the repo root and its
+  Dockerfile `COPY` paths adjusted, following `services/wiki-store-go/Dockerfile` as the
+  working template (it copies the sibling module's `go.mod`/`go.sum` before `go mod download`
+  and the full tree before `go build`). Their multi-org drains — `documents_outbox`,
+  `data_orchestrator_jobs` — must stay unscoped.
 
 ### Phase 2 — Light up the visual arm: MinIO CAS + page-image producer *(PR-F)*
 - **Goal:** something actually emits `dataplane.page_images.created` so the (built)
