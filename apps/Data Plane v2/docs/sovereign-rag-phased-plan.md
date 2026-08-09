@@ -300,16 +300,47 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
   **`pgx.Rows` must be fully drained inside the callback** (returning them out compiles, then
   fails at runtime because commit closes them) — currently undocumented; (4) nesting a scoped
   call inside a callback compiles and silently checks out a second pool connection.
-- **Remaining rollout:** 3 Go services — `documents-api-go` (55 sites), `data-quality-go` (42),
-  `data-orchestrator-go` (35). **⚠ Blocked on an infrastructure prerequisite**, not on the RLS
-  work: unlike `wiki-store-go` (whose compose build context is already the repo root and which
-  already carried a sibling-module `replace`), these three build from `context:
-  services/<svc>`, so a `replace ... => ../../shared/go` would resolve for `go build` and then
-  **fail only at image-build time**. Each needs its context widened to the repo root and its
-  Dockerfile `COPY` paths adjusted, following `services/wiki-store-go/Dockerfile` as the
-  working template (it copies the sibling module's `go.mod`/`go.sum` before `go mod download`
-  and the full tree before `go build`). Their multi-org drains — `documents_outbox`,
-  `data_orchestrator_jobs` — must stay unscoped.
+- **Infrastructure prerequisite ✅ (2026-08-09) — solved without widening the build context.**
+  Unlike `wiki-store-go`, the remaining 3 Go services build from `context: services/<svc>`, so a
+  `replace ... => ../../shared/go` resolved for `go build` and would have failed only at
+  image-build time. Widening to the repo root was the obvious fix and the wrong one:
+  `.dockerignore` deliberately excludes these Go trees so the root-context Rust builds stay
+  lean, and widening it back would have bloated every Rust image. Used the pattern this repo
+  already had for the Model Plane protos instead — a named `additional_contexts: shared-go:
+  "shared/go"` in `docker-compose.yml`, consumed via `COPY --from=shared-go ...` in each
+  Dockerfile, context left narrow. **`go build` cannot tell these two approaches apart — only an
+  image build with a real import can** (proved with a temporary probe import, then removed).
+- **`documents-api-go` / `data-quality-go` / `data-orchestrator-go` ✅ (2026-08-09) — rollout
+  complete.** ~40 / 20 / 11 statements scoped respectively (data-quality-go's actual scope ran
+  well past the 42-site estimate's cross-org assumption: nearly every path there runs through
+  verified auth claims, not background sweeps). Unscoped, per the by-now-familiar reasons: the
+  `documents_outbox` and `knowledge_observability_outbox` drains, `data_orchestrator_jobs`'
+  claim/lease and its exhausted-job retirement sweep, a durable eval-recovery sweep, and every
+  GDPR erasure path. One erasure rationale got a needed correction: "a drifted org_id row
+  survives erasure" only bites when a statement lacks its own org predicate — these purges all
+  already bind `WHERE org_id = $1`, so the hazard was hypothetical for this implementation, not
+  demonstrated. Leaving them unscoped is still the right conservative default.
+  Two new structural traps, likely to recur in any Go service added later: (1) a function that
+  deliberately tolerates a failing sub-query and degrades breaks once several queries share one
+  transaction, because the error now aborts the commit too — fixed with pgx nested `Begin`
+  (`SAVEPOINT`) to preserve the original tolerance; (2) a not-found path that called a sibling
+  scoped method opened a second transaction while the first still held its connection
+  (`ErrNestedScope`) — inlined the check onto the same transaction, which incidentally closed a
+  real race where a concurrent write turned an invalid state transition into a spurious
+  not-found.
+- **Go helper hardened from adopter feedback, all four items from the note above acted on:**
+  `InOrgScope[T]` (value-returning, removes the zero-value-on-early-return trap), `Queryer`
+  (lets a repo migrate one function at a time), the `pgx.Rows`-must-drain-in-callback
+  requirement is now documented on `WithOrgScope`, and a nesting guard exists — though honestly
+  scoped: `WithOrgScope`'s own callback never receives the marked context, so detection there
+  depends on a caller threading it through by hand; `InOrgScope`'s callback does receive it, so
+  detection is real there.
+- **Phase 1 is now complete: all 10 Data Plane v2 Postgres-backed services enforce org isolation
+  under RLS**, deployed and live-verified together — correct network on every service, zero
+  permission/RLS errors across the fleet, real corpus intact (10 documents / 51 knowledge units
+  / 51 lineage rows), and a real re-announce driving both scoped downstream adapters end to end.
+  This is what D-A's account/grant model needs before it can be built: see the D-A section
+  below, "What remains before D-A can start."
 
 ### Phase 2 — Light up the visual arm: MinIO CAS + page-image producer *(PR-F)*
 - **Goal:** something actually emits `dataplane.page_images.created` so the (built)
@@ -587,27 +618,27 @@ implements each — none of the three are built yet as of this entry.
      references anywhere in org-core (dead schema from migration 002, not a live risk —
      confirmed no other Control Plane service holds a connection string to the `org_core`
      database; org-core is the only consumer).
-     **Data Plane v2 side — foundation ✅ built and proven 2026-08-09, rollout in progress.**
-     When first checked this was not merely unvalidated but entirely absent: zero RLS
-     migrations, zero transaction-pinning pattern, zero `WithOrgScope`-equivalent anywhere.
-     That is the actual blocker for D-A's data-access-grant feature specifically — the
-     org-core validation above covers Control Plane's own identity/admin data
-     (organizations, members, entitlements) and says nothing about the *documents and
-     knowledge* an account-level grant would expose, which live entirely in DPv2. It has
-     since been built: migration + both language helpers + 2 pilot services, all
-     live-verified (see the Phase 1 RLS entry above). **What remains before D-A can start**
-     is the 8-service rollout listed there — in particular `retrieval-engine-rs`, since that
-     is the service an account-scoped read would actually flow through, and it is not yet
-     adopted. D-A's grant check is then a second predicate layered on a working org-level
-     one, which is the order this sequencing decision was asking for.
+     **Data Plane v2 side — ✅ COMPLETE 2026-08-09. This was the actual blocker for D-A's
+     data-access-grant feature and it is now clear.** When first checked this was not merely
+     unvalidated but entirely absent: zero RLS migrations, zero transaction-pinning pattern,
+     zero `WithOrgScope`-equivalent anywhere. The org-core validation above covers Control
+     Plane's own identity/admin data (organizations, members, entitlements) and says nothing
+     about the *documents and knowledge* an account-level grant would expose, which live
+     entirely in DPv2. All 10 Postgres-backed DPv2 services now enforce org isolation under
+     RLS, deployed together and live-verified as a fleet (see the Phase 1 RLS entry above) —
+     including `retrieval-engine-rs`, the service an account-scoped read would actually flow
+     through. D-A's grant check is now a second predicate layered on a working org-level one,
+     which is the order this sequencing decision asked for. **Nothing further is needed on
+     this side before D-A's own schema/claim/grant work can begin.**
   3. Data Plane v2's current JWT `Claims`/`AuthContext` (`retrieval-engine-rs/src/authz/
      context.rs`) carry only `org_id` — no account concept anywhere in the propagation
      chain yet. An account-scoped read needs a new claim (e.g. `account_id` +
      `account_data_access: bool`) minted by auth-core once org-core can resolve it, which
      depends on org-core having the account/grant schema in the first place.
   - **Not started**: no schema, no migration, no claim, no grant-check code. This entry is
-    the scope, not the implementation — org-level RLS validation is the concrete next
-    unblocking step, tracked as its own work above.
+    the scope, not the implementation. The one prerequisite this sequencing decision named —
+    org-level RLS, validated live, across both planes — is now done; D-A's own build is the
+    next unblocked step, not a further prerequisite.
 - **D-B (text embedder) — DECIDED: migrate to Cohere Embed v4 for dense text.** This
   resolves Phase 3 Step 4's sub-decision below in favor of the original blueprint
   requirement (line 40: "Cohere Embed v4 = dense text (multilingual chunks...)"). Driven by
