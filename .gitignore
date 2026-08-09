@@ -102,6 +102,12 @@ apps/Control Plane/user-core/server
 # ──────────────────────────────────────────────────────────────────────
 .claude/worktrees/
 
+# Per-machine agent state: local settings, a scheduler lock, and a
+# launch.json whose runtimeArgs hardcode this checkout's absolute path. All
+# machine-specific. If genuinely shared project config is added here later,
+# re-include it explicitly with a `!` rule rather than dropping this one.
+.claude/
+
 # ──────────────────────────────────────────────────────────────────────
 # Logs and runtime state
 # ──────────────────────────────────────────────────────────────────────
@@ -171,6 +177,8 @@ apps/Frontend Plane/*.png
 apps/Frontend Plane/*.jpg
 apps/Frontend Plane/verevonv3/*.png
 apps/Frontend Plane/verevonv3/*.jpg
+apps/Frontend Plane/verevonv3/apps/*/*.png
+apps/Frontend Plane/verevonv3/apps/*/*.jpg
 **/image copy*.png
 **/screenshot-*.png
 
