@@ -1,8 +1,42 @@
+use quarry_core::privacy::PrivacyPolicy;
+use quarry_runtime::driver::FetchHints;
+use quarry_runtime::proxy_pool::ProxyPool;
 use quarry_runtime::{Driver, StaticDriver};
 use std::time::Duration;
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+// StaticDriver's direct-egress client only ever connects to an address that
+// has passed the security preflight (see `quarry_runtime::dns_guard`), and
+// `wiremock::MockServer` always binds to loopback -- so a direct fetch here
+// would be correctly rejected as SSRF-blocked before any HTTP happens. Route
+// through the proxy-egress identity instead: it owns its own connection (the
+// pinned-DNS guard is a Direct-only contract) and exercises the same
+// request-send / response-parse path (`StaticDriver::send_once`) that a
+// direct fetch would.
+fn approved_proxy_hints() -> FetchHints {
+    FetchHints {
+        org_id: "quarry_integration_test".to_string(),
+        privacy: PrivacyPolicy {
+            allow_third_party_processing: true,
+            processor_id: Some("quarry_proxy_pool".into()),
+            ..PrivacyPolicy::default()
+        },
+        ..FetchHints::default()
+    }
+}
+
+fn driver_proxied_through(server: &MockServer) -> StaticDriver {
+    let pool = ProxyPool::from_env_string(&server.uri());
+    StaticDriver::with_proxy_pool_and_processor(
+        Duration::from_secs(5),
+        "quarry-test",
+        pool,
+        Some("quarry_proxy_pool".into()),
+    )
+    .unwrap()
+}
 
 #[tokio::test]
 async fn static_driver_fetches_from_wiremock() {
@@ -17,9 +51,12 @@ async fn static_driver_fetches_from_wiremock() {
         .mount(&server)
         .await;
 
-    let driver = StaticDriver::new(Duration::from_secs(5), "quarry-test").unwrap();
-    let url = Url::parse(&server.uri()).unwrap();
-    let resp = driver.fetch(&url).await.unwrap();
+    let driver = driver_proxied_through(&server);
+    let url: Url = "http://example.com/".parse().unwrap();
+    let resp = driver
+        .fetch_conditional(&url, &approved_proxy_hints())
+        .await
+        .unwrap();
 
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body, b"<html>hi</html>");
@@ -38,9 +75,12 @@ async fn static_driver_returns_500_status() {
         .mount(&server)
         .await;
 
-    let driver = StaticDriver::new(Duration::from_secs(5), "quarry-test").unwrap();
-    let url = Url::parse(&server.uri()).unwrap();
-    let resp = driver.fetch(&url).await.unwrap();
+    let driver = driver_proxied_through(&server);
+    let url: Url = "http://example.com/".parse().unwrap();
+    let resp = driver
+        .fetch_conditional(&url, &approved_proxy_hints())
+        .await
+        .unwrap();
 
     assert_eq!(resp.status, 500);
 }
