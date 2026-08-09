@@ -29,7 +29,7 @@ use tonic::{Request, Response, Status};
 use tracing::warn;
 
 use crate::auth::{
-    OwnerIntent, VerifiedIdentity, authorize_operation, authorize_owner_row, identity,
+    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
 };
 use crate::orchestration_store as store;
 use crate::store::Pool;
@@ -655,6 +655,13 @@ fn now_ts() -> prost_types::Timestamp {
     ts(Utc::now())
 }
 
+/// Inverse of [`ts`]. `None` for a value with no valid Postgres representation
+/// (out of `chrono`'s range) rather than silently clamping to some default -
+/// the caller must reject the request explicitly.
+fn prost_timestamp_to_chrono(value: prost_types::Timestamp) -> Option<DateTime<Utc>> {
+    DateTime::from_timestamp(value.seconds, u32::try_from(value.nanos).ok()?)
+}
+
 /// Convert `serde_json::Value` to `prost_types::Struct` for proto `Struct`
 /// fields. Non-object values are wrapped under a single `value` key.
 pub(crate) fn json_to_struct(v: &JsonValue) -> Option<prost_types::Struct> {
@@ -895,6 +902,153 @@ fn verification_status_to_proto(status: &str) -> i32 {
         "verified_failure" => proto::VerificationStatus::VerifiedFailure as i32,
         "partially_verified" => proto::VerificationStatus::PartiallyVerified as i32,
         _ => proto::VerificationStatus::Unknown as i32,
+    }
+}
+
+/// Dimensions this metric set deliberately does not claim, same discipline as
+/// `unavailable_proof_sections`.
+fn unavailable_verification_metrics() -> Vec<proto::UnavailableSection> {
+    vec![
+        proto::UnavailableSection {
+            section: "cost_per_verified_outcome".to_string(),
+            reason: "Cost is owned by cost-core, a separate database this plane cannot join; \
+                     cost_entries carries a run_id, so a cross-service correlation is possible \
+                     future work, not fabricated here."
+                .to_string(),
+        },
+        proto::UnavailableSection {
+            section: "unnecessary_approval".to_string(),
+            reason: "Whether a granted approval was ever truly necessary is not inferable from \
+                     this schema - it would require a counterfactual (would the action have \
+                     been safe without human review) this plane has no data source for."
+                .to_string(),
+        },
+        proto::UnavailableSection {
+            section: "rollback_rate".to_string(),
+            reason: "No rollback mechanism exists yet (roadmap P1 item 4, stateful simulators \
+                     and CI release gates, is unbuilt); there is nothing to count."
+                .to_string(),
+        },
+    ]
+}
+
+/// Aggregate one organization's Verified Outcome Foundation metrics from
+/// already-fetched, already-tenant-scoped rows. Pure and DB-free by
+/// construction, mirroring `build_run_proof_bundle` — every rate below is
+/// computed here so the rule can be unit-tested without a live Postgres.
+fn build_verification_metrics(
+    org_id: &str,
+    since: Option<DateTime<Utc>>,
+    continuations: &[store::ContinuationMetricsRow],
+    approvals: &[store::ApprovalMetricsRow],
+) -> proto::VerificationMetrics {
+    let total_completed = continuations
+        .iter()
+        .filter(|c| c.outcome == "completed")
+        .count() as i64;
+    let total_failed = continuations
+        .iter()
+        .filter(|c| c.outcome == "failed")
+        .count() as i64;
+    let total_cancelled = continuations
+        .iter()
+        .filter(|c| c.outcome == "cancelled")
+        .count() as i64;
+
+    // False success is the headline this whole layer exists to produce: the
+    // dispatcher recorded a structural `completed`, but the independent
+    // postcondition check came back `verified_failure` - the boundary said
+    // yes, the system of record said no.
+    let false_success_count = continuations
+        .iter()
+        .filter(|c| {
+            c.outcome == "completed" && c.verification_status.as_deref() == Some("verified_failure")
+        })
+        .count() as i64;
+    let verified_success_count = continuations
+        .iter()
+        .filter(|c| c.verification_status.as_deref() == Some("verified_success"))
+        .count() as i64;
+    let partially_verified_count = continuations
+        .iter()
+        .filter(|c| c.verification_status.as_deref() == Some("partially_verified"))
+        .count() as i64;
+    let unknown_verification_count = continuations
+        .iter()
+        .filter(|c| c.verification_status.as_deref() == Some("unknown"))
+        .count() as i64;
+    // NULL, not "unknown": rows with no verification_status recorded at all.
+    // See the proto doc - this means "predates the instrumentation," since
+    // every live dispatch persists at least a structural `unknown`.
+    let unverified_count = continuations
+        .iter()
+        .filter(|c| c.verification_status.is_none())
+        .count() as i64;
+
+    let structural_method_count = continuations
+        .iter()
+        .filter(|c| c.verification_method.as_deref() == Some("structural"))
+        .count() as i64;
+    let postcondition_method_count = continuations
+        .iter()
+        .filter(|c| c.verification_method.as_deref() == Some("postcondition"))
+        .count() as i64;
+
+    let median_seconds_receipt_to_outcome = median_seconds(
+        continuations
+            .iter()
+            .map(|c| (c.finalized_at - c.started_at).num_seconds()),
+    );
+
+    let approvals_requested = approvals.len() as i64;
+    let approvals_granted = approvals.iter().filter(|a| a.status == "granted").count() as i64;
+    let approvals_denied = approvals.iter().filter(|a| a.status == "denied").count() as i64;
+    let median_seconds_approval_decision = median_seconds(approvals.iter().filter_map(|a| {
+        a.decided_at
+            .map(|decided_at| (decided_at - a.requested_at).num_seconds())
+    }));
+
+    proto::VerificationMetrics {
+        org_id: org_id.to_string(),
+        since: since.map(ts),
+        generated_at: Some(now_ts()),
+        total_completed,
+        total_failed,
+        total_cancelled,
+        verified_success_count,
+        false_success_count,
+        partially_verified_count,
+        unverified_count,
+        unknown_verification_count,
+        structural_method_count,
+        postcondition_method_count,
+        approvals_requested,
+        approvals_granted,
+        approvals_denied,
+        median_seconds_receipt_to_outcome,
+        median_seconds_approval_decision,
+        unavailable: unavailable_verification_metrics(),
+    }
+}
+
+/// Median of a whole-seconds duration iterator. `0` for an empty input -
+/// callers must read that alongside the matching count field (e.g.
+/// `total_completed`) rather than mistaking it for "instant."
+///
+/// Sorts rather than using a mean specifically so one slow outlier (a stuck
+/// worker, a provider incident) cannot dominate the reported figure the way
+/// an average would.
+fn median_seconds(values: impl Iterator<Item = i64>) -> i64 {
+    let mut values: Vec<i64> = values.collect();
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let mid = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[mid - 1] + values[mid]) / 2
+    } else {
+        values[mid]
     }
 }
 
@@ -1484,6 +1638,45 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         result
     }
 
+    async fn get_verification_metrics(
+        &self,
+        request: Request<proto::GetVerificationMetricsRequest>,
+    ) -> Result<Response<proto::GetVerificationMetricsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetVerificationMetricsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:read")?;
+            let req = request.into_inner();
+            validate_approval_org(&req.org_id)?;
+            caller.authorize_org(&req.org_id)?;
+            let since = req
+                .since
+                .map(|since| {
+                    prost_timestamp_to_chrono(since)
+                        .ok_or_else(|| Status::invalid_argument("since is not a valid timestamp"))
+                })
+                .transpose()?;
+
+            let continuations =
+                store::list_continuation_metrics_rows_for_org(&self.pool, &req.org_id, since)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            let approvals =
+                store::list_approval_metrics_rows_for_org(&self.pool, &req.org_id, since)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+
+            let metrics =
+                build_verification_metrics(&req.org_id, since, &continuations, &approvals);
+            Ok(Response::new(proto::GetVerificationMetricsResponse {
+                metrics: Some(metrics),
+            }))
+        }
+        .await;
+        record_metrics("get_verification_metrics", started, result.is_ok());
+        result
+    }
+
     async fn list_pending_approvals(
         &self,
         request: Request<proto::OrgPendingApprovalsRequest>,
@@ -1918,17 +2111,22 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 // VERIFICATION_STATUS_UNSPECIFIED is treated the same as an
                 // absent field — a caller sending it explicitly has not
                 // performed any judgment, so it must not be stored as a claim.
-                let verification_status = req.verification.as_ref().and_then(|v| {
-                    match proto::VerificationStatus::try_from(v.status) {
-                        Ok(proto::VerificationStatus::Unknown) => Some("unknown"),
-                        Ok(proto::VerificationStatus::VerifiedSuccess) => Some("verified_success"),
-                        Ok(proto::VerificationStatus::VerifiedFailure) => Some("verified_failure"),
-                        Ok(proto::VerificationStatus::PartiallyVerified) => {
-                            Some("partially_verified")
-                        }
-                        Ok(proto::VerificationStatus::Unspecified) | Err(_) => None,
-                    }
-                });
+                let verification_status =
+                    req.verification.as_ref().and_then(
+                        |v| match proto::VerificationStatus::try_from(v.status) {
+                            Ok(proto::VerificationStatus::Unknown) => Some("unknown"),
+                            Ok(proto::VerificationStatus::VerifiedSuccess) => {
+                                Some("verified_success")
+                            }
+                            Ok(proto::VerificationStatus::VerifiedFailure) => {
+                                Some("verified_failure")
+                            }
+                            Ok(proto::VerificationStatus::PartiallyVerified) => {
+                                Some("partially_verified")
+                            }
+                            Ok(proto::VerificationStatus::Unspecified) | Err(_) => None,
+                        },
+                    );
                 let verification =
                     verification_status
                         .zip(req.verification.as_ref())
@@ -3121,5 +3319,184 @@ mod tests {
             "appr_1 has no continuation and must not borrow appr_2's evidence"
         );
         assert!(bundle.approvals[1].execution.is_some());
+    }
+
+    // --- Verification metrics (roadmap P1 item 5) -------------------------
+
+    fn metrics_row(
+        outcome: &str,
+        verification_status: Option<&str>,
+        verification_method: Option<&str>,
+        elapsed_secs: i64,
+    ) -> store::ContinuationMetricsRow {
+        let started_at = chrono::Utc::now() - chrono::Duration::seconds(elapsed_secs);
+        store::ContinuationMetricsRow {
+            outcome: outcome.to_owned(),
+            verification_status: verification_status.map(str::to_owned),
+            verification_method: verification_method.map(str::to_owned),
+            started_at,
+            finalized_at: started_at + chrono::Duration::seconds(elapsed_secs),
+        }
+    }
+
+    fn approval_row(
+        status: &str,
+        requested_secs_ago: i64,
+        decision_lag_secs: Option<i64>,
+    ) -> store::ApprovalMetricsRow {
+        let requested_at = chrono::Utc::now() - chrono::Duration::seconds(requested_secs_ago);
+        store::ApprovalMetricsRow {
+            status: status.to_owned(),
+            requested_at,
+            decided_at: decision_lag_secs.map(|lag| requested_at + chrono::Duration::seconds(lag)),
+        }
+    }
+
+    #[test]
+    fn median_seconds_handles_empty_single_even_and_odd() {
+        assert_eq!(median_seconds(std::iter::empty()), 0);
+        assert_eq!(median_seconds([7].into_iter()), 7);
+        assert_eq!(median_seconds([10, 20].into_iter()), 15);
+        assert_eq!(median_seconds([1, 100, 4].into_iter()), 4);
+    }
+
+    #[test]
+    fn median_seconds_ignores_a_single_slow_outlier_more_than_a_mean_would() {
+        let with_outlier = median_seconds([10, 12, 11, 9, 10_000].into_iter());
+        assert_eq!(
+            with_outlier, 11,
+            "the outlier must not drag the median toward it"
+        );
+    }
+
+    #[test]
+    fn false_success_counts_only_completed_rows_refuted_by_postcondition() {
+        let rows = vec![
+            metrics_row(
+                "completed",
+                Some("verified_failure"),
+                Some("postcondition"),
+                5,
+            ),
+            // A genuinely failed continuation reporting verified_failure is an
+            // honest structural failure the postcondition layer agreed with -
+            // not a false success, since nothing claimed success here.
+            metrics_row("failed", Some("verified_failure"), Some("postcondition"), 5),
+            metrics_row(
+                "completed",
+                Some("verified_success"),
+                Some("postcondition"),
+                5,
+            ),
+        ];
+        let metrics = build_verification_metrics("org-1", None, &rows, &[]);
+        assert_eq!(
+            metrics.false_success_count, 1,
+            "only the completed+refuted row is a false success"
+        );
+        assert_eq!(metrics.verified_success_count, 1);
+    }
+
+    #[test]
+    fn unverified_and_unknown_are_distinct_buckets() {
+        let rows = vec![
+            // NULL columns: predates instrumentation.
+            metrics_row("completed", None, None, 1),
+            // Recorded, but the dispatcher's own honest "nothing stronger to
+            // show" - a live row, not a historical gap.
+            metrics_row("completed", Some("unknown"), Some("structural"), 1),
+        ];
+        let metrics = build_verification_metrics("org-1", None, &rows, &[]);
+        assert_eq!(metrics.unverified_count, 1);
+        assert_eq!(metrics.unknown_verification_count, 1);
+    }
+
+    #[test]
+    fn totals_and_method_counts_partition_by_their_own_field() {
+        let rows = vec![
+            metrics_row(
+                "completed",
+                Some("verified_success"),
+                Some("postcondition"),
+                1,
+            ),
+            metrics_row("failed", Some("unknown"), Some("structural"), 1),
+            metrics_row("cancelled", None, None, 1),
+        ];
+        let metrics = build_verification_metrics("org-1", None, &rows, &[]);
+        assert_eq!(metrics.total_completed, 1);
+        assert_eq!(metrics.total_failed, 1);
+        assert_eq!(metrics.total_cancelled, 1);
+        assert_eq!(metrics.structural_method_count, 1);
+        assert_eq!(metrics.postcondition_method_count, 1);
+    }
+
+    #[test]
+    fn approval_counts_and_median_decision_latency_are_correct() {
+        let approvals = vec![
+            approval_row("requested", 100, None), // still pending, no decision yet
+            approval_row("granted", 100, Some(10)),
+            approval_row("granted", 100, Some(30)),
+            approval_row("denied", 100, Some(20)),
+        ];
+        let metrics = build_verification_metrics("org-1", None, &[], &approvals);
+        assert_eq!(
+            metrics.approvals_requested, 4,
+            "the pending one still counts as requested"
+        );
+        assert_eq!(metrics.approvals_granted, 2);
+        assert_eq!(metrics.approvals_denied, 1);
+        assert_eq!(
+            metrics.median_seconds_approval_decision, 20,
+            "the still-pending approval (no decided_at) must not enter the latency calculation"
+        );
+    }
+
+    #[test]
+    fn median_time_to_outcome_uses_receipt_start_not_query_time() {
+        let rows = vec![
+            metrics_row(
+                "completed",
+                Some("verified_success"),
+                Some("postcondition"),
+                4,
+            ),
+            metrics_row(
+                "completed",
+                Some("verified_success"),
+                Some("postcondition"),
+                8,
+            ),
+        ];
+        let metrics = build_verification_metrics("org-1", None, &rows, &[]);
+        assert_eq!(metrics.median_seconds_receipt_to_outcome, 6);
+    }
+
+    #[test]
+    fn unavailable_names_exactly_the_dimensions_this_plane_cannot_prove() {
+        let metrics = build_verification_metrics("org-1", None, &[], &[]);
+        let sections: Vec<&str> = metrics
+            .unavailable
+            .iter()
+            .map(|s| s.section.as_str())
+            .collect();
+        assert_eq!(
+            sections,
+            vec![
+                "cost_per_verified_outcome",
+                "unnecessary_approval",
+                "rollback_rate"
+            ]
+        );
+        assert!(metrics.unavailable.iter().all(|s| !s.reason.is_empty()));
+    }
+
+    #[test]
+    fn empty_input_is_all_zero_not_an_error() {
+        let metrics = build_verification_metrics("org-1", None, &[], &[]);
+        assert_eq!(metrics.total_completed, 0);
+        assert_eq!(metrics.approvals_requested, 0);
+        assert_eq!(metrics.median_seconds_receipt_to_outcome, 0);
+        assert_eq!(metrics.org_id, "org-1");
     }
 }

@@ -928,6 +928,93 @@ pub async fn list_continuation_evidence_for_run(
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// Verification metrics (verevon-vision.md §2.1 / §7, roadmap P1 item 5)
+// ---------------------------------------------------------------------------
+
+/// One terminal continuation's outcome and verification facts, flattened for
+/// aggregation. Unlike [`ContinuationEvidenceRow`] this is an INNER join: a
+/// continuation still in flight (no outcome row yet) has no terminal claim to
+/// count, structural or otherwise, so it is correctly absent here rather than
+/// showing up as a row of nulls.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ContinuationMetricsRow {
+    /// `completed` | `failed` | `cancelled` — the dispatcher's own workflow
+    /// state, before any independent check.
+    pub outcome: String,
+    /// NULL only for a row that predates this instrumentation; see the
+    /// `VerificationMetrics.unverified_count` proto doc for why that is not
+    /// the same thing as "no verifier applies."
+    pub verification_status: Option<String>,
+    pub verification_method: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub finalized_at: DateTime<Utc>,
+}
+
+/// One approval's request/decision facts, for human-effort metrics.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApprovalMetricsRow {
+    /// `requested` | `granted` | `denied` | `timed_out`.
+    pub status: String,
+    pub requested_at: DateTime<Utc>,
+    pub decided_at: Option<DateTime<Utc>>,
+}
+
+/// List every terminal continuation's outcome+verification facts for one
+/// organization, optionally windowed to outcomes finalized at or after
+/// `since`.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn list_continuation_metrics_rows_for_org(
+    pool: &Pool,
+    org_id: &str,
+    since: Option<DateTime<Utc>>,
+) -> Result<Vec<ContinuationMetricsRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    let rows = sqlx::query_as::<_, ContinuationMetricsRow>(
+        "SELECT o.outcome, o.verification_status, o.verification_method, \
+                r.started_at, o.finalized_at \
+         FROM approval_continuation_receipts r \
+         JOIN approval_continuation_outcomes o ON o.receipt_id = r.receipt_id \
+         WHERE r.org_id = $1 AND ($2::timestamptz IS NULL OR o.finalized_at >= $2)",
+    )
+    .bind(org_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// List every approval's request/decision facts for one organization,
+/// optionally windowed to approvals requested at or after `since`.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn list_approval_metrics_rows_for_org(
+    pool: &Pool,
+    org_id: &str,
+    since: Option<DateTime<Utc>>,
+) -> Result<Vec<ApprovalMetricsRow>> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    let rows = sqlx::query_as::<_, ApprovalMetricsRow>(
+        "SELECT status, requested_at, decided_at \
+         FROM approvals \
+         WHERE org_id = $1 AND ($2::timestamptz IS NULL OR requested_at >= $2)",
+    )
+    .bind(org_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
