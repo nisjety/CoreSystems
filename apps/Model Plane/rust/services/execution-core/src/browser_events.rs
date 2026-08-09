@@ -509,6 +509,13 @@ mod tests {
         {
             Err(Status::unimplemented("not needed in this test"))
         }
+        async fn get_verification_metrics(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::GetVerificationMetricsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::GetVerificationMetricsResponse>, Status>
+        {
+            Err(Status::unimplemented("not needed in this test"))
+        }
         async fn list_plans(
             &self,
             _: TonicRequest<ListPlansRequest>,

@@ -543,6 +543,16 @@ impl OrchestrationCoreService for MockOrchestration {
         ))
     }
 
+    async fn get_verification_metrics(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::GetVerificationMetricsRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::GetVerificationMetricsResponse>, Status>
+    {
+        Err(Status::unimplemented(
+            "get_verification_metrics not needed in this test",
+        ))
+    }
+
     async fn get_subagent_lineage(
         &self,
         request: TonicRequest<GetSubagentLineageRequest>,
@@ -1075,6 +1085,13 @@ impl OrchestrationCoreService for OrgScopedMock {
         &self,
         _: TonicRequest<mp_contracts::model_plane::v1::GetRunProofBundleRequest>,
     ) -> Result<Response<mp_contracts::model_plane::v1::GetRunProofBundleResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn get_verification_metrics(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::GetVerificationMetricsRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::GetVerificationMetricsResponse>, Status>
+    {
         Err(Status::unimplemented("not needed in this test"))
     }
     async fn get_subagent_lineage(

@@ -2433,6 +2433,13 @@ mod tests {
             Err(Status::unimplemented("not needed in this test"))
         }
 
+        async fn get_verification_metrics(
+            &self,
+            _: Request<pb::GetVerificationMetricsRequest>,
+        ) -> Result<Response<pb::GetVerificationMetricsResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+
         async fn record_orchestration_event(
             &self,
             request: Request<pb::RecordOrchestrationEventRequest>,

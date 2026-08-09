@@ -92,6 +92,21 @@ func (s *stubClient) ClaimApprovalDeliveries(ctx context.Context, in *mpv1.Claim
 
 // The approval-continuation trio. These handlers do not exercise them, but a
 // stub must satisfy the whole client interface or the package fails to build.
+// GetRunProofBundle and GetVerificationMetrics predate this stub's own
+// completeness: the Go bindings for both were only just regenerated from a
+// .proto contract that had already declared them (GetRunProofBundle since
+// P1.2's proof bundle; GetVerificationMetrics new here for P1.5) - neither
+// method reaches this handler path, but a stub must satisfy the whole
+// client interface or the package fails to build.
+func (s *stubClient) GetRunProofBundle(ctx context.Context, in *mpv1.GetRunProofBundleRequest, opts ...grpc.CallOption) (*mpv1.GetRunProofBundleResponse, error) {
+	s.lastReq = in
+	return nil, s.err
+}
+func (s *stubClient) GetVerificationMetrics(ctx context.Context, in *mpv1.GetVerificationMetricsRequest, opts ...grpc.CallOption) (*mpv1.GetVerificationMetricsResponse, error) {
+	s.lastReq = in
+	return nil, s.err
+}
+
 func (s *stubClient) GetApprovalContinuation(ctx context.Context, in *mpv1.GetApprovalContinuationRequest, opts ...grpc.CallOption) (*mpv1.GetApprovalContinuationResponse, error) {
 	s.lastReq = in
 	return nil, s.err
