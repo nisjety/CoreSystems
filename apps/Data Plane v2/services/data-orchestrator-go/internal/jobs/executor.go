@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
+
+	"github.com/triodelab/dataplane/shared/go/orgscope"
 
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/authctx"
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/model"
@@ -67,6 +70,12 @@ type PostgresJobAuditor struct {
 	pool *pgxpool.Pool
 }
 
+// RecordCreated writes the job-creation audit row.
+//
+// Phase 1 RLS: a single-org write on a request path — job.OrgID originates in
+// the HTTP handler's verified caller claims. Its caller (CreateJob) invokes
+// this AFTER store.Create has committed and closed its own scope, so the two
+// scopes are sequential rather than nested.
 func (a *PostgresJobAuditor) RecordCreated(ctx context.Context, job model.Job) error {
 	details, err := json.Marshal(map[string]any{
 		"document_count": len(job.DocumentIDs),
@@ -75,12 +84,14 @@ func (a *PostgresJobAuditor) RecordCreated(ctx context.Context, job model.Job) e
 	if err != nil {
 		return err
 	}
-	_, err = a.pool.Exec(ctx, `
-		INSERT INTO data_plane_audit_log
-			(user_id, org_id, action, resource_type, resource_id, details)
-		VALUES ('system', $1, 'job_created', 'job', $2, $3::jsonb)
-	`, job.OrgID, job.JobID, details)
-	return err
+	return orgscope.WithOrgScope(ctx, a.pool, job.OrgID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO data_plane_audit_log
+				(user_id, org_id, action, resource_type, resource_id, details)
+			VALUES ('system', $1, 'job_created', 'job', $2, $3::jsonb)
+		`, job.OrgID, job.JobID, details)
+		return err
+	})
 }
 
 func NewExecutorWithDependencies(store JobStore, publisher EventPublisher) *Executor {

@@ -170,6 +170,9 @@ func staleDetectorPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, up); err != nil {
 		t.Fatalf("reapply idempotent retry-bookkeeping migration: %v", err)
 	}
+	// Detect now runs scoped; see grantScopedRuntimeRoleIn in
+	// store_integration_test.go for why this fixture needs the role.
+	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 
 	t.Cleanup(func() {
 		down := readDurabilityMigration(t, "20260807120000_embedding_retry_bookkeeping.down.sql")

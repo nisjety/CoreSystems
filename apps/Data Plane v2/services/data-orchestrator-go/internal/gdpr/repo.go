@@ -40,6 +40,26 @@ func NewPurgeRepo(pool *pgxpool.Pool) *PurgeRepo {
 // apps/Data Plane v2/infra/postgres/migrations — see org_purge.go's package
 // doc for the full accounting, including tables deliberately NOT purged
 // here).
+//
+// Phase 1 RLS: deliberately NOT wrapped in orgscope.WithOrgScope, unlike the
+// request-scoped paths in internal/jobs. This matches wiki-store-go's identical
+// decision in internal/repo/org_purge.go, and the reasoning holds even though
+// this purge targets a single org:
+//
+//   - Under RLS a DELETE can only remove rows the policy lets the role see.
+//     Any row whose org_id drifted — legacy, NULL, mis-backfilled — would
+//     survive the purge silently while HardPurgeByOrg still returned nil. An
+//     erasure that under-deletes and reports success is a worse failure than
+//     one that runs unfiltered, because nothing downstream would notice and the
+//     GDPR obligation would be quietly unmet.
+//   - The isolation a policy would add is already present statically: both
+//     statements below are literal `DELETE ... WHERE org_id = $1` with no code
+//     path that can filter on anything else (see the Safety note above). There
+//     is no dynamic filter here for a policy to backstop.
+//
+// Note also that data_orchestrator_jobs is the cross-org queue: this is the one
+// place the service is *supposed* to delete rows the worker would otherwise
+// claim for a tenant, so narrowing visibility here works against the purpose.
 func (r *PurgeRepo) HardPurgeByOrg(ctx context.Context, orgID string) error {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {

@@ -983,6 +983,12 @@ services:
     build:
       context: services/documents-api-go
       dockerfile: Dockerfile
+      # The go.mod `replace` points at ../../shared/go, which is outside this
+      # service's context. Pass it as a named context rather than widening to
+      # the repo root: .dockerignore deliberately excludes these Go trees so
+      # the root-context Rust builds stay lean.
+      additional_contexts:
+        shared-go: "shared/go"
       args: *build-metadata
     # This optional local secret file is provisioned from the Application Plane's
     # dedicated publish-only identity. It contains only the three bridge values,
@@ -1104,6 +1110,12 @@ services:
     build:
       context: services/data-orchestrator-go
       dockerfile: Dockerfile
+      # The go.mod `replace` points at ../../shared/go, which is outside this
+      # service's context. Pass it as a named context rather than widening to
+      # the repo root: .dockerignore deliberately excludes these Go trees so
+      # the root-context Rust builds stay lean.
+      additional_contexts:
+        shared-go: "shared/go"
       args: *build-metadata
     restart: unless-stopped
     init: true
@@ -1155,6 +1167,12 @@ services:
     build:
       context: services/data-quality-go
       dockerfile: Dockerfile
+      # The go.mod `replace` points at ../../shared/go, which is outside this
+      # service's context. Pass it as a named context rather than widening to
+      # the repo root: .dockerignore deliberately excludes these Go trees so
+      # the root-context Rust builds stay lean.
+      additional_contexts:
+        shared-go: "shared/go"
       args: *build-metadata
     restart: unless-stopped
     init: true

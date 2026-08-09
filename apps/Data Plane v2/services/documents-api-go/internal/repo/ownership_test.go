@@ -36,6 +36,11 @@ func setupOwnershipDB(t *testing.T) (*repo.DocumentRepo, string, func()) {
 		pool.Close()
 		t.Fatalf("ensure schema: %v", err)
 	}
+	// Every DocumentRepo call below traverses orgscope.WithOrgScope, so the
+	// scoped runtime role must exist and hold grants on this database's tables.
+	// See grantScopedRuntimeRole (integration_test.go) for why a test fixture
+	// needs a database role at all.
+	grantScopedRuntimeRole(ctx, t, pool)
 	org := fmt.Sprintf("owntest-%d-%d", os.Getpid(), time.Now().UnixNano())
 	cleanup := func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM documents WHERE org_id=$1`, org)

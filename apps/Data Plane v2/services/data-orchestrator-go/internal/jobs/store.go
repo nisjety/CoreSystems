@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/triodelab/dataplane/shared/go/orgscope"
+
 	"github.com/triodelab/dataplane/services/data-orchestrator-go/internal/model"
 )
 
@@ -74,48 +76,61 @@ func scanJob(row rowScanner) (*model.Job, error) {
 	return &job, nil
 }
 
+// createResult carries Create's two-value success out of the scoped callback.
+type createResult struct {
+	job        *model.Job
+	wasCreated bool
+}
+
+// Create records job intent, or returns the existing job for a replayed
+// idempotency key.
+//
+// Phase 1 RLS: unlike ClaimNext and ExpireExhausted below, this is a
+// request-scoped path — job.OrgID is set by the HTTP handler from verified
+// caller claims (authctx rejects any token without a non-empty org_id), never
+// from the request body. The scope replaces this function's own Begin rather
+// than nesting a second transaction inside it, so the insert and the
+// idempotency read-back stay in one transaction exactly as before.
 func (s *PostgresJobStore) Create(ctx context.Context, job model.Job) (*model.Job, bool, error) {
 	documentIDs, err := json.Marshal(job.DocumentIDs)
 	if err != nil {
 		return nil, false, fmt.Errorf("encode job document ids: %w", err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	out, err := orgscope.InOrgScope(ctx, s.pool, job.OrgID,
+		func(ctx context.Context, tx pgx.Tx) (createResult, error) {
+			created, err := scanJob(tx.QueryRow(ctx, `
+				INSERT INTO data_orchestrator_jobs (
+					job_id, org_id, job_type, status, document_ids, progress, total,
+					idempotency_key, created_at, updated_at
+				)
+				VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $9)
+				ON CONFLICT (org_id, idempotency_key) DO NOTHING
+				RETURNING `+jobColumns,
+				job.JobID, job.OrgID, job.JobType, job.Status, string(documentIDs),
+				job.Progress, job.Total, job.IdempotencyKey, job.CreatedAt,
+			))
+			wasCreated := true
+			if errors.Is(err, pgx.ErrNoRows) {
+				wasCreated = false
+				created, err = scanJob(tx.QueryRow(ctx, `
+					SELECT `+jobColumns+`
+					FROM data_orchestrator_jobs
+					WHERE org_id = $1 AND idempotency_key = $2
+				`, job.OrgID, job.IdempotencyKey))
+			}
+			if err != nil {
+				return createResult{}, fmt.Errorf("create or load job: %w", err)
+			}
+			if !wasCreated && !sameJobIntent(created, &job) {
+				return createResult{}, ErrIdempotencyConflict
+			}
+			return createResult{job: created, wasCreated: wasCreated}, nil
+		})
 	if err != nil {
-		return nil, false, fmt.Errorf("begin create job: %w", err)
+		return nil, false, err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck -- commit below owns the successful path.
-
-	created, err := scanJob(tx.QueryRow(ctx, `
-		INSERT INTO data_orchestrator_jobs (
-			job_id, org_id, job_type, status, document_ids, progress, total,
-			idempotency_key, created_at, updated_at
-		)
-		VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $9)
-		ON CONFLICT (org_id, idempotency_key) DO NOTHING
-		RETURNING `+jobColumns,
-		job.JobID, job.OrgID, job.JobType, job.Status, string(documentIDs),
-		job.Progress, job.Total, job.IdempotencyKey, job.CreatedAt,
-	))
-	wasCreated := true
-	if errors.Is(err, pgx.ErrNoRows) {
-		wasCreated = false
-		created, err = scanJob(tx.QueryRow(ctx, `
-			SELECT `+jobColumns+`
-			FROM data_orchestrator_jobs
-			WHERE org_id = $1 AND idempotency_key = $2
-		`, job.OrgID, job.IdempotencyKey))
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("create or load job: %w", err)
-	}
-	if !wasCreated && !sameJobIntent(created, &job) {
-		return nil, false, ErrIdempotencyConflict
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("commit create job: %w", err)
-	}
-	return created, wasCreated, nil
+	return out.job, out.wasCreated, nil
 }
 
 func sameJobIntent(existing, requested *model.Job) bool {
@@ -125,12 +140,20 @@ func sameJobIntent(existing, requested *model.Job) bool {
 		slices.Equal(existing.DocumentIDs, requested.DocumentIDs)
 }
 
+// Get reads a single job belonging to orgID.
+//
+// Phase 1 RLS: single-org read. jobID is caller-supplied (a URL path param), so
+// this is a classic IDOR shape — `org_id = $1` is the existing defence and the
+// policy is its backstop.
 func (s *PostgresJobStore) Get(ctx context.Context, orgID, jobID string) (*model.Job, error) {
-	job, err := scanJob(s.pool.QueryRow(ctx, `
-		SELECT `+jobColumns+`
-		FROM data_orchestrator_jobs
-		WHERE org_id = $1 AND job_id = $2::uuid
-	`, orgID, jobID))
+	job, err := orgscope.InOrgScope(ctx, s.pool, orgID,
+		func(ctx context.Context, tx pgx.Tx) (*model.Job, error) {
+			return scanJob(tx.QueryRow(ctx, `
+				SELECT `+jobColumns+`
+				FROM data_orchestrator_jobs
+				WHERE org_id = $1 AND job_id = $2::uuid
+			`, orgID, jobID))
+		})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrJobNotFound
 	}
@@ -200,6 +223,19 @@ func (s *PostgresJobStore) Fail(ctx context.Context, orgID, jobID, message strin
 //
 // `started_at` uses COALESCE so a reclaimed job keeps its original start time —
 // it reports when the work first began, not when the last retry did.
+//
+// Phase 1 RLS: deliberately NOT wrapped in a scope, and this is the clearest
+// such case in the service. `data_orchestrator_jobs` is a CROSS-ORG queue: this
+// statement's whole job is to find the oldest runnable row belonging to ANY
+// tenant. A scoped claim would see one organization's rows and silently stop
+// running every other tenant's jobs — and it would not fail loudly, it would
+// return (nil, nil) and look exactly like an idle queue. There is also no org
+// to scope to: the worker has no request and no tenant, which is why no org_id
+// appears in the WHERE clause.
+//
+// Isolation is preserved downstream instead: the claimed row carries its own
+// org_id, and every statement the executor then runs against it
+// (Start/SetProgress/Complete/Fail) goes through the scoped transition path.
 func (s *PostgresJobStore) ClaimNext(
 	ctx context.Context,
 	owner string,
@@ -247,6 +283,13 @@ func (s *PostgresJobStore) ClaimNext(
 // `attempts >= maxAttempts` forever: excluded from ClaimNext, but still
 // `running` and never reported as failed. Writing `error_message` together with
 // `completed_at` is required by `data_orchestrator_jobs_terminal_shape_check`.
+//
+// Phase 1 RLS: deliberately NOT wrapped in a scope, for the same reason as
+// ClaimNext. This is the cross-org sweep half of the queue — it retires
+// exhausted jobs for every tenant on each worker tick and takes no org_id.
+// Scoping it would leave every other organization's exhausted jobs stuck in
+// `running` forever while the returned count still read zero, which is
+// indistinguishable from a healthy queue.
 func (s *PostgresJobStore) ExpireExhausted(ctx context.Context, maxAttempts int) (int64, error) {
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE data_orchestrator_jobs
@@ -268,20 +311,41 @@ func (s *PostgresJobStore) ExpireExhausted(ctx context.Context, maxAttempts int)
 	return tag.RowsAffected(), nil
 }
 
+// transition applies one conditional status UPDATE and classifies a no-op.
+//
+// Phase 1 RLS: every caller (Start/SetProgress/Complete/Fail) names a single
+// organization — from verified claims on the HTTP path, and from the claimed
+// row's own org_id when the durable worker executes a job — so the whole
+// transition runs in one scope. The existence check that used to call s.Get now
+// runs inline on the same tx: calling Get here would open a SECOND scope while
+// this one still holds a pool connection, which the helper rejects as a nested
+// scope. Same two queries, same classification, one transaction — so a
+// concurrent write can no longer land between the UPDATE and the check and turn
+// an invalid-transition into a spurious not-found.
 func (s *PostgresJobStore) transition(ctx context.Context, orgID, jobID, query string, args ...any) (*model.Job, error) {
 	params := []any{orgID, jobID}
 	params = append(params, args...)
-	job, err := scanJob(s.pool.QueryRow(ctx, query, params...))
-	if err == nil {
-		return job, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("persist job transition: %w", err)
-	}
-	if _, getErr := s.Get(ctx, orgID, jobID); errors.Is(getErr, ErrJobNotFound) {
-		return nil, ErrJobNotFound
-	} else if getErr != nil {
-		return nil, getErr
-	}
-	return nil, ErrInvalidJobTransition
+	return orgscope.InOrgScope(ctx, s.pool, orgID,
+		func(ctx context.Context, tx pgx.Tx) (*model.Job, error) {
+			job, err := scanJob(tx.QueryRow(ctx, query, params...))
+			if err == nil {
+				return job, nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("persist job transition: %w", err)
+			}
+			// The conditional UPDATE matched nothing. A zero-row RETURNING is
+			// not an error, so the transaction is still healthy here.
+			if _, getErr := scanJob(tx.QueryRow(ctx, `
+				SELECT `+jobColumns+`
+				FROM data_orchestrator_jobs
+				WHERE org_id = $1 AND job_id = $2::uuid
+			`, orgID, jobID)); getErr != nil {
+				if errors.Is(getErr, pgx.ErrNoRows) {
+					return nil, ErrJobNotFound
+				}
+				return nil, fmt.Errorf("get job: %w", getErr)
+			}
+			return nil, ErrInvalidJobTransition
+		})
 }

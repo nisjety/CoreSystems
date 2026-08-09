@@ -41,6 +41,26 @@ func NewPostgresOrgPurger(pool *pgxpool.Pool) *PostgresOrgPurger {
 // redelivery after the first successful purge simply matches zero rows on
 // every table and returns nil — nothing here needs a dedup key to stay safe
 // on a second run.
+//
+// Phase 1 RLS: deliberately NOT wrapped in orgscope.WithOrgScope, unlike every
+// request-scoped path in this service. This matches wiki-store-go's identical
+// decision in internal/repo/org_purge.go, and the reasoning holds even though
+// this purge targets a single org:
+//
+//   - Under RLS a DELETE can only remove rows the policy lets the role see.
+//     Any row whose org_id drifted — legacy, NULL, mis-backfilled — would
+//     survive the purge silently while HardPurgeByOrg still returned nil. An
+//     erasure that under-deletes and reports success is a worse failure than
+//     one that runs unfiltered, because nothing downstream would notice and
+//     the GDPR obligation would be quietly unmet.
+//   - The isolation a policy would add is already present statically: both
+//     statements below are literal `DELETE ... WHERE org_id = $1` with no code
+//     path that can filter on anything else (see the Safety note above). There
+//     is no dynamic filter here for a policy to backstop.
+//
+// The org_id arrives straight from the erasure event payload (org_purge.go's
+// HandleOrgErasure), so the single bound parameter is the whole tenant
+// boundary — audited, not assumed.
 func (p *PostgresOrgPurger) HardPurgeByOrg(ctx context.Context, orgID string) error {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {

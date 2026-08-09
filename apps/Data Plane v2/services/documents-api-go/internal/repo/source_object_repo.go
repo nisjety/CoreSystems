@@ -8,16 +8,24 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/triodelab/dataplane/shared/go/orgscope"
 
 	"github.com/triodelab/dataplane/services/documents-api-go/internal/model"
 )
 
+// Phase 1 RLS — every method on SourceObjectRepo serves exactly one
+// organization (input.OrgID is stamped from the verified request scope in
+// handler.SourceObjectHandler), so each runs inside orgscope. See the
+// DocumentRepo header in document_repo.go for the full rationale and the list
+// of paths that deliberately stay unscoped.
+//
+// The `sourceObjectQuerier` interface that used to sit here — satisfied by BOTH
+// *pgxpool.Pool and pgx.Tx — was removed on purpose: it let the same helper be
+// called scoped or unscoped, which is exactly the ambiguity RLS adoption is
+// meant to eliminate. upsertSourceObjectTx/softDeleteSourceObjectTx now take a
+// pgx.Tx, so an unscoped call is a compile error.
 type SourceObjectRepo struct {
 	pool *pgxpool.Pool
-}
-
-type sourceObjectQuerier interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
 func NewSourceObjectRepo(pool *pgxpool.Pool) *SourceObjectRepo {
@@ -45,20 +53,25 @@ func sourceObjectContentChanged(inserted bool, oldHash, newHash string) bool {
 }
 
 func (r *SourceObjectRepo) Upsert(ctx context.Context, input model.UpsertSourceObjectInput) (*UpsertSourceObjectResult, error) {
-	result, err := upsertSourceObject(ctx, r.pool, input)
+	// Phase 1 RLS: single-org upsert. The best-effort cache-version bump stays
+	// outside the scope so its failure keeps only logging (see bumpOrgVersion).
+	result, err := orgscope.InOrgScope(ctx, r.pool, input.OrgID,
+		func(ctx context.Context, tx pgx.Tx) (*UpsertSourceObjectResult, error) {
+			return upsertSourceObjectTx(ctx, tx, input)
+		})
 	if err == nil {
 		r.bumpOrgVersion(ctx, input.OrgID)
 	}
 	return result, err
 }
 
-func upsertSourceObject(ctx context.Context, q sourceObjectQuerier, input model.UpsertSourceObjectInput) (*UpsertSourceObjectResult, error) {
+func upsertSourceObjectTx(ctx context.Context, tx pgx.Tx, input model.UpsertSourceObjectInput) (*UpsertSourceObjectResult, error) {
 	meta := input.Metadata
 	if len(meta) == 0 {
 		meta = json.RawMessage(`{}`)
 	}
 
-	row := q.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		WITH prev AS (
 			SELECT content_hash AS old_content_hash
 			FROM source_objects
@@ -144,17 +157,21 @@ func upsertSourceObject(ctx context.Context, q sourceObjectQuerier, input model.
 }
 
 func (r *SourceObjectRepo) SoftDelete(ctx context.Context, input model.DeleteSourceObjectInput) (*model.SourceObject, error) {
-	obj, err := softDeleteSourceObject(ctx, r.pool, input)
+	// Phase 1 RLS: single-org tombstone; bump stays outside, as in Upsert.
+	obj, err := orgscope.InOrgScope(ctx, r.pool, input.OrgID,
+		func(ctx context.Context, tx pgx.Tx) (*model.SourceObject, error) {
+			return softDeleteSourceObjectTx(ctx, tx, input)
+		})
 	if err == nil {
 		r.bumpOrgVersion(ctx, input.OrgID)
 	}
 	return obj, err
 }
 
-func softDeleteSourceObject(ctx context.Context, q sourceObjectQuerier, input model.DeleteSourceObjectInput) (*model.SourceObject, error) {
+func softDeleteSourceObjectTx(ctx context.Context, tx pgx.Tx, input model.DeleteSourceObjectInput) (*model.SourceObject, error) {
 	var row pgx.Row
 	if input.SourceObjectID != "" {
-		row = q.QueryRow(ctx, `
+		row = tx.QueryRow(ctx, `
 			UPDATE source_objects
 			   SET deleted_at = COALESCE(deleted_at, NOW())
 			 WHERE org_id = $1 AND source_object_id = $2
@@ -166,7 +183,7 @@ func softDeleteSourceObject(ctx context.Context, q sourceObjectQuerier, input mo
 			           modified_at, discovered_at, deleted_at, updated_at
 		`, input.OrgID, input.SourceObjectID)
 	} else {
-		row = q.QueryRow(ctx, `
+		row = tx.QueryRow(ctx, `
 			UPDATE source_objects
 			   SET deleted_at = COALESCE(deleted_at, NOW())
 			 WHERE org_id = $1 AND connector = $2 AND external_id = $3
@@ -204,29 +221,27 @@ func (r *SourceObjectRepo) UpsertWithOutbox(
 	if strings.TrimSpace(input.OrgID) == "" || strings.TrimSpace(eventType) == "" {
 		return nil, fmt.Errorf("source-object upsert outbox requires tenant and event type")
 	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin source-object upsert: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	result, err := upsertSourceObject(ctx, tx, input)
-	if err != nil {
-		return nil, err
-	}
-	payload, err := sourceObjectChangedPayload(result, userID)
-	if err != nil {
-		return nil, err
-	}
-	if err := enqueueSourceObjectEventTx(ctx, tx, input.OrgID, eventType, payload); err != nil {
-		return nil, err
-	}
-	if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit source-object upsert and outbox: %w", err)
-	}
-	return result, nil
+	// Phase 1 RLS: replaces this function's own Begin — the projection, the
+	// outbox row and the cache-version bump were already one transaction for
+	// one org, so the scope IS that transaction rather than a second one.
+	return orgscope.InOrgScope(ctx, r.pool, input.OrgID,
+		func(ctx context.Context, tx pgx.Tx) (*UpsertSourceObjectResult, error) {
+			result, err := upsertSourceObjectTx(ctx, tx, input)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := sourceObjectChangedPayload(result, userID)
+			if err != nil {
+				return nil, err
+			}
+			if err := enqueueSourceObjectEventTx(ctx, tx, input.OrgID, eventType, payload); err != nil {
+				return nil, err
+			}
+			if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+				return nil, err
+			}
+			return result, nil
+		})
 }
 
 // SoftDeleteWithOutbox atomically commits the scoped tombstone, cache-version
@@ -239,29 +254,26 @@ func (r *SourceObjectRepo) SoftDeleteWithOutbox(
 	if strings.TrimSpace(input.OrgID) == "" || strings.TrimSpace(eventType) == "" {
 		return nil, fmt.Errorf("source-object delete outbox requires tenant and event type")
 	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin source-object delete: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	obj, err := softDeleteSourceObject(ctx, tx, input)
-	if err != nil {
-		return nil, err
-	}
-	payload, err := sourceObjectDeletedPayload(obj, userID)
-	if err != nil {
-		return nil, err
-	}
-	if err := enqueueSourceObjectEventTx(ctx, tx, input.OrgID, eventType, payload); err != nil {
-		return nil, err
-	}
-	if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit source-object delete and outbox: %w", err)
-	}
-	return obj, nil
+	// Phase 1 RLS: replaces this function's own Begin, exactly as in
+	// UpsertWithOutbox above.
+	return orgscope.InOrgScope(ctx, r.pool, input.OrgID,
+		func(ctx context.Context, tx pgx.Tx) (*model.SourceObject, error) {
+			obj, err := softDeleteSourceObjectTx(ctx, tx, input)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := sourceObjectDeletedPayload(obj, userID)
+			if err != nil {
+				return nil, err
+			}
+			if err := enqueueSourceObjectEventTx(ctx, tx, input.OrgID, eventType, payload); err != nil {
+				return nil, err
+			}
+			if err := bumpOrgVersionTx(ctx, tx, input.OrgID); err != nil {
+				return nil, err
+			}
+			return obj, nil
+		})
 }
 
 func sourceObjectChangedPayload(result *UpsertSourceObjectResult, userID string) ([]byte, error) {
@@ -325,7 +337,20 @@ func (r *SourceObjectRepo) Duplicates(ctx context.Context, input model.ListSourc
 		input.MaxGroups = 100
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	// Phase 1 RLS: single-org duplicate report. The whole grouping loop runs
+	// inside the callback — the rows do not outlive the transaction.
+	return orgscope.InOrgScope(ctx, r.pool, input.OrgID,
+		func(ctx context.Context, tx pgx.Tx) ([]model.SourceObjectDuplicateGroup, error) {
+			return listSourceObjectDuplicatesTx(ctx, tx, input)
+		})
+}
+
+func listSourceObjectDuplicatesTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	input model.ListSourceObjectDuplicatesInput,
+) ([]model.SourceObjectDuplicateGroup, error) {
+	rows, err := tx.Query(ctx, `
 		WITH live AS (
 			SELECT
 				source_object_id, connector, source, external_id,
@@ -428,14 +453,24 @@ func (r *SourceObjectRepo) Duplicates(ctx context.Context, input model.ListSourc
 	return out, nil
 }
 
+// bumpOrgVersion is the best-effort per-org cache-busting counter.
+//
+// Phase 1 RLS: scoped, but in a transaction of its OWN — never inside a
+// caller's. A failed statement poisons the enclosing transaction, so folding
+// this into a caller's scope would promote a logged warning into a failed
+// request. Callers run it AFTER their scope returns; calling it from inside one
+// would be a nested scope.
 func (r *SourceObjectRepo) bumpOrgVersion(ctx context.Context, orgID string) {
-	_, err := r.pool.Exec(ctx, `
-		INSERT INTO org_versions (org_id, version, bumped_at)
-			VALUES ($1, 2, NOW())
-		ON CONFLICT (org_id) DO UPDATE
-			SET version = org_versions.version + 1,
-			    bumped_at = NOW()
-	`, orgID)
+	err := orgscope.WithOrgScope(ctx, r.pool, orgID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO org_versions (org_id, version, bumped_at)
+				VALUES ($1, 2, NOW())
+			ON CONFLICT (org_id) DO UPDATE
+				SET version = org_versions.version + 1,
+				    bumped_at = NOW()
+		`, orgID)
+		return err
+	})
 	if err != nil {
 		fmt.Printf("warn: org_version bump failed for %s: %v\n", orgID, err)
 	}

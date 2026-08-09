@@ -125,6 +125,24 @@ func (c *Consumer) processLegacy(ctx context.Context, raw []byte) error {
 	return nil
 }
 
+// persist writes one cost event.
+//
+// Phase 1 RLS: deliberately NOT wrapped in a scope. Two independent reasons:
+//
+//   - This is a background NATS consumer draining a MIXED-ORG subject — the
+//     "worker draining a queue for every org" exception the helper names. One
+//     legacy message can even fan out across several orgs (processLegacy loops
+//     over evt.OrgIDs), so there is no single tenant this drain belongs to.
+//   - More decisively, a scope here would be tautological. The GUC would be set
+//     from evt.OrgID and the row's org_id written from that same evt.OrgID, so
+//     the policy's WITH CHECK would compare a value against itself and add no
+//     isolation whatever. That is the difference from the request-scoped writes
+//     in internal/jobs, where the org comes from verified caller claims — an
+//     authority independent of the row being written, which is what makes the
+//     backstop meaningful.
+//
+// The tenant boundary here is upstream instead: cost/verifier.go authenticates
+// the event's signature before it is ever persisted.
 func (c *Consumer) persist(ctx context.Context, evt *Event) error {
 	if evt.OrgID == "" {
 		return errInvalidEnvelope

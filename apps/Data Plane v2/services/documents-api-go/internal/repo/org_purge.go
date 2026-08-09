@@ -34,6 +34,16 @@ import (
 // the shared Postgres instance and are not reachable from here. See
 // internal/gdpr/org_purge.go's package doc for the full list and the
 // follow-up this implies.
+//
+// Phase 1 RLS: this path deliberately stays on the UNSCOPED (superuser) pool
+// while the rest of the repository runs inside orgscope. Under row-level
+// security a DELETE can only remove rows the role is permitted to SEE, so a row
+// whose org_id had drifted — or gone NULL — would silently survive the erasure
+// while this function still returned nil and the caller still reported success.
+// An erasure that under-deletes and reports OK is strictly worse than one that
+// runs unfiltered. Tenant scoping here comes from the static
+// `WHERE org_id = $1` on every statement below, which no code path can widen.
+// Every service in this rollout made the same call for its erasure path.
 func (r *DocumentRepo) HardPurgeByOrg(ctx context.Context, orgID string) error {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {

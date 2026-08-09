@@ -7,8 +7,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
+
+	"github.com/triodelab/dataplane/shared/go/orgscope"
 )
 
 // defaultReconcileMaxAttempts mirrors index-engine-rs's
@@ -70,6 +73,50 @@ func NewStaleDetector(pool *pgxpool.Pool) *StaleDetector {
 	return &StaleDetector{pool: pool}
 }
 
+// collectTolerated runs a best-effort id lookup on a SAVEPOINT.
+//
+// The two lookups that use it deliberately swallow their errors — the report
+// still carries its counts without them. On the unscoped pool that was free;
+// inside one scoped transaction a failure would abort the tx and take every
+// later statement, including the COMMIT, with it, so the whole report would 500
+// instead of degrading. A SAVEPOINT (pgx models one as a nested Begin) keeps
+// the original tolerance, and returning whatever was collected before a
+// mid-iteration error matches the previous behaviour exactly.
+func collectTolerated(ctx context.Context, tx pgx.Tx, sql string, args ...any) []string {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return nil
+	}
+	rows, err := sp.Query(ctx, sql, args...)
+	if err != nil {
+		_ = sp.Rollback(ctx)
+		return nil
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	if rows.Err() != nil {
+		// Roll the savepoint back so the OUTER transaction stays usable.
+		_ = sp.Rollback(ctx)
+		return ids
+	}
+	_ = sp.Commit(ctx)
+	return ids
+}
+
+// Detect reports embedding staleness for exactly one organization.
+//
+// Phase 1 RLS: despite living next to the cross-org job queue, this is NOT a
+// sweep — its only caller is the GET /v1/orchestrator/stale-embeddings handler,
+// which takes orgID from verified caller claims (authctx), and every query
+// already filters `org_id = $1`. All five queries share one scoped transaction
+// so the counts, the id lists and the details cannot disagree with each other
+// under a concurrent write, and so a five-query report costs one pool checkout.
 func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold time.Duration) (*StaleEmbeddingReport, error) {
 	if stuckThreshold == 0 {
 		stuckThreshold = 30 * time.Minute
@@ -80,7 +127,35 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 		CheckedAt: time.Now(),
 	}
 
-	staleRows, err := d.pool.Query(ctx, `
+	if err := orgscope.WithOrgScope(ctx, d.pool, orgID, func(tx pgx.Tx) error {
+		return d.detectInScope(ctx, tx, orgID, stuckThreshold, report)
+	}); err != nil {
+		return nil, err
+	}
+
+	log.Info().
+		Str("org_id", orgID).
+		Int("stale", report.StaleCount).
+		Int("stuck_pending", report.StuckPendingCount).
+		Int("failed", report.FailedCount).
+		Int("retryable_failed", report.RetryableFailedCount).
+		Int("exhausted_failed", report.ExhaustedFailedCount).
+		Msg("stale embedding detection complete")
+
+	return report, nil
+}
+
+// detectInScope holds every query in Detect. It takes the tx rather than
+// reading d.pool so it cannot be called outside a scope — a compile error is a
+// stronger guarantee than a comment for a function this long.
+func (d *StaleDetector) detectInScope(
+	ctx context.Context,
+	tx pgx.Tx,
+	orgID string,
+	stuckThreshold time.Duration,
+	report *StaleEmbeddingReport,
+) error {
+	staleRows, err := tx.Query(ctx, `
 		SELECT DISTINCT ku.document_id, ku.knowledge_id, ku.embedding_status, ku.updated_at, ku.embedded_at
 		FROM knowledge_units ku
 		JOIN documents d ON d.document_id = ku.document_id
@@ -92,10 +167,13 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 		LIMIT 500
 	`, orgID)
 	if err != nil {
-		return nil, fmt.Errorf("detect stale embeddings: %w", err)
+		return fmt.Errorf("detect stale embeddings: %w", err)
 	}
 	defer staleRows.Close()
 
+	// Drained before the next query: the scope requires every pgx.Rows to be
+	// consumed inside the callback, and pgx forbids a second query on the same
+	// transaction while these rows are still open.
 	staleDocSet := make(map[string]bool)
 	for staleRows.Next() {
 		var detail StaleEmbedDetail
@@ -106,13 +184,14 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 		report.Details = append(report.Details, detail)
 		staleDocSet[detail.DocumentID] = true
 	}
+	staleRows.Close()
 	for docID := range staleDocSet {
 		report.StaleDocumentIDs = append(report.StaleDocumentIDs, docID)
 	}
 	report.StaleCount = len(report.StaleDocumentIDs)
 
 	cutoff := time.Now().Add(-stuckThreshold)
-	stuckRows, err := d.pool.Query(ctx, `
+	stuckRows, err := tx.Query(ctx, `
 		SELECT DISTINCT ku.document_id, ku.knowledge_id, ku.embedding_status, ku.updated_at
 		FROM knowledge_units ku
 		JOIN documents d ON d.document_id = ku.document_id
@@ -129,7 +208,7 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 		LIMIT 500
 	`, orgID, cutoff)
 	if err != nil {
-		return nil, fmt.Errorf("detect stuck pending: %w", err)
+		return fmt.Errorf("detect stuck pending: %w", err)
 	}
 	defer stuckRows.Close()
 
@@ -143,6 +222,7 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 		report.Details = append(report.Details, detail)
 		stuckDocSet[detail.DocumentID] = true
 	}
+	stuckRows.Close()
 	for docID := range stuckDocSet {
 		report.StuckDocumentIDs = append(report.StuckDocumentIDs, docID)
 	}
@@ -150,7 +230,7 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 
 	maxAttempts := reconcileMaxAttempts()
 	var failedCount, retryableFailed, exhaustedFailed int
-	err = d.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT
 			COUNT(DISTINCT document_id),
 			COUNT(DISTINCT document_id) FILTER (WHERE embedding_retry_count < $2),
@@ -159,7 +239,7 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 		WHERE org_id = $1 AND embedding_status = 'failed'
 	`, orgID, maxAttempts).Scan(&failedCount, &retryableFailed, &exhaustedFailed)
 	if err != nil {
-		return nil, fmt.Errorf("count failed embeddings: %w", err)
+		return fmt.Errorf("count failed embeddings: %w", err)
 	}
 	report.FailedCount = failedCount
 	// A document with a mix of retryable and exhausted units counts in both.
@@ -168,49 +248,22 @@ func (d *StaleDetector) Detect(ctx context.Context, orgID string, stuckThreshold
 	report.ExhaustedFailedCount = exhaustedFailed
 
 	if failedCount > 0 {
-		failedRows, err := d.pool.Query(ctx, `
+		report.FailedDocumentIDs = append(report.FailedDocumentIDs, collectTolerated(ctx, tx, `
 			SELECT DISTINCT document_id FROM knowledge_units
 			WHERE org_id = $1 AND embedding_status = 'failed'
 			LIMIT 200
-		`, orgID)
-		if err == nil {
-			defer failedRows.Close()
-			for failedRows.Next() {
-				var docID string
-				if failedRows.Scan(&docID) == nil {
-					report.FailedDocumentIDs = append(report.FailedDocumentIDs, docID)
-				}
-			}
-		}
+		`, orgID)...)
 	}
 
 	if exhaustedFailed > 0 {
-		exhaustedRows, err := d.pool.Query(ctx, `
+		report.ExhaustedFailedDocumentIDs = append(report.ExhaustedFailedDocumentIDs, collectTolerated(ctx, tx, `
 			SELECT DISTINCT document_id FROM knowledge_units
 			WHERE org_id = $1
 			  AND embedding_status = 'failed'
 			  AND embedding_retry_count >= $2
 			LIMIT 200
-		`, orgID, maxAttempts)
-		if err == nil {
-			defer exhaustedRows.Close()
-			for exhaustedRows.Next() {
-				var docID string
-				if exhaustedRows.Scan(&docID) == nil {
-					report.ExhaustedFailedDocumentIDs = append(report.ExhaustedFailedDocumentIDs, docID)
-				}
-			}
-		}
+		`, orgID, maxAttempts)...)
 	}
 
-	log.Info().
-		Str("org_id", orgID).
-		Int("stale", report.StaleCount).
-		Int("stuck_pending", report.StuckPendingCount).
-		Int("failed", report.FailedCount).
-		Int("retryable_failed", report.RetryableFailedCount).
-		Int("exhausted_failed", report.ExhaustedFailedCount).
-		Msg("stale embedding detection complete")
-
-	return report, nil
+	return nil
 }

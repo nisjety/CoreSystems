@@ -13,7 +13,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/triodelab/dataplane/shared/go/orgscope"
 )
 
 type Linter struct {
@@ -25,23 +28,34 @@ func NewLinter(pool *pgxpool.Pool) *Linter {
 }
 
 type Issue struct {
-	Kind        string `json:"kind"`         // "orphan_doc" | "stale_doc" | "orphan_wiki" | "stale_wiki" | "weak_citation" | "contradiction"
-	Severity    string `json:"severity"`     // "info" | "warning" | "error"
-	ID          string `json:"id"`           // document_id, page_id, or claim_id (kind decides which)
-	Title       string `json:"title,omitempty"`
-	Description string `json:"description"`
+	Kind        string    `json:"kind"`     // "orphan_doc" | "stale_doc" | "orphan_wiki" | "stale_wiki" | "weak_citation" | "contradiction"
+	Severity    string    `json:"severity"` // "info" | "warning" | "error"
+	ID          string    `json:"id"`       // document_id, page_id, or claim_id (kind decides which)
+	Title       string    `json:"title,omitempty"`
+	Description string    `json:"description"`
 	DetectedAt  time.Time `json:"detected_at"`
 }
 
 type Report struct {
-	OrgID    string  `json:"org_id"`
-	Issues   []Issue `json:"issues"`
-	Counts   map[string]int `json:"counts"`
-	RanAt    time.Time `json:"ran_at"`
+	OrgID  string         `json:"org_id"`
+	Issues []Issue        `json:"issues"`
+	Counts map[string]int `json:"counts"`
+	RanAt  time.Time      `json:"ran_at"`
 }
 
 // Run executes all linters and returns a consolidated report.
 // staleAfterDays defaults to 90 if zero.
+//
+// Phase 1 RLS: this is a per-org report, not a cross-org corpus sweep — orgID
+// arrives from verified caller claims (authctx) via the /v1/quality/lint
+// handler. All six checks share ONE scoped transaction so the report is a
+// single consistent snapshot, and so the six checks cost one pool checkout
+// rather than six.
+//
+// Note the hardening: the check functions below take a pgx.Tx rather than
+// reading l.pool. Six near-identical query bodies is exactly the shape where a
+// seventh gets added later against the pool by habit; taking the tx makes an
+// unscoped call a compile error instead of a review question.
 func (l *Linter) Run(ctx context.Context, orgID string, staleAfterDays int) (*Report, error) {
 	if staleAfterDays <= 0 {
 		staleAfterDays = 90
@@ -56,7 +70,7 @@ func (l *Linter) Run(ctx context.Context, orgID string, staleAfterDays int) (*Re
 
 	checks := []struct {
 		name string
-		fn   func(context.Context, string, int) ([]Issue, error)
+		fn   func(context.Context, pgx.Tx, string, int) ([]Issue, error)
 	}{
 		{"orphan_docs", l.findOrphanDocs},
 		{"stale_docs", l.findStaleDocs},
@@ -66,13 +80,21 @@ func (l *Linter) Run(ctx context.Context, orgID string, staleAfterDays int) (*Re
 		{"contradictions", l.findContradictions},
 	}
 
-	for _, c := range checks {
-		issues, err := c.fn(ctx, orgID, staleAfterDays)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", c.name, err)
+	err := orgscope.WithOrgScope(ctx, l.pool, orgID, func(tx pgx.Tx) error {
+		for _, c := range checks {
+			// Each check drains its own rows before returning, as the scope
+			// requires — nothing derived from tx escapes this callback.
+			issues, err := c.fn(ctx, tx, orgID, staleAfterDays)
+			if err != nil {
+				return fmt.Errorf("%s: %w", c.name, err)
+			}
+			report.Issues = append(report.Issues, issues...)
+			report.Counts[c.name] = len(issues)
 		}
-		report.Issues = append(report.Issues, issues...)
-		report.Counts[c.name] = len(issues)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return report, nil
 }
@@ -92,8 +114,8 @@ func (l *Linter) Run(ctx context.Context, orgID string, staleAfterDays int) (*Re
 // NOTE the ID here is a **claim_id**, not a page_id. That distinction matters —
 // see the comment on `wikiKinds` in
 // `data-orchestrator-go/internal/jobs/executor.go`.
-func (l *Linter) findContradictions(ctx context.Context, orgID string, _ int) ([]Issue, error) {
-	rows, err := l.pool.Query(ctx, `
+func (l *Linter) findContradictions(ctx context.Context, tx pgx.Tx, orgID string, _ int) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT gc.claim_id,
 		       LEFT(gc.claim_text, 160),
 		       jsonb_array_length(COALESCE(gc.contradicted_by_claim_ids, '[]'::jsonb))
@@ -141,8 +163,16 @@ func (l *Linter) findContradictions(ctx context.Context, orgID string, _ int) ([
 	return issues, rows.Err()
 }
 
-func (l *Linter) findOrphanDocs(ctx context.Context, orgID string, _ int) ([]Issue, error) {
-	rows, err := l.pool.Query(ctx, `
+// findOrphanDocs anti-joins retrieval_candidates, which carries no org_id of
+// its own — the child policy from 20260809180000_org_rls_child_tables.sql
+// derives one from its retrieval_runs parent. Under scope the join therefore
+// sees only this org's candidates. For a live corpus that changes nothing (a
+// candidate for this org's document belongs to this org's trace), but a
+// candidate whose parent run has a drifted or NULL org_id becomes invisible
+// and its document reports as an orphan. That is a false positive in an
+// advisory report, not a correctness problem.
+func (l *Linter) findOrphanDocs(ctx context.Context, tx pgx.Tx, orgID string, _ int) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT d.document_id, d.title
 		FROM documents d
 		LEFT JOIN retrieval_candidates rc ON rc.document_id = d.document_id
@@ -176,8 +206,8 @@ func (l *Linter) findOrphanDocs(ctx context.Context, orgID string, _ int) ([]Iss
 	return issues, rows.Err()
 }
 
-func (l *Linter) findStaleDocs(ctx context.Context, orgID string, days int) ([]Issue, error) {
-	rows, err := l.pool.Query(ctx, `
+func (l *Linter) findStaleDocs(ctx context.Context, tx pgx.Tx, orgID string, days int) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT document_id, title
 		FROM documents
 		WHERE org_id = $1
@@ -210,8 +240,8 @@ func (l *Linter) findStaleDocs(ctx context.Context, orgID string, days int) ([]I
 	return issues, rows.Err()
 }
 
-func (l *Linter) findOrphanWikiPages(ctx context.Context, orgID string, _ int) ([]Issue, error) {
-	rows, err := l.pool.Query(ctx, `
+func (l *Linter) findOrphanWikiPages(ctx context.Context, tx pgx.Tx, orgID string, _ int) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT p.page_id, p.title
 		FROM wiki_pages p
 		WHERE p.org_id = $1
@@ -248,8 +278,8 @@ func (l *Linter) findOrphanWikiPages(ctx context.Context, orgID string, _ int) (
 	return issues, rows.Err()
 }
 
-func (l *Linter) findStaleWikiPages(ctx context.Context, orgID string, days int) ([]Issue, error) {
-	rows, err := l.pool.Query(ctx, `
+func (l *Linter) findStaleWikiPages(ctx context.Context, tx pgx.Tx, orgID string, days int) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT p.page_id, p.title
 		FROM wiki_pages p
 		WHERE p.org_id = $1
@@ -282,8 +312,8 @@ func (l *Linter) findStaleWikiPages(ctx context.Context, orgID string, days int)
 	return issues, rows.Err()
 }
 
-func (l *Linter) findWeakCitations(ctx context.Context, orgID string, _ int) ([]Issue, error) {
-	rows, err := l.pool.Query(ctx, `
+func (l *Linter) findWeakCitations(ctx context.Context, tx pgx.Tx, orgID string, _ int) ([]Issue, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT v.version_id, p.title
 		FROM wiki_page_versions v
 		JOIN wiki_pages p ON p.page_id = v.page_id

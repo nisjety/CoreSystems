@@ -52,6 +52,14 @@ func (p *KnowledgeObservabilityOutbox) loop(ctx context.Context) {
 	}
 }
 
+// drainOnce mirrors already-published outbox rows into the Application Plane.
+//
+// Phase 1 RLS: deliberately UNSCOPED, for the same reason as
+// OutboxPublisher.drainOnce in outbox.go — this is a cross-org background loop
+// with no org_id filter, and a scoped transaction would silently narrow it to a
+// single tenant while still looking healthy. Note that each row it reads
+// carries its own org_id, which it forwards to the publisher; that per-row
+// value is telemetry, not a scope the loop as a whole could adopt.
 func (p *KnowledgeObservabilityOutbox) drainOnce(ctx context.Context) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {

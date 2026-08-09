@@ -130,6 +130,7 @@ func qualityIntegrationPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, up); err != nil {
 		t.Fatalf("reapply idempotent durability migration: %v", err)
 	}
+	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 	t.Cleanup(func() {
 		down := readDurabilityMigration(t, "20260711160000_quality_orchestrator_durability.down.sql")
 		if _, err := pool.Exec(context.Background(), down); err != nil {
@@ -142,6 +143,60 @@ func qualityIntegrationPool(t *testing.T) *pgxpool.Pool {
 		admin.Close()
 	})
 	return pool
+}
+
+// grantScopedRuntimeRoleIn makes `dataplane_app` usable inside this test's
+// isolated schema.
+//
+// Why a test fixture needs a database ROLE at all: PostgresEvalStore now runs
+// Create/Get/Start/Complete/Fail through orgscope.InOrgScope, which issues
+// `SET LOCAL ROLE dataplane_app` on every scoped transaction. That role is
+// created by infra/postgres/migrations/20260809120000_org_rls_isolation.sql,
+// which this fixture never runs — it applies only the durability migration the
+// store depends on. Without this helper the first scoped call fails with
+// `role "dataplane_app" does not exist`, and because the test is gated on
+// TEST_DATABASE_URL a plain `go test ./...` would never surface it.
+//
+// Grants only — no policies. Enabling RLS here would test the migration rather
+// than the store, and this fixture deliberately builds a reduced schema the
+// real policies do not match.
+//
+// Both exception codes are required on the CREATE ROLE. Roles are cluster-wide,
+// so parallel packages/binaries sharing one server race here; with the role
+// absent, the losing backend raises unique_violation on pg_authid_rolname_index
+// before duplicate_object is ever considered.
+func grantScopedRuntimeRoleIn(ctx context.Context, t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	// schema is a locally generated "quality_eval_<uuid hex>" identifier, never
+	// caller input; %I quotes it regardless.
+	if _, err := pool.Exec(ctx, `
+		DO $role$
+		BEGIN
+		    CREATE ROLE dataplane_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+		EXCEPTION WHEN duplicate_object OR unique_violation THEN
+		    NULL;
+		END
+		$role$;
+
+		DO $grants$
+		BEGIN
+		    EXECUTE format('GRANT USAGE ON SCHEMA %I TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA %I GRANT USAGE, SELECT ON SEQUENCES TO dataplane_app', `+quoteSQLLiteral(schema)+`);
+		END
+		$grants$;
+	`); err != nil {
+		t.Fatalf("grant scoped runtime role in %s: %v", schema, err)
+	}
+}
+
+// quoteSQLLiteral renders a Go string as a single-quoted SQL literal. Needed
+// because the grants above run inside a DO block, which cannot take bind
+// parameters.
+func quoteSQLLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 func readDurabilityMigration(t *testing.T, name string) string {

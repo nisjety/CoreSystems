@@ -1,12 +1,18 @@
 # syntax=docker/dockerfile:1.7
 # Multi-stage build for data-quality-go.
-# Build context: services/data-quality-go.
+# Build context: services/data-quality-go. The ../../shared/go replace target is NOT in
+# that context, so it arrives as a named additional build context (`shared-go`,
+# wired in docker-compose.yml) — the same mechanism the Rust services use for
+# the Model Plane protos. Widening to the repo root was rejected: .dockerignore
+# deliberately excludes this tree so root-context Rust builds stay lean.
+# WORKDIR is two levels deep so the go.mod replace path resolves.
 
 FROM golang:1.26.5-bookworm AS builder
-WORKDIR /app
+WORKDIR /workspace/services/data-quality-go
 ENV GOPROXY=https://proxy.golang.org|https://goproxy.io|direct
 ENV GOSUMDB=sum.golang.org
 COPY go.mod go.sum ./
+COPY --from=shared-go go.mod go.sum /workspace/shared/go/
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     set -e; \
     for i in 1 2 3 4 5; do \
@@ -17,7 +23,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
         sleep 8; \
     done; \
     exit 1
-COPY . .
+COPY --from=shared-go . /workspace/shared/go
+COPY . ./
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOFLAGS="-trimpath" \
     go build -ldflags="-s -w" -o /data-quality ./cmd

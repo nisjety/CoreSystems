@@ -7,7 +7,10 @@ import (
 	"math"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/triodelab/dataplane/shared/go/orgscope"
 )
 
 // GoldenSource loads an org's judged queries: normalized query → the ids
@@ -32,57 +35,74 @@ func NewPostgresGoldenStore(pool *pgxpool.Pool) *PostgresGoldenStore {
 	return &PostgresGoldenStore{pool: pool}
 }
 
+// Load reads one org's judged queries.
+//
+// Phase 1 RLS: reached from the /v1/evals/golden handler (authctx claims) and
+// from RunEval, which is always executing on behalf of one org's evaluation.
 func (s *PostgresGoldenStore) Load(ctx context.Context, orgID string) (map[string][]string, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT query_norm, relevant_ids
-		FROM eval_golden_judgments
-		WHERE org_id = $1
-	`, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("query golden judgments: %w", err)
-	}
-	defer rows.Close()
+	return orgscope.InOrgScope(ctx, s.pool, orgID,
+		func(ctx context.Context, tx pgx.Tx) (map[string][]string, error) {
+			rows, err := tx.Query(ctx, `
+				SELECT query_norm, relevant_ids
+				FROM eval_golden_judgments
+				WHERE org_id = $1
+			`, orgID)
+			if err != nil {
+				return nil, fmt.Errorf("query golden judgments: %w", err)
+			}
+			defer rows.Close()
 
-	golden := make(map[string][]string)
-	for rows.Next() {
-		var queryNorm string
-		var raw []byte
-		if err := rows.Scan(&queryNorm, &raw); err != nil {
-			return nil, fmt.Errorf("scan golden judgment: %w", err)
-		}
-		var ids []string
-		if err := json.Unmarshal(raw, &ids); err != nil {
-			return nil, fmt.Errorf("decode golden judgment ids: %w", err)
-		}
-		if len(ids) > 0 {
-			golden[queryNorm] = ids
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate golden judgments: %w", err)
-	}
-	return golden, nil
+			// Drained inside the scope: rows die at COMMIT.
+			golden := make(map[string][]string)
+			for rows.Next() {
+				var queryNorm string
+				var raw []byte
+				if err := rows.Scan(&queryNorm, &raw); err != nil {
+					return nil, fmt.Errorf("scan golden judgment: %w", err)
+				}
+				var ids []string
+				if err := json.Unmarshal(raw, &ids); err != nil {
+					return nil, fmt.Errorf("decode golden judgment ids: %w", err)
+				}
+				if len(ids) > 0 {
+					golden[queryNorm] = ids
+				}
+			}
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("iterate golden judgments: %w", err)
+			}
+			return golden, nil
+		})
 }
 
 // Upsert stores/replaces the judgment for one query (org-scoped PK).
+//
+// Phase 1 RLS: the org_id written comes from verified caller claims, so the
+// policy's WITH CHECK and this INSERT agree by construction — the scope makes
+// a future edit that sourced org_id from the request body fail closed instead
+// of writing into another tenant.
 func (s *PostgresGoldenStore) Upsert(ctx context.Context, orgID, query string, relevantIDs []string) error {
 	raw, err := json.Marshal(relevantIDs)
 	if err != nil {
 		return fmt.Errorf("encode golden judgment ids: %w", err)
 	}
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO eval_golden_judgments (org_id, query_norm, relevant_ids)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (org_id, query_norm)
-		DO UPDATE SET relevant_ids = EXCLUDED.relevant_ids, updated_at = NOW()
-	`, orgID, NormalizeQuery(query), raw)
-	if err != nil {
-		return fmt.Errorf("upsert golden judgment: %w", err)
-	}
-	return nil
+	return orgscope.WithOrgScope(ctx, s.pool, orgID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO eval_golden_judgments (org_id, query_norm, relevant_ids)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (org_id, query_norm)
+			DO UPDATE SET relevant_ids = EXCLUDED.relevant_ids, updated_at = NOW()
+		`, orgID, NormalizeQuery(query), raw); err != nil {
+			return fmt.Errorf("upsert golden judgment: %w", err)
+		}
+		return nil
+	})
 }
 
 // List returns the org's judged queries (normalized) with their relevant ids.
+//
+// Phase 1 RLS: no direct queries — Load opens its own scope. Deliberately not
+// scoped here as well, which would nest.
 func (s *PostgresGoldenStore) List(ctx context.Context, orgID string) (map[string][]string, error) {
 	return s.Load(ctx, orgID)
 }

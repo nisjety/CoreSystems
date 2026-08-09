@@ -162,6 +162,15 @@ func (p *OutboxPublisher) loop(ctx context.Context) {
 // drainOnce reads up to maxOutboxBatchSize unpublished rows, publishes
 // each, then marks them published. We use a single tx + SKIP LOCKED so
 // multiple replicas can run this loop without double-publishing.
+//
+// Phase 1 RLS: deliberately UNSCOPED. This is a cross-org background drain —
+// one process publishes `documents_outbox` for every tenant, and the SELECT
+// below carries no org_id filter on purpose. Wrapping it in
+// orgscope.WithOrgScope would not fail loudly; it would quietly publish one
+// org's events and leave every other tenant's rows unpublished forever, which
+// on a dashboard looks identical to an idle queue. The WRITE side of this same
+// table (repo.EnqueueOutbox and the outbox rows written inside each mutation)
+// IS scoped — that is where a single org is actually in scope.
 func (p *OutboxPublisher) drainOnce(ctx context.Context) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {

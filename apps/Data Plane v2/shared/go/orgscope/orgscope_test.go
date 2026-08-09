@@ -2,6 +2,7 @@ package orgscope
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -48,6 +49,55 @@ func TestEmptyOrgIDRejectedBeforeTouchingDatabase(t *testing.T) {
 			t.Fatalf("expected ErrEmptyOrgID for %q, got %v", candidate, err)
 		}
 	}
+}
+
+// The nesting guard must fire before any connection is taken. A nil pool
+// proves that: if the check regressed we would panic dereferencing it rather
+// than getting the error asserted here.
+func TestNestedScopeIsRejectedBeforeTakingAConnection(t *testing.T) {
+	ctx := context.WithValue(context.Background(), scopeMarker{}, struct{}{})
+	err := WithOrgScope(ctx, nil, "org-1", func(pgx.Tx) error {
+		t.Fatal("callback must not run for a nested scope")
+		return nil
+	})
+	if !errors.Is(err, ErrNestedScope) {
+		t.Fatalf("expected ErrNestedScope, got %v", err)
+	}
+}
+
+// A non-nested context must still be accepted — otherwise the guard would be
+// constant-on and would break every legitimate call.
+func TestUnmarkedContextIsNotTreatedAsNested(t *testing.T) {
+	if InScope(context.Background()) {
+		t.Fatal("a fresh context must not report as scoped")
+	}
+	// Reaching the empty-org check (not the nesting check) proves the guard let
+	// this through.
+	if err := WithOrgScope(context.Background(), nil, "", func(pgx.Tx) error { return nil }); !errors.Is(err, ErrEmptyOrgID) {
+		t.Fatalf("expected ErrEmptyOrgID, got %v", err)
+	}
+}
+
+// InOrgScope must return the zero value on error, so a caller that ignores the
+// error cannot mistake a failed scope for a real result.
+func TestInOrgScopeReturnsZeroValueOnError(t *testing.T) {
+	got, err := InOrgScope(context.Background(), nil, "", func(context.Context, pgx.Tx) (string, error) {
+		t.Fatal("callback must not run when the org is empty")
+		return "leaked", nil
+	})
+	if !errors.Is(err, ErrEmptyOrgID) {
+		t.Fatalf("expected ErrEmptyOrgID, got %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected the zero value on error, got %q", got)
+	}
+}
+
+// Both concrete types must satisfy Queryer, which is the entire point of the
+// interface — it lets a helper accept the pool today and a scoped tx tomorrow.
+func TestQueryerIsSatisfiedByBothPoolAndTx(t *testing.T) {
+	var _ Queryer = (*pgxpool.Pool)(nil)
+	var _ Queryer = (pgx.Tx)(nil)
 }
 
 // Real end-to-end proof against a live database. Skipped unless one is

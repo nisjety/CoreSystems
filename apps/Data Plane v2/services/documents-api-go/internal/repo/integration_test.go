@@ -142,12 +142,53 @@ func setupPostgres(t *testing.T) (*pgxpool.Pool, func()) {
 	if _, err := pool.Exec(ctx, schemaSQL); err != nil {
 		t.Fatalf("apply schema: %v", err)
 	}
+	grantScopedRuntimeRole(ctx, t, pool)
 
 	cleanup := func() {
 		pool.Close()
 		_ = container.Terminate(context.Background())
 	}
 	return pool, cleanup
+}
+
+// grantScopedRuntimeRole makes `dataplane_app` usable against the fixture
+// schema built by schemaSQL above.
+//
+// Why a test fixture needs a database ROLE at all: production code in
+// internal/repo now runs its queries through orgscope.WithOrgScope, which
+// issues `SET LOCAL ROLE dataplane_app` on every scoped transaction. That role
+// is created by infra/postgres/migrations/20260809120000_org_rls_isolation.sql,
+// which these fixtures never run — they build a slim subset of init.sql
+// instead. Without this helper the first repository call to traverse a scoped
+// path fails with `role "dataplane_app" does not exist`, and because every test
+// here is behind the `integration` build tag a plain `go test ./...` would
+// never surface it.
+//
+// Grants only — no policies. Enabling RLS here would test the migration rather
+// than the repository, and schemaSQL is a reduced schema the real policies do
+// not match.
+//
+// Both exception codes are required on the CREATE ROLE. Roles are cluster-wide,
+// so parallel packages/binaries sharing one server race here; with the role
+// absent, the losing backend raises unique_violation on pg_authid_rolname_index
+// before duplicate_object is ever considered.
+func grantScopedRuntimeRole(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `
+		DO $role$
+		BEGIN
+		    CREATE ROLE dataplane_app NOLOGIN NOSUPERUSER NOBYPASSRLS;
+		EXCEPTION WHEN duplicate_object OR unique_violation THEN
+		    NULL;
+		END
+		$role$;
+
+		GRANT USAGE ON SCHEMA public TO dataplane_app;
+		GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO dataplane_app;
+		GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO dataplane_app;
+	`); err != nil {
+		t.Fatalf("grant scoped runtime role: %v", err)
+	}
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

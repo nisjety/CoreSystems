@@ -47,6 +47,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -68,16 +69,70 @@ const OrgGUC = "app.current_org"
 // empty" bug rather than an obvious error, so it is rejected up front.
 var ErrEmptyOrgID = errors.New("orgscope: a non-empty orgID is required")
 
+// ErrNestedScope is returned when a scoped callback opens another scope. That
+// checks a second connection out of the pool while the first is still held, so
+// under load it exhausts the pool and deadlocks — and it is invisible in
+// review, because the inner call is usually just an ordinary repository method
+// that happens to scope itself. The first adopter had to hand-audit for this;
+// detecting it is cheaper than remembering.
+//
+// The fix is not to nest: call the inner work with the tx you already have, or
+// sequence the two scopes one after the other.
+var ErrNestedScope = errors.New("orgscope: nested org scope (call the inner work with the existing tx, or sequence the scopes)")
+
+// Queryer is the query surface shared by *pgxpool.Pool and pgx.Tx.
+//
+// It exists so a repository can migrate to scoped access one function at a
+// time: a helper written against Queryer accepts the pool today and a scoped
+// tx tomorrow, instead of forcing the whole type to flip in one commit (which
+// is what the first adopter had to do). Prefer taking pgx.Tx directly for
+// anything that must ONLY ever run scoped — that makes an unscoped call a
+// compile error, which is stronger than a comment.
+type Queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+type scopeMarker struct{}
+
+// InScope reports whether ctx is already inside a scoped transaction. Useful
+// for an assertion in code that must not be reached unscoped.
+func InScope(ctx context.Context) bool {
+	return ctx.Value(scopeMarker{}) != nil
+}
+
 // WithOrgScope runs fn inside a transaction pinned to orgID and enforced by
 // row-level security.
 //
 // The transaction is committed when fn returns nil and rolled back otherwise.
 // A rollback is also attempted on every path that does not reach the commit,
 // so an early return or panic cannot leak an open transaction.
+//
+// # Drain rows before returning
+//
+// Anything derived from the tx dies at COMMIT, so `pgx.Rows` must be fully
+// scanned INSIDE fn. Returning rows out of the callback compiles cleanly and
+// then fails at runtime with a closed-rows error — put the scan loop in the
+// callback and return the materialized slice instead. The same applies to
+// anything else holding the tx.
+//
+// # Do not nest
+//
+// Calling another scoped function from inside fn checks a second connection out
+// of the pool while this one is still held; see [ErrNestedScope]. Note the
+// limitation honestly: because fn receives only the tx, its body closes over
+// the CALLER's ctx, which carries no marker — so nesting is only detected when
+// a caller explicitly threads a scoped ctx down. Use [InOrgScope], whose
+// callback is handed the marked ctx, when you want that detection to be real.
 func WithOrgScope(ctx context.Context, pool *pgxpool.Pool, orgID string, fn func(pgx.Tx) error) error {
 	if strings.TrimSpace(orgID) == "" {
 		return ErrEmptyOrgID
 	}
+	if InScope(ctx) {
+		return ErrNestedScope
+	}
+	ctx = context.WithValue(ctx, scopeMarker{}, struct{}{})
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -108,4 +163,52 @@ func WithOrgScope(ctx context.Context, pool *pgxpool.Pool, orgID string, fn func
 		return fmt.Errorf("orgscope: commit: %w", err)
 	}
 	return nil
+}
+
+// InOrgScope is [WithOrgScope] for a callback that produces a value.
+//
+// The error-only signature forces every read path to declare its results in the
+// enclosing scope and assign into them from the closure. That is noise, and it
+// invites a specific bug: on an early `return nil` (a not-found case, say) the
+// captured variable silently keeps its zero value and the caller cannot tell
+// that apart from a real empty result. Returning the value through the type
+// system removes both problems.
+//
+//	page, err := orgscope.InOrgScope(ctx, pool, orgID,
+//	    func(ctx context.Context, tx pgx.Tx) (Page, error) {
+//	        var p Page
+//	        err := tx.QueryRow(ctx, "SELECT ...").Scan(&p.ID)
+//	        return p, err
+//	    })
+//
+// On any error the zero value of T is returned, so a caller that ignores the
+// error cannot mistake a failed scope for a real result.
+//
+// The callback is handed the scoped ctx, so a nested scope opened with it fails
+// with [ErrNestedScope] instead of silently taking a second pool connection —
+// the detection [WithOrgScope] cannot offer. Prefer this for new code, and note
+// the same rule about draining `pgx.Rows` before returning.
+func InOrgScope[T any](
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	orgID string,
+	fn func(context.Context, pgx.Tx) (T, error),
+) (T, error) {
+	var out T
+	err := WithOrgScope(ctx, pool, orgID, func(tx pgx.Tx) error {
+		// The marker must go on the ctx the callback actually receives;
+		// WithOrgScope's own copy is not visible to it.
+		scoped := context.WithValue(ctx, scopeMarker{}, struct{}{})
+		v, err := fn(scoped, tx)
+		if err != nil {
+			return err
+		}
+		out = v
+		return nil
+	})
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return out, nil
 }
