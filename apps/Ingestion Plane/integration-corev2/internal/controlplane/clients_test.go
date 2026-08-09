@@ -74,6 +74,45 @@ func TestAuthClientVerifyTokenUsesAuthCoreJWKSContract(t *testing.T) {
 	}
 }
 
+func TestAuthClientUsesPlaneIssuerAdvertisedWithJWKS(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	const advertisedIssuer = "https://auth.example.test/api/convex-auth"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"planeTokenIssuer": advertisedIssuer,
+			"keys":             []map[string]any{jwksTestKey("test-key", &privateKey.PublicKey)},
+		})
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss":            advertisedIssuer,
+		"aud":            "ingestion",
+		"sub":            "user-1",
+		"iat":            now.Unix(),
+		"nbf":            now.Add(-time.Second).Unix(),
+		"exp":            now.Add(5 * time.Minute).Unix(),
+		"org_id":         "org-1",
+		"user_id":        "user-1",
+		"principal_type": "user",
+	})
+	token.Header["kid"] = "test-key"
+	signed, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+
+	cfg := testControlPlaneConfig(server.URL)
+	cfg.PlaneTokenIssuer = "https://stale-config.example.test/api/convex-auth"
+	if _, err := NewAuthClient(cfg, server.Client()).VerifyToken(t.Context(), signed); err != nil {
+		t.Fatalf("VerifyToken error: %v", err)
+	}
+}
+
 func TestAuthClientVerifyTokenRefreshesJWKSOnceForRotatedSigningKey(t *testing.T) {
 	oldKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -260,7 +299,7 @@ func TestAuthClientJWKSRejectsMalformedOrUnusableDocuments(t *testing.T) {
 			}))
 			defer server.Close()
 			client := NewAuthClient(testControlPlaneConfig(server.URL), server.Client())
-			if _, _, err := client.fetchJWKS(t.Context(), false, 0); err == nil {
+			if _, _, _, err := client.fetchJWKS(t.Context(), false, 0); err == nil {
 				t.Fatal("invalid JWKS document was accepted")
 			}
 		})
@@ -279,7 +318,7 @@ func TestAuthClientFailsClosedWhenUnconfiguredOrAlgorithmIsUnsupported(t *testin
 	}
 	client.audience = "ingestion"
 	client.issuer = "issuer"
-	if _, _, err := client.parseToken(signed, nil); err == nil {
+	if _, _, err := client.parseToken(signed, nil, client.issuer); err == nil {
 		t.Fatal("unsupported signing algorithm was accepted")
 	}
 }
@@ -296,11 +335,11 @@ func TestAuthClientJWKSForcedRefreshReusesNewerGeneration(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewAuthClient(testControlPlaneConfig(server.URL), server.Client())
-	_, generation, err := client.fetchJWKS(t.Context(), false, 0)
+	_, _, generation, err := client.fetchJWKS(t.Context(), false, 0)
 	if err != nil {
 		t.Fatalf("initial fetch: %v", err)
 	}
-	if _, reusedGeneration, err := client.fetchJWKS(t.Context(), true, generation-1); err != nil || reusedGeneration != generation {
+	if _, _, reusedGeneration, err := client.fetchJWKS(t.Context(), true, generation-1); err != nil || reusedGeneration != generation {
 		t.Fatalf("generation = %d, err = %v", reusedGeneration, err)
 	}
 	if got := calls.Load(); got != 1 {

@@ -15,6 +15,32 @@ import (
 
 var ErrRevocationUnsupported = errors.New("provider token revocation is unsupported")
 
+// TokenEndpointError retains the provider's machine-readable OAuth failure
+// code while preserving the existing safe error text for logs and operators.
+// Callers use it to distinguish a reconnect-required grant from a transient
+// provider outage without inspecting an error string.
+type TokenEndpointError struct {
+	ProviderKey string
+	StatusCode  int
+	Code        string
+	Description string
+}
+
+func (e *TokenEndpointError) Error() string {
+	if e.StatusCode > 0 {
+		return fmt.Sprintf("%s token endpoint returned status %d: %s", e.ProviderKey, e.StatusCode, e.Description)
+	}
+	return fmt.Sprintf("%s token endpoint returned error: %s", e.ProviderKey, e.Description)
+}
+
+// IsAuthorizationRefreshRequired reports whether OAuth has authoritatively
+// rejected a refresh grant. This state can only recover through a new human
+// authorization flow; retrying it in the background cannot succeed.
+func IsAuthorizationRefreshRequired(err error) bool {
+	var tokenErr *TokenEndpointError
+	return errors.As(err, &tokenErr) && strings.EqualFold(strings.TrimSpace(tokenErr.Code), "invalid_grant")
+}
+
 type ProviderProfile struct {
 	ID            string
 	DisplayName   string
@@ -933,10 +959,10 @@ func doTokenRequest(client *http.Client, req *http.Request, providerKey string) 
 		return TokenResult{}, fmt.Errorf("decode %s token response: %w", providerKey, err)
 	}
 	if ok, _ := raw["ok"].(bool); raw["ok"] != nil && !ok {
-		return TokenResult{}, fmt.Errorf("%s token endpoint returned error: %s", providerKey, tokenError(raw))
+		return TokenResult{}, tokenEndpointError(providerKey, 0, raw)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return TokenResult{}, fmt.Errorf("%s token endpoint returned status %d: %s", providerKey, resp.StatusCode, tokenError(raw))
+		return TokenResult{}, tokenEndpointError(providerKey, resp.StatusCode, raw)
 	}
 	accessToken := firstNonEmpty(stringValue(raw["access_token"]), stringValue(raw["authed_user.access_token"]))
 	if accessToken == "" {
@@ -960,6 +986,15 @@ func doTokenRequest(client *http.Client, req *http.Request, providerKey string) 
 		ExpiresAt:    expiresAt,
 		Raw:          raw,
 	}, nil
+}
+
+func tokenEndpointError(providerKey string, statusCode int, raw map[string]any) *TokenEndpointError {
+	return &TokenEndpointError{
+		ProviderKey: providerKey,
+		StatusCode:  statusCode,
+		Code:        stringValue(raw["error"]),
+		Description: tokenError(raw),
+	}
 }
 
 func splitReturnedScopes(scopeValue string) []string {

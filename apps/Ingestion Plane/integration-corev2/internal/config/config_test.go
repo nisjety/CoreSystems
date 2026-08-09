@@ -131,9 +131,13 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	t.Setenv("INTEGRATION_SERVICE_API_KEY", "integration-service-key")
 	t.Setenv("INTEGRATION_CORE_URL", "http://integration-corev2:3026/")
 	t.Setenv("FACEBOOK_CLIENT_ID", "facebook-app-id")
+	t.Setenv("META_APP_CLIENT_ID", "meta-app-id")
+	t.Setenv("META_APP_CLIENT_SECRET", "meta-app-secret")
 	t.Setenv("META_JS_SDK_API_VERSION", "23.0")
 	t.Setenv("META_JS_SDK_LOCALE", "nb_NO")
 	t.Setenv("META_BUSINESS_LOGIN_CONFIG_ID", "business-login-config")
+	t.Setenv("META_BUSINESS_LOGIN_SUPPORT_MESSAGING_CONFIG_ID", "support-messaging-config")
+	t.Setenv("META_BUSINESS_LOGIN_STUDIO_ADS_CONFIG_ID", "studio-ads-config")
 	t.Setenv("META_WEBHOOK_VERIFY_TOKEN", "meta-verify-token")
 	t.Setenv("META_WEBHOOK_SECRET", "meta-webhook-secret")
 	t.Setenv("THREADS_API_BASE_URL", "https://threads.test/v1/")
@@ -172,17 +176,26 @@ func TestLoadAcceptsBase64EncryptionKey(t *testing.T) {
 	if cfg.LinkedInMarketingVersion != "202606" {
 		t.Fatalf("LinkedInMarketingVersion = %q, want default 202606", cfg.LinkedInMarketingVersion)
 	}
-	if cfg.MetaJSSDKAppID != "facebook-app-id" || cfg.MetaJSSDKAPIVersion != "v23.0" || cfg.MetaJSSDKLocale != "nb_NO" {
-		t.Fatalf("Meta JS SDK config = %q/%q/%q, want facebook-app-id/v23.0/nb_NO", cfg.MetaJSSDKAppID, cfg.MetaJSSDKAPIVersion, cfg.MetaJSSDKLocale)
+	if cfg.MetaClientID != "meta-app-id" || cfg.MetaClientSecret != "meta-app-secret" {
+		t.Fatalf("Meta OAuth credentials = %q/%q, want meta-app-id/meta-app-secret", cfg.MetaClientID, cfg.MetaClientSecret)
+	}
+	if cfg.MetaJSSDKAppID != "meta-app-id" || cfg.MetaJSSDKAPIVersion != "v23.0" || cfg.MetaJSSDKLocale != "nb_NO" {
+		t.Fatalf("Meta JS SDK config = %q/%q/%q, want meta-app-id/v23.0/nb_NO", cfg.MetaJSSDKAppID, cfg.MetaJSSDKAPIVersion, cfg.MetaJSSDKLocale)
 	}
 	if cfg.MetaBusinessLoginConfigID != "business-login-config" {
 		t.Fatalf("MetaBusinessLoginConfigID = %q, want configured id", cfg.MetaBusinessLoginConfigID)
 	}
+	if cfg.MetaBusinessLoginConfigIDs["studio_ads"] != "studio-ads-config" {
+		t.Fatalf("MetaBusinessLoginConfigIDs[studio_ads] = %q, want configured studio ads id", cfg.MetaBusinessLoginConfigIDs["studio_ads"])
+	}
+	if cfg.MetaBusinessLoginConfigIDs["support_messaging"] != "support-messaging-config" {
+		t.Fatalf("MetaBusinessLoginConfigIDs[support_messaging] = %q, want configured support messaging id", cfg.MetaBusinessLoginConfigIDs["support_messaging"])
+	}
 	if cfg.MetaWebhookVerifyToken != "meta-verify-token" || cfg.MetaWebhookSecret != "meta-webhook-secret" || cfg.MetaThreadsAPIBaseURL != "https://threads.test/v1" {
 		t.Fatalf("Meta webhook/Threads config = %q/%q/%q, want configured values", cfg.MetaWebhookVerifyToken, cfg.MetaWebhookSecret, cfg.MetaThreadsAPIBaseURL)
 	}
-	if cfg.InstagramClientID != "facebook-app-id" {
-		t.Fatalf("InstagramClientID = %q, want shared Meta/Facebook app fallback", cfg.InstagramClientID)
+	if cfg.InstagramClientID != "" {
+		t.Fatalf("InstagramClientID = %q, want empty when a dedicated Instagram client is not configured", cfg.InstagramClientID)
 	}
 }
 
@@ -295,6 +308,8 @@ func TestValidateEmailWorkerRequiresDedicatedConversationIngestToken(t *testing.
 		EncryptionKey:                  []byte("12345678901234567890123456789012"),
 		ConversationIngestURL:          "http://conversation-ingest-rs:3161",
 		ConversationIngestServiceToken: "integration-email-worker-test-secret-at-least-32-bytes",
+		InternalAPIKey:                 "internal",
+		IntegrationCoreURL:             "http://integration-corev2:3026",
 	}
 	if err := cfg.ValidateEmailWorkerRuntime(); err != nil {
 		t.Fatalf("ValidateEmailWorkerRuntime() error = %v", err)
@@ -420,6 +435,8 @@ func TestLoadReadsOptionalDiscordBotToken(t *testing.T) {
 		EncryptionKey:                  []byte("12345678901234567890123456789012"),
 		ConversationIngestURL:          "http://conversation-ingest-rs:3161",
 		ConversationIngestServiceToken: "integration-email-worker-test-secret-at-least-32-bytes",
+		InternalAPIKey:                 "internal",
+		IntegrationCoreURL:             "http://integration-corev2:3026",
 	}
 	if err := workerCfg.ValidateEmailWorkerRuntime(); err != nil {
 		t.Fatalf("ValidateEmailWorkerRuntime() error = %v, want DISCORD_BOT_TOKEN to stay optional", err)

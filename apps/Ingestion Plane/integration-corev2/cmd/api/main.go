@@ -107,9 +107,10 @@ func main() {
 		WebhookOrg: &webhookorg.Resolver{
 			Store: repo,
 			Meta: &webhookorg.GraphAssetLister{
-				BaseURL: cfg.FacebookAPIBaseURL,
-				Tokens:  service,
-				HTTP:    &http.Client{Timeout: 15 * time.Second},
+				BaseURL:          cfg.FacebookAPIBaseURL,
+				InstagramBaseURL: cfg.InstagramAPIBaseURL,
+				Tokens:           service,
+				HTTP:             &http.Client{Timeout: 15 * time.Second},
 			},
 			Logger: &logger,
 		},

@@ -29,7 +29,7 @@ func TestTeams_OneOnOneResolvesCounterpartAndSelfDirection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/me/chats"):
-			fmt.Fprint(w, `{"value":[{"id":"chat1","topic":"","chatType":"oneOnOne","members":[{"userId":"self-user","displayName":"Ima Fernandes Da Costa","email":"ima@aquatiq.com"},{"userId":"other-user","displayName":"Robert Røsten","email":"robert@example.com"}]}]}`)
+			fmt.Fprint(w, `{"value":[{"id":"chat1","topic":"","chatType":"oneOnOne","members":[{"userId":"self-user","displayName":"Ima Fernandes Da Costa","email":"ima@coresystem.com"},{"userId":"other-user","displayName":"Robert Røsten","email":"robert@example.com"}]}]}`)
 		case strings.HasSuffix(r.URL.Path, "/chats/chat1/messages"):
 			fmt.Fprint(w, `{"value":[{"id":"m2","messageType":"message","createdDateTime":"2026-07-18T10:20:00Z","from":{"user":{"id":"self-user","displayName":"Ima Fernandes Da Costa"}},"body":{"contentType":"text","content":"My reply"}},{"id":"m1","messageType":"message","createdDateTime":"2026-07-18T10:10:00Z","from":{"user":{"id":"other-user","displayName":"Robert Røsten"}},"body":{"contentType":"text","content":"Hello"}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/me/joinedTeams"):
@@ -44,7 +44,7 @@ func TestTeams_OneOnOneResolvesCounterpartAndSelfDirection(t *testing.T) {
 	result, err := fetcher.FetchConnection(context.Background(), store.Connection{
 		ProviderAccountID: "self-user",
 		DisplayName:       "Ima Fernandes Da Costa",
-		UserEmail:         "ima@aquatiq.com",
+		UserEmail:         "ima@coresystem.com",
 	}, "token", "2026-07-18T10:00:00Z", 24*time.Hour, 25)
 	if err != nil {
 		t.Fatalf("FetchConnection: %v", err)
@@ -56,7 +56,7 @@ func TestTeams_OneOnOneResolvesCounterpartAndSelfDirection(t *testing.T) {
 	if inbound.Subject != "Robert Røsten" || inbound.Direction != "inbound" || inbound.From.Email != "robert@example.com" {
 		t.Fatalf("inbound identity = %+v", inbound)
 	}
-	if outbound.Subject != "Robert Røsten" || outbound.Direction != "outbound" || outbound.From.Email != "ima@aquatiq.com" {
+	if outbound.Subject != "Robert Røsten" || outbound.Direction != "outbound" || outbound.From.Email != "ima@coresystem.com" {
 		t.Fatalf("outbound identity = %+v", outbound)
 	}
 	if len(outbound.To) != 1 || outbound.To[0].Name != "Robert Røsten" || outbound.To[0].Email != "robert@example.com" {
@@ -68,7 +68,7 @@ func TestTeams_OneOnOneUsesEmailFallbackToResolveSelfDirection(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/me/chats"):
-			fmt.Fprint(w, `{"value":[{"id":"chat1","topic":"","chatType":"oneOnOne","members":[{"userId":"self-user","displayName":"Ima","email":"ima@aquatiq.com"},{"userId":"other-user","displayName":"Robert","email":"robert@example.com"}]}]}`)
+			fmt.Fprint(w, `{"value":[{"id":"chat1","topic":"","chatType":"oneOnOne","members":[{"userId":"self-user","displayName":"Ima","email":"ima@coresystem.com"},{"userId":"other-user","displayName":"Robert","email":"robert@example.com"}]}]}`)
 		case strings.HasSuffix(r.URL.Path, "/chats/chat1/messages"):
 			fmt.Fprint(w, `{"value":[{"id":"m1","messageType":"message","createdDateTime":"2026-07-18T10:20:00Z","from":{"user":{"id":"self-user","displayName":"Ima"}},"body":{"contentType":"text","content":"My reply"}}]}`)
 		case strings.HasSuffix(r.URL.Path, "/me/joinedTeams"):
@@ -82,7 +82,7 @@ func TestTeams_OneOnOneUsesEmailFallbackToResolveSelfDirection(t *testing.T) {
 	fetcher := &TeamsFetcher{BaseURL: server.URL, HTTP: server.Client()}
 	result, err := fetcher.FetchConnection(context.Background(), store.Connection{
 		DisplayName: "Ima",
-		UserEmail:   "ima@aquatiq.com",
+		UserEmail:   "ima@coresystem.com",
 	}, "token", "2026-07-18T10:00:00Z", 24*time.Hour, 25)
 	if err != nil {
 		t.Fatalf("FetchConnection: %v", err)
@@ -285,7 +285,7 @@ func TestTeams_ConnectionBootstrapIncludesExistingChatHistory(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/me/chats"):
-			fmt.Fprint(w, `{"value":[{"id":"chat1","topic":"","chatType":"oneOnOne","members":[{"userId":"self-user","displayName":"Ima","email":"ima@aquatiq.com"},{"userId":"other-user","displayName":"Robert","email":"robert@example.com"}]}]}`)
+			fmt.Fprint(w, `{"value":[{"id":"chat1","topic":"","chatType":"oneOnOne","members":[{"userId":"self-user","displayName":"Ima","email":"ima@coresystem.com"},{"userId":"other-user","displayName":"Robert","email":"robert@example.com"}]}]}`)
 		case strings.HasSuffix(r.URL.Path, "/chats/chat1/messages"):
 			fmt.Fprintf(w, `{"value":[{"id":"m1","messageType":"message","createdDateTime":%q,"from":{"user":{"id":"other-user","displayName":"Robert"}},"body":{"contentType":"text","content":"Existing conversation"}}]}`, messageTime)
 		case strings.HasSuffix(r.URL.Path, "/me/joinedTeams"):
@@ -300,7 +300,7 @@ func TestTeams_ConnectionBootstrapIncludesExistingChatHistory(t *testing.T) {
 	result, err := fetcher.FetchConnection(context.Background(), store.Connection{
 		ProviderAccountID: "self-user",
 		DisplayName:       "Ima",
-		UserEmail:         "ima@aquatiq.com",
+		UserEmail:         "ima@coresystem.com",
 	}, "token", "", 24*time.Hour, 25)
 	if err != nil {
 		t.Fatalf("FetchConnection: %v", err)

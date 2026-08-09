@@ -28,5 +28,11 @@ use quarry_core::error::QuarryResult;
 /// one site produces exactly one row instead of one per page.
 #[async_trait]
 pub trait SourceRegistrar: Send + Sync {
-    async fn register_source(&self, org_id: &str, name: &str, url: &str, kind: &str) -> QuarryResult<()>;
+    async fn register_source(
+        &self,
+        org_id: &str,
+        name: &str,
+        url: &str,
+        kind: &str,
+    ) -> QuarryResult<()>;
 }

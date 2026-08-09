@@ -56,13 +56,53 @@ func srcItem(name, mime string, size int64, folder bool) (store.Source, store.It
 	return src, item
 }
 
+// orgPermissions is the ordinary case for connector-synced content: an item in
+// a shared library, reachable by a site group. Tests that are not about
+// visibility use it so they exercise the normal path.
+func orgPermissions() []store.Permission {
+	return []store.Permission{{PrincipalType: "siteGroup", PrincipalName: "Members", Roles: []string{"read"}}}
+}
+
+func TestIngestor_ForwardsVisibilityFromItemACL(t *testing.T) {
+	cases := []struct {
+		name        string
+		permissions []store.Permission
+		want        string
+	}{
+		{"site group grant forwards org", orgPermissions(), VisibilityOrg},
+		{
+			"individually-shared item forwards private",
+			[]store.Permission{{PrincipalType: "user", PrincipalName: "Ima Fernandes da Costa"}},
+			VisibilityPrivate,
+		},
+		{"uncaptured ACL fails closed to private", nil, VisibilityPrivate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeFetcher{data: []byte("real document text"), maxBytes: 1000}
+			s := &fakeSink{configured: true}
+			src, item := srcItem("plan.txt", "text/plain", 18, false)
+			if err := newIngestor(f, s, "internal").
+				IngestItemContent(context.Background(), src, item, tc.permissions); err != nil {
+				t.Fatalf("ingest: %v", err)
+			}
+			if len(s.created) != 1 {
+				t.Fatalf("expected 1 forwarded doc, got %d", len(s.created))
+			}
+			if got := s.created[0].Visibility; got != tc.want {
+				t.Errorf("Visibility = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIngestor_HappyPathForwardsDocument(t *testing.T) {
 	f := &fakeFetcher{data: []byte("real document text"), maxBytes: 1000}
 	s := &fakeSink{configured: true}
 	ing := newIngestor(f, s, "internal")
 
 	src, item := srcItem("plan.txt", "text/plain", 18, false)
-	if err := ing.IngestItemContent(context.Background(), src, item); err != nil {
+	if err := ing.IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 	if len(s.created) != 1 {
@@ -110,7 +150,7 @@ func TestIngestor_ForwardsModifiedAt(t *testing.T) {
 	src, item := srcItem("plan.txt", "text/plain", 18, false)
 	modified := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
 	item.ModifiedAt = &modified
-	if err := ing.IngestItemContent(context.Background(), src, item); err != nil {
+	if err := ing.IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
 	if len(s.created) != 1 {
@@ -125,7 +165,7 @@ func TestIngestor_SkipsFolder(t *testing.T) {
 	f := &fakeFetcher{data: []byte("x"), maxBytes: 1000}
 	s := &fakeSink{configured: true}
 	src, item := srcItem("folder", "", 0, true)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err != nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls != 0 || len(s.created) != 0 {
@@ -137,7 +177,7 @@ func TestIngestor_SkipsUnsupportedType(t *testing.T) {
 	f := &fakeFetcher{data: []byte("x"), maxBytes: 1000}
 	s := &fakeSink{configured: true}
 	src, item := srcItem("logo.png", "image/png", 10, false)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err != nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls != 0 {
@@ -149,7 +189,7 @@ func TestIngestor_SkipsOversizedByMetadata(t *testing.T) {
 	f := &fakeFetcher{data: []byte("x"), maxBytes: 100}
 	s := &fakeSink{configured: true}
 	src, item := srcItem("big.txt", "text/plain", 999, false)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err != nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls != 0 {
@@ -161,7 +201,7 @@ func TestIngestor_SkipsEmptyExtractedText(t *testing.T) {
 	f := &fakeFetcher{data: []byte("   "), maxBytes: 1000}
 	s := &fakeSink{configured: true}
 	src, item := srcItem("blank.txt", "text/plain", 3, false)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err != nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatal(err)
 	}
 	if len(s.created) != 0 {
@@ -173,7 +213,7 @@ func TestIngestor_DownloadErrorReturnsError(t *testing.T) {
 	f := &fakeFetcher{err: errors.New("graph 500"), maxBytes: 1000}
 	s := &fakeSink{configured: true}
 	src, item := srcItem("plan.txt", "text/plain", 10, false)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err == nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err == nil {
 		t.Fatal("download failure must surface as an error for best-effort logging")
 	}
 }
@@ -182,7 +222,7 @@ func TestIngestor_UnconfiguredSinkIsNoOp(t *testing.T) {
 	f := &fakeFetcher{data: []byte("text"), maxBytes: 1000}
 	s := &fakeSink{configured: false}
 	src, item := srcItem("plan.txt", "text/plain", 10, false)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err != nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatal(err)
 	}
 	if f.calls != 0 || len(s.created) != 0 {
@@ -194,7 +234,7 @@ func TestIngestor_DefaultClassificationInternal(t *testing.T) {
 	f := &fakeFetcher{data: []byte("body"), maxBytes: 1000}
 	s := &fakeSink{configured: true}
 	src, item := srcItem("a.txt", "text/plain", 4, false)
-	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item); err != nil {
+	if err := newIngestor(f, s, "").IngestItemContent(context.Background(), src, item, orgPermissions()); err != nil {
 		t.Fatal(err)
 	}
 	if s.created[0].ZDRClassification != "internal" {

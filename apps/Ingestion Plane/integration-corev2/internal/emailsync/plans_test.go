@@ -153,14 +153,14 @@ func TestRunOnce_MailAndTeamsPlansShareOneConnection(t *testing.T) {
 
 func TestRunOnce_TeamsKeepsConnectedUsersOutboundMessages(t *testing.T) {
 	conn := planConnection("conn_ms", "microsoft", "teams.messages.read")
-	conn.UserEmail = "ima@aquatiq.com"
+	conn.UserEmail = "ima@coresystem.com"
 	st := &fakeStore{connections: []store.Connection{conn}}
 	teams := &fakeFetcher{results: map[string]FetchResult{
 		"": {
 			Messages: []EmailMessage{{
 				ProviderEventID: "chat-self-1",
 				Direction:       "outbound",
-				From:            Participant{Name: "Ima", Email: "ima@aquatiq.com"},
+				From:            Participant{Name: "Ima", Email: "ima@coresystem.com"},
 				To:              []Participant{{Name: "Robert", Email: "robert@example.com"}},
 				BodyText:        "My reply",
 			}},

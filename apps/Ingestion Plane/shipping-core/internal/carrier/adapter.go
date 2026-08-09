@@ -44,6 +44,12 @@ type Info struct {
 // Address is the minimal shape every carrier adapter needs to compute a
 // quote or create a booking. Adapters translate this into whatever shape
 // their upstream API expects.
+//
+// Phone/Email are booking-only (a quote never needs them): some carriers
+// (Bring included) reject a booking outright unless the recipient has at
+// least one, since it's what they use to send delivery notifications.
+// Both are optional here — an adapter that has neither simply omits the
+// carrier's notification block rather than failing itself.
 type Address struct {
 	Name       string `json:"name"`
 	Street     string `json:"street"`
@@ -51,6 +57,8 @@ type Address struct {
 	City       string `json:"city"`
 	Country    string `json:"country"` // ISO 3166-1 alpha-2, e.g. "NO"
 	IsBusiness bool   `json:"is_business"`
+	Phone      string `json:"phone,omitempty"`
+	Email      string `json:"email,omitempty"`
 }
 
 // Package describes the physical properties of what's being shipped.

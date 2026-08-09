@@ -19,7 +19,7 @@ func (r *PostgresRepository) UpdateConnectionCapabilities(ctx context.Context, i
 		SET capabilities = $2, updated_at = now()
 		WHERE id = $1
 		RETURNING `+connectionColumns,
-		id, capabilities).Scan(connectionScanDest(&connection)...)
+		id, nonNilStringSlice(capabilities)).Scan(connectionScanDest(&connection)...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Connection{}, ErrNotFound

@@ -67,11 +67,21 @@ func NewIngestor(cfg Config) *Ingestor {
 
 // IngestItemContent downloads, extracts, and forwards one item's content.
 //
+// `permissions` is the item's ACL as captured moments earlier by the sync
+// engine; it decides the forwarded document's Data Plane visibility (see
+// ClassifyVisibility). It is passed in rather than re-fetched so this costs no
+// extra Graph call, and an empty slice fails closed to `private`.
+//
 // It is best-effort at the call site: the returned error is logged by the sync
 // engine but never aborts the page, so one unreadable file cannot stall a whole
 // drive's sync. Folders, oversized files, unsupported formats, and files whose
 // extracted text is empty are all skipped cleanly (return nil, no error).
-func (i *Ingestor) IngestItemContent(ctx context.Context, source store.Source, item store.Item) error {
+func (i *Ingestor) IngestItemContent(
+	ctx context.Context,
+	source store.Source,
+	item store.Item,
+	permissions []store.Permission,
+) error {
 	if i == nil || i.fetcher == nil || i.docs == nil || !i.docs.Configured() {
 		return nil
 	}
@@ -107,12 +117,17 @@ func (i *Ingestor) IngestItemContent(ctx context.Context, source store.Source, i
 		return nil
 	}
 
+	visibility := ClassifyVisibility(permissions)
 	input := dataplane.CreateDocumentInput{
 		Source:            "sharepoint",
 		Type:              "sharepoint_file",
 		Title:             documentTitle(item),
 		Content:           text,
 		ZDRClassification: i.classification,
+		// Mirrors the SharePoint ACL rather than letting documents-api guess.
+		// Without this every connector document landed `private`, which made it
+		// invisible to graph extraction and to everyone but the service account.
+		Visibility: visibility,
 		Metadata: map[string]any{
 			"connector":    "sharepoint",
 			"source_id":    source.ID.String(),

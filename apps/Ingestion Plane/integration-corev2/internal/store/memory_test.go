@@ -37,6 +37,70 @@ func TestMemoryRepositoryStoresAndDeletesConnections(t *testing.T) {
 	}
 }
 
+func TestNonNilStringSliceRepresentsEmptySQLArrays(t *testing.T) {
+	got := nonNilStringSlice(nil)
+	if got == nil {
+		t.Fatal("nonNilStringSlice(nil) returned nil; SQL array columns must receive an empty array")
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty slice length = %d, want 0", len(got))
+	}
+}
+
+func TestMemoryRepositoryFindActiveConnectionByProviderAccount(t *testing.T) {
+	ctx := context.Background()
+	repo := NewMemoryRepository()
+	for _, connection := range []Connection{
+		{ID: "conn-a", ProviderKey: "google", ConnectorType: "google", OrganizationID: "org-1", ProviderAccountID: "account-a", Status: "active"},
+		{ID: "conn-b", ProviderKey: "google", ConnectorType: "google", OrganizationID: "org-1", ProviderAccountID: "account-b", Status: "needs_refresh"},
+	} {
+		if _, err := repo.UpsertConnection(ctx, connection); err != nil {
+			t.Fatalf("UpsertConnection(%s): %v", connection.ID, err)
+		}
+	}
+
+	got, err := repo.FindActiveConnectionByProviderAccount(ctx, "org-1", "google", "account-b")
+	if err != nil {
+		t.Fatalf("FindActiveConnectionByProviderAccount error: %v", err)
+	}
+	if got.ID != "conn-b" {
+		t.Fatalf("connection ID = %q, want conn-b", got.ID)
+	}
+	if _, err := repo.FindActiveConnectionByProviderAccount(ctx, "org-1", "google", "missing"); err != ErrNotFound {
+		t.Fatalf("missing account error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMemoryRepositoryClaimsProviderInboxJobsForEmailWorker(t *testing.T) {
+	repo := NewMemoryRepository()
+	ctx := context.Background()
+	job, err := repo.CreateSyncJob(ctx, SyncJob{
+		ID:             "sync-inbox-1",
+		OrganizationID: "org-1",
+		ConnectionID:   "conn-1",
+		ProviderKey:    "google",
+		Status:         "waiting_provider",
+		Reason:         "manual_inbox_refresh",
+		Mode:           "inbox",
+		Metadata:       map[string]any{"handoffTarget": "email-worker"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSyncJob error: %v", err)
+	}
+
+	claimed, err := repo.ClaimSyncJob(ctx, SyncJobClaim{
+		Consumer:       "email-worker",
+		Target:         "email-worker",
+		OrganizationID: "org-1",
+	})
+	if err != nil {
+		t.Fatalf("ClaimSyncJob error: %v", err)
+	}
+	if claimed.ID != job.ID || claimed.Status != "running" {
+		t.Fatalf("claimed job = %#v, want %q in running state", claimed, job.ID)
+	}
+}
+
 func TestMemoryWebhookAccountLookupFailsClosedOnAmbiguousOwnership(t *testing.T) {
 	repo := NewMemoryRepository()
 	ctx := t.Context()

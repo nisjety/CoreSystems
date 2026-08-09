@@ -2,15 +2,18 @@ import asyncio
 import json
 from typing import Any
 
-import httpx
 from hubspot import HubSpot
 from odoorpc import ODOO
 from simple_salesforce import Salesforce
 
+from app.network_policy import (
+    UnsafeOutboundTarget,
+    create_pinned_async_http_client,
+    create_pinned_urllib_opener,
+    resolve_public_http_target,
+)
 from app.notion_import import import_from_notion
-from app.network_policy import UnsafeOutboundTarget, validate_public_http_url
 from app.schemas import ImportDocument
-
 
 _MAX_HTTP_RESPONSE_BYTES = 10 * 1024 * 1024
 _MAX_HTTP_RECORDS = 1_000
@@ -104,15 +107,19 @@ async def import_from_odoo(connection: dict[str, Any], options: dict[str, Any]) 
     if port < 1 or port > 65535:
         raise ValueError("Odoo port is invalid")
     host_url = host if "://" in host else f"http://{host}:{port}"
-    validated = await validate_public_http_url(host_url)
-    validated_host = httpx.URL(validated).host
+    target = await resolve_public_http_target(host_url)
     model = options.get("model", "product.template")
     fields = options.get("fields", ["id", "name", "description"])
     domain = options.get("domain", [])
     limit = max(1, min(int(options.get("limit", 100)), 1_000))
 
     def fetch_records() -> list[dict[str, Any]]:
-        odoo = ODOO(validated_host, port=port)
+        odoo = ODOO(
+            target.hostname,
+            protocol="jsonrpc+ssl" if target.url.startswith("https://") else "jsonrpc",
+            port=target.port,
+            opener=create_pinned_urllib_opener(target),
+        )
         odoo.login(
             connection.get("database"), connection.get("username"), connection.get("password")
         )
@@ -140,23 +147,25 @@ async def import_from_http_system(
     connection: dict[str, Any],
     options: dict[str, Any],
 ) -> list[ImportDocument]:
-    url = await validate_public_http_url(connection.get("url"))
+    target = await resolve_public_http_target(connection.get("url"))
     headers = _connector_headers(connection.get("headers", {}))
     params = options.get("params", {})
     if not isinstance(params, dict):
         raise ValueError("connector params must be an object")
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
-        async with client.stream("GET", url, headers=headers, params=params) as response:
-            if response.is_redirect:
-                raise UnsafeOutboundTarget("connector redirects are not permitted")
-            response.raise_for_status()
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > _MAX_HTTP_RESPONSE_BYTES:
-                    raise ValueError("connector response exceeds 10 MiB")
-                chunks.append(chunk)
+    async with (
+        create_pinned_async_http_client(target, timeout=30.0) as client,
+        client.stream("GET", target.url, headers=headers, params=params) as response,
+    ):
+        if response.is_redirect:
+            raise UnsafeOutboundTarget("connector redirects are not permitted")
+        response.raise_for_status()
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > _MAX_HTTP_RESPONSE_BYTES:
+                raise ValueError("connector response exceeds 10 MiB")
+            chunks.append(chunk)
     try:
         payload = json.loads(b"".join(chunks))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -181,7 +190,7 @@ async def import_from_http_system(
                 source_name=title,
                 title=title,
                 text=str(item),
-                metadata={"source": source_name, "url": url},
+                metadata={"source": source_name, "url": target.url},
             )
         )
     return documents

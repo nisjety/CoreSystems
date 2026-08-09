@@ -16,11 +16,15 @@ import (
 
 type fakeContentSink struct {
 	items []store.Item
-	err   error
+	// permissions[i] is the ACL handed to the sink alongside items[i], so tests
+	// can assert the sync engine forwards the captured ACL rather than dropping it.
+	permissions [][]store.Permission
+	err         error
 }
 
-func (f *fakeContentSink) IngestItemContent(_ context.Context, _ store.Source, item store.Item) error {
+func (f *fakeContentSink) IngestItemContent(_ context.Context, _ store.Source, item store.Item, permissions []store.Permission) error {
 	f.items = append(f.items, item)
+	f.permissions = append(f.permissions, permissions)
 	return f.err
 }
 

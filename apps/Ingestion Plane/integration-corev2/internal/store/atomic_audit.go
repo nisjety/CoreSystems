@@ -84,8 +84,8 @@ func cloneConnections(input map[string]Connection) map[string]Connection {
 	output := make(map[string]Connection, len(input))
 	for key, value := range input {
 		value.ProviderContext = cloneStringMap(value.ProviderContext)
-		value.Capabilities = append([]string(nil), value.Capabilities...)
-		value.Scopes = append([]string(nil), value.Scopes...)
+		value.Capabilities = nonNilStringSlice(value.Capabilities)
+		value.Scopes = nonNilStringSlice(value.Scopes)
 		output[key] = value
 	}
 	return output

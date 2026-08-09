@@ -80,6 +80,12 @@ func (i *PagesIngestor) IngestSitePage(ctx context.Context, source store.Source,
 		modifiedAt = item.ModifiedAt
 	}
 
+	// Visibility is deliberately NOT set here, unlike the drive-item ingestor.
+	// The ACL capture this would need is /drives/{id}/items/{id}/permissions,
+	// which does not apply to a site page — the sync engine captures no ACL for
+	// pages at all. Rather than guess (and risk widening access on a hunch),
+	// pages fall through to documents-api's default. Giving pages honest
+	// visibility means capturing site-level permissions first.
 	input := dataplane.CreateDocumentInput{
 		Source:            "sharepoint",
 		Type:              "sharepoint_page",

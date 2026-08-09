@@ -66,6 +66,7 @@ func (f *fakeConnStore) UpdateConnectionProviderContext(_ context.Context, id st
 }
 
 type fakeAssets struct {
+	assets         map[string]MetaWebhookAssets
 	ids            map[string][]string // connection id → asset ids
 	calls          int
 	subscribeCalls int
@@ -87,6 +88,17 @@ func (f *fakeAssets) ListWebhookAccountIDs(_ context.Context, conn store.Connect
 		return nil, f.err
 	}
 	return f.ids[conn.ID], nil
+}
+
+func (f *fakeAssets) ListWebhookAssets(ctx context.Context, conn store.Connection) (MetaWebhookAssets, error) {
+	ids, err := f.ListWebhookAccountIDs(ctx, conn)
+	if err != nil {
+		return MetaWebhookAssets{}, err
+	}
+	if assets, ok := f.assets[conn.ID]; ok {
+		return assets, nil
+	}
+	return MetaWebhookAssets{AccountIDs: ids}, nil
 }
 
 func TestResolve_RetriesEnrichmentAfterTransientGraphFailure(t *testing.T) {
@@ -255,7 +267,9 @@ func TestProvisionConnectionPersistsWebhookAccountIDs(t *testing.T) {
 		ID: "conn_meta", ProviderKey: "meta", OrganizationID: "org_meta", Status: "active",
 		Capabilities: []string{"social.inbox.read"},
 	}}}
-	assets := &fakeAssets{ids: map[string][]string{"conn_meta": {"page-1", "ig-1", "waba-1"}}}
+	assets := &fakeAssets{assets: map[string]MetaWebhookAssets{"conn_meta": {
+		AccountIDs: []string{"page-1", "ig-1", "waba-1"}, PageIDs: []string{"page-1"}, InstagramAccountIDs: []string{"ig-1"}, WhatsAppBusinessAccountIDs: []string{"waba-1"},
+	}}}
 	r := &Resolver{Store: st, Meta: assets}
 
 	updated, err := r.ProvisionConnection(t.Context(), st.connections[0])
@@ -264,6 +278,9 @@ func TestProvisionConnectionPersistsWebhookAccountIDs(t *testing.T) {
 	}
 	if updated.ProviderContext["webhook_account_ids"] != "page-1,ig-1,waba-1" {
 		t.Fatalf("provider context = %v", updated.ProviderContext)
+	}
+	if updated.ProviderContext["meta_page_ids"] != "page-1" || updated.ProviderContext["meta_instagram_account_ids"] != "ig-1" || updated.ProviderContext["meta_whatsapp_business_account_ids"] != "waba-1" {
+		t.Fatalf("typed provider context = %v", updated.ProviderContext)
 	}
 	if assets.subscribeCalls != 1 {
 		t.Fatalf("subscription calls = %d, want 1", assets.subscribeCalls)

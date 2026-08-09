@@ -124,6 +124,8 @@ func (r *MemoryRepository) UpsertConnection(_ context.Context, connection Connec
 	}
 	connection.UpdatedAt = now
 	connection.ProviderContext = cloneStringMap(connection.ProviderContext)
+	connection.Capabilities = nonNilStringSlice(connection.Capabilities)
+	connection.Scopes = nonNilStringSlice(connection.Scopes)
 	r.connections[connection.ID] = connection
 	return connection, nil
 }
@@ -138,6 +140,8 @@ func (r *MemoryRepository) ReconnectConnection(_ context.Context, connection Con
 	connection.CreatedAt = existing.CreatedAt
 	connection.UpdatedAt = time.Now().UTC()
 	connection.ProviderContext = cloneStringMap(connection.ProviderContext)
+	connection.Capabilities = nonNilStringSlice(connection.Capabilities)
+	connection.Scopes = nonNilStringSlice(connection.Scopes)
 	if guildID := existing.ProviderContext["guild_id"]; guildID != "" {
 		connection.ProviderContext["guild_id"] = guildID
 	}
@@ -157,11 +161,24 @@ func (r *MemoryRepository) UpdateConnectionCredentials(_ context.Context, connec
 	current.AccessTokenExpiresAt = connection.AccessTokenExpiresAt
 	current.LastRefreshedAt = connection.LastRefreshedAt
 	current.Status = connection.Status
-	current.Capabilities = append([]string(nil), connection.Capabilities...)
-	current.Scopes = append([]string(nil), connection.Scopes...)
+	current.Capabilities = nonNilStringSlice(connection.Capabilities)
+	current.Scopes = nonNilStringSlice(connection.Scopes)
 	current.UpdatedAt = time.Now().UTC()
 	r.connections[connection.ID] = current
 	return current, nil
+}
+
+func (r *MemoryRepository) UpdateConnectionSyncStatus(_ context.Context, connectionID, status string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	connection, ok := r.connections[connectionID]
+	if !ok || connection.DeletedAt != nil {
+		return ErrNotFound
+	}
+	connection.LastSyncStatus = status
+	connection.UpdatedAt = time.Now().UTC()
+	r.connections[connectionID] = connection
+	return nil
 }
 
 func (r *MemoryRepository) ListConnections(_ context.Context, filter ConnectionFilter) ([]Connection, error) {
@@ -203,6 +220,21 @@ func (r *MemoryRepository) FindActiveConnection(_ context.Context, organizationI
 	defer r.mu.RUnlock()
 	for _, connection := range r.connections {
 		if connection.OrganizationID != organizationID || connection.ConnectorType != connectorType || connection.DeletedAt != nil {
+			continue
+		}
+		if connection.Status == "active" || connection.Status == "needs_refresh" {
+			connection.ProviderContext = cloneStringMap(connection.ProviderContext)
+			return connection, nil
+		}
+	}
+	return Connection{}, ErrNotFound
+}
+
+func (r *MemoryRepository) FindActiveConnectionByProviderAccount(_ context.Context, organizationID, connectorType, providerAccountID string) (Connection, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, connection := range r.connections {
+		if connection.OrganizationID != organizationID || connection.ConnectorType != connectorType || connection.ProviderAccountID != providerAccountID || connection.DeletedAt != nil {
 			continue
 		}
 		if connection.Status == "active" || connection.Status == "needs_refresh" {
@@ -380,10 +412,12 @@ func (r *MemoryRepository) UpdateSyncJob(_ context.Context, job SyncJob) (SyncJo
 }
 
 func syncClaimStatus(target string) string {
-	if strings.EqualFold(strings.TrimSpace(target), "finspo-core") {
+	switch strings.ToLower(strings.TrimSpace(target)) {
+	case "finspo-core", "email-worker":
 		return "waiting_provider"
+	default:
+		return "handoff_data_plane"
 	}
-	return "handoff_data_plane"
 }
 
 func mergeAnyMap(base map[string]any, extra map[string]any) map[string]any {

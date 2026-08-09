@@ -30,8 +30,8 @@ The simplest workflow is `make e2e` (or its equivalent):
 ```bash
 # 1. Bring up the stack
 docker compose up -d \
-    aquatiq-postgres-local \
-    aquatiq-redis-local \
+    coresystem-postgres-local \
+    coresystem-redis-local \
     org-core-temporal \
     quarry-nats \
     quarry-control \

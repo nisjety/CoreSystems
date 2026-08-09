@@ -61,7 +61,7 @@ func (r *PostgresRepository) CreateConnectSession(ctx context.Context, session C
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 	`, session.ID, session.ProviderKey, session.ConnectorType, session.OrganizationID, session.WorkspaceID,
 		session.UserID, session.UserEmail, session.StateHash, session.CodeVerifierCiphertext, session.RedirectURI,
-		session.ReturnURL, providerContext, session.Capabilities, session.Scopes, session.ExpiresAt, session.CreatedAt)
+		session.ReturnURL, providerContext, nonNilStringSlice(session.Capabilities), nonNilStringSlice(session.Scopes), session.ExpiresAt, session.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create connect session: %w", err)
 	}
@@ -129,7 +129,7 @@ func (r *PostgresRepository) UpsertConnection(ctx context.Context, connection Co
 		RETURNING `+connectionColumns,
 		connection.ID, connection.ProviderKey, connection.ConnectorType, connection.OrganizationID, connection.WorkspaceID,
 		connection.UserID, connection.UserEmail, connection.Status, connection.DisplayName, connection.ProviderAccountID,
-		connection.TenantID, providerContext, connection.Capabilities, connection.Scopes, connection.EncryptedAccessToken,
+		connection.TenantID, providerContext, nonNilStringSlice(connection.Capabilities), nonNilStringSlice(connection.Scopes), connection.EncryptedAccessToken,
 		connection.EncryptedRefreshToken, connection.AccessTokenExpiresAt, nullableTime(connection.LastRefreshedAt),
 		connection.LastSyncStatus, connection.CreatedAt, connection.UpdatedAt).Scan(connectionScanDest(&connection)...)
 	if err != nil {
@@ -174,8 +174,8 @@ func (r *PostgresRepository) ReconnectConnection(ctx context.Context, connection
 		connection.ProviderAccountID,
 		connection.TenantID,
 		providerContext,
-		connection.Capabilities,
-		connection.Scopes,
+		nonNilStringSlice(connection.Capabilities),
+		nonNilStringSlice(connection.Scopes),
 		connection.EncryptedAccessToken,
 		connection.EncryptedRefreshToken,
 		connection.AccessTokenExpiresAt,
@@ -213,8 +213,8 @@ func (r *PostgresRepository) UpdateConnectionCredentials(ctx context.Context, co
 		connection.AccessTokenExpiresAt,
 		nullableTime(connection.LastRefreshedAt),
 		connection.Status,
-		connection.Capabilities,
-		connection.Scopes,
+		nonNilStringSlice(connection.Capabilities),
+		nonNilStringSlice(connection.Scopes),
 	).Scan(connectionScanDest(&saved)...)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -223,6 +223,17 @@ func (r *PostgresRepository) UpdateConnectionCredentials(ctx context.Context, co
 		return Connection{}, fmt.Errorf("update connection credentials: %w", err)
 	}
 	return saved, nil
+}
+
+func (r *PostgresRepository) UpdateConnectionSyncStatus(ctx context.Context, connectionID, status string) error {
+	if _, err := r.pool.Exec(ctx, `
+		UPDATE integration_connections
+		SET last_sync_status = $2, updated_at = now()
+		WHERE id = $1 AND deleted_at IS NULL
+	`, connectionID, status); err != nil {
+		return fmt.Errorf("update connection sync status: %w", err)
+	}
+	return nil
 }
 
 func (r *PostgresRepository) ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error) {
@@ -275,6 +286,28 @@ func (r *PostgresRepository) FindActiveConnection(ctx context.Context, organizat
 			return Connection{}, ErrNotFound
 		}
 		return Connection{}, fmt.Errorf("find active connection: %w", err)
+	}
+	return connection, nil
+}
+
+func (r *PostgresRepository) FindActiveConnectionByProviderAccount(ctx context.Context, organizationID, connectorType, providerAccountID string) (Connection, error) {
+	var connection Connection
+	err := r.pool.QueryRow(ctx, `
+		SELECT `+connectionColumns+`
+		FROM integration_connections
+		WHERE organization_id = $1
+		  AND connector_type = $2
+		  AND provider_account_id = $3
+		  AND deleted_at IS NULL
+		  AND status IN ('active', 'needs_refresh')
+		ORDER BY updated_at DESC
+		LIMIT 1
+	`, organizationID, connectorType, providerAccountID).Scan(connectionScanDest(&connection)...)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Connection{}, ErrNotFound
+		}
+		return Connection{}, fmt.Errorf("find active connection by provider account: %w", err)
 	}
 	return connection, nil
 }

@@ -189,7 +189,7 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/me":
-			fmt.Fprint(w, `{"mail": "support@aquatiq.com", "userPrincipalName": "operator@aquatiq.com"}`)
+			fmt.Fprint(w, `{"mail": "support@coresystem.com", "userPrincipalName": "operator@coresystem.com"}`)
 		case strings.Contains(r.URL.RawQuery, "changeType=created"):
 			if !strings.Contains(r.URL.RawQuery, "%24filter=receivedDateTime") && !strings.Contains(r.URL.RawQuery, "$filter=receivedDateTime") {
 				t.Errorf("initial delta missing receivedDateTime filter: %s", r.URL.RawQuery)
@@ -224,7 +224,7 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	if result.NextCursor != server.URL+"/delta-final" {
 		t.Errorf("cursor = %q, want the deltaLink", result.NextCursor)
 	}
-	if result.ProviderContextPatch["mailbox_address"] != "support@aquatiq.com" {
+	if result.ProviderContextPatch["mailbox_address"] != "support@coresystem.com" {
 		t.Errorf("mailbox address = %q, want provider-confirmed mail address", result.ProviderContextPatch["mailbox_address"])
 	}
 	msg := result.Messages[0]

@@ -926,7 +926,7 @@ mod tests {
             sub: "user-real".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
-            org_id: "org-real-aquatiq".into(),
+            org_id: "org-real-coresystem".into(),
             user_id: "user-real".into(),
             principal_type: Some("user".into()),
             service_id: None,
@@ -948,7 +948,7 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), usize::MAX)
             .await
             .unwrap();
-        assert_eq!(&body[..], b"org-real-aquatiq");
+        assert_eq!(&body[..], b"org-real-coresystem");
 
         clear_env();
         reset_jwks_cache_for_test().await;
@@ -976,7 +976,7 @@ mod tests {
             sub: "user-real".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
-            org_id: "org-real-aquatiq".into(),
+            org_id: "org-real-coresystem".into(),
             user_id: "user-real".into(),
             principal_type: Some("user".into()),
             service_id: None,

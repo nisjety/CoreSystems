@@ -13,6 +13,13 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	// Config.Load always resolves these fallbacks, but preserving them here
+	// keeps explicitly constructed test and embedded configurations compatible.
+	metaClientID := firstNonEmpty(cfg.MetaClientID, cfg.FacebookClientID)
+	metaClientSecret := firstNonEmpty(cfg.MetaClientSecret, cfg.FacebookClientSecret)
+	metaAuthorizationURL := firstNonEmpty(cfg.MetaAuthorizationURL, cfg.FacebookAuthorizationURL)
+	metaTokenURL := firstNonEmpty(cfg.MetaTokenURL, cfg.FacebookTokenURL)
+	metaAPIBaseURL := firstNonEmpty(cfg.MetaAPIBaseURL, cfg.FacebookAPIBaseURL)
 	return map[string]ProviderOAuthClient{
 		"microsoft": &MicrosoftProviderClient{base: microsoft},
 		"slack": NewOAuth2Client(OAuth2ClientConfig{
@@ -36,7 +43,10 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			UsePKCE:          true,
 			ExtraAuthParams: map[string]string{
 				"access_type": "offline",
-				"prompt":      "consent",
+				// Google documents a space-delimited combination of consent and
+				// select_account. This keeps refresh-token consent while allowing
+				// an operator to choose a different Google account on reconnect.
+				"prompt": "select_account consent",
 			},
 			HTTPClient: httpClient,
 		}),
@@ -48,7 +58,11 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			TokenURL:         cfg.NotionTokenURL,
 			APIBaseURL:       cfg.NotionAPIBaseURL,
 			ScopeSeparator:   " ",
-			HTTPClient:       httpClient,
+			ExtraAuthParams: map[string]string{
+				// Notion's public OAuth contract requires an end-user grant.
+				"owner": "user",
+			},
+			HTTPClient: httpClient,
 		}),
 		"github": NewOAuth2Client(OAuth2ClientConfig{
 			ProviderKey:      "github",
@@ -93,7 +107,10 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			UseBasicAuth:     true,
 			HTTPClient:       httpClient,
 		}),
-		"instagram": NewMetaOAuthClient(OAuth2ClientConfig{
+		// Instagram API with Instagram Login has a different OAuth and Graph
+		// surface from Facebook Login for Business. It must never share the
+		// MetaOAuthClient's Facebook token-exchange or Graph endpoints.
+		"instagram": NewInstagramBusinessLoginClient(OAuth2ClientConfig{
 			ProviderKey:      "instagram",
 			ClientID:         cfg.InstagramClientID,
 			ClientSecret:     cfg.InstagramClientSecret,
@@ -102,7 +119,7 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 			APIBaseURL:       cfg.InstagramAPIBaseURL,
 			ScopeSeparator:   ",",
 			HTTPClient:       httpClient,
-		}, nil),
+		}),
 		"facebook": NewMetaOAuthClient(OAuth2ClientConfig{
 			ProviderKey:      "facebook",
 			ClientID:         cfg.FacebookClientID,
@@ -153,11 +170,11 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 		// at all (works in dev mode for app-role users on a Business-type app).
 		"meta": NewMetaOAuthClient(OAuth2ClientConfig{
 			ProviderKey:      "meta",
-			ClientID:         cfg.FacebookClientID,
-			ClientSecret:     cfg.FacebookClientSecret,
-			AuthorizationURL: cfg.FacebookAuthorizationURL,
-			TokenURL:         cfg.FacebookTokenURL,
-			APIBaseURL:       cfg.FacebookAPIBaseURL,
+			ClientID:         metaClientID,
+			ClientSecret:     metaClientSecret,
+			AuthorizationURL: metaAuthorizationURL,
+			TokenURL:         metaTokenURL,
+			APIBaseURL:       metaAPIBaseURL,
 			ScopeSeparator:   ",",
 			HTTPClient:       httpClient,
 		}, cfg.MetaBusinessLoginConfigIDs),

@@ -110,6 +110,71 @@ func TestVerifierRejectsInvalidOrMismatchedAttestations(t *testing.T) {
 	}
 }
 
+func TestVerifierSupportsMultipleIssuersWithDistinctKeys(t *testing.T) {
+	conversationPublic, conversationPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey(conversation-core) error: %v", err)
+	}
+	executionPublic, executionPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey(model-execution) error: %v", err)
+	}
+	raw, err := json.Marshal([]map[string]string{
+		{"issuer": "conversation-core", "kid": "conversation-write-2026-07", "public_key": base64.StdEncoding.EncodeToString(conversationPublic)},
+		{"issuer": "model-execution", "kid": "model-execution-write-2026-08", "public_key": base64.StdEncoding.EncodeToString(executionPublic)},
+	})
+	if err != nil {
+		t.Fatalf("Marshal trusted keys error: %v", err)
+	}
+	keys, err := ParseTrustedKeysJSON(string(raw))
+	if err != nil {
+		t.Fatalf("ParseTrustedKeysJSON error: %v", err)
+	}
+	verifier := NewVerifier(keys, func() time.Time { return time.Unix(testNowUnix, 0).UTC() })
+
+	binding := testBinding(t)
+	executionBinding := binding
+	executionBinding.PresenterService = "model-execution"
+	executionHeader := Header{Algorithm: "EdDSA", Type: AttestationType, KeyID: "model-execution-write-2026-08"}
+	executionClaims := withClaims(testClaims(binding), func(c *Claims) {
+		c.Issuer = "model-execution"
+		c.PresenterService = "model-execution"
+	})
+
+	t.Run("model-execution verifies against its own registered key", func(t *testing.T) {
+		token := signCompactJWS(t, executionPrivate, executionHeader, executionClaims)
+		verified, err := verifier.Verify(token, executionBinding)
+		if err != nil {
+			t.Fatalf("Verify error: %v", err)
+		}
+		if verified.Issuer != "model-execution" || verified.KeyID != "model-execution-write-2026-08" {
+			t.Fatalf("verified attestation = %#v, want model-execution identifiers", verified)
+		}
+	})
+
+	t.Run("conversation-core still verifies against its own key unaffected by the second issuer", func(t *testing.T) {
+		token := signCompactJWS(t, conversationPrivate, testHeader(), testClaims(binding))
+		verified, err := verifier.Verify(token, binding)
+		if err != nil {
+			t.Fatalf("Verify error: %v", err)
+		}
+		if verified.Issuer != "conversation-core" {
+			t.Fatalf("verified attestation = %#v, want conversation-core", verified)
+		}
+	})
+
+	t.Run("a key registered for one issuer cannot verify claims asserting a different issuer", func(t *testing.T) {
+		// Signed with conversation-core's own key under conversation-core's own
+		// kid, but the claims payload asserts the model-execution issuer. The
+		// signature itself is valid; only the issuer binding must reject this.
+		spoofed := withClaims(testClaims(binding), func(c *Claims) { c.Issuer = "model-execution" })
+		token := signCompactJWS(t, conversationPrivate, testHeader(), spoofed)
+		if _, err := verifier.Verify(token, binding); err == nil {
+			t.Fatal("Verify error = nil, want rejection of a kid/issuer mismatch")
+		}
+	})
+}
+
 func TestParseTrustedKeysJSONRejectsUnsafeConfiguration(t *testing.T) {
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -130,6 +195,7 @@ func TestParseTrustedKeysJSONRejectsUnsafeConfiguration(t *testing.T) {
 		{name: "wrong key size", raw: `[{"issuer":"conversation-core","kid":"kid-1","public_key":"` + base64.StdEncoding.EncodeToString([]byte("short")) + `"}]`},
 		{name: "zero key", raw: `[{"issuer":"conversation-core","kid":"kid-1","public_key":"` + base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize)) + `"}]`},
 		{name: "duplicate issuer kid", raw: `[{"issuer":"conversation-core","kid":"kid-1","public_key":"` + encoded + `"},{"issuer":"conversation-core","kid":"kid-1","public_key":"` + encoded + `"}]`},
+		{name: "duplicate kid across different issuers", raw: `[{"issuer":"conversation-core","kid":"kid-1","public_key":"` + encoded + `"},{"issuer":"model-execution","kid":"kid-1","public_key":"` + encoded + `"}]`},
 		{name: "invalid trailing bytes", raw: `[{"issuer":"conversation-core","kid":"kid-1","public_key":"` + encoded + `"}]garbage`},
 	}
 	for _, tt := range tests {

@@ -22,7 +22,7 @@ func TestToJobHistoryEvent_ForwardsOwnerOrgAndKind(t *testing.T) {
 		Type:      quarrycontracts.EvtPageFetched,
 		Seq:       3,
 		Timestamp: ts,
-		Payload:   map[string]any{"url": "https://aquatiq.com"},
+		Payload:   map[string]any{"url": "https://coresystem.com"},
 	}
 
 	wire := toJobHistoryEvent(evt, owner)

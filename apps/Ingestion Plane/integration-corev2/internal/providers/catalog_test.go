@@ -228,6 +228,41 @@ func TestCatalogIncludesSocialProvidersWithStagedOAuthReadiness(t *testing.T) {
 	}
 }
 
+func TestMetaMessengerBundleRequestsOnlyMessengerPermissions(t *testing.T) {
+	meta := Meta()
+	scopes := ResolveScopes(meta, ResolveCapabilities(meta, nil, []string{"messenger"}))
+
+	want := []string{"pages_manage_metadata", "pages_messaging", "pages_read_engagement", "pages_show_list"}
+	if !slices.Equal(scopes, want) {
+		t.Fatalf("meta messenger scopes = %v, want %v", scopes, want)
+	}
+	for _, forbidden := range []string{
+		"ads_management", "business_management", "catalog_management", "instagram_basic",
+		"threads_basic", "whatsapp_business_management",
+	} {
+		if slices.Contains(scopes, forbidden) {
+			t.Fatalf("meta messenger scopes = %v, must not include %s", scopes, forbidden)
+		}
+	}
+}
+
+func TestInstagramInboxBundleRequestsOnlyInstagramInboxPermissions(t *testing.T) {
+	instagram := Instagram()
+	scopes := ResolveScopes(instagram, ResolveCapabilities(instagram, nil, []string{"inbox"}))
+
+	want := []string{
+		"instagram_business_basic", "instagram_business_manage_comments", "instagram_business_manage_messages",
+	}
+	if !slices.Equal(scopes, want) {
+		t.Fatalf("Instagram inbox scopes = %v, want %v", scopes, want)
+	}
+	for _, forbidden := range []string{"ads_management", "business_management", "threads_basic", "whatsapp_business_management"} {
+		if slices.Contains(scopes, forbidden) {
+			t.Fatalf("Instagram inbox scopes = %v, must not include %s", scopes, forbidden)
+		}
+	}
+}
+
 func TestProviderReadinessMarksMissingCredentials(t *testing.T) {
 	catalog := WithReadiness(Catalog(), map[string][]string{
 		"stripe": {"STRIPE_CLIENT_ID"},

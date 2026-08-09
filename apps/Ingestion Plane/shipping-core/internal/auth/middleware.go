@@ -111,7 +111,7 @@ func NewMiddleware(config Config) (func(http.Handler) http.Handler, error) {
 				writeAuthError(w, http.StatusForbidden, "identity context does not match verified token")
 				return
 			}
-			if principal.PrincipalType == "service" && !serviceScopeAllows(principal.Scopes, r.Method) {
+			if principal.PrincipalType == "service" && !serviceScopeAllows(principal.Scopes, r.Method, r.URL.Path) {
 				writeAuthError(w, http.StatusForbidden, "service principal lacks shipping scope")
 				return
 			}
@@ -223,8 +223,18 @@ func conflicts(unverified, verified string) bool {
 	return unverified != "" && unverified != verified
 }
 
-func serviceScopeAllows(scopes []string, method string) bool {
-	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+// readShapedPostRoutes are POST endpoints that only ever read — they take a
+// JSON body to describe the query (a quote request) rather than to mutate
+// anything. Every other POST route (bookings, manifests, pickups, confirm,
+// cancel) genuinely creates or changes durable state and must stay
+// write-gated regardless of this set.
+var readShapedPostRoutes = map[string]bool{
+	"/api/quotes":           true,
+	"/api/quotes/recommend": true,
+}
+
+func serviceScopeAllows(scopes []string, method, path string) bool {
+	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions || readShapedPostRoutes[path] {
 		return slices.Contains(scopes, "shipping:read") || slices.Contains(scopes, "shipping:write")
 	}
 	return slices.Contains(scopes, "shipping:write")

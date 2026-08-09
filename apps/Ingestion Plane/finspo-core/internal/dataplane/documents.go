@@ -55,6 +55,10 @@ type CreateDocumentInput struct {
 	Metadata          map[string]any `json:"metadata,omitempty"`
 	IdempotencyKey    string         `json:"idempotency_key,omitempty"`
 	CreatedBy         string         `json:"created_by,omitempty"`
+	// Visibility mirrors the source item's own ACL ("org" or "private").
+	// Omitted means "let documents-api decide", which for a service caller
+	// resolves to `private` — so callers that know the ACL must send it.
+	Visibility string `json:"visibility,omitempty"`
 	// ModifiedAt is the source item's own last-modified time (SharePoint's
 	// lastModifiedDateTime), forwarded as document_date. Distinct from
 	// Data Plane's own created_at/updated_at bookkeeping. Nil is a valid,
@@ -95,6 +99,9 @@ func (c *DocumentsClient) CreateDocument(ctx context.Context, orgID string, inpu
 	}
 	if input.ZDRClassification != "" {
 		payload["zdr_classification"] = input.ZDRClassification
+	}
+	if input.Visibility != "" {
+		payload["visibility"] = input.Visibility
 	}
 	if len(input.Metadata) > 0 {
 		payload["metadata"] = input.Metadata

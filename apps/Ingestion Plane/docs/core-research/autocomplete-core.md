@@ -61,7 +61,7 @@ Three things changed materially since the 2026-06-07 note, which called it
 - **Declared in the ROOT compose** `/docker-compose.yml`, not the plane compose:
   - `autocomplete-core` — build `./apps/Ingestion Plane/autocomplete-core`,
     `container_name: autocomplete-core`, **`ports: "3219:3219"`**, network
-    `aquatiq-local` (external → `verevon-net`), `depends_on: [quarry-nats, quarry-sonic]`,
+    `coresystem-local` (external → `verevon-net`), `depends_on: [quarry-nats, quarry-sonic]`,
     healthcheck `wget http://localhost:3219/health`. [source-only]
   - `quarry-sonic` — the Sonic index, same network, config from
     `autocomplete-core/deploy/sonic.template.cfg` with `SONIC_PASSWORD` injected. [source-only]

@@ -16,15 +16,15 @@ plus a self-contained `docker-compose.yml` for running Quarry v2 standalone
 ## Production deployment (CoreSystem stack)
 
 The three services are also wired into `/Volumes/Lagring/Triodelab/CoreSystem/docker-compose.yml`
-which reuses the shared `aquatiq-postgres-local`, `aquatiq-redis-local`,
-`aquatiq-nats-local`, and `org-core-temporal` infrastructure.
+which reuses the shared `coresystem-postgres-local`, `coresystem-redis-local`,
+`coresystem-nats-local`, and `org-core-temporal` infrastructure.
 
 ### Bootstrap (first-time setup)
 
 ```bash
 # 1. Create the quarry_v2 database in the shared Postgres
-docker exec aquatiq-postgres-local psql -U "${DB_USER:-aquatiq}" \
-    -c "CREATE DATABASE quarry_v2 OWNER \"${DB_USER:-aquatiq}\";"
+docker exec coresystem-postgres-local psql -U "${DB_USER:-coresystem}" \
+    -c "CREATE DATABASE quarry_v2 OWNER \"${DB_USER:-coresystem}\";"
 
 # 2. Build + start Quarry v2 services
 cd /Volumes/Lagring/Triodelab/CoreSystem

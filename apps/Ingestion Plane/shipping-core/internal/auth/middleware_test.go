@@ -175,6 +175,45 @@ func TestMiddlewareAcceptsScopedServicePrincipal(t *testing.T) {
 	}
 }
 
+func TestMiddlewareAcceptsReadScopedServicePrincipalForQuotes(t *testing.T) {
+	middleware, privateKey, keyID := newTestMiddleware(t)
+	token := signTestToken(t, privateKey, keyID, map[string]any{
+		"sub":            "service:execution-core",
+		"user_id":        nil,
+		"service_id":     "service:execution-core",
+		"principal_type": "service",
+		"scopes":         []string{"shipping:read"},
+	})
+
+	for _, path := range []string{"/api/quotes", "/api/quotes/recommend"} {
+		response := serve(middleware(noContentHandler()), http.MethodPost, path, map[string]string{
+			"Authorization": "Bearer " + token,
+		})
+		if response.Code != http.StatusNoContent {
+			t.Errorf("path %s: status = %d, want %d (a read-scoped principal must reach a read-shaped POST route)", path, response.Code, http.StatusNoContent)
+		}
+	}
+}
+
+func TestMiddlewareRejectsReadScopedServicePrincipalForBookings(t *testing.T) {
+	middleware, privateKey, keyID := newTestMiddleware(t)
+	token := signTestToken(t, privateKey, keyID, map[string]any{
+		"sub":            "service:execution-core",
+		"user_id":        nil,
+		"service_id":     "service:execution-core",
+		"principal_type": "service",
+		"scopes":         []string{"shipping:read"},
+	})
+
+	response := serve(middleware(noContentHandler()), http.MethodPost, "/api/bookings", map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d (shipping:read must never be enough to create a booking)", response.Code, http.StatusForbidden)
+	}
+}
+
 func TestNewMiddlewareRejectsMissingVerificationMaterial(t *testing.T) {
 	_, err := NewMiddleware(Config{Audience: testAudience, Issuer: testIssuer})
 	if err == nil {

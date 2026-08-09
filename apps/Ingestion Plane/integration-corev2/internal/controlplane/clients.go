@@ -33,16 +33,17 @@ const (
 var errUnknownSigningKey = errors.New("unknown signing key")
 
 type AuthClient struct {
-	baseURL        string
-	jwksURL        string
-	issuer         string
-	audience       string
-	httpClient     *http.Client
-	keysMu         sync.RWMutex
-	keysRefreshMu  sync.Mutex
-	keys           map[string]*rsa.PublicKey
-	keysExpiry     time.Time
-	keysGeneration uint64
+	baseURL          string
+	jwksURL          string
+	issuer           string
+	audience         string
+	httpClient       *http.Client
+	keysMu           sync.RWMutex
+	keysRefreshMu    sync.Mutex
+	keys             map[string]*rsa.PublicKey
+	keysExpiry       time.Time
+	keysGeneration   uint64
+	discoveredIssuer string
 }
 
 type OrgClient struct {
@@ -145,17 +146,17 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Princi
 	if c.baseURL == "" || c.jwksURL == "" || c.issuer == "" || c.audience == "" {
 		return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unconfigured", "AUTH_CORE_URL is not configured")
 	}
-	keys, generation, err := c.fetchJWKS(ctx, false, 0)
+	keys, issuer, generation, err := c.fetchJWKS(ctx, false, 0)
 	if err != nil {
 		return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unreachable", "Unable to load auth-core verification keys")
 	}
-	claims, parsed, err := c.parseToken(token, keys)
+	claims, parsed, err := c.parseToken(token, keys, issuer)
 	if errors.Is(err, errUnknownSigningKey) {
-		keys, _, err = c.fetchJWKS(ctx, true, generation)
+		keys, issuer, _, err = c.fetchJWKS(ctx, true, generation)
 		if err != nil {
 			return auth.Principal{}, auth.NewError(http.StatusServiceUnavailable, "auth_core_unreachable", "Unable to refresh auth-core verification keys")
 		}
-		claims, parsed, err = c.parseToken(token, keys)
+		claims, parsed, err = c.parseToken(token, keys, issuer)
 	}
 	if err != nil {
 		return auth.Principal{}, auth.NewError(http.StatusUnauthorized, "unauthorized", "Token verification failed")
@@ -183,7 +184,7 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Princi
 	}, nil
 }
 
-func (c *AuthClient) parseToken(token string, keys map[string]*rsa.PublicKey) (jwt.MapClaims, *jwt.Token, error) {
+func (c *AuthClient) parseToken(token string, keys map[string]*rsa.PublicKey, issuer string) (jwt.MapClaims, *jwt.Token, error) {
 	claims := jwt.MapClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(parsed *jwt.Token) (any, error) {
 		if parsed.Method.Alg() != jwt.SigningMethodRS256.Alg() {
@@ -198,7 +199,7 @@ func (c *AuthClient) parseToken(token string, keys map[string]*rsa.PublicKey) (j
 	},
 		jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()}),
 		jwt.WithAudience(c.audience),
-		jwt.WithIssuer(c.issuer),
+		jwt.WithIssuer(issuer),
 		jwt.WithExpirationRequired(),
 		jwt.WithIssuedAt(),
 		jwt.WithLeeway(30*time.Second),
@@ -206,13 +207,14 @@ func (c *AuthClient) parseToken(token string, keys map[string]*rsa.PublicKey) (j
 	return claims, parsed, err
 }
 
-func (c *AuthClient) fetchJWKS(ctx context.Context, force bool, observedGeneration uint64) (map[string]*rsa.PublicKey, uint64, error) {
+func (c *AuthClient) fetchJWKS(ctx context.Context, force bool, observedGeneration uint64) (map[string]*rsa.PublicKey, string, uint64, error) {
 	c.keysMu.RLock()
 	if len(c.keys) > 0 && ((!force && time.Now().Before(c.keysExpiry)) || (force && c.keysGeneration != observedGeneration)) {
 		keys := c.keys
+		issuer := c.discoveredIssuer
 		generation := c.keysGeneration
 		c.keysMu.RUnlock()
-		return keys, generation, nil
+		return keys, issuer, generation, nil
 	}
 	c.keysMu.RUnlock()
 
@@ -221,26 +223,28 @@ func (c *AuthClient) fetchJWKS(ctx context.Context, force bool, observedGenerati
 	c.keysMu.RLock()
 	if len(c.keys) > 0 && ((!force && time.Now().Before(c.keysExpiry)) || (force && c.keysGeneration != observedGeneration)) {
 		keys := c.keys
+		issuer := c.discoveredIssuer
 		generation := c.keysGeneration
 		c.keysMu.RUnlock()
-		return keys, generation, nil
+		return keys, issuer, generation, nil
 	}
 	c.keysMu.RUnlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.jwksURL, nil)
 	if err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("JWKS returned HTTP %d", resp.StatusCode)
+		return nil, "", 0, fmt.Errorf("JWKS returned HTTP %d", resp.StatusCode)
 	}
 	var document struct {
-		Keys []struct {
+		PlaneTokenIssuer string `json:"planeTokenIssuer"`
+		Keys             []struct {
 			KeyID string `json:"kid"`
 			Type  string `json:"kty"`
 			Use   string `json:"use"`
@@ -250,7 +254,7 @@ func (c *AuthClient) fetchJWKS(ctx context.Context, force bool, observedGenerati
 		} `json:"keys"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&document); err != nil {
-		return nil, 0, err
+		return nil, "", 0, err
 	}
 	keys := make(map[string]*rsa.PublicKey, len(document.Keys))
 	for _, item := range document.Keys {
@@ -273,15 +277,20 @@ func (c *AuthClient) fetchJWKS(ctx context.Context, force bool, observedGenerati
 		}
 	}
 	if len(keys) == 0 {
-		return nil, 0, fmt.Errorf("JWKS contains no usable RS256 keys")
+		return nil, "", 0, fmt.Errorf("JWKS contains no usable RS256 keys")
+	}
+	issuer := strings.TrimSpace(document.PlaneTokenIssuer)
+	if issuer == "" {
+		issuer = c.issuer
 	}
 	c.keysMu.Lock()
 	c.keys = keys
+	c.discoveredIssuer = issuer
 	c.keysExpiry = time.Now().Add(5 * time.Minute)
 	c.keysGeneration++
 	generation := c.keysGeneration
 	c.keysMu.Unlock()
-	return keys, generation, nil
+	return keys, issuer, generation, nil
 }
 
 func stringClaim(claims jwt.MapClaims, key string) string {

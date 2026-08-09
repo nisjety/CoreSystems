@@ -33,9 +33,10 @@ type TokenSource interface {
 // are terminal when inbox/Messenger is enabled; WABA failures are terminal
 // only when WhatsApp management is enabled.
 type GraphAssetLister struct {
-	BaseURL string // e.g. https://graph.facebook.com/v25.0
-	Tokens  TokenSource
-	HTTP    *http.Client
+	BaseURL          string // e.g. https://graph.facebook.com/v25.0
+	InstagramBaseURL string // e.g. https://graph.instagram.com/v25.0
+	Tokens           TokenSource
+	HTTP             *http.Client
 }
 
 type graphIDPage struct {
@@ -57,7 +58,19 @@ type graphBusinessPage struct {
 }
 
 func (g *GraphAssetLister) ListWebhookAccountIDs(ctx context.Context, conn store.Connection) ([]string, error) {
-	return g.listWebhookAccountIDs(ctx, conn, nil)
+	assets, err := g.ListWebhookAssets(ctx, conn)
+	return assets.AccountIDs, err
+}
+
+func (g *GraphAssetLister) ListWebhookAssets(ctx context.Context, conn store.Connection) (MetaWebhookAssets, error) {
+	// Instagram API with Instagram Login issues a graph.instagram.com token for
+	// the professional account itself. It cannot enumerate Facebook Pages via
+	// /me/accounts, and Instagram webhook subscriptions are configured at the
+	// Meta app level rather than a per-account /subscribed_apps edge.
+	if conn.ProviderKey == "instagram" {
+		return g.listStandaloneInstagramAssets(ctx, conn)
+	}
+	return g.listWebhookAssets(ctx, conn, nil)
 }
 
 // SubscribeWebhookAccounts enables only the webhook families represented by
@@ -65,31 +78,74 @@ func (g *GraphAssetLister) ListWebhookAccountIDs(ctx context.Context, conn store
 // separate so Resolver can reject ambiguous tenant bindings before any
 // provider-side subscription mutation occurs.
 func (g *GraphAssetLister) SubscribeWebhookAccounts(ctx context.Context, conn store.Connection, accountIDs []string) error {
+	if conn.ProviderKey == "instagram" {
+		assets, err := g.listStandaloneInstagramAssets(ctx, conn)
+		if err != nil {
+			return err
+		}
+		for _, accountID := range accountIDs {
+			if !containsAssetID(assets.InstagramAccountIDs, strings.TrimSpace(accountID)) {
+				return fmt.Errorf("Instagram professional account %s no longer matches this connection", accountID)
+			}
+		}
+		return nil
+	}
 	allowed := make(map[string]bool, len(accountIDs))
 	for _, id := range accountIDs {
 		allowed[strings.TrimSpace(id)] = true
 	}
-	_, err := g.listWebhookAccountIDs(ctx, conn, allowed)
+	_, err := g.listWebhookAssets(ctx, conn, allowed)
 	return err
 }
 
-func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store.Connection, subscribeIDs map[string]bool) ([]string, error) {
+func (g *GraphAssetLister) listStandaloneInstagramAssets(ctx context.Context, conn store.Connection) (MetaWebhookAssets, error) {
+	if !connectionHasAnyCapability(conn, "social.inbox.read") {
+		return MetaWebhookAssets{}, nil
+	}
 	if g.Tokens == nil {
-		return nil, fmt.Errorf("graph asset lister has no token source")
+		return MetaWebhookAssets{}, fmt.Errorf("graph asset lister has no token source")
 	}
 	token, err := g.Tokens.AccessTokenForConnection(ctx, conn.ID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve token: %w", err)
+		return MetaWebhookAssets{}, fmt.Errorf("resolve Instagram token: %w", err)
+	}
+	var profile struct {
+		ID string `json:"id"`
+	}
+	baseURL := g.instagramBaseURL()
+	if err := g.getJSONFromBase(ctx, token.AccessToken, baseURL, baseURL+"/me?fields=id,username", &profile); err != nil {
+		return MetaWebhookAssets{}, fmt.Errorf("read Instagram professional account: %w", err)
+	}
+	accountID := strings.TrimSpace(profile.ID)
+	if accountID == "" {
+		return MetaWebhookAssets{}, fmt.Errorf("Instagram Login returned no professional account id")
+	}
+	return MetaWebhookAssets{
+		AccountIDs:          []string{accountID},
+		InstagramAccountIDs: []string{accountID},
+	}, nil
+}
+
+func (g *GraphAssetLister) listWebhookAssets(ctx context.Context, conn store.Connection, subscribeIDs map[string]bool) (MetaWebhookAssets, error) {
+	if g.Tokens == nil {
+		return MetaWebhookAssets{}, fmt.Errorf("graph asset lister has no token source")
+	}
+	token, err := g.Tokens.AccessTokenForConnection(ctx, conn.ID)
+	if err != nil {
+		return MetaWebhookAssets{}, fmt.Errorf("resolve token: %w", err)
 	}
 
-	var ids []string
+	assets := MetaWebhookAssets{}
 	foundWABA := false
 	seen := map[string]bool{}
-	push := func(id string) {
+	push := func(id string, category *[]string) {
 		id = strings.TrimSpace(id)
 		if id != "" && !seen[id] {
 			seen[id] = true
-			ids = append(ids, id)
+			assets.AccountIDs = append(assets.AccountIDs, id)
+		}
+		if id != "" && !containsAssetID(*category, id) {
+			*category = append(*category, id)
 		}
 	}
 	wantsUnifiedInbox := connectionHasAnyCapability(conn, "social.inbox.read") && conn.ProviderKey != "whatsapp"
@@ -99,7 +155,7 @@ func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store
 		(conn.ProviderKey == "whatsapp" && connectionHasAnyCapability(conn, "social.inbox.read"))
 	requiresWhatsApp := conn.ProviderKey == "whatsapp"
 	if !wantsPageInbox && !wantsWhatsApp {
-		return nil, nil
+		return MetaWebhookAssets{}, nil
 	}
 
 	// Pages + linked Instagram business accounts (paginated).
@@ -125,29 +181,29 @@ func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store
 		}
 		if err := g.getJSON(ctx, token.AccessToken, pagesURL, &page); err != nil {
 			if wantsPageInbox {
-				return nil, fmt.Errorf("list pages: %w", err)
+				return MetaWebhookAssets{}, fmt.Errorf("list pages: %w", err)
 			}
 			break
 		}
 		for _, item := range page.Data {
 			if wantsPageInbox {
-				push(item.ID)
+				push(item.ID, &assets.PageIDs)
 			}
 			if wantsUnifiedInbox && item.InstagramBusinessAccount != nil {
-				push(item.InstagramBusinessAccount.ID)
+				push(item.InstagramBusinessAccount.ID, &assets.InstagramAccountIDs)
 			}
 			if subscribeIDs[item.ID] && wantsPageInbox && item.ID != "" {
 				if strings.TrimSpace(item.AccessToken) == "" {
-					return nil, fmt.Errorf("subscribe Page %s: Graph did not return a Page access token", item.ID)
+					return MetaWebhookAssets{}, fmt.Errorf("subscribe Page %s: Graph did not return a Page access token", item.ID)
 				}
 				if err := g.subscribe(ctx, item.AccessToken, item.ID, pageSubscriptionFields(wantsUnifiedInbox, wantsMessenger)); err != nil {
-					return nil, fmt.Errorf("subscribe Page %s: %w", item.ID, err)
+					return MetaWebhookAssets{}, fmt.Errorf("subscribe Page %s: %w", item.ID, err)
 				}
 			}
 		}
 		pagesURL, err = g.safePageURL(page.Paging.Next)
 		if err != nil {
-			return nil, fmt.Errorf("list pages pagination: %w", err)
+			return MetaWebhookAssets{}, fmt.Errorf("list pages pagination: %w", err)
 		}
 	}
 
@@ -161,7 +217,7 @@ func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store
 		}.Encode()
 	}
 	if businessesURL == "" {
-		return ids, nil
+		return assets, nil
 	}
 	processedWABAs := map[string]bool{}
 	processWABAPage := func(page graphIDPage) error {
@@ -173,7 +229,7 @@ func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store
 				}
 				processedWABAs[waba.ID] = true
 				foundWABA = true
-				push(waba.ID)
+				push(waba.ID, &assets.WhatsAppBusinessAccountIDs)
 				if subscribeIDs[waba.ID] {
 					if err := g.subscribe(ctx, token.AccessToken, waba.ID, ""); err != nil {
 						return fmt.Errorf("subscribe WhatsApp Business Account %s: %w", waba.ID, err)
@@ -186,7 +242,7 @@ func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store
 						return fmt.Errorf("list phone numbers for WhatsApp Business Account %s: %w", waba.ID, err)
 					}
 					for _, number := range numbers.Data {
-						push(number.ID)
+						push(number.ID, &assets.WhatsAppPhoneNumberIDs)
 					}
 					var err error
 					numbersURL, err = g.safePageURL(numbers.Paging.Next)
@@ -212,24 +268,33 @@ func (g *GraphAssetLister) listWebhookAccountIDs(ctx context.Context, conn store
 	for businessPage := 0; businessesURL != "" && businessPage < 10; businessPage++ {
 		var businesses graphBusinessPage
 		if err := g.getJSON(ctx, token.AccessToken, businessesURL, &businesses); err != nil {
-			return nil, fmt.Errorf("list WhatsApp Business Accounts: %w", err)
+			return MetaWebhookAssets{}, fmt.Errorf("list WhatsApp Business Accounts: %w", err)
 		}
 		for _, business := range businesses.Data {
 			if err := processWABAPage(business.OwnedWhatsAppBusinessAccounts); err != nil {
-				return nil, err
+				return MetaWebhookAssets{}, err
 			}
 		}
 		var err error
 		businessesURL, err = g.safePageURL(businesses.Paging.Next)
 		if err != nil {
-			return nil, fmt.Errorf("list Meta businesses pagination: %w", err)
+			return MetaWebhookAssets{}, fmt.Errorf("list Meta businesses pagination: %w", err)
 		}
 	}
 	if requiresWhatsApp && !foundWABA {
-		return nil, fmt.Errorf("Meta connection has no accessible WhatsApp Business Account")
+		return MetaWebhookAssets{}, fmt.Errorf("Meta connection has no accessible WhatsApp Business Account")
 	}
 
-	return ids, nil
+	return assets, nil
+}
+
+func containsAssetID(ids []string, id string) bool {
+	for _, value := range ids {
+		if value == id {
+			return true
+		}
+	}
+	return false
 }
 
 func pageSubscriptionFields(wantsUnifiedInbox, wantsMessenger bool) string {
@@ -325,7 +390,18 @@ func (g *GraphAssetLister) baseURL() string {
 	return strings.TrimRight(g.BaseURL, "/")
 }
 
+func (g *GraphAssetLister) instagramBaseURL() string {
+	if strings.TrimSpace(g.InstagramBaseURL) == "" {
+		return "https://graph.instagram.com/v25.0"
+	}
+	return strings.TrimRight(g.InstagramBaseURL, "/")
+}
+
 func (g *GraphAssetLister) getJSON(ctx context.Context, accessToken, fullURL string, out any) error {
+	return g.getJSONFromBase(ctx, accessToken, g.baseURL(), fullURL, out)
+}
+
+func (g *GraphAssetLister) getJSONFromBase(ctx context.Context, accessToken, baseURL, fullURL string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
@@ -335,7 +411,7 @@ func (g *GraphAssetLister) getJSON(ctx context.Context, accessToken, fullURL str
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	resp, err := sameOriginClient(client, g.baseURL()).Do(req)
+	resp, err := sameOriginClient(client, baseURL).Do(req)
 	if err != nil {
 		return fmt.Errorf("request graph: %w", err)
 	}

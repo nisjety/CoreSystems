@@ -61,7 +61,10 @@ type PermissionAwareSourceObjectSink interface {
 // *content.Ingestor. Calls are best-effort — one file's failure is logged and
 // the page continues.
 type ContentSink interface {
-	IngestItemContent(ctx context.Context, source store.Source, item store.Item) error
+	// permissions is the item's freshly-captured ACL, which the sink uses to
+	// decide the forwarded document's visibility. It is empty when permission
+	// capture is disabled or failed; sinks must fail closed on that.
+	IngestItemContent(ctx context.Context, source store.Source, item store.Item, permissions []store.Permission) error
 }
 
 // SitePagesLister is the narrow Graph surface the engine needs to sync a
@@ -377,7 +380,7 @@ func (e *Engine) processPage(ctx context.Context, source store.Source, page shar
 		// a single unreadable/oversized file must not abort the page or fail the
 		// metadata sync it rides alongside. Folders are skipped inside the sink.
 		if e.content != nil && !item.IsFolder() {
-			if err := e.content.IngestItemContent(ctx, source, res.Item); err != nil {
+			if err := e.content.IngestItemContent(ctx, source, res.Item, permissions); err != nil {
 				e.logger.Warn().Err(err).
 					Str("source_id", source.ID.String()).
 					Str("item_id", item.ID).
