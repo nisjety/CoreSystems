@@ -2042,6 +2042,67 @@ question for `verevon-vision.md` and a roadmap-sequencing question for
 because the RC is what makes it newly cheap, not because Model Plane owns
 the decision.
 
+### 23.12 Agent Plugins — a portable packaging format for skills and MCP servers
+
+**New 2026-08-09.** [Agent Plugins](https://agent-plugins.org)
+([spec repo](https://github.com/agentplugins/agent-plugins-spec)) is a new
+open, vendor-neutral standard (v1.0.0; steering committee includes Amazon,
+Cursor, Microsoft, OpenAI, Vercel) for packaging Agent Skills and MCP servers
+into one portable directory: a closed `plugin.json` manifest, a fixed
+`skills/` location holding `SKILL.md`-plus-scripts packages, a fixed
+`mcp.json` describing MCP servers (stdio, Streamable HTTP, legacy SSE), and
+reverse-domain-namespaced directories for client-specific extras. VS Code and
+Cursor are confirmed compatible clients as of this writing (both: skills +
+all three MCP transports); Claude Code was not confirmed present in what was
+checked.
+
+**This is a different layer from §23.1-23.2, not a replacement for it — do
+not conflate the two the same way the 2026-07-28 note above warns against
+conflating auto-discovery with capability-core's own disclosure.** Agent
+Plugins governs how a *human's editor client* discovers and loads a *plugin
+bundle* at install time. §23.1-23.2 governs how *capability-core* discloses
+capability information to *the model* at inference time, staged by risk/cost
+summary before full schema. Nothing in Agent Plugins changes what
+capability-core stores or how model-gateway assembles context — the
+GREENFIELD status of §23.1-23.2 is unchanged by this finding.
+
+**Where it is genuinely relevant — two narrow, real connections:**
+
+1. **As an import/export format for `capability-core`'s `mcp_servers` table.**
+   `MCPHandler` (`registry_apis.go:227-362`) has its own bespoke registration
+   shape today. `mcp.json`'s three closed server variants (stdio /
+   streamable-http / sse) are a real, already-adopted-by-two-editors
+   alternative to inventing another bespoke import format, if Verevon ever
+   wants to accept a plugin-packaged MCP server as a registration source
+   rather than only a bare URL. Worth noting precisely what the spec pins
+   down that our own registration path does not yet: `command` MUST be a
+   single executable token (never a shell string — no injection surface from
+   a malformed launch command), remote `url` MUST be HTTPS except for
+   loopback, and **the spec is explicit, twice, that `env`/`headers` are
+   "visible package data, not a portable secret mechanism"** — authorization
+   is entirely client-managed, which is exactly the shape `mcp_oauth.rs`'s
+   OAuth 2.1 + Dynamic Client Registration flow already takes. No conflict;
+   if anything, external validation that auth belongs at the client layer,
+   not in portable config.
+2. **As a distribution shape for §24's `SkillPackage`.** §24.2's
+   `SkillPackage` interface is Verevon's own independently-designed governed
+   skill envelope — versioned, signed, with `allowedCapabilities` and
+   `policyRequirements`. Agent Plugins' `skills/<name>/SKILL.md` is
+   structurally the same primitive at its core (name, description, packaged
+   instructions/scripts/references) but carries none of `SkillPackage`'s
+   governance fields — the spec's `extensions` field (reverse-domain
+   namespaced, e.g. a hypothetical `com.verevon.skill-package` key) is
+   precisely where those Verevon-specific fields would travel if a
+   `SkillPackage` were ever exported as a portable Agent Plugin, or imported
+   from one authored elsewhere. The two are complementary: §24 is the
+   richer internal governance model; Agent Plugins is a candidate external
+   interchange shape for the portion of it that has cross-client meaning.
+
+Neither connection is scheduled work — both are noted so a future build of
+§23.1-23.2 or §24 does not reinvent a portable format that already has real
+adoption, without being talked into building against it before there is a
+concrete need to interoperate with an external client.
+
 ---
 
 ## 24. Skills as versioned software packages
@@ -2089,6 +2150,10 @@ interface SkillPackage {
 	status: "draft" | "candidate" | "active" | "deprecated" | "revoked";
 }
 ```
+
+See §23.12 for a candidate external interchange shape (Agent Plugins'
+`skills/SKILL.md` packaging) this internal envelope could export to or
+import from — a distribution question, not a change to this model.
 
 ### 24.3 Skill compilation
 
