@@ -131,3 +131,100 @@ message GetRunProofBundleRequest {
 message GetRunProofBundleResponse {
   RunProofBundle bundle = 1;
 }
+
+// Aggregate Verified Outcome Foundation metrics for one organization
+// (verevon-vision.md §2.1 / §7, roadmap P1 item 5). Where the Proof Bundle
+// answers "what happened on this one run," this answers "is the Verified
+// Outcome layer actually catching anything, across every run."
+//
+// Every count below is computed straight from `approval_continuation_receipts`
+// / `approval_continuation_outcomes` / `approvals` — the same tables the Proof
+// Bundle reads, so this is provably consistent with it rather than a second,
+// divergent notion of the same facts. As with the bundle, dimensions this
+// plane cannot prove (cost, whether an approval was truly *necessary*,
+// rollback) are named in `unavailable` rather than estimated.
+message VerificationMetrics {
+  string org_id = 1;
+
+  // Window start. Unset (zero value) means all-time.
+  google.protobuf.Timestamp since = 2;
+  google.protobuf.Timestamp generated_at = 3;
+
+  // --- Structural outcomes: what the dispatcher recorded, before any
+  // independent check. Denominator for every rate below. ---
+  int64 total_completed = 4;
+  int64 total_failed = 5;
+  int64 total_cancelled = 6;
+
+  // --- Verified completion: of the structurally completed continuations,
+  // how many does the system of record independently confirm. ---
+  int64 verified_success_count = 7;
+
+  // --- False success: the headline metric this whole layer exists to
+  // produce. A continuation the dispatcher recorded as `completed`, but
+  // whose own postcondition check came back `verified_failure` - the
+  // boundary said yes, the system of record said no. Zero here is a real
+  // claim ("none caught yet"), not "nothing to catch": read it alongside
+  // postcondition_method_count, since a false success can only be caught
+  // where a verifier actually ran. ---
+  int64 false_success_count = 8;
+
+  int64 partially_verified_count = 9;
+
+  // Structurally completed or failed, but with no verification_status
+  // recorded at all (the column is NULL, not `unknown`). Every dispatch that
+  // passes through the current worker persists a status - even Inconclusive
+  // resolves to a structural `unknown`, never NULL - so this bucket means
+  // "predates this instrumentation," i.e. a row from before the Verified
+  // Outcome Foundation was wired into the dispatcher, or from a worker build
+  // that never attached a verification result. It is not "no verifier
+  // applies to this operation" - that case is `unknown_verification_count`
+  // (see below), which the dispatcher itself always fills in.
+  int64 unverified_count = 10;
+
+  // Verification recorded, but the judgment came back `unknown` - the
+  // dispatcher's own default when no postcondition verifier exists for the
+  // operation, or none was reached (FailedRetryable, an unresolved
+  // UnreceiptedWrite). Distinct from `unverified_count`: this row WAS
+  // processed by the current instrumentation, it just has nothing stronger
+  // than the structural claim to show.
+  int64 unknown_verification_count = 11;
+
+  // --- Coverage: how much of the traffic this layer actually reaches. ---
+  int64 structural_method_count = 12;
+  int64 postcondition_method_count = 13;
+
+  // --- Human approval effort. Requested is the full funnel denominator;
+  // granted+denied+expired need not sum to it (still-pending approvals are
+  // requested but not yet decided). ---
+  int64 approvals_requested = 14;
+  int64 approvals_granted = 15;
+  int64 approvals_denied = 16;
+
+  // Median wall-clock seconds from a receipt's `started_at` to its outcome's
+  // `finalized_at`, over continuations that reached a terminal outcome.
+  // Median, not mean, so one slow outlier cannot dominate the figure. Zero
+  // when no continuation in the window has finalized.
+  int64 median_seconds_receipt_to_outcome = 17;
+
+  // Median wall-clock seconds from `requested_at` to `decided_at`, over
+  // approvals that received a decision. Zero when none have.
+  int64 median_seconds_approval_decision = 18;
+
+  // Dimensions this metric set deliberately does not claim, same discipline
+  // as RunProofBundle.unavailable.
+  repeated UnavailableSection unavailable = 19;
+}
+
+message GetVerificationMetricsRequest {
+  // Required. Metrics are computed only for the caller's own verified
+  // organization.
+  string org_id = 1;
+
+  // Window start. Unset means all-time.
+  google.protobuf.Timestamp since = 2;
+}
+
+message GetVerificationMetricsResponse {
+  VerificationMetrics metrics = 1;
+}

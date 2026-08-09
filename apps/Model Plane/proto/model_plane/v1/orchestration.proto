@@ -95,6 +95,11 @@ service OrchestrationCoreService {
   // record defined in proof_bundle.proto. Read-only; org-scoped.
   rpc GetRunProofBundle(GetRunProofBundleRequest) returns (GetRunProofBundleResponse);
 
+  // Aggregate Verified Outcome Foundation metrics across every run for one
+  // organization (roadmap P1 item 5) — verified completion, false success,
+  // human approval effort, and verification coverage. Read-only; org-scoped.
+  rpc GetVerificationMetrics(GetVerificationMetricsRequest) returns (GetVerificationMetricsResponse);
+
   // Stream orchestration events for a run. Server-streaming over gRPC;
   // SSE-compatible at the gateway (/v1/runs/{id}/events).
   rpc StreamRunEvents(StreamRunEventsRequest) returns (stream OrchestrationEvent);
