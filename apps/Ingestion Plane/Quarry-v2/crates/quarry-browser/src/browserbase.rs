@@ -1,14 +1,32 @@
 //! Browserbase cloud browser driver.
 //!
-//! Implements [`BrowserDriver`] against the Browserbase REST + Connect API:
-//! - Sessions are created via `POST /v1/sessions`
-//! - Pages are driven via CDP over the session's WebSocket debugger URL
-//! - Screenshots, PDFs, and content come from CDP commands forwarded through
-//!   the Browserbase proxy
+//! Implements [`BrowserDriver`] against the Browserbase REST API:
+//! - Sessions are created via `POST /v1/sessions`, returning a `connectUrl`
+//!   CDP WebSocket and a `liveViewUrl`
+//! - Screenshots, PDFs, and content come from Browserbase's REST helper
+//!   endpoints (`POST /v1/sessions/{id}/content|screenshot|pdf`) — this
+//!   driver never opens a client connection to `connectUrl` itself
 //!
 //! This driver uses a REST-based approach (similar to Browserless) for the
 //! initial implementation. A future upgrade can open a persistent CDP
 //! WebSocket for lower latency.
+//!
+//! ## SSRF / network-interception coverage
+//!
+//! `goto()` calls `guard_navigation_target` before every navigation (see
+//! `crate::navigation`), the same entry-point check every driver in this
+//! crate uses. Browserbase additionally exposes a
+//! `browserSettings.allowedDomains` field on session creation that restricts
+//! *main-frame* navigation to a caller-supplied domain allowlist — by
+//! Browserbase's own docs it does not cover subframes, images, scripts, or
+//! XHR, so it would not close the redirect/subresource gap this driver has
+//! relative to the local chromiumoxide driver's `install_network_guard`.
+//! It isn't wired in here either way: this driver creates its Browserbase
+//! session eagerly in `acquire()`, before any navigation target is known,
+//! and `allowedDomains` is a session-creation-time setting — using it would
+//! mean deferring session creation until the first `goto()`, a bigger
+//! behavior change than this driver's current model. See `docs/GAP.md`
+//! §12.1 for the full per-provider capability audit.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -425,5 +443,32 @@ mod tests {
         driver.goto(&session, "https://example.com").await.unwrap();
         let png = driver.screenshot(&session, true).await.unwrap();
         assert_eq!(&png[..], b"\x89PNG\r\n");
+    }
+
+    #[tokio::test]
+    async fn goto_rejects_private_target_before_touching_session_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/v1/sessions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "sess-blocked",
+                "connectUrl": "wss://connect.browserbase.com/sess-blocked",
+            })))
+            .mount(&server)
+            .await;
+
+        let driver = BrowserbaseDriver::new(make_config(&server.uri()));
+        let session = driver.acquire(&make_lease()).await.unwrap();
+
+        let err = driver
+            .goto(&session, "http://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+
+        // The blocked goto must not have recorded a current_url — content()
+        // still fails with "no current URL" instead of fetching the target.
+        let content_err = driver.content(&session).await.unwrap_err();
+        assert!(content_err.message.contains("no current URL"));
     }
 }

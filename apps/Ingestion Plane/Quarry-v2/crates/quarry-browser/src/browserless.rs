@@ -17,6 +17,18 @@
 //! → `sessionId` and `proxy_affinity.sticky_key` → `sessionId` (when proxy
 //! affinity is bound). This makes multi-page authenticated flows reuse a
 //! single Browserless backend node instead of round-robining.
+//!
+//! ## SSRF / network-interception coverage
+//!
+//! `goto()` calls `guard_navigation_target` before every navigation (see
+//! `crate::navigation`), the same entry-point check every driver in this
+//! crate uses. `content`/`screenshot`/`pdf` additionally send
+//! `rejectRequestPattern` on every REST call (see [`SSRF_REJECT_PATTERNS`]),
+//! which Browserless applies across the whole page load for that call —
+//! the closest thing to full-session coverage any of the three remote
+//! drivers gets, though it's a string/regex match against the request URL,
+//! not a DNS resolution, so it can't catch DNS-rebinding. See
+//! `docs/GAP.md` §12.1 for the full per-provider capability audit.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -48,6 +60,29 @@ fn urlencoding(s: &str) -> String {
     }
     out
 }
+
+/// Best-effort request-level SSRF patterns passed via Browserless's
+/// `rejectRequestPattern` REST option (see
+/// <https://docs.browserless.io/rest-apis/request-configuration#rejecting-undesired-requests>).
+/// Browserless applies this to every request the page makes during that
+/// call — navigation, redirects, and subresources — giving Browserless a
+/// partial equivalent of the in-session coverage `install_network_guard`
+/// gives the local chromiumoxide driver.
+///
+/// This is a string/regex match against the request URL, not a DNS
+/// resolution: unlike `guard_navigation_target`/`guard_page_request_target`,
+/// it cannot catch DNS-rebinding (a public-looking hostname that resolves to
+/// a private address), and only covers the literal IP ranges and hostnames
+/// listed here. It is defence-in-depth on top of the entry-point guard in
+/// `goto()`, not a replacement for it.
+const SSRF_REJECT_PATTERNS: &[&str] = &[
+    r"127\.\d{1,3}\.\d{1,3}\.\d{1,3}",
+    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}",
+    r"172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}",
+    r"192\.168\.\d{1,3}\.\d{1,3}",
+    r"169\.254\.\d{1,3}\.\d{1,3}",
+    r"localhost",
+];
 
 /// Session-scoped navigation state for the Browserless driver.
 #[derive(Default)]
@@ -197,7 +232,11 @@ impl BrowserDriver for BrowserlessDriver {
 
     async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
         let url = self.current_url().await?;
-        self.post_json_bytes("content", json!({ "url": url })).await
+        self.post_json_bytes(
+            "content",
+            json!({ "url": url, "rejectRequestPattern": SSRF_REJECT_PATTERNS }),
+        )
+        .await
     }
 
     async fn screenshot(&self, _session: &BrowserSession, full_page: bool) -> QuarryResult<Bytes> {
@@ -206,6 +245,7 @@ impl BrowserDriver for BrowserlessDriver {
             "screenshot",
             json!({
                 "url": url,
+                "rejectRequestPattern": SSRF_REJECT_PATTERNS,
                 "options": { "fullPage": full_page, "type": "png" },
             }),
         )
@@ -214,7 +254,11 @@ impl BrowserDriver for BrowserlessDriver {
 
     async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
         let url = self.current_url().await?;
-        self.post_json_bytes("pdf", json!({ "url": url })).await
+        self.post_json_bytes(
+            "pdf",
+            json!({ "url": url, "rejectRequestPattern": SSRF_REJECT_PATTERNS }),
+        )
+        .await
     }
 }
 
@@ -224,7 +268,7 @@ mod tests {
     use quarry_core::error::ErrorCode;
     use quarry_core::ids::kinds;
     use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
-    use wiremock::matchers::{method, path as wpath, query_param};
+    use wiremock::matchers::{body_partial_json, method, path as wpath, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_lease() -> BrowserLease {
@@ -392,5 +436,42 @@ mod tests {
         let err = driver.content(&session).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::DriverFailed);
         assert!(err.message.contains("no current URL"));
+    }
+
+    #[tokio::test]
+    async fn goto_rejects_private_target_before_touching_nav_state() {
+        let driver = BrowserlessDriver::new("https://x.com", None);
+        let session = driver.acquire(&make_lease()).await.unwrap();
+
+        let err = driver
+            .goto(&session, "http://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+
+        // No HTTP call is even possible here (goto never touches the
+        // network for this driver), but confirm nav state was never set.
+        let content_err = driver.content(&session).await.unwrap_err();
+        assert!(content_err.message.contains("no current URL"));
+    }
+
+    #[tokio::test]
+    async fn content_sends_ssrf_reject_patterns_to_browserless() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/content"))
+            .and(body_partial_json(json!({
+                "rejectRequestPattern": SSRF_REJECT_PATTERNS,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"<html>ok</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let driver = BrowserlessDriver::new(server.uri(), None);
+        let session = driver.acquire(&make_lease()).await.unwrap();
+        driver.goto(&session, "https://example.com").await.unwrap();
+        let body = driver.content(&session).await.unwrap();
+        assert_eq!(&body[..], b"<html>ok</html>");
     }
 }

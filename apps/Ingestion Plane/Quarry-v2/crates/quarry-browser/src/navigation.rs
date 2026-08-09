@@ -121,4 +121,13 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
     }
+
+    #[test]
+    fn rejects_an_empty_resolution() {
+        // A name that resolves to nothing must fail closed. Without this the
+        // `is_empty` arm reads as unreachable and could be dropped as dead.
+        let err = ensure_public_addresses(&[]).expect_err("an empty resolution must be blocked");
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
 }
