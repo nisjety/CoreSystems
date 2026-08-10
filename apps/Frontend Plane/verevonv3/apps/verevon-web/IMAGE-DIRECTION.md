@@ -172,6 +172,54 @@ automatisert mekanisme (03):
 Erstatter `hourglass-glass-render.jpg`, `glitched-vision-city.jpg` og
 `undo-control-hand-warm.jpg` — se §6 for orfaneringen.
 
+**Runde 8 — kort 01 får et videoforløp, kilde skiftet igjen til Higgsfield/
+Kling.** Founder brainstormet et helt annet register for kort 01 spesifikt:
+ikke ett stillbilde, men flere «venting forårsaket av en prosess»-metaforer i
+én loop (lang, tom bagasjekarusell med én koffert; et tomt venterom; en
+institusjonell korridor med flere ventende; en rulletrapp; et rødt lyskryss i
+tåke). Generert med Higgsfield (Kling 3.0) — fem 5-sekunders klipp, hver med
+en egen art-direction-prompt (fast kamera eller ekstremt sakte push-in,
+ingen håndholdt bevegelse, «restrained European editorial art film»,
+«nothing resolves»-instruksjon i hver prompt).
+
+Rulletrappen ble forkastet etter diskusjon: en rulletrapp har en topp og en
+bunn — den frakter deg et sted, som leser som *fremdrift*, ikke *venting*.
+Det ligger nærmere kort 03s «et system handler uten din kontroll» enn kort
+01s «ingenting løser seg». De fire resterende (venterom, korridor, lyskryss,
+bagasjekarusell) deler nesten identisk promptspråk (samme kornethet, samme
+«creamy highlights/lifted shadows»-gradering), så de ble krysstonet sammen
+til én 18-sekunders loop i stedet for valgt mellom — se
+`public/verevon-vibe/problem-delay-loop.mp4` (bygget med ffmpegs `xfade`,
+0,6 s overtoning per kutt, lydspor fjernet siden en nettside-loop uansett
+må være muted).
+
+Loopen brukes to steder: som hover-forhåndsvisning på ProblemSection kort 01
+(stillbildet — fortsatt `conveyor-belt-single-suitcase.jpg` fra runde 7 — er
+`poster`, videoen spilles kun på hover, ingen autoplay ved lasting) og som
+selve heltet på en ny, dedikert side som kortets CTA nå peker til (i stedet
+for den gamle samme-side-ankeret `#kunnskap`).
+
+**Rettet samme runde — siden argumenterte først feil sak.** Første versjon av
+den nye siden lå på `/plattform/kildespor` og handlet om kildespor/synlige
+kilder — fordi ordet «kilde» står i kort 01s brødtekst. Det er feil argument
+for dette kortet: synlige kilder er kort 02s påstand («ingen har hele
+bildet»), ikke kort 01s. Kort 01 handler om at *prosessen* rundt et raskt
+svar er det som tar tid. Siden er flyttet til `/produkt/svartid` og
+skrevet om: tittelen er nå «Svaret er raskt. Prosessen rundt det er ikke.»
+(founder sin egen formulering, oversatt) i stedet for kortets egen tittel
+gjenbrukt som sidetittel — «Det er ikke svaret som tar tid» fungerer som en
+kort-overskrift med brødtekst under, ikke som en selvstendig sidetittel.
+Løsningsdelen handler nå om at én agent gjør de fire stegene samtidig og
+legger fram ett utkast til godkjenning, ikke om at kilden vises. De to
+stillbildene klippet fra loopen er omdøpt til `svartid-waiting-room.jpg` og
+`svartid-corridor.jpg` for å matche.
+
+Dette er samtidig starten på et bredere mønster: separate sider per
+historie-punkt fra forsiden, ikke bare per Problem-kort. Kilder/kildespor
+hører hjemme på en egen side knyttet til ProductLoop-steget «Verevon gjør
+spørsmålet om til arbeidet» — ikke bygget enda, men denne siden er satt opp
+til å lenke dit når den finnes.
+
 **`PreFooterStatementSection.tsx`** hadde **ingen fotografier i det hele tatt** — de fem svevende «kortene» var rene CSS-gradienter med et par prikker og hårstreker hver. Samlet leste de som generisk UI-konfetti, og de gjorde dette til den andre heltabstrakte seksjonen på rad etter Problem. Rettet: fem ekte stills, samme posisjoner, samme GSAP-timeline (`data-prefooter-card` er beholdt).
 
 ### Gode bilder, tekst møter nå bildet — rettet
@@ -289,6 +337,8 @@ peker til Unsplash-fotosiden, ikke en `i.pinimg.com`-fil.
 | `conveyor-belt-single-suitcase.jpg` | Problem, kort 01 | Én koffert alene på en ellers tom bagasjekarusell | Unsplash | `https://unsplash.com/photos/kj4e59Sf7Q0` |
 | `monitor-wall-lone-operator.jpg` | Problem, kort 02 | Operatør bakfra mot ~30 usammenhengende kamera-/systemskjermer | Unsplash | `https://unsplash.com/photos/TtMKq3lJm-U` |
 | `aerospace-hand-pressure-gauge.jpg` | Problem, kort 03 | Hånd på en analog trykkmåler-vender, «LINE PRESSURE» synlig | Unsplash | `https://unsplash.com/photos/H20OWckc-5E` |
+| `problem-delay-loop.mp4` / `-poster.jpg` (i `verevon-vibe/`) | Problem kort 01 (hover) + `/produkt/svartid` (hero) | 4 krysstonede «venting»-metaforer: venterom, korridor, lyskryss, bagasjekarusell | Higgsfield (Kling 3.0) | generert, ingen kildelenke |
+| `svartid-waiting-room.jpg`, `svartid-corridor.jpg` | `/produkt/svartid` | Stillbilder klippet fra `problem-delay-loop.mp4` | Higgsfield (Kling 3.0) | generert, ingen kildelenke |
 | `desk-vast-white.jpg` | Problem, galakse | Person ved pult i et stort, tomt hvitt rom | black-excellence + art | `https://i.pinimg.com/originals/32/4d/51/324d51dffbdf1a5e98d0b2e5d1e759f8.jpg` |
 | `window-city-dusk.jpg` | Problem, galakse | Silhuett ved vindu over by i skumring | black-excellence | `https://i.pinimg.com/originals/80/09/bf/8009bfd17482d4b51f5663abf1ca23d9.jpg` |
 | `stair-descent-warm.jpg` | PreFooter, still 1 | Ensom figur i buet trearkitektur, varmt lys | art | `https://i.pinimg.com/originals/94/af/06/94af06f3df8b298d997eed1507cb0d69.jpg` |

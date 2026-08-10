@@ -23,6 +23,8 @@ type IndexCard = {
 	kicker: string;
 	label: string;
 	title: string;
+	/** Hover-preview loop. When set, the card plays this on hover instead of showing a still image; the same file is the linked page's hero. */
+	video?: string;
 };
 
 type GalaxyImage = {
@@ -127,8 +129,9 @@ function GalaxyThumb({ image }: { image: GalaxyImage }) {
 }
 
 // The 3 index cards below the credo — each one points into a later section
-// (or /trust) instead of restating the thesis, so this section stays a
-// single, uncluttered move: state the problem, then hand off.
+// (or a dedicated page, like /trust or /produkt/svartid) instead of
+// restating the thesis, so this section stays a single, uncluttered move:
+// state the problem, then hand off.
 //
 // Third pass on these images. Round 2 leaned into cohere.com's dark
 // generative-render register (light through cloud, a liquid terrain) but
@@ -165,15 +168,32 @@ function GalaxyThumb({ image }: { image: GalaxyImage }) {
 //   nobody in that chair has one picture, they have thirty partial ones.
 // - 03: a hand on an analogue pressure-gauge dial, "LINE PRESSURE" labelled
 //   in shot — a real hand on a real control, not a metaphor for control.
+//
+// Seventh pass, card 01 only. Higgsfield/Kling exploration produced five
+// "waiting caused by process" metaphors (empty waiting room, institutional
+// corridor, an escalator, a red traffic light in fog, the baggage carousel
+// already in use as this card's still). The escalator was dropped — a
+// moving staircase has a top and a bottom, so it reads as progress toward a
+// destination, not delay; that's closer to card 03's "a system acting
+// without your input" than to card 01. The other four share near-identical
+// prompt language (same grade, same "nothing resolves" instruction), so they
+// were crossfaded into one loop rather than picked between. It plays on
+// hover (card click still just switches tabs, as before); the CTA now
+// navigates to /produkt/svartid, which uses the same file as its hero.
+// (First cut of that page argued source-traceability, because "kilde"
+// appears in this card's body copy — wrong argument, that belongs to card
+// 02. The page now stays on this card's actual thesis: the four steps cost
+// time, not the answer itself.)
 const cards: IndexCard[] = [
 	{
 		kicker: "01",
 		title: "Det er ikke svaret som tar tid",
 		body: "Det er å finne kilden, sjekke reglene, formulere svaret og gjøre neste steg riktig. Et svar uten synlig kilde er ren gjetning med god selvtillit.",
-		href: "#kunnskap",
-		label: "Se hvordan kildene vises",
+		href: "/produkt/svartid",
+		label: "Se tidsbesparelsen",
 		image: "/verevon-mood/conveyor-belt-single-suitcase.jpg",
 		imagePosition: "38% 62%",
+		video: "/verevon-vibe/problem-delay-loop.mp4",
 	},
 	{
 		kicker: "02",
@@ -257,6 +277,7 @@ function ProblemLine({ line, lineIndex }: { line: string[]; lineIndex: number })
 export function ProblemSection() {
 	const sectionRef = useRef<HTMLDivElement>(null);
 	const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+	const videoRefs = useRef<Array<HTMLVideoElement | null>>([]);
 	const [activeIndex, setActiveIndex] = useState(0);
 	const [previousIndex, setPreviousIndex] = useState<number | null>(null);
 	const shouldReduceMotion = useReducedMotion() ?? false;
@@ -297,6 +318,29 @@ export function ProblemSection() {
 
 		event.preventDefault();
 		selectTab(nextIndex, true);
+	}
+
+	function playCardVideo(index: number) {
+		if (shouldReduceMotion) {
+			return;
+		}
+
+		videoRefs.current[index]?.play().catch(() => {
+			// Autoplay can be rejected before the user has interacted with the
+			// page at all; the poster stays visible either way, so there's
+			// nothing to recover from here.
+		});
+	}
+
+	function pauseCardVideo(index: number) {
+		const video = videoRefs.current[index];
+
+		if (!video) {
+			return;
+		}
+
+		video.pause();
+		video.currentTime = 0;
 	}
 
 	useLayoutEffect(() => {
@@ -543,19 +587,40 @@ export function ProblemSection() {
 											selectTab(index);
 										}
 									}}
+									onMouseEnter={() => playCardVideo(index)}
+									onMouseLeave={() => pauseCardVideo(index)}
 									role={isActive ? "tabpanel" : "button"}
 									tabIndex={isActive ? undefined : 0}
 								>
-									<Image
-										alt=""
-										className="object-cover"
-										fill
-										sizes="(max-width: 760px) 100vw, 50vw"
-										src={card.image}
-										style={{
-											objectPosition: card.imagePosition ?? "center",
-										}}
-									/>
+									{card.video ? (
+										<video
+											className="absolute inset-0 size-full object-cover"
+											loop
+											muted
+											playsInline
+											poster={card.image}
+											preload="metadata"
+											ref={(element) => {
+												videoRefs.current[index] = element;
+											}}
+											style={{
+												objectPosition: card.imagePosition ?? "center",
+											}}
+										>
+											<source src={card.video} type="video/mp4" />
+										</video>
+									) : (
+										<Image
+											alt=""
+											className="object-cover"
+											fill
+											sizes="(max-width: 760px) 100vw, 50vw"
+											src={card.image}
+											style={{
+												objectPosition: card.imagePosition ?? "center",
+											}}
+										/>
+									)}
 
 									<div
 										aria-hidden="true"
