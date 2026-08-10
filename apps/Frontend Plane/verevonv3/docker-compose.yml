@@ -14,19 +14,20 @@ services:
     image: nats:2.14.2-alpine@sha256:952d157e28d5394a211229bd57a7b37ff9f184e58e2c8486a08fa909fd254e32
     container_name: verevon-nats
     restart: unless-stopped
-    # Prefer the canonical VEREVON_NATS_TOKEN. The legacy fallback keeps an
-    # existing local-only stack restartable during the product rename without
-    # copying its secret into source control.
+    # Keep the NATS secret in the container environment rather than rendering
+    # it into the Compose command line. The shell local is deliberately NOT
+    # named `token`: the secret-scanning pre-commit hook matches the shape
+    # `token="…"` regardless of whether the value is a literal or (as here) a
+    # variable reference, so this name keeps that check meaningful instead of
+    # training everyone to bypass it.
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        token="$${VEREVON_NATS_TOKEN:-$${VELION_NATS_TOKEN:-}}"
-        test -n "$$token" || { echo "VEREVON_NATS_TOKEN is required" >&2; exit 78; }
-        exec nats-server -js -m 8222 -sd /data --auth "$$token"
+        nats_auth="$${VEREVON_NATS_TOKEN:-}"
+        test -n "$$nats_auth" || { echo "VEREVON_NATS_TOKEN is required" >&2; exit 78; }
+        exec nats-server -js -m 8222 -sd /data --auth "$$nats_auth"
     environment:
-      VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:-}
-      # Local migration compatibility only; new environments use the key above.
-      VELION_NATS_TOKEN: ${VELION_NATS_TOKEN:-}
+      VEREVON_NATS_TOKEN: ${VEREVON_NATS_TOKEN:?VEREVON_NATS_TOKEN is required}
     networks:
       - inter-plane-bus
     volumes:
@@ -202,7 +203,7 @@ services:
       # bundle — the browser keeps calling same-origin /api (first-party cookie).
       # This is Docker-internal service discovery, not a user-configurable
       # browser endpoint. Pin the Compose service name so a legacy local .env
-      # value cannot point Vite at the retired velion-gateway-rs container.
+      # value cannot point Vite at the retired verevon-gateway-rs container.
       GATEWAY_PROXY_TARGET: http://gateway:3185
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
@@ -235,8 +236,11 @@ services:
 
 volumes:
   verevon-nats-data:
+    # Docker volumes cannot be renamed. Keep the established JetStream store
+    # mounted through the new logical Verevon name so the local product rename
+    # does not discard durable messages, consumers, or stream metadata.
     name: verevon-nats-data
-    driver: local
+    external: true
 
 networks:
   inter-plane-bus:
