@@ -224,6 +224,11 @@ pub struct AppState {
     /// it emitted earlier in a thread; see `artifacts.rs` for the trade-off this
     /// in-memory store accepts.
     pub artifact_versions: crate::artifacts::ArtifactVersionStore,
+    /// §23.6 tool result handles — oversized tool results held out of model
+    /// context and queried by handle. Keyed `(org, user, handle)` and TTL'd;
+    /// deliberately never populated on a ZDR turn (see
+    /// `tool_result_handles`'s module docs).
+    pub tool_results: crate::tool_result_handles::ToolResultStore,
     /// Wave 10f — in-memory trajectory ring-buffer. Bounded; older
     /// entries evicted FIFO. Durable retention should subscribe to the
     /// fixed `mp.v1.run.*.event` subject and filter `TRAJECTORY_RECORDED`.
@@ -325,6 +330,7 @@ impl AppState {
             lsp: crate::lsp::BridgeClient::new(""),
             approvals: crate::approvals::ApprovalStore::new(),
             artifact_versions: crate::artifacts::ArtifactVersionStore::new(),
+            tool_results: crate::tool_result_handles::ToolResultStore::new(),
             trajectories: crate::trajectory::TrajectoryStore::new(),
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
             skills: crate::skills::SkillStore::new(),
@@ -470,15 +476,14 @@ impl AppState {
             .unwrap_or_default();
         let insight_core_base_url = std::env::var("INSIGHT_CORE_URL")
             .unwrap_or_else(|_| "http://insight-core:3163".to_owned());
-        let social_core_base_url =
-            std::env::var("SOCIAL_CORE_URL").unwrap_or_else(|_| "http://social-core:3162".to_owned());
+        let social_core_base_url = std::env::var("SOCIAL_CORE_URL")
+            .unwrap_or_else(|_| "http://social-core:3162".to_owned());
         let application_core_internal_key = std::env::var("APPLICATION_CORE_INTERNAL_KEY")
             .or_else(|_| std::env::var("INTERNAL_API_KEY"))
             .unwrap_or_default();
         let verevon_public_origin = std::env::var("VEREVON_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| "http://localhost:5173".to_owned());
-        let mcp_oauth_service_token =
-            std::env::var("MCP_OAUTH_SERVICE_TOKEN").unwrap_or_default();
+        let mcp_oauth_service_token = std::env::var("MCP_OAUTH_SERVICE_TOKEN").unwrap_or_default();
         let http_client = reqwest::Client::new();
         // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
         // Shared between both publisher branches below; cheap clone (Arc inner).

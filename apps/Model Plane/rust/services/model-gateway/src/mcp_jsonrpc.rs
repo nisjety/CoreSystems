@@ -62,25 +62,41 @@ pub struct McpToolDef {
 
 /// Build a `tools/list` request — discovers the tools an MCP server exposes,
 /// with their real input schemas (matrix §G2). Issued after the `initialize`
-/// handshake, same as `tools/call`.
+/// handshake, same as `tools/call`. `cursor` is the opaque pagination token
+/// from a previous page's [`McpToolsPage::next_cursor`]; `None` requests the
+/// first page.
 #[must_use]
-pub fn build_list_tools_request(id: i64) -> Value {
+pub fn build_list_tools_request(id: i64, cursor: Option<&str>) -> Value {
+    let mut params = serde_json::Map::new();
+    if let Some(cursor) = cursor {
+        params.insert("cursor".to_owned(), Value::String(cursor.to_owned()));
+    }
     json!({
         "jsonrpc": JSONRPC_VERSION,
         "id": id,
         "method": "tools/list",
-        "params": {}
+        "params": params
     })
 }
 
-/// Parse a `tools/list` response line for `expected_id` into the advertised
-/// tool defs. Mirrors [`parse_tool_call_response`]'s validation; a server that
-/// reports no `tools` array yields an `Err` so the caller can fall back.
+/// One page of a `tools/list` response: the tools it carried, plus the
+/// server's pagination cursor for the next page (per the MCP pagination
+/// spec). `next_cursor` is `None` when this was the last page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpToolsPage {
+    pub tools: Vec<McpToolDef>,
+    pub next_cursor: Option<String>,
+}
+
+/// Parse a `tools/list` response line for `expected_id` into one page of
+/// advertised tool defs plus its pagination cursor. Mirrors
+/// [`parse_tool_call_response`]'s validation; a server that reports no
+/// `tools` array yields an `Err` so the caller can fall back.
 ///
 /// # Errors
 /// Returns `Err` on invalid JSON-RPC, id mismatch, a JSON-RPC `error`, or a
 /// `result` missing the `tools` array.
-pub fn parse_list_tools_response(expected_id: i64, line: &str) -> Result<Vec<McpToolDef>, String> {
+pub fn parse_list_tools_response(expected_id: i64, line: &str) -> Result<McpToolsPage, String> {
     let value: Value =
         serde_json::from_str(line.trim()).map_err(|e| format!("invalid json-rpc: {e}"))?;
     if value.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
@@ -96,12 +112,21 @@ pub fn parse_list_tools_response(expected_id: i64, line: &str) -> Result<Vec<Mcp
             .map_or_else(|| err.to_string(), ToOwned::to_owned);
         return Err(msg);
     }
-    let tools = value
+    let result = value
         .get("result")
-        .and_then(|r| r.get("tools"))
+        .ok_or_else(|| "tools/list result missing tools array".to_owned())?;
+    let tools = result
+        .get("tools")
         .and_then(Value::as_array)
         .ok_or_else(|| "tools/list result missing tools array".to_owned())?;
-    Ok(tools.iter().filter_map(parse_one_tool).collect())
+    let next_cursor = result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    Ok(McpToolsPage {
+        tools: tools.iter().filter_map(parse_one_tool).collect(),
+        next_cursor,
+    })
 }
 
 /// Extract a single `{name, description, inputSchema}` entry from a `tools/list`
@@ -288,10 +313,17 @@ mod tests {
 
     #[test]
     fn build_list_tools_request_has_method_and_id() {
-        let req = build_list_tools_request(7);
+        let req = build_list_tools_request(7, None);
         assert_eq!(req["method"], "tools/list");
         assert_eq!(req["id"], 7);
         assert_eq!(req["jsonrpc"], JSONRPC_VERSION);
+        assert!(req["params"].get("cursor").is_none());
+    }
+
+    #[test]
+    fn build_list_tools_request_includes_cursor_when_given() {
+        let req = build_list_tools_request(7, Some("page-2"));
+        assert_eq!(req["params"]["cursor"], "page-2");
     }
 
     #[test]
@@ -300,14 +332,22 @@ mod tests {
             {"name":"read_file","description":"Read a file","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
             {"name":"list_dir"}
         ]}}"#;
-        let tools = parse_list_tools_response(3, line).expect("parse ok");
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0].name, "read_file");
-        assert_eq!(tools[0].description, "Read a file");
-        assert!(tools[0].input_schema_json.contains("\"path\""));
+        let page = parse_list_tools_response(3, line).expect("parse ok");
+        assert_eq!(page.tools.len(), 2);
+        assert_eq!(page.tools[0].name, "read_file");
+        assert_eq!(page.tools[0].description, "Read a file");
+        assert!(page.tools[0].input_schema_json.contains("\"path\""));
         // A tool with no inputSchema gets an open object schema, not empty.
-        assert_eq!(tools[1].name, "list_dir");
-        assert_eq!(tools[1].input_schema_json, "{\"type\":\"object\"}");
+        assert_eq!(page.tools[1].name, "list_dir");
+        assert_eq!(page.tools[1].input_schema_json, "{\"type\":\"object\"}");
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn parse_list_tools_response_extracts_next_cursor() {
+        let line = r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[],"nextCursor":"page-2-token"}}"#;
+        let page = parse_list_tools_response(3, line).expect("parse ok");
+        assert_eq!(page.next_cursor, Some("page-2-token".to_owned()));
     }
 
     #[test]

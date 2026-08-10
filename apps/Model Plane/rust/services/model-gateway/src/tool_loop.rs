@@ -15,16 +15,14 @@ use std::fmt::Write as _;
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
-    ProxyMcpToolRequest, ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition,
-    WebSearchRequest,
+    ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest, ProxyMcpToolRequest,
+    ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
 };
 use serde_json::Value;
 
 use crate::{
     auth::{
-        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
-        VerifiedIngestionBearer,
+        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer, VerifiedIngestionBearer,
     },
     relevance,
     sse_events::ChatEvent,
@@ -251,7 +249,12 @@ pub(crate) fn tool_artifact_events(
         return (Vec::new(), None);
     }
     match outcome.name.as_str() {
-        "create_artifact" | "update_artifact" => authored_artifact_events(outcome, known_kind),
+        // `result_query`'s `as_artifact` emits the same authored-artifact
+        // envelope, so a materialized result slice reaches the client through
+        // the identical, already-proven path (§23.6 artifact-ref linkage).
+        "create_artifact" | "update_artifact" | "result_query" => {
+            authored_artifact_events(outcome, known_kind)
+        }
         "code_interpreter" => code_interpreter_events(outcome),
         _ => (Vec::new(), None),
     }
@@ -282,8 +285,8 @@ fn authored_artifact_events(
         .and_then(Value::as_str)
         .unwrap_or(id.as_str())
         .to_owned();
-    let version = u32::try_from(envelope.get("version").and_then(Value::as_u64).unwrap_or(1))
-        .unwrap_or(1);
+    let version =
+        u32::try_from(envelope.get("version").and_then(Value::as_u64).unwrap_or(1)).unwrap_or(1);
     let created = envelope
         .get("created")
         .and_then(Value::as_bool)
@@ -391,7 +394,10 @@ fn code_interpreter_events(outcome: &ToolOutcome) -> (Vec<ChatEvent>, Option<Str
         .get("stderr")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let exit_code = payload.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
+    let exit_code = payload
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let mut summary = serde_json::json!({
         "stdout": truncate_chars(stdout, MAX_TOOL_OUTPUT_CHARS),
         "stderr": truncate_chars(stderr, MAX_TOOL_OUTPUT_CHARS),
@@ -612,9 +618,8 @@ fn contains_word(haystack: &str, token: &str) -> bool {
 /// inflectional ending followed by a word boundary.
 fn ends_word_after_inflection(rest: &str) -> bool {
     INFLECTION_SUFFIXES.iter().any(|suffix| {
-        rest.strip_prefix(suffix).is_some_and(|tail| {
-            !tail.chars().next().is_some_and(char::is_alphanumeric)
-        })
+        rest.strip_prefix(suffix)
+            .is_some_and(|tail| !tail.chars().next().is_some_and(char::is_alphanumeric))
     })
 }
 
@@ -1357,7 +1362,10 @@ async fn dispatch_shipping_quotes_tool(
     if !response.status().is_success() {
         return err_outcome(
             call,
-            format!("shipping.get_quotes returned {}", response.status().as_u16()),
+            format!(
+                "shipping.get_quotes returned {}",
+                response.status().as_u16()
+            ),
         );
     }
 
@@ -1368,7 +1376,10 @@ async fn dispatch_shipping_quotes_tool(
             output: body,
             error: None,
         },
-        Err(err) => err_outcome(call, format!("shipping.get_quotes response read failed: {err}")),
+        Err(err) => err_outcome(
+            call,
+            format!("shipping.get_quotes response read failed: {err}"),
+        ),
     }
 }
 
@@ -1551,12 +1562,19 @@ pub async fn dispatch_tool(
             let content = arg_str(&call.arguments_json, "content");
             let id = id.trim();
             if id.is_empty() {
-                return err_outcome(call, "update_artifact requires the 'id' of an existing artifact");
+                return err_outcome(
+                    call,
+                    "update_artifact requires the 'id' of an existing artifact",
+                );
             }
             // An unknown id means the model is revising something the user has
             // never seen. Creating it silently would produce a "v1" the user
             // cannot relate to anything, so refuse and name the fix.
-            if state.artifact_versions.current_version(thread_id, id).is_none() {
+            if state
+                .artifact_versions
+                .current_version(thread_id, id)
+                .is_none()
+            {
                 return err_outcome(
                     call,
                     format!(
@@ -1949,9 +1967,10 @@ pub async fn dispatch_tool(
         // a cross-tenant read. Underscore names are what we advertise (Anthropic
         // rejects '.' in tool names); the dotted forms are accepted so the Agent
         // Console's explicit action ids resolve to the same handler.
-        "insights_overview" | "insights.overview" => {
-            verevon_read_outcome(call, crate::verevon_actions::insights_overview(state, org_id).await)
-        }
+        "insights_overview" | "insights.overview" => verevon_read_outcome(
+            call,
+            crate::verevon_actions::insights_overview(state, org_id).await,
+        ),
         "social_list_accounts" | "social.list_accounts" => verevon_read_outcome(
             call,
             crate::verevon_actions::social_list_accounts(state, org_id).await,
@@ -2007,43 +2026,362 @@ pub async fn dispatch_tool(
             let Some((server_id, tool_name)) = parse_mcp_tool_name(other) else {
                 return err_outcome(call, format!("malformed mcp tool name '{other}'"));
             };
-            let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+            dispatch_mcp_tool_call(
+                state,
+                org_id,
+                user_id,
+                zdr,
+                call,
+                server_id,
+                tool_name,
+                call.arguments_json.clone(),
+            )
+            .await
+        }
+        // Staged disclosure (§23.1/§23.12): once a catalog exceeds
+        // `mcp_disclosure_threshold`, the individual `mcp__<server>__<tool>`
+        // definitions above are replaced by these two synthetic tools
+        // (`stage_mcp_tool_defs`), so a large connected catalog never floods
+        // every turn with every tool's full schema. Below threshold neither
+        // name is ever advertised, so this arm is unreachable and today's
+        // behavior (including Visma's proven-live setup) is unaffected.
+        crate::runtime_registries::MCP_CATALOG_TOOL_NAME => {
+            let tool_name_filter = arg_str(&call.arguments_json, "tool_name");
+            let full = crate::runtime_registries::full_mcp_tool_defs(
+                &state.mcp,
+                &state.ownership,
+                org_id,
+                user_id,
                 &state.http_client,
                 &state.capability_core_base_url,
                 &state.mcp_oauth_service_token,
-                org_id,
-                server_id,
             )
             .await;
-            match crate::runtime_registries::handle_proxy_mcp_tool(
+            let filter = (!tool_name_filter.is_empty()).then_some(tool_name_filter.as_str());
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                output: crate::runtime_registries::format_mcp_catalog(&full, filter),
+                error: None,
+            }
+        }
+        crate::runtime_registries::MCP_CALL_TOOL_NAME => {
+            let qualified_name = arg_str(&call.arguments_json, "tool_name");
+            if qualified_name.is_empty() {
+                return err_outcome(call, "mcp_call requires a 'tool_name' argument");
+            }
+            let arguments = arg_value(&call.arguments_json, "arguments")
+                .unwrap_or_else(|| serde_json::json!({}));
+            // Re-check against the live discovered+allowlisted set rather than
+            // trusting the model's `tool_name` string outright — a stale or
+            // hallucinated qualified name must not reach the proxy dispatch
+            // below with an unverified server_id/tool_name split.
+            let full = crate::runtime_registries::full_mcp_tool_defs(
                 &state.mcp,
                 &state.ownership,
-                ProxyMcpToolRequest {
-                    request_id: String::new(),
-                    org_id: org_id.to_owned(),
-                    server_id: server_id.to_owned(),
-                    tool_name: tool_name.to_owned(),
-                    input_json: call.arguments_json.clone(),
-                    user_id: user_id.to_owned(),
-                },
-                oauth_token.as_deref(),
+                org_id,
+                user_id,
+                &state.http_client,
+                &state.capability_core_base_url,
+                &state.mcp_oauth_service_token,
+            )
+            .await;
+            let Some(selected) = full.iter().find(|def| def.name == qualified_name) else {
+                return err_outcome(
+                    call,
+                    format!("unknown or unavailable mcp tool '{qualified_name}'"),
+                );
+            };
+            // §23.8 — check the arguments against this tool's own declared
+            // schema before anything leaves the gateway. The schema is already
+            // in hand from the lookup above, so this costs nothing, and a
+            // malformed call is answered with exact field errors instead of a
+            // remote round-trip that returns whatever prose the server picks.
+            // The validator fails open by design (see `argument_repair`), so
+            // it can only ever catch what the schema is unambiguous about.
+            let argument_errors = crate::argument_repair::validate_arguments(
+                &selected.parameters_json,
+                &arguments.to_string(),
+            );
+            if !argument_errors.is_empty() {
+                return err_outcome(
+                    call,
+                    crate::argument_repair::repair_message(
+                        &qualified_name,
+                        &argument_errors,
+                        &selected.parameters_json,
+                    ),
+                );
+            }
+            let Some((server_id, tool_name)) = parse_mcp_tool_name(&qualified_name) else {
+                return err_outcome(call, format!("malformed mcp tool name '{qualified_name}'"));
+            };
+            dispatch_mcp_tool_call(
+                state,
+                org_id,
+                user_id,
+                zdr,
+                call,
+                server_id,
+                tool_name,
+                arguments.to_string(),
             )
             .await
-            {
-                Ok(resp) if resp.error_message.is_empty() => ToolOutcome {
+        }
+        // §23.6 — read a slice of a result parked under a handle by
+        // `handle_or_inline_output`. The handle resolves only for the exact
+        // (org, user) that produced it, so a replayed or guessed id from
+        // another tenant or colleague simply does not exist here.
+        "result_query" => {
+            let handle_id = arg_str(&call.arguments_json, "handle_id");
+            if handle_id.trim().is_empty() {
+                return err_outcome(call, "result_query requires a 'handle_id'");
+            }
+            let Some(resolved) = state
+                .tool_results
+                .resolve(org_id, user_id, handle_id.trim())
+            else {
+                return err_outcome(
+                    call,
+                    format!(
+                        "no result handle '{}' — it may have expired, or belong to a different \
+                         conversation. Re-run the tool call that produced it.",
+                        handle_id.trim()
+                    ),
+                );
+            };
+            let query = match parse_handle_query(&call.arguments_json) {
+                Ok(query) => query,
+                Err(message) => return err_outcome(call, message),
+            };
+            let slice = match crate::tool_result_handles::apply_query(&resolved.payload, &query) {
+                Ok(slice) => slice,
+                Err(message) => return err_outcome(call, message),
+            };
+            // `as_artifact` materializes this slice as a downloadable artifact
+            // for the user, and records the reference on the handle — the
+            // artifact-ref linkage §23.6's interface carries. It reuses the
+            // authored-artifact envelope, so the emission path is the proven
+            // one `create_artifact` already uses.
+            let as_artifact = arg_value(&call.arguments_json, "as_artifact")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if as_artifact {
+                let artifact_id = format!("result_{}", handle_id.trim());
+                let content =
+                    serde_json::to_string_pretty(&slice).unwrap_or_else(|_| slice.to_string());
+                if content.chars().count() > crate::artifacts::MAX_TEXT_ARTIFACT_CHARS {
+                    return err_outcome(
+                        call,
+                        format!(
+                            "that slice exceeds the {} character artifact limit — narrow it with \
+                             select/where/limit first",
+                            crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
+                        ),
+                    );
+                }
+                let version = state
+                    .artifact_versions
+                    .next_version(thread_id, &artifact_id);
+                state
+                    .tool_results
+                    .attach_artifact(org_id, user_id, handle_id.trim(), &artifact_id);
+                return ToolOutcome {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
-                    output: resp.output_json,
+                    output: authored_artifact_payload(
+                        &artifact_id,
+                        crate::artifacts::ArtifactKind::Code,
+                        &format!("Result of {}", resolved.capability_id),
+                        &content,
+                        version,
+                    ),
                     error: None,
-                },
-                Ok(resp) => err_outcome(call, resp.error_message),
-                Err(status) => {
-                    err_outcome(call, format!("mcp tool call failed: {}", status.message()))
-                }
+                };
+            }
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                output: truncate_chars(&slice.to_string(), MAX_TOOL_OUTPUT_CHARS),
+                error: None,
             }
         }
         other => err_outcome(call, format!("unknown tool '{other}'")),
     }
+}
+
+/// Proxy one MCP tool call by its already-split `(server_id, tool_name)` to
+/// the governed [`crate::runtime_registries::handle_proxy_mcp_tool`] path —
+/// the same handler execution-core's `ProxyMcpTool` RPC uses. Shared by the
+/// direct `mcp__<server>__<tool>` dispatch arm and the `mcp_call` synthetic
+/// tool (reachable once catalog staging is active, see
+/// [`crate::runtime_registries::stage_mcp_tool_defs`]), so both reach
+/// execution through the exact same authority regardless of which name the
+/// model used to get there — staging adds a name-indirection layer, never a
+/// new capability.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_mcp_tool_call(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    call: &ToolCall,
+    server_id: &str,
+    tool_name: &str,
+    arguments_json: String,
+) -> ToolOutcome {
+    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+        &state.http_client,
+        &state.capability_core_base_url,
+        &state.mcp_oauth_service_token,
+        org_id,
+        server_id,
+    )
+    .await;
+    match crate::runtime_registries::handle_proxy_mcp_tool(
+        &state.mcp,
+        &state.ownership,
+        ProxyMcpToolRequest {
+            request_id: String::new(),
+            org_id: org_id.to_owned(),
+            server_id: server_id.to_owned(),
+            tool_name: tool_name.to_owned(),
+            input_json: arguments_json,
+            user_id: user_id.to_owned(),
+        },
+        oauth_token.as_deref(),
+    )
+    .await
+    {
+        Ok(resp) if resp.error_message.is_empty() => {
+            let output =
+                handle_or_inline_output(state, org_id, user_id, zdr, &call.name, resp.output_json);
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                output,
+                error: None,
+            }
+        }
+        Ok(resp) => err_outcome(call, resp.error_message),
+        Err(status) => err_outcome(call, format!("mcp tool call failed: {}", status.message())),
+    }
+}
+
+/// §23.6 — when a tool result is large enough that inlining it would truncate
+/// it, park the complete payload under a [`crate::tool_result_handles`] handle
+/// and hand the model the handle instead. Below that size, or when the payload
+/// is not JSON we could query, return it unchanged.
+///
+/// **ZDR returns the raw output unchanged**, deliberately: a handle keeps
+/// result content in gateway memory past the turn that produced it, and a ZDR
+/// turn promises exactly the opposite. Such a turn keeps the pre-existing
+/// truncation behavior — less useful, but it is the honest trade.
+fn handle_or_inline_output(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    capability_id: &str,
+    output: String,
+) -> String {
+    if zdr || output.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+        return output;
+    }
+    // A payload we cannot parse cannot be projected, filtered, or paged, so a
+    // handle would promise a query surface that does not work on it.
+    let Ok(parsed) = serde_json::from_str::<Value>(&output) else {
+        return output;
+    };
+    let size_bytes = output.len();
+    let payload = crate::tool_result_handles::unwrap_mcp_content(&parsed);
+    let expires_at = chrono::Utc::now()
+        .checked_add_signed(
+            chrono::Duration::from_std(crate::tool_result_handles::HANDLE_TTL)
+                .unwrap_or_else(|_| chrono::Duration::seconds(900)),
+        )
+        .map(|at| at.to_rfc3339());
+    state
+        .tool_results
+        .insert(
+            org_id,
+            user_id,
+            capability_id,
+            payload,
+            size_bytes,
+            expires_at,
+        )
+        .to_model_json()
+}
+
+/// Parse a `result_query` call's arguments into a validated
+/// [`crate::tool_result_handles::HandleQuery`].
+///
+/// Pure and fallible: an unknown operator is named back to the model rather
+/// than silently ignored, which would return a differently-filtered set than
+/// the model believes it asked for.
+fn parse_handle_query(
+    arguments_json: &str,
+) -> Result<crate::tool_result_handles::HandleQuery, String> {
+    use crate::tool_result_handles::{Aggregate, AggregateOp, FilterOp, HandleQuery, RowFilter};
+
+    let select = arg_value(arguments_json, "select")
+        .and_then(|value| value.as_array().cloned())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+
+    let filter = match arg_value(arguments_json, "where") {
+        Some(Value::Object(clause)) => {
+            let field = clause
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if field.is_empty() {
+                return Err("'where' requires a 'field' naming the column to filter".to_owned());
+            }
+            let op = FilterOp::parse(clause.get("op").and_then(Value::as_str).unwrap_or("eq"))?;
+            let value = clause.get("value").cloned().unwrap_or(Value::Null);
+            Some(RowFilter { field, op, value })
+        }
+        _ => None,
+    };
+
+    let aggregate = match arg_value(arguments_json, "aggregate") {
+        Some(Value::Object(clause)) => {
+            let op =
+                AggregateOp::parse(clause.get("op").and_then(Value::as_str).unwrap_or_default())?;
+            let field = clause
+                .get("field")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Some(Aggregate { op, field })
+        }
+        // A bare string is the shape a model reaches for unprompted
+        // ("aggregate": "count"); accept it rather than failing a good call.
+        Some(Value::String(op)) => Some(Aggregate {
+            op: AggregateOp::parse(&op)?,
+            field: None,
+        }),
+        _ => None,
+    };
+
+    let offset =
+        usize::try_from(arg_i64(arguments_json, "offset").unwrap_or(0).max(0)).unwrap_or(0);
+    let limit = usize::try_from(arg_i64(arguments_json, "limit").unwrap_or(0).max(0)).unwrap_or(0);
+
+    Ok(HandleQuery {
+        select,
+        filter,
+        aggregate,
+        offset,
+        limit,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2205,6 +2543,14 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "shipping_get_quotes".to_owned(),
             description: "Compare live shipping quotes across the connected carrier fleet (Bring, DHL, UPS, FedEx) for a given origin, destination, and package. Returns cheapest-first pricing and transit days.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"from":{"type":"object","description":"Origin address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"to":{"type":"object","description":"Destination address","properties":{"name":{"type":"string"},"postal_code":{"type":"string"},"city":{"type":"string"},"country":{"type":"string","description":"ISO 3166-1 alpha-2, e.g. NO"}},"required":["name","postal_code","city","country"]},"package":{"type":"object","properties":{"weight_kg":{"type":"number"},"length_cm":{"type":"number"},"width_cm":{"type":"number"},"height_cm":{"type":"number"}},"required":["weight_kg","length_cm","width_cm","height_cm"]},"segment":{"type":"string","enum":["b2b","b2c"],"description":"Required by shipping-core; use b2b unless the recipient is a private individual"}},"required":["from","to","package","segment"]}"#.to_owned(),
+        },
+        // §23.6 — inert until a tool returns a result handle, but it must be
+        // advertised up front: the model can only act on a handle it receives
+        // mid-loop if the tool that reads one is already in its tool list.
+        ToolDefinition {
+            name: "result_query".to_owned(),
+            description: "Read a large tool result that was returned as a handle instead of inline. When a tool result comes back as {handle_id, summary, row_count, projection_hints, ...}, the COMPLETE data is held under that handle — nothing was truncated — and this tool reads whatever slice of it you need. Use `select` to return only certain fields, `where` to filter rows, `offset`/`limit` to page, or `aggregate` to get a count/sum/min/max/avg without pulling any rows into context. Prefer an aggregate or a narrow select over paging everything. Set `as_artifact` to save the slice as a file the user can open and download.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"handle_id":{"type":"string","description":"The handle_id from the tool result you want to read"},"select":{"type":"array","items":{"type":"string"},"description":"Field names to return; omit for whole records. Use the handle's projection_hints."},"where":{"type":"object","description":"Row filter","properties":{"field":{"type":"string"},"op":{"type":"string","enum":["eq","ne","contains","gt","gte","lt","lte"],"description":"Defaults to eq"},"value":{"description":"Value to compare against"}},"required":["field","value"]},"aggregate":{"type":"object","description":"Return only an aggregate over the matching rows, no row data","properties":{"op":{"type":"string","enum":["count","sum","min","max","avg"]},"field":{"type":"string","description":"Required for every op except count"}},"required":["op"]},"offset":{"type":"integer","description":"Rows to skip (default 0)"},"limit":{"type":"integer","description":"Max rows to return (default 25, max 200)"},"as_artifact":{"type":"boolean","description":"Save this slice as a downloadable artifact for the user instead of returning it inline"}},"required":["handle_id"]}"#.to_owned(),
         },
         // --- Verevon workspace READ tools ------------------------------------
         // These make the signed-in user's OWN Verevon data answerable in chat.
@@ -2911,13 +3257,9 @@ pub async fn run_tool_rounds(
             // a generated .xlsx or a long document would consume the entire
             // context budget. Harvest the events, then replace the output with
             // a compact summary before it reaches `format_tool_context`.
-            let artifact_kind_hint = artifact_id_of(&outcome).and_then(|id| {
-                authored_artifact_kinds
-                    .get(&id)
-                    .copied()
-            });
-            let (artifact_events, rewritten) =
-                tool_artifact_events(&outcome, artifact_kind_hint);
+            let artifact_kind_hint =
+                artifact_id_of(&outcome).and_then(|id| authored_artifact_kinds.get(&id).copied());
+            let (artifact_events, rewritten) = tool_artifact_events(&outcome, artifact_kind_hint);
             if let Some(rewritten) = rewritten {
                 outcome.output = rewritten;
             }
@@ -3028,6 +3370,415 @@ mod tests {
             parse_mcp_tool_name("mcp__srv__do__a__thing"),
             Some(("srv", "do__a__thing"))
         );
+    }
+
+    /// A payload comfortably past `MAX_TOOL_OUTPUT_CHARS`, shaped like a real
+    /// query result so the derived handle has rows and fields.
+    fn oversized_rows_json() -> String {
+        let rows: Vec<Value> = (0..400)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "name": format!("Record number {i}"),
+                    "amount": i * 3,
+                })
+            })
+            .collect();
+        serde_json::to_string(&rows).expect("serializes")
+    }
+
+    #[tokio::test]
+    async fn a_zdr_turn_never_parks_a_result_in_the_handle_store() {
+        let state = crate::state::AppState::new();
+        let payload = oversized_rows_json();
+
+        let output =
+            handle_or_inline_output(&state, "org", "user", true, "mcp__s__t", payload.clone());
+
+        // Byte-identical passthrough: ZDR keeps the pre-existing truncation
+        // path rather than retaining result content in gateway memory.
+        assert_eq!(output, payload);
+        assert!(
+            state.tool_results.is_empty(),
+            "a ZDR turn must leave nothing behind in the result store"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_small_result_is_returned_inline_unchanged() {
+        let state = crate::state::AppState::new();
+        let payload = r#"[{"id":1}]"#.to_owned();
+
+        let output =
+            handle_or_inline_output(&state, "org", "user", false, "mcp__s__t", payload.clone());
+
+        assert_eq!(output, payload);
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_result_becomes_a_queryable_handle_instead_of_a_truncated_blob() {
+        let state = crate::state::AppState::new();
+
+        let output = handle_or_inline_output(
+            &state,
+            "org",
+            "user",
+            false,
+            "mcp__s__q",
+            oversized_rows_json(),
+        );
+
+        let envelope: Value = serde_json::from_str(&output).expect("handle envelope is json");
+        assert_eq!(envelope["capability_id"], "mcp__s__q");
+        assert_eq!(envelope["row_count"], 400);
+        // The handle is dramatically smaller than the payload it replaced —
+        // that is the entire point.
+        assert!(output.chars().count() < MAX_TOOL_OUTPUT_CHARS);
+
+        // And it actually resolves for the org+user that produced it.
+        let handle_id = envelope["handle_id"].as_str().expect("handle id");
+        assert!(state
+            .tool_results
+            .resolve("org", "user", handle_id)
+            .is_some());
+        assert!(state
+            .tool_results
+            .resolve("other", "user", handle_id)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_oversized_result_stays_inline_rather_than_promising_a_query_surface() {
+        let state = crate::state::AppState::new();
+        // Not JSON, so select/where/limit could never work against it.
+        let payload = "x".repeat(MAX_TOOL_OUTPUT_CHARS + 100);
+
+        let output =
+            handle_or_inline_output(&state, "org", "user", false, "mcp__s__t", payload.clone());
+
+        assert_eq!(output, payload);
+        assert!(state.tool_results.is_empty());
+    }
+
+    #[test]
+    fn result_query_arguments_parse_into_a_validated_query() {
+        let query = parse_handle_query(
+            r#"{"handle_id":"res_1","select":["a","b"],"where":{"field":"status","op":"contains","value":"open"},"offset":10,"limit":5}"#,
+        )
+        .expect("valid query");
+
+        assert_eq!(query.select, vec!["a", "b"]);
+        assert_eq!(query.offset, 10);
+        assert_eq!(query.limit, 5);
+        let filter = query.filter.expect("filter parsed");
+        assert_eq!(filter.field, "status");
+        assert_eq!(filter.op, crate::tool_result_handles::FilterOp::Contains);
+    }
+
+    #[test]
+    fn result_query_accepts_a_bare_string_aggregate_and_rejects_unknown_ops() {
+        // "aggregate": "count" is the shape a model reaches for unprompted.
+        let bare = parse_handle_query(r#"{"handle_id":"res_1","aggregate":"count"}"#)
+            .expect("bare aggregate accepted");
+        assert_eq!(
+            bare.aggregate.expect("aggregate").op,
+            crate::tool_result_handles::AggregateOp::Count
+        );
+
+        // An unknown op is named back rather than silently dropped — dropping
+        // it would return unfiltered rows the model believes were filtered.
+        let bad_op = parse_handle_query(
+            r#"{"handle_id":"res_1","where":{"field":"a","op":"regex","value":"x"}}"#,
+        )
+        .unwrap_err();
+        assert!(bad_op.contains("regex"));
+
+        let no_field =
+            parse_handle_query(r#"{"handle_id":"res_1","where":{"op":"eq","value":"x"}}"#)
+                .unwrap_err();
+        assert!(no_field.contains("field"));
+    }
+
+    #[tokio::test]
+    async fn result_query_refuses_an_unknown_handle_with_an_actionable_message() {
+        let state = crate::state::AppState::new();
+        let call = tool_call("result_query", r#"{"handle_id":"res_does_not_exist"}"#);
+
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        let error = outcome.error.expect("unknown handle is an error");
+        assert!(error.contains("res_does_not_exist"));
+        // Tells the model what to do next instead of just failing.
+        assert!(error.contains("Re-run the tool call"));
+    }
+
+    #[tokio::test]
+    async fn result_query_reads_a_slice_of_a_parked_result() {
+        let state = crate::state::AppState::new();
+        let parked = handle_or_inline_output(
+            &state,
+            "org",
+            "user",
+            false,
+            "mcp__s__q",
+            oversized_rows_json(),
+        );
+        let handle_id = serde_json::from_str::<Value>(&parked).expect("json")["handle_id"]
+            .as_str()
+            .expect("handle id")
+            .to_owned();
+
+        let call = tool_call(
+            "result_query",
+            &format!(
+                r#"{{"handle_id":"{handle_id}","select":["id","amount"],"where":{{"field":"amount","op":"gte","value":1000}},"limit":3}}"#
+            ),
+        );
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        assert!(outcome.error.is_none(), "query failed: {:?}", outcome.error);
+        let slice: Value = serde_json::from_str(&outcome.output).expect("slice is json");
+        assert_eq!(slice["returned_rows"], 3);
+        assert_eq!(slice["has_more"], true);
+        // Projection applied: only the two selected fields survive.
+        let first = &slice["rows"][0];
+        assert!(first.get("id").is_some() && first.get("amount").is_some());
+        assert!(first.get("name").is_none());
+    }
+
+    #[tokio::test]
+    async fn result_query_aggregate_returns_no_rows_at_all() {
+        let state = crate::state::AppState::new();
+        let parked = handle_or_inline_output(
+            &state,
+            "org",
+            "user",
+            false,
+            "mcp__s__q",
+            oversized_rows_json(),
+        );
+        let handle_id = serde_json::from_str::<Value>(&parked).expect("json")["handle_id"]
+            .as_str()
+            .expect("handle id")
+            .to_owned();
+
+        let call = tool_call(
+            "result_query",
+            &format!(r#"{{"handle_id":"{handle_id}","aggregate":{{"op":"count"}}}}"#),
+        );
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        let result: Value = serde_json::from_str(&outcome.output).expect("json");
+        assert_eq!(result["value"], 400);
+        // Aggregate-only visibility: not a single row reaches model context.
+        assert!(result.get("rows").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_colleague_in_the_same_org_cannot_read_another_users_handle() {
+        let state = crate::state::AppState::new();
+        let parked = handle_or_inline_output(
+            &state,
+            "org",
+            "user_a",
+            false,
+            "mcp__s__q",
+            oversized_rows_json(),
+        );
+        let handle_id = serde_json::from_str::<Value>(&parked).expect("json")["handle_id"]
+            .as_str()
+            .expect("handle id")
+            .to_owned();
+
+        let call = tool_call("result_query", &format!(r#"{{"handle_id":"{handle_id}"}}"#));
+        let outcome = dispatch_tool(
+            // Same org, different user.
+            &state, "run", "org", "user_b", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        assert!(
+            outcome.error.is_some(),
+            "another user's result handle must not resolve"
+        );
+    }
+
+    /// Register one MCP server on `state` and seed its discovered catalog, so
+    /// the staged-disclosure tools (`mcp_catalog`/`mcp_call`) can be dispatched
+    /// without a live server. The URL is never reached: every assertion below
+    /// is about what the gateway decides *before* it would dial out.
+    fn seed_mcp_server(state: &crate::state::AppState, schema_json: &str) {
+        use mp_contracts::model_plane::v1::McpServer;
+
+        crate::runtime_registries::handle_register_mcp_server(
+            &state.mcp,
+            mp_contracts::model_plane::v1::RegisterMcpServerRequest {
+                request_id: "t".into(),
+                org_id: "org".into(),
+                server: Some(McpServer {
+                    server_id: "srv".into(),
+                    name: "Orders".into(),
+                    url: "https://mcp.example.test".into(),
+                    transport: "http".into(),
+                    token: String::new(),
+                    tool_allowlist: vec!["create_order".into()],
+                    enabled: true,
+                }),
+            },
+        )
+        .expect("registers");
+        state.ownership.set(
+            "org",
+            crate::ownership::KIND_MCP,
+            "srv",
+            crate::ownership::Ownership::org(),
+        );
+        state.mcp.seed_catalog_for_test(
+            "org",
+            "srv",
+            vec![crate::mcp_jsonrpc::McpToolDef {
+                name: "create_order".to_owned(),
+                description: "Create a sales order".to_owned(),
+                input_schema_json: schema_json.to_owned(),
+            }],
+        );
+    }
+
+    const ORDER_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"order_id":{"type":"string"},"segment":{"type":"string","enum":["b2b","b2c"]}},"required":["order_id","segment"]}"#;
+
+    #[tokio::test]
+    async fn mcp_call_rejects_arguments_the_schema_forbids_without_dialing_out() {
+        let state = crate::state::AppState::new();
+        seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
+
+        // Missing the required `segment`, and `order_id` is an object where a
+        // string belongs.
+        let call = tool_call(
+            crate::runtime_registries::MCP_CALL_TOOL_NAME,
+            r#"{"tool_name":"mcp__srv__create_order","arguments":{"order_id":{"nested":1}}}"#,
+        );
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        let error = outcome.error.expect("malformed arguments are rejected");
+        // Names both problems, and says plainly that nothing was sent — a
+        // model that believes the call half-happened may compensate wrongly.
+        assert!(error.contains("segment"), "got: {error}");
+        assert!(error.contains("order_id"), "got: {error}");
+        assert!(error.contains("NOT called") && error.contains("nothing was sent"));
+        // Carries the schema so the repair needs no extra catalog round-trip.
+        assert!(error.contains("\"required\""));
+        // Proof it never dialled: a real attempt to https://mcp.example.test
+        // would surface as a transport error, not a schema complaint.
+        assert!(!error.contains("transport"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn mcp_call_lets_well_formed_arguments_through_to_dispatch() {
+        let state = crate::state::AppState::new();
+        seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
+
+        let call = tool_call(
+            crate::runtime_registries::MCP_CALL_TOOL_NAME,
+            r#"{"tool_name":"mcp__srv__create_order","arguments":{"order_id":"SO-1","segment":"b2b"}}"#,
+        );
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        // It still fails — there is no server at that URL — but it must fail
+        // at the TRANSPORT, not at validation. That is what proves the
+        // validator let a good call through rather than blocking it.
+        let error = outcome.error.expect("no server is listening");
+        assert!(
+            !error.contains("NOT called"),
+            "validator blocked a valid call: {error}"
+        );
+        assert!(
+            !error.contains("did not match"),
+            "validator blocked a valid call: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_call_refuses_a_tool_name_outside_the_discovered_allowlist() {
+        let state = crate::state::AppState::new();
+        seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
+
+        let call = tool_call(
+            crate::runtime_registries::MCP_CALL_TOOL_NAME,
+            r#"{"tool_name":"mcp__srv__delete_everything","arguments":{}}"#,
+        );
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+
+        let error = outcome.error.expect("unknown tool is refused");
+        assert!(error.contains("unknown or unavailable"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn mcp_catalog_lists_summaries_and_inspects_one_tool_in_full() {
+        let state = crate::state::AppState::new();
+        seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
+
+        let list = dispatch_tool(
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            None,
+            None,
+            "",
+            "",
+            false,
+            &tool_call(crate::runtime_registries::MCP_CATALOG_TOOL_NAME, "{}"),
+            None,
+        )
+        .await;
+        let listed: Value = serde_json::from_str(&list.output).expect("json");
+        assert_eq!(listed["count"], 1);
+        assert_eq!(listed["tools"][0]["name"], "mcp__srv__create_order");
+        // Level 1: a summary, with no input schema in sight.
+        assert!(listed["tools"][0].get("input_schema").is_none());
+
+        let inspect = dispatch_tool(
+            &state,
+            "run",
+            "org",
+            "user",
+            "thread",
+            None,
+            None,
+            "",
+            "",
+            false,
+            &tool_call(
+                crate::runtime_registries::MCP_CATALOG_TOOL_NAME,
+                r#"{"tool_name":"mcp__srv__create_order"}"#,
+            ),
+            None,
+        )
+        .await;
+        let inspected: Value = serde_json::from_str(&inspect.output).expect("json");
+        // Level 2: the real schema, for exactly the one tool asked about.
+        assert_eq!(inspected["name"], "mcp__srv__create_order");
+        assert_eq!(inspected["input_schema"]["required"][0], "order_id");
     }
 
     #[test]
@@ -3444,19 +4195,23 @@ mod tests {
             r#"{"query":"  Coresystem   AS "}"#,
         ))
         .expect("web_search signature");
-        let same = duplicate_call_signature(&tool_call("web_search", r#"{"query":"coresystem as"}"#))
-            .expect("web_search signature");
+        let same =
+            duplicate_call_signature(&tool_call("web_search", r#"{"query":"coresystem as"}"#))
+                .expect("web_search signature");
         assert_eq!(first, same);
     }
 
     #[test]
     fn duplicate_signature_does_not_apply_to_stateful_or_side_effecting_tools() {
-        assert!(duplicate_call_signature(&tool_call("browser_agent", r#"{"objective":"x"}"#))
-            .is_none());
-        assert!(duplicate_call_signature(&tool_call("recall_memory", r#"{"query":"x"}"#))
-            .is_none());
-        assert!(duplicate_call_signature(&tool_call("save_memory", r#"{"content":"x"}"#))
-            .is_none());
+        assert!(
+            duplicate_call_signature(&tool_call("browser_agent", r#"{"objective":"x"}"#)).is_none()
+        );
+        assert!(
+            duplicate_call_signature(&tool_call("recall_memory", r#"{"query":"x"}"#)).is_none()
+        );
+        assert!(
+            duplicate_call_signature(&tool_call("save_memory", r#"{"content":"x"}"#)).is_none()
+        );
     }
 
     #[test]
@@ -3564,7 +4319,10 @@ mod tests {
 
     #[test]
     fn bounded_tool_output_passes_small_results_through_untouched() {
-        assert_eq!(bounded_tool_output("  [{\"sku\":\"A\"}]  "), "[{\"sku\":\"A\"}]");
+        assert_eq!(
+            bounded_tool_output("  [{\"sku\":\"A\"}]  "),
+            "[{\"sku\":\"A\"}]"
+        );
     }
 
     #[test]
@@ -3806,16 +4564,16 @@ mod tests {
     fn ordinary_dev_and_business_questions_never_force_a_search() {
         for query in [
             // Compounds that merely CONTAIN a token (the substring bug).
-            "how do I do type conversion in Rust",       // version
-            "why does my variable have an underscore",   // score
-            "how do I do model selection",               // election
-            "write me a newsletter for our customers",   // news
-            "hva er enterprise-arkitektur?",             // pris
+            "how do I do type conversion in Rust", // version
+            "why does my variable have an underscore", // score
+            "how do I do model selection",         // election
+            "write me a newsletter for our customers", // news
+            "hva er enterprise-arkitektur?",       // pris
             "hvordan fungerer det i dagligvarehandelen?", // i dag
-            "hva er konversjon i markedsforing?",        // versjon
-            "hvordan unngar jeg konkurs i regnskapet?",  // kurs
-            "hva er været i Stockholm?",                 // stock
-            "explain scoreboard rendering",              // score
+            "hva er konversjon i markedsforing?",  // versjon
+            "hvordan unngar jeg konkurs i regnskapet?", // kurs
+            "hva er været i Stockholm?",           // stock
+            "explain scoreboard rendering",        // score
             // Whole words too weak to justify FORCING a search — the model
             // still has web_search in the loop if it disagrees.
             "how do I schedule a cron job",
@@ -3904,7 +4662,9 @@ mod tests {
             );
         }
         assert!(
-            create.description.contains("Do NOT use it for short answers"),
+            create
+                .description
+                .contains("Do NOT use it for short answers"),
             "without a negative rule the model wraps every reply in an artifact"
         );
         let update = defs
@@ -4040,7 +4800,11 @@ mod tests {
         }
         match &events[1] {
             ChatEvent::Attachment {
-                name, mime, size, url, ..
+                name,
+                mime,
+                size,
+                url,
+                ..
             } => {
                 assert_eq!(name, "report.xlsx");
                 assert!(mime.contains("spreadsheetml"));
@@ -4057,7 +4821,10 @@ mod tests {
         );
         assert!(rewritten.contains("report.xlsx"));
         assert!(rewritten.contains("4096"));
-        assert!(rewritten.contains("wrote report.xlsx"), "stdout is still useful");
+        assert!(
+            rewritten.contains("wrote report.xlsx"),
+            "stdout is still useful"
+        );
     }
 
     /// Pure computation (a calculator call) produces no files, and its stdout
@@ -4133,13 +4900,13 @@ mod tests {
         assert!(validate_authored_artifact("", "document", "T", "body").is_err());
         assert!(validate_authored_artifact("id", "document", "T", "   ").is_err());
         // An unknown kind must be named in the error so the model can correct.
-        let err = validate_authored_artifact("id", "hologram", "T", "body")
-            .expect_err("unknown kind");
+        let err =
+            validate_authored_artifact("id", "hologram", "T", "body").expect_err("unknown kind");
         assert!(err.contains("hologram"), "{err}");
         // A binary kind cannot be hand-authored — it must come from the
         // interpreter, and the error has to say so.
-        let err = validate_authored_artifact("id", "spreadsheet", "T", "body")
-            .expect_err("binary kind");
+        let err =
+            validate_authored_artifact("id", "spreadsheet", "T", "body").expect_err("binary kind");
         assert!(err.contains("code_interpreter"), "{err}");
         // Over the size ceiling.
         let huge = "x".repeat(crate::artifacts::MAX_TEXT_ARTIFACT_CHARS + 1);
@@ -4177,7 +4944,10 @@ mod tests {
     #[test]
     fn a_long_paste_is_never_forced_even_when_it_contains_a_trigger_word() {
         let short = "what is the current price of bitcoin";
-        assert!(should_force_web_search(short), "control: short query forces");
+        assert!(
+            should_force_web_search(short),
+            "control: short query forces"
+        );
 
         let pasted_document = format!(
             "Please review this contract excerpt and summarize the obligations. {}",
@@ -4514,5 +5284,4 @@ mod tests {
             outcome.output
         );
     }
-
 }

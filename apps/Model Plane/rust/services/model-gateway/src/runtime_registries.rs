@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use mp_ids::new_ulid;
+use serde_json::{json, Value};
 use tonic::Status;
 
 use mp_contracts::model_plane::v1::{
@@ -189,6 +190,24 @@ impl McpRegistry {
         self.inner
             .contains_key(&(org_id.to_owned(), server_id.to_owned()))
     }
+
+    /// Seed the discovered tool catalog directly, standing in for a live
+    /// `tools/list`. **Test-only** — production code must go through
+    /// [`mcp_discover_cached`], which owns the TTL, the timeout, and the
+    /// fail-closed behavior this bypasses. Exists so dispatch-level tests in
+    /// other modules can exercise the tool paths without a live MCP server.
+    #[cfg(test)]
+    pub(crate) fn seed_catalog_for_test(
+        &self,
+        org_id: &str,
+        server_id: &str,
+        tools: Vec<McpToolDef>,
+    ) {
+        self.catalog.insert(
+            (org_id.to_owned(), server_id.to_owned()),
+            (Instant::now(), tools),
+        );
+    }
 }
 
 /// Discover an MCP server's tools over the real **Streamable HTTP** transport
@@ -203,7 +222,9 @@ pub(crate) async fn http_list_tools(url: &str, token: &str) -> Result<Vec<McpToo
         .await
 }
 
-pub(crate) async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, reqwest::Url), String> {
+pub(crate) async fn safe_mcp_http_client(
+    url: &str,
+) -> Result<(reqwest::Client, reqwest::Url), String> {
     let endpoint = reqwest::Url::parse(url).map_err(|_| "invalid MCP endpoint URL".to_owned())?;
     // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may use
     // plain HTTP and resolve to a private address — that is the whole point of a
@@ -246,7 +267,9 @@ pub(crate) async fn safe_mcp_http_client(url: &str) -> Result<(reqwest::Client, 
     Ok((client, endpoint))
 }
 
-pub(crate) async fn bounded_mcp_response(mut response: reqwest::Response) -> Result<String, String> {
+pub(crate) async fn bounded_mcp_response(
+    mut response: reqwest::Response,
+) -> Result<String, String> {
     if response
         .content_length()
         .is_some_and(|length| length > MCP_MAX_RESPONSE_BYTES as u64)
@@ -333,6 +356,169 @@ async fn mcp_discover_cached(
     }
 }
 
+/// Default number of individual MCP tool definitions exposed to the model
+/// before staging ([`stage_mcp_tool_defs`]) collapses them into the two
+/// synthetic `mcp_catalog`/`mcp_call` tools instead. Deliberately generous —
+/// a safety net, not a routine budget: any org whose full candidate count
+/// stays at or under this (Visma's proven-live setup included) sees
+/// byte-identical behavior to before staging existed.
+const DEFAULT_MCP_DISCLOSURE_THRESHOLD: usize = 40;
+
+/// Absolute ceiling regardless of configuration, mirroring
+/// `tool_loop::MAX_TOOL_ROUNDS_CEILING`'s role — a bad env value must not
+/// disable staging for a catalog large enough that per-tool disclosure would
+/// blow the prompt budget.
+const MAX_MCP_DISCLOSURE_THRESHOLD_CEILING: usize = 200;
+
+/// Disclosure threshold for this process: `MCP_DISCLOSURE_THRESHOLD` env
+/// override, clamped to `1..=MAX_MCP_DISCLOSURE_THRESHOLD_CEILING`, else
+/// [`DEFAULT_MCP_DISCLOSURE_THRESHOLD`]. Read once, mirroring
+/// `tool_loop::max_tool_rounds`'s pattern.
+pub fn mcp_disclosure_threshold() -> usize {
+    static THRESHOLD: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *THRESHOLD.get_or_init(|| {
+        std::env::var("MCP_DISCLOSURE_THRESHOLD")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|parsed| *parsed > 0)
+            .map_or(DEFAULT_MCP_DISCLOSURE_THRESHOLD, |parsed| {
+                parsed.min(MAX_MCP_DISCLOSURE_THRESHOLD_CEILING)
+            })
+    })
+}
+
+/// Synthetic tool name the model calls to browse the full MCP catalog once
+/// staging is active — see [`stage_mcp_tool_defs`]. Handled in
+/// `tool_loop::dispatch_tool`.
+pub const MCP_CATALOG_TOOL_NAME: &str = "mcp_catalog";
+/// Synthetic tool name the model calls to invoke one MCP tool by its exact
+/// qualified name once staging is active. Handled in
+/// `tool_loop::dispatch_tool`.
+pub const MCP_CALL_TOOL_NAME: &str = "mcp_call";
+
+/// Truncation length for a tool's description in `mcp_catalog`'s summary
+/// listing (§23.1's "Level 1" disclosure). Full descriptions remain reachable
+/// via `mcp_catalog` with a `tool_name` filter (Level 2).
+const MCP_CATALOG_SUMMARY_DESCRIPTION_CHARS: usize = 160;
+
+/// Collapse `full_defs` into the two synthetic staging tools when the
+/// candidate count exceeds `threshold`; otherwise return it unchanged.
+///
+/// Below threshold this is byte-identical to today's behavior: the model
+/// still sees every individual `mcp__<server>__<tool>` definition with its
+/// real schema. Above threshold, the individual definitions are replaced by
+/// `mcp_catalog` (Level-1 summaries of every tool, or one tool's full schema
+/// when called with `tool_name`) and `mcp_call` (proxied execution by
+/// qualified name). Both re-run discovery at call time — cheap, since
+/// [`mcp_discover_cached`]'s TTL cache makes this a cache hit, not a new
+/// network round-trip — rather than needing any new cross-turn state, and
+/// `mcp_call` dispatches through the exact same path the direct `mcp__`
+/// tool-call arm already uses (`tool_loop::dispatch_mcp_tool_call`). Staging
+/// changes only what the model sees up front, never what it can reach or
+/// with what authority.
+///
+/// Pure — no IO — so the threshold behavior is fully unit-tested without a
+/// live MCP server.
+#[must_use]
+pub fn stage_mcp_tool_defs(
+    full_defs: Vec<ToolDefinition>,
+    threshold: usize,
+) -> Vec<ToolDefinition> {
+    if full_defs.len() <= threshold {
+        return full_defs;
+    }
+    vec![
+        ToolDefinition {
+            name: MCP_CATALOG_TOOL_NAME.to_owned(),
+            description: format!(
+                "List available MCP tools ({} total; staged because the full set is large). \
+                 Call with no arguments for a short summary of every tool (qualified name, \
+                 description). Call with `tool_name` set to one exact qualified name from that \
+                 list to see its full parameter schema before calling it with {}.",
+                full_defs.len(),
+                MCP_CALL_TOOL_NAME
+            ),
+            parameters_json: json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Optional. Exact qualified name (from a prior mcp_catalog call) to inspect one tool's full schema instead of listing summaries."
+                    }
+                }
+            })
+            .to_string(),
+        },
+        ToolDefinition {
+            name: MCP_CALL_TOOL_NAME.to_owned(),
+            description: format!(
+                "Call one MCP tool by its exact qualified name (from {MCP_CATALOG_TOOL_NAME}). \
+                 Check that tool's full schema via {MCP_CATALOG_TOOL_NAME} first if you have not \
+                 already, so `arguments` matches what it expects."
+            ),
+            parameters_json: json!({
+                "type": "object",
+                "properties": {
+                    "tool_name": {
+                        "type": "string",
+                        "description": "Exact qualified tool name, from mcp_catalog."
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Arguments for the target tool, matching the schema mcp_catalog returned for it."
+                    }
+                },
+                "required": ["tool_name", "arguments"]
+            })
+            .to_string(),
+        },
+    ]
+}
+
+/// Render `mcp_catalog`'s call result: Level-1 summaries for every tool in
+/// `full_defs`, or one tool's full definition (name, description, real input
+/// schema) when `tool_name` matches exactly. An unmatched `tool_name` returns
+/// an `error` field rather than silently falling back to the full listing, so
+/// a typo'd name is visible to the model instead of masquerading as "list
+/// everything".
+///
+/// Pure — unit-tested directly with fixture [`ToolDefinition`]s, independent
+/// of live discovery.
+#[must_use]
+pub fn format_mcp_catalog(full_defs: &[ToolDefinition], tool_name: Option<&str>) -> String {
+    if let Some(name) = tool_name {
+        return match full_defs.iter().find(|def| def.name == name) {
+            Some(found) => json!({
+                "name": found.name,
+                "description": found.description,
+                "input_schema": serde_json::from_str::<Value>(&found.parameters_json)
+                    .unwrap_or(Value::Null),
+            })
+            .to_string(),
+            None => json!({ "error": format!("no such tool '{name}'") }).to_string(),
+        };
+    }
+    let tools: Vec<Value> = full_defs
+        .iter()
+        .map(|def| {
+            let char_count = def.description.chars().count();
+            let description = if char_count > MCP_CATALOG_SUMMARY_DESCRIPTION_CHARS {
+                let mut truncated: String = def
+                    .description
+                    .chars()
+                    .take(MCP_CATALOG_SUMMARY_DESCRIPTION_CHARS)
+                    .collect();
+                truncated.push('…');
+                truncated
+            } else {
+                def.description.clone()
+            };
+            json!({ "name": def.name, "description": description })
+        })
+        .collect();
+    json!({ "count": tools.len(), "tools": tools }).to_string()
+}
+
 /// Build the agent-facing tool definitions for every **enabled** MCP server an
 /// org has registered, namespaced `mcp__<server_id>__<tool>` so the gateway's
 /// `dispatch_tool` (and the model) can route calls back to the right server.
@@ -347,7 +533,13 @@ async fn mcp_discover_cached(
 /// server's `tools/list` is fetched for real input schemas and then intersected
 /// with the exact stored allowlist. A disabled or unreachable server contributes
 /// nothing. Never panics.
-pub async fn mcp_tool_defs(
+///
+/// Returns the full, unstaged set — see [`mcp_tool_defs`] for the version the
+/// chat/agent loops actually consume, which applies [`stage_mcp_tool_defs`] on
+/// top of this. Exposed separately so the `mcp_catalog`/`mcp_call` synthetic
+/// tools (`tool_loop::dispatch_tool`) can re-run discovery without duplicating
+/// the server-iteration/allowlist/naming logic.
+pub async fn full_mcp_tool_defs(
     reg: &McpRegistry,
     ownership: &crate::ownership::OwnershipStore,
     org_id: &str,
@@ -427,6 +619,33 @@ pub async fn mcp_tool_defs(
         }
     }
     defs
+}
+
+/// The version [`mcp_tool_defs`]'s callers (the chat and execution-core tool
+/// loops) actually consume: [`full_mcp_tool_defs`] with
+/// [`stage_mcp_tool_defs`] applied on top, so a large catalog collapses to
+/// the two synthetic `mcp_catalog`/`mcp_call` tools instead of flooding every
+/// turn with every individual tool's full schema (§23.1).
+pub async fn mcp_tool_defs(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    org_id: &str,
+    user_id: &str,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    mcp_oauth_service_token: &str,
+) -> Vec<ToolDefinition> {
+    let full = full_mcp_tool_defs(
+        reg,
+        ownership,
+        org_id,
+        user_id,
+        http_client,
+        capability_core_base_url,
+        mcp_oauth_service_token,
+    )
+    .await;
+    stage_mcp_tool_defs(full, mcp_disclosure_threshold())
 }
 
 /// Registers (or upserts) a validated MCP server in the gateway-scoped
@@ -1776,6 +1995,80 @@ pub fn handle_list_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_tool_def(name: &str, description: &str, parameters_json: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            parameters_json: parameters_json.to_owned(),
+        }
+    }
+
+    #[test]
+    fn stage_mcp_tool_defs_returns_unchanged_at_or_under_threshold() {
+        let defs = vec![
+            fixture_tool_def("mcp__s1__a", "tool a", "{}"),
+            fixture_tool_def("mcp__s1__b", "tool b", "{}"),
+            fixture_tool_def("mcp__s2__c", "tool c", "{}"),
+        ];
+        let staged = stage_mcp_tool_defs(defs.clone(), 3);
+        assert_eq!(staged, defs);
+    }
+
+    #[test]
+    fn stage_mcp_tool_defs_collapses_to_two_synthetic_tools_over_threshold() {
+        let defs = (0..5)
+            .map(|i| fixture_tool_def(&format!("mcp__s1__t{i}"), "a tool", "{}"))
+            .collect::<Vec<_>>();
+        let staged = stage_mcp_tool_defs(defs, 3);
+        assert_eq!(staged.len(), 2);
+        assert_eq!(staged[0].name, MCP_CATALOG_TOOL_NAME);
+        assert_eq!(staged[1].name, MCP_CALL_TOOL_NAME);
+        // The catalog tool's own description surfaces the real count so the
+        // model knows how much it is not seeing directly.
+        assert!(staged[0].description.contains('5'));
+        // mcp_call's schema requires both tool_name and arguments.
+        let call_schema: Value = serde_json::from_str(&staged[1].parameters_json).unwrap();
+        let required = call_schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("tool_name")));
+        assert!(required.contains(&json!("arguments")));
+    }
+
+    #[test]
+    fn format_mcp_catalog_lists_all_with_truncated_descriptions() {
+        let long_description = "x".repeat(MCP_CATALOG_SUMMARY_DESCRIPTION_CHARS + 20);
+        let defs = vec![
+            fixture_tool_def("mcp__s1__short", "short desc", "{}"),
+            fixture_tool_def("mcp__s1__long", &long_description, "{}"),
+        ];
+        let output = format_mcp_catalog(&defs, None);
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["count"], 2);
+        let tools = parsed["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["description"], "short desc");
+        let truncated = tools[1]["description"].as_str().unwrap();
+        assert!(truncated.chars().count() <= MCP_CATALOG_SUMMARY_DESCRIPTION_CHARS + 1);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn format_mcp_catalog_inspects_one_tool_by_name() {
+        let schema = r#"{"type":"object","required":["path"]}"#;
+        let defs = vec![fixture_tool_def("mcp__s1__read", "reads a file", schema)];
+        let output = format_mcp_catalog(&defs, Some("mcp__s1__read"));
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["name"], "mcp__s1__read");
+        assert_eq!(parsed["description"], "reads a file");
+        assert_eq!(parsed["input_schema"]["required"][0], "path");
+    }
+
+    #[test]
+    fn format_mcp_catalog_reports_error_for_unknown_tool_name() {
+        let defs = vec![fixture_tool_def("mcp__s1__read", "reads a file", "{}")];
+        let output = format_mcp_catalog(&defs, Some("mcp__s1__does_not_exist"));
+        let parsed: Value = serde_json::from_str(&output).unwrap();
+        assert!(parsed["error"].as_str().unwrap().contains("no such tool"));
+    }
 
     #[test]
     fn mcp_register_assigns_id() {

@@ -34,6 +34,11 @@ use crate::mcp_jsonrpc::{
     McpCallOutcome, McpToolDef, MCP_PROTOCOL_VERSION,
 };
 
+/// Defensive cap on `tools/list` pages followed per discovery call. A
+/// well-behaved server needs one or two pages even for large catalogs; this
+/// only guards against a misbehaving server returning a `nextCursor` forever.
+const MAX_TOOLS_LIST_PAGES: u32 = 50;
+
 /// Session id the server may assign at `initialize`, echoed on later calls.
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
 /// Negotiated protocol revision, sent alongside every request.
@@ -108,7 +113,9 @@ impl McpHttpSession {
             session_id: None,
         };
 
-        let (body, session_id) = session.post(&build_initialize_request(INITIALIZE_ID)).await?;
+        let (body, session_id) = session
+            .post(&build_initialize_request(INITIALIZE_ID))
+            .await?;
         session.session_id = session_id;
         let response = extract_jsonrpc_response(&body, INITIALIZE_ID)
             .ok_or_else(|| "initialize returned no JSON-RPC response".to_owned())?;
@@ -169,16 +176,30 @@ impl McpHttpSession {
         Ok((body, session_id))
     }
 
-    /// Discover the tools this server advertises.
+    /// Discover every tool this server advertises, following `nextCursor`
+    /// (MCP pagination spec) until the server reports no further page or
+    /// [`MAX_TOOLS_LIST_PAGES`] is reached.
     ///
     /// # Errors
     /// Returns `Err` on transport failure, a non-success status, a JSON-RPC
-    /// error, or a `result` without the `tools` array.
+    /// error, or a `result` without the `tools` array — on any page.
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, String> {
-        let (body, _) = self.post(&build_list_tools_request(LIST_TOOLS_ID)).await?;
-        let response = extract_jsonrpc_response(&body, LIST_TOOLS_ID)
-            .ok_or_else(|| "tools/list returned no JSON-RPC response".to_owned())?;
-        parse_list_tools_response(LIST_TOOLS_ID, &response)
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOLS_LIST_PAGES {
+            let (body, _) = self
+                .post(&build_list_tools_request(LIST_TOOLS_ID, cursor.as_deref()))
+                .await?;
+            let response = extract_jsonrpc_response(&body, LIST_TOOLS_ID)
+                .ok_or_else(|| "tools/list returned no JSON-RPC response".to_owned())?;
+            let page = parse_list_tools_response(LIST_TOOLS_ID, &response)?;
+            tools.extend(page.tools);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return Ok(tools),
+            }
+        }
+        Ok(tools)
     }
 
     /// Invoke one tool. Transport and protocol failures both surface as
@@ -252,8 +273,9 @@ mod tests {
         // which is the whole point of returning a string rather than a Value.
         let body = "data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"execute_query\"}]}}\n";
         let response = extract_jsonrpc_response(body, 2).expect("response found");
-        let tools = parse_list_tools_response(2, &response).expect("parses");
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "execute_query");
+        let page = parse_list_tools_response(2, &response).expect("parses");
+        assert_eq!(page.tools.len(), 1);
+        assert_eq!(page.tools[0].name, "execute_query");
+        assert_eq!(page.next_cursor, None);
     }
 }

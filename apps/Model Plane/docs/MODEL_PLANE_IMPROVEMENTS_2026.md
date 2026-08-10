@@ -1767,6 +1767,28 @@ which supplies a real staged-disclosure primitive (`server/discover`) for
 exactly this Level 0-3 model, rather than requiring one to be invented from
 scratch.**
 
+**Update 2026-08-09 — a narrower mitigation now exists in model-gateway; the
+GREENFIELD verdict above is unchanged for capability-core.**
+`runtime_registries.rs`'s `stage_mcp_tool_defs` (behind `mcp_tool_defs`, the
+function both the chat and execution-core tool loops call) now collapses
+every individual `mcp__<server>__<tool>` definition into two synthetic
+tools — `mcp_catalog` (Level 1 summaries, or one tool's full schema via an
+optional `tool_name` filter — Level 2) and `mcp_call` (proxied execution by
+qualified name, reusing the exact `handle_proxy_mcp_tool` authority the
+direct dispatch already had) — whenever an org's full candidate count
+exceeds `MCP_DISCLOSURE_THRESHOLD` (env-overridable, default 40). Below
+threshold, behavior is byte-identical to before this landed, so Visma's
+proven-live setup and every other small/typical org is unaffected. This
+addresses the literal symptom this section opens with ("do not load every
+connected tool schema into model context") for a large catalog, but it is
+**not** the capability-core-side build this section and §23.2 describe:
+there is still no per-tool risk/cost/ranking metadata, no semantic
+`search_capabilities`, and no `RankedList` integration for MCP tools
+specifically — `mcp_catalog`'s Level-1 summary can only honestly offer
+name, owning server, and truncated description, because that is all the
+data that exists today. See §23.13 for the mitigation's full detail and the
+ecosystem findings (rmcp, mcp-explorer) that shaped its design.
+
 Do not load every connected tool schema into model context.
 
 ```text
@@ -1874,6 +1896,11 @@ Generated code must run with:
 
 ### 23.6 Tool result handles
 
+**Landed 2026-08-09 for MCP tool results — four of the six capabilities
+below are real; two are not.** `model-gateway/src/tool_result_handles.rs`
+implements this interface field-for-field, and `tool_loop.rs`'s MCP dispatch
+now parks an oversized result under a handle instead of truncating it.
+
 ```ts
 interface ToolResultHandle {
 	handleId: string;
@@ -1890,12 +1917,61 @@ interface ToolResultHandle {
 
 Allow:
 
-- field projection;
-- server-side filtering;
-- runtime pagination;
-- direct tool-to-tool transfer;
-- artifact-to-tool transfer;
-- aggregate-only model visibility.
+- field projection; — **built** (`result_query`'s `select`)
+- server-side filtering; — **built** (`where` with
+  `eq`/`ne`/`contains`/`gt`/`gte`/`lt`/`lte`), though see the caveat below
+- runtime pagination; — **built** (`offset`/`limit`, capped at 200 rows)
+- direct tool-to-tool transfer; — **not built**
+- artifact-to-tool transfer; — **not built**
+- aggregate-only model visibility. — **built** (`aggregate` returns
+  count/sum/min/max/avg and no rows at all)
+
+**What replaced what.** Before this, a result past `MAX_TOOL_OUTPUT_CHARS`
+(8 000) was truncated by `bounded_tool_output` with an honest "this is
+INCOMPLETE" note. Honest, but it left the model choosing between re-running
+with a narrower request — often impossible, since the upstream tool may
+expose no filter at all — and answering from a partial set. A handle instead
+returns a small, *complete* description (row count, field names, size,
+`schema_id`, expiry) plus an id; the payload stays in the gateway and the
+model pulls only the slice it needs. Below the threshold nothing changes,
+and a payload that is not parseable JSON stays inline rather than being
+given a query surface that could not work on it.
+
+**Caveat on "server-side filtering".** The filtering here is gateway-side
+over an already-fetched result, not pushed down to the upstream tool. That
+saves model context, not the upstream round-trip or its cost. Real pushdown
+needs the normalized per-tool pagination/filter contract §23.3 describes,
+which does not exist yet.
+
+**Deliberate limits worth keeping.** `schema_id` is a **content-derived
+shape fingerprint** (hash of the sorted union of row field names), not a
+§23.3 normalized-schema registry id — the registry does not exist, and
+reusing the name for a hash would overclaim. Aggregates skip non-numeric
+values and report how many were skipped rather than coercing them to zero,
+and an aggregate over no numeric values is `null`, never `0`. A row missing
+the filtered field never matches, including under `ne` — treating absence as
+satisfying a negative would invent matches. Projection omits an absent field
+rather than emitting `null`, since "not present" and "present but empty" are
+different claims about a record. An aggregate always reports over the whole
+filtered set, never one page.
+
+**Isolation and ZDR.** Handles are keyed `(org_id, user_id, handle_id)`, so
+a handle id replayed from another tenant — or by a different user inside the
+same tenant — does not resolve; both are covered by tests. **A ZDR turn never
+creates a handle at all**: holding result content in gateway memory past the
+turn that produced it is exactly the retention ZDR promises not to do, so
+such a turn keeps the pre-existing inline truncation. Less useful, and the
+honest trade.
+
+**Artifact-ref linkage.** `result_query`'s `as_artifact` materializes the
+current slice as a downloadable artifact and records the reference on the
+handle, which is what populates `artifactRef`. It reuses the existing
+authored-artifact envelope, so emission travels the same proven path
+`create_artifact` already uses rather than a second one.
+
+Applied today only to MCP tool results, which are the ones that actually
+overflow. Extending it to the other large-result tools is mechanical — the
+module is tool-agnostic — but is not done.
 
 ### 23.7 Tool-call graph compilation
 
@@ -1914,6 +1990,9 @@ The model approves the plan or fills ambiguous parameters; the runtime executes 
 
 ### 23.8 Argument repair
 
+**Landed 2026-08-09 for the staged `mcp_call` path.**
+`model-gateway/src/argument_repair.rs` implements this flow exactly.
+
 Invalid arguments should trigger a narrow repair path:
 
 ```text
@@ -1925,6 +2004,63 @@ validation failure
 ```
 
 Do not rerun the full planner unless the selected capability is unsuitable.
+
+**Why it became necessary now.** §23.12's staged disclosure is what created
+the gap: `mcp_call` lets the model invoke a tool *by name*, and
+`mcp_catalog` returns Level-1 summaries by default — so the model can call a
+tool whose full input schema it never inspected. Before this, the cost of
+getting the arguments wrong was a full round-trip to a remote MCP server,
+answered with whatever prose that server chose, frequently with no
+indication of which field was at fault.
+
+`validate_arguments` now checks the arguments against the tool's own
+declared schema **before anything leaves the gateway**. The schema is
+already in hand — the `mcp_call` arm fetches the tool definitions to
+validate the tool name — so this costs nothing extra. On failure the model
+gets the exact field problems *plus that one tool's schema inline*, which is
+the "expose only selected capability schema" step: the repair needs no
+second `mcp_catalog` call, and re-listing the whole catalog would undo the
+context saving staged disclosure exists for.
+
+**Fail open is the whole design constraint.** A validator that rejects a
+call the upstream would have accepted is worse than no validator: it breaks
+working integrations for the sake of tidiness. So every rule is
+one-directional, reporting a problem only where the schema is unambiguous:
+
+- Unparseable schema, non-object schema, missing `properties`, or any
+  construct beyond `required`/`type`/`enum` (`oneOf`, `$ref`, nested object
+  schemas, `pattern`, `minimum`, …) ⇒ **no opinion**.
+- A field the schema does not mention ⇒ **no opinion**
+  (`additionalProperties` is commonly open; rejecting an extra field is a
+  pure false positive).
+- A `null` value ⇒ **no type opinion**, since servers differ on whether null
+  means "absent" or "explicitly empty". `required` still counts it as
+  present, exactly as JSON Schema specifies.
+- Coercions models make and servers accept — a quoted number for a numeric
+  field, a number for a string field, `"true"` for a boolean, a
+  case-mismatched enum member — ⇒ **allowed**. Only irreconcilable
+  mismatches are reported: a non-numeric word where a number is required, a
+  scalar where an object or array is required.
+
+What is left is a validator that catches the two failure modes that actually
+dominate — a missing required field, and a value outside a declared `enum` —
+and otherwise stays out of the way. The rejection message states plainly
+that the tool was **not** called and nothing was sent, since a model that
+believes a call half-succeeded may take a compensating action it should not.
+
+**Deliberately not wired to the direct path.** The
+`mcp__<server>__<tool>` arm — the one proven live against Visma — is
+untouched. It holds no schema at hand, so validating there would mean both
+new regression risk on the proven path and a new lookup, for no information
+the staged path does not already have.
+
+**Coverage note.** The end-to-end tests added here (a malformed `mcp_call`
+rejected without dialing out, a well-formed one passing validation and
+failing only at the transport, an out-of-allowlist tool name refused, and
+`mcp_catalog`'s list-vs-inspect split) are also the first end-to-end
+coverage of §23.12's staging work, which until now was tested only at the
+pure-function level. They run against a seeded discovery catalog
+(`McpRegistry::seed_catalog_for_test`), so no live MCP server is required.
 
 ### 23.9 Outcome-driven capability ranking
 
@@ -2102,6 +2238,93 @@ Neither connection is scheduled work — both are noted so a future build of
 §23.1-23.2 or §24 does not reinvent a portable format that already has real
 adoption, without being talked into building against it before there is a
 concrete need to interoperate with an external client.
+
+### 23.13 MCP client hardening and a first staged-disclosure mitigation
+
+**New/landed 2026-08-09.** Two external references —
+[`simonw/mcp-explorer`](https://github.com/simonw/mcp-explorer) (a CLI for
+exploring MCP servers) and
+[`modelcontextprotocol/rust-sdk`](https://github.com/modelcontextprotocol/rust-sdk)
+(`rmcp`, the official Rust MCP SDK) — informed both a bug fix and the first
+real implementation of §23.1's "do not load every connected tool schema"
+mitigation, landed in `model-gateway` this session.
+
+**Pagination gap found and fixed.** `rmcp`'s README documents `tools/list`
+as paginated at the protocol level (`nextCursor`, walked transparently by
+its `list_all_tools` helper). Checking our own client against that:
+`mcp_jsonrpc.rs`'s `build_list_tools_request`/`parse_list_tools_response`
+never sent or read a cursor, and `mcp_http.rs`'s `McpHttpSession::list_tools`
+issued exactly one `tools/list` call and returned whatever page came back.
+Any MCP server that paginates its tool list was silently having every tool
+past page 1 dropped — undiscovered, unexposed, uncallable — with no error
+and no log line to indicate the catalog was incomplete. Fixed:
+`parse_list_tools_response` now returns an `McpToolsPage { tools,
+next_cursor }`; `build_list_tools_request` takes an optional cursor;
+`list_tools` loops until `next_cursor` is `None` or a defensive 50-page cap
+is hit. This was a prerequisite for the mitigation below, not just adjacent
+to it — a "complete tool catalog" that silently wasn't complete would have
+made the catalog tool's own count dishonest.
+
+**mcp-explorer validates the disclosure shape.** `mcp-explorer`'s `list`
+command (compact: one-line signature + truncated description per tool)
+versus its `inspect` command (one tool, full schema/params/annotations) is a
+real, adopted, external precedent for exactly the Level 1 / Level 2 split
+§23.1 calls for — a summary-first listing, with an explicit second step to
+see one tool's full detail before calling it. That two-step shape, not a
+single flat dump, directly informed `mcp_catalog`'s design below: calling it
+with no arguments matches `list`; calling it with a `tool_name` filter
+matches `inspect`.
+
+**The mitigation landed.** `runtime_registries.rs` gained
+`stage_mcp_tool_defs` + `format_mcp_catalog`, and `tool_loop.rs` gained
+matching `dispatch_tool` arms for two synthetic tools:
+- `mcp_catalog` — no arguments: Level-1 summaries (qualified name, truncated
+  description) for every discovered tool. With a `tool_name` argument: that
+  one tool's full definition (name, description, real input schema) —
+  Level 2.
+- `mcp_call` — `{tool_name, arguments}`: re-validates `tool_name` against the
+  live discovered+allowlisted set (never trusts the model's string blindly),
+  then dispatches through the exact same `handle_proxy_mcp_tool` path the
+  direct `mcp__<server>__<tool>` arm already used — a name-indirection
+  layer, not a new capability or authority.
+
+This activates only when an org's full candidate tool count exceeds
+`MCP_DISCLOSURE_THRESHOLD` (env-overridable, default 40, ceiling 200 —
+mirrors `tool_loop::max_tool_rounds`'s env-override pattern exactly). At or
+under threshold, `mcp_tool_defs` returns the same individual
+`mcp__<server>__<tool>` definitions as before, byte-for-byte — Visma's
+proven-live setup, and every other org with a typical-sized catalog, is
+unaffected. Both synthetic tools re-run discovery on call (cheap:
+`mcp_discover_cached`'s 60s TTL cache makes this a cache hit, not a network
+round-trip) rather than needing any new cross-turn state, matching the
+constraint of not touching the proven live tool-loading path for anything
+below threshold.
+
+**What this is not.** This is a model-gateway-local mitigation of the
+symptom, not the capability-core-side build §23.1-23.2 describe. There is
+still no per-tool risk/cost/ranking metadata (`mcp_catalog`'s summary can
+only honestly offer name + server + description, because that is all that
+exists), no semantic `search_capabilities`, and no `RankedList` integration
+for MCP tools. The GREENFIELD verdict for the capability-core build is
+unchanged — see the update to §23.1 above.
+
+**Follow-on landed the same day.** The `mcp_call` path this section adds is
+also what §23.6's tool result handles now hang off: an oversized MCP result
+comes back as a queryable handle rather than a truncated blob. See §23.6.
+
+**rmcp as a candidate future migration, connecting to §23.11.** Separately
+from the pagination fix: `rmcp` is the official, actively-maintained
+(3.7k+ stars) Rust MCP SDK — and it already implements the `2026-07-28` spec
+RC that §23.11 describes our own `mcp_http.rs` as not yet supporting
+(discover-based lifecycle, JSON Schema 2020-12, and the rest), alongside
+full backward compatibility with `2025-11-25` and earlier. §23.11 scopes the
+RC migration as a rewrite bounded to `mcp_http.rs`'s session-opening logic;
+adopting `rmcp` instead would fold that migration into a broader one (new
+dependency, a different client lifecycle API surface, re-verification
+against the live Visma integration) that also removes the hand-rolled
+protocol-edge-case maintenance burden the pagination gap just demonstrated.
+Flagged as a candidate worth weighing against the narrower in-place rewrite
+§23.11 already scopes — not scheduled or started.
 
 ---
 
