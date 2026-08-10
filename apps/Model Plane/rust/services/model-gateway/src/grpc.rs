@@ -2147,15 +2147,15 @@ mod tests {
         GenerateImageRequest, GenerateImageResponse, GeneratedImage, GetContextAssemblyRequest,
         GetContextAssemblyResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse,
         HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, InferChunk, InferResponse,
-        LanguageAnalysisResult, ListModelsRequest, ListModelsResponse, ListRunsRequest, ListSystemRunsRequest,
-        SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse,
-        ListRunsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse,
+        LanguageAnalysisResult, ListModelsRequest, ListModelsResponse, ListRunsRequest,
+        ListRunsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListSystemRunsRequest,
         ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ManagedRunSource,
         ModelInfo, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
         ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
         ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail, SaveCheckpointRequest,
-        SaveCheckpointResponse, SpeechVoiceInfo, StartManagedRunRequest, StartManagedRunResponse,
-        StartRunRequest, StartRunResponse, StreamVideoGenerationContentRequest,
+        SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse,
+        SpeechVoiceInfo, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest,
+        StartRunResponse, StreamVideoGenerationContentRequest,
         StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
         TerminalOutcome, Trajectory, TranscribeSpeechRequest, TranscribeSpeechResponse,
         TranslateTextRequest, TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
@@ -2756,7 +2756,9 @@ mod tests {
             &self,
             _: Request<SetAgentSkillEnabledRequest>,
         ) -> Result<Response<SetAgentSkillEnabledResponse>, Status> {
-            Err(Status::unimplemented("set_agent_skill_enabled not needed in test"))
+            Err(Status::unimplemented(
+                "set_agent_skill_enabled not needed in test",
+            ))
         }
 
         async fn upsert_agent_skill(

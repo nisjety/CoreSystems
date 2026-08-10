@@ -328,9 +328,10 @@ mod tests {
         // The regression: `loaded` was a permanent marker, so an org was pulled
         // exactly once per process and later edits were invisible until restart.
         let store = SkillStore::new();
-        store
-            .loaded
-            .insert("o".to_owned(), std::time::Instant::now() - skill_cache_ttl());
+        store.loaded.insert(
+            "o".to_owned(),
+            std::time::Instant::now() - skill_cache_ttl(),
+        );
 
         assert!(
             !store.is_org_loaded("o"),
@@ -393,7 +394,11 @@ mod tests {
         store.replace_learned("other", vec![learned("s9", "theirs")]);
         store.replace_learned("other", vec![]);
 
-        assert_eq!(store.list("o").len(), 1, "sibling org's refresh bled across");
+        assert_eq!(
+            store.list("o").len(),
+            1,
+            "sibling org's refresh bled across"
+        );
     }
 
     #[test]

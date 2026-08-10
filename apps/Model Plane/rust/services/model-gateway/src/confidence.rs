@@ -129,12 +129,7 @@ fn evidence_bonus(units: u32) -> f64 {
 /// tool-sourced answers are never flagged "uncertain" — the regression v1 fixed
 /// stays fixed.
 #[must_use]
-pub fn score(
-    answer: &str,
-    output_tokens: u32,
-    max_tokens: u32,
-    evidence: Evidence,
-) -> Option<f64> {
+pub fn score(answer: &str, output_tokens: u32, max_tokens: u32, evidence: Evidence) -> Option<f64> {
     let trimmed = answer.trim();
     if trimmed.is_empty() {
         return Some(EMPTY_SCORE);
@@ -163,13 +158,21 @@ mod tests {
 
     #[test]
     fn empty_answer_is_low_but_real() {
-        assert_eq!(score("   ", 0, 1024, Evidence::default()), Some(EMPTY_SCORE));
+        assert_eq!(
+            score("   ", 0, 1024, Evidence::default()),
+            Some(EMPTY_SCORE)
+        );
     }
 
     #[test]
     fn clean_answer_without_evidence_is_base() {
         assert_eq!(
-            score("The capital of Norway is Oslo.", 8, 1024, Evidence::default()),
+            score(
+                "The capital of Norway is Oslo.",
+                8,
+                1024,
+                Evidence::default()
+            ),
             Some(BASE)
         );
     }
@@ -183,8 +186,13 @@ mod tests {
             Evidence::from_grounded_flag(true),
         )
         .unwrap();
-        let plain = score("Per the source, revenue rose 4%.", 12, 1024, Evidence::default())
-            .unwrap();
+        let plain = score(
+            "Per the source, revenue rose 4%.",
+            12,
+            1024,
+            Evidence::default(),
+        )
+        .unwrap();
         assert!(grounded > plain);
     }
 
@@ -195,14 +203,44 @@ mod tests {
     #[test]
     fn confidence_varies_with_evidence_volume_not_a_constant() {
         let answer = "Oslo har 728 714 innbyggere.";
-        let one = score(answer, 30, 4096, Evidence { web_citations: 1, ..Evidence::default() })
-            .unwrap();
-        let five = score(answer, 30, 4096, Evidence { web_citations: 5, ..Evidence::default() })
-            .unwrap();
-        let ten = score(answer, 30, 4096, Evidence { web_citations: 10, ..Evidence::default() })
-            .unwrap();
-        assert!(one < five, "more sources must score higher: {one} vs {five}");
-        assert!(five < ten, "more sources must score higher: {five} vs {ten}");
+        let one = score(
+            answer,
+            30,
+            4096,
+            Evidence {
+                web_citations: 1,
+                ..Evidence::default()
+            },
+        )
+        .unwrap();
+        let five = score(
+            answer,
+            30,
+            4096,
+            Evidence {
+                web_citations: 5,
+                ..Evidence::default()
+            },
+        )
+        .unwrap();
+        let ten = score(
+            answer,
+            30,
+            4096,
+            Evidence {
+                web_citations: 10,
+                ..Evidence::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            one < five,
+            "more sources must score higher: {one} vs {five}"
+        );
+        assert!(
+            five < ten,
+            "more sources must score higher: {five} vs {ten}"
+        );
     }
 
     #[test]
@@ -212,14 +250,21 @@ mod tests {
             answer,
             30,
             4096,
-            Evidence { tool_successes: 1, ..Evidence::default() },
+            Evidence {
+                tool_successes: 1,
+                ..Evidence::default()
+            },
         )
         .unwrap();
         let mixed = score(
             answer,
             30,
             4096,
-            Evidence { tool_successes: 1, tool_failures: 2, ..Evidence::default() },
+            Evidence {
+                tool_successes: 1,
+                tool_failures: 2,
+                ..Evidence::default()
+            },
         )
         .unwrap();
         assert!(mixed < clean, "failures must debit: {mixed} vs {clean}");
@@ -228,7 +273,11 @@ mod tests {
             answer,
             30,
             4096,
-            Evidence { tool_successes: 1, tool_failures: 40, ..Evidence::default() },
+            Evidence {
+                tool_successes: 1,
+                tool_failures: 40,
+                ..Evidence::default()
+            },
         )
         .unwrap();
         assert!(noisy >= BASE + 0.07 - MAX_FAILURE_PENALTY - 1e-9);
@@ -271,7 +320,10 @@ mod tests {
             "Lageret har 12 tomme varer.",
             30,
             4096,
-            Evidence { tool_successes: 1, ..Evidence::default() },
+            Evidence {
+                tool_successes: 1,
+                ..Evidence::default()
+            },
         )
         .unwrap();
         assert!(
@@ -286,7 +338,11 @@ mod tests {
             "ok",
             5,
             1024,
-            Evidence { kb_citations: 50, web_citations: 50, ..Evidence::default() },
+            Evidence {
+                kb_citations: 50,
+                web_citations: 50,
+                ..Evidence::default()
+            },
         )
         .unwrap();
         assert!((FLOOR..=CEIL).contains(&s));

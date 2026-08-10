@@ -210,7 +210,10 @@ mod tests {
         assert_eq!(ArtifactKind::parse("code"), Some(ArtifactKind::Code));
         assert_eq!(ArtifactKind::parse("  HTML "), Some(ArtifactKind::Html));
         // Synonyms a model reaches for on its own.
-        assert_eq!(ArtifactKind::parse("markdown"), Some(ArtifactKind::Document));
+        assert_eq!(
+            ArtifactKind::parse("markdown"),
+            Some(ArtifactKind::Document)
+        );
         assert_eq!(ArtifactKind::parse("text"), Some(ArtifactKind::Document));
         // Unknown must be rejected, not defaulted: a defaulted kind renders as
         // the wrong thing (or nothing) with no error anyone can see.
@@ -282,7 +285,13 @@ mod tests {
             }
             other => panic!("expected artifact, got {other:?}"),
         }
-        match attachment_event("f1", "r.xlsx", "application/x", "data:application/x;base64,AA", 2) {
+        match attachment_event(
+            "f1",
+            "r.xlsx",
+            "application/x",
+            "data:application/x;base64,AA",
+            2,
+        ) {
             ChatEvent::Attachment {
                 id,
                 name,

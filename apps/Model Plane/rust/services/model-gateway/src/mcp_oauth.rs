@@ -232,7 +232,10 @@ pub fn generate_pkce() -> Pkce {
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
     let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
-    Pkce { verifier, challenge }
+    Pkce {
+        verifier,
+        challenge,
+    }
 }
 
 /// Generate a cryptographically random CSRF `state` value.
@@ -673,7 +676,10 @@ mod tests {
     #[test]
     fn pkce_verifier_and_challenge_are_url_safe() {
         let pkce = generate_pkce();
-        let is_url_safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let is_url_safe = |s: &str| {
+            s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
         assert!(is_url_safe(&pkce.verifier));
         assert!(is_url_safe(&pkce.challenge));
     }

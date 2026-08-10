@@ -765,7 +765,11 @@ mod tests {
     fn resolve_location_refuses_a_city_it_cannot_place() {
         assert_eq!(resolve_location("Atlantis"), None);
         assert_eq!(resolve_location("Paris"), None, "non-Norwegian city");
-        assert_eq!(resolve_location("Ålesund"), None, "uncovered Norwegian city");
+        assert_eq!(
+            resolve_location("Ålesund"),
+            None,
+            "uncovered Norwegian city"
+        );
         assert_eq!(resolve_location("Oslu"), None, "typo must not resolve");
     }
 

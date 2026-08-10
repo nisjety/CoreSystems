@@ -87,7 +87,10 @@ pub struct Signal {
 
 impl Signal {
     fn of(kind: SignalKind) -> Self {
-        Self { kind, strength: kind.strength() }
+        Self {
+            kind,
+            strength: kind.strength(),
+        }
     }
 }
 
@@ -257,7 +260,12 @@ pub fn is_near_duplicate(context: &TurnContext<'_>) -> bool {
 /// punctuation would turn "nei, men …" into "nei men …" and lose the boundary the
 /// bare-negation rule depends on.
 fn normalize(message: &str) -> String {
-    message.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+    message
+        .trim()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Split into comparable word tokens, dropping punctuation and one-character
@@ -337,17 +345,23 @@ mod tests {
     /// it exists for, where no flag arrives.
     #[test]
     fn an_undeclared_retype_is_still_a_near_duplicate() {
-        let kinds: Vec<SignalKind> =
-            classify(&reask("hva er saldoen paa konto 1920", "hva er saldoen paa konto 1920", 5))
-                .iter()
-                .map(|s| s.kind)
-                .collect();
+        let kinds: Vec<SignalKind> = classify(&reask(
+            "hva er saldoen paa konto 1920",
+            "hva er saldoen paa konto 1920",
+            5,
+        ))
+        .iter()
+        .map(|s| s.kind)
+        .collect();
         assert!(kinds.contains(&SignalKind::NearDuplicate), "{kinds:?}");
     }
     use super::*;
 
     fn ctx<'a>(message: &'a str) -> TurnContext<'a> {
-        TurnContext { message, ..TurnContext::default() }
+        TurnContext {
+            message,
+            ..TurnContext::default()
+        }
     }
 
     // ── The Norwegian substring traps ───────────────────────────────────────
@@ -363,7 +377,10 @@ mod tests {
             "kan du forklare feilkoden 500?",
             "hva er feil med denne ordren?",
         ] {
-            assert!(!is_correction(message), "{message:?} must not read as a correction");
+            assert!(
+                !is_correction(message),
+                "{message:?} must not read as a correction"
+            );
         }
     }
 
@@ -375,14 +392,20 @@ mod tests {
             "no thanks",
             "no, i meant the other one — can you check both?",
         ] {
-            assert!(!is_correction(message), "{message:?} must not read as a correction");
+            assert!(
+                !is_correction(message),
+                "{message:?} must not read as a correction"
+            );
         }
     }
 
     #[test]
     fn a_bare_rejection_is_a_correction() {
         for message in ["nei", "Nei", "  nei  ", "feil", "wrong", "nope", "nei."] {
-            assert!(is_correction(message), "{message:?} should read as a correction");
+            assert!(
+                is_correction(message),
+                "{message:?} should read as a correction"
+            );
         }
     }
 
@@ -397,7 +420,10 @@ mod tests {
             "That is incorrect — the invoice is from March",
             "feil svar",
         ] {
-            assert!(is_correction(message), "{message:?} should read as a correction");
+            assert!(
+                is_correction(message),
+                "{message:?} should read as a correction"
+            );
         }
     }
 
@@ -455,7 +481,10 @@ mod tests {
             "hva er saldoen for kunde Aquatiq",
             NEAR_DUPLICATE_WINDOW.as_secs() + 1,
         );
-        assert!(!is_near_duplicate(&context), "outside the window it is not a complaint");
+        assert!(
+            !is_near_duplicate(&context),
+            "outside the window it is not a complaint"
+        );
     }
 
     #[test]
@@ -465,7 +494,10 @@ mod tests {
             "hva er saldoen for kunde Aquatiq",
             20,
         );
-        assert!(!is_near_duplicate(&context), "same subject, different question");
+        assert!(
+            !is_near_duplicate(&context),
+            "same subject, different question"
+        );
     }
 
     #[test]
@@ -515,7 +547,11 @@ mod tests {
             regenerated: true,
             ..TurnContext::default()
         });
-        assert_eq!(signals.len(), 2, "expected both regenerate and correction: {signals:?}");
+        assert_eq!(
+            signals.len(),
+            2,
+            "expected both regenerate and correction: {signals:?}"
+        );
     }
 
     #[test]
@@ -542,7 +578,10 @@ mod tests {
             SignalKind::Correction,
         ] {
             let strength = kind.strength();
-            assert!(strength > 0.0 && strength <= 1.0, "{kind:?} strength {strength}");
+            assert!(
+                strength > 0.0 && strength <= 1.0,
+                "{kind:?} strength {strength}"
+            );
             assert_eq!(Signal::of(kind).strength, strength);
         }
     }

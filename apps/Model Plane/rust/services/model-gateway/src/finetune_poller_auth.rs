@@ -234,8 +234,11 @@ mod tests {
             })))
             .mount(&auth)
             .await;
-        let provider =
-            FinetunePollerTokenProvider::new_for_test(&auth.uri(), "model-gateway-finetune-poller", "secret");
+        let provider = FinetunePollerTokenProvider::new_for_test(
+            &auth.uri(),
+            "model-gateway-finetune-poller",
+            "secret",
+        );
 
         assert!(provider.token().await.is_err());
     }

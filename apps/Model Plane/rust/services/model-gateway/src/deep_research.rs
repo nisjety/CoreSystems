@@ -205,14 +205,8 @@ macro_rules! cached_cap {
         #[must_use]
         pub fn $name() -> $ty {
             static CACHED: std::sync::OnceLock<$ty> = std::sync::OnceLock::new();
-            *CACHED.get_or_init(|| {
-                $clamp(
-                    std::env::var($env).ok().as_deref(),
-                    $default,
-                    $min,
-                    $max,
-                )
-            })
+            *CACHED
+                .get_or_init(|| $clamp(std::env::var($env).ok().as_deref(), $default, $min, $max))
         }
     };
 }
@@ -553,11 +547,9 @@ fn parse_json_sub_queries(cleaned: &str) -> Option<Vec<String>> {
     let items: Vec<String> = array
         .iter()
         .filter_map(|item| {
-            item.as_str().map(str::to_owned).or_else(|| {
-                item.get("query")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
+            item.as_str()
+                .map(str::to_owned)
+                .or_else(|| item.get("query").and_then(Value::as_str).map(str::to_owned))
         })
         .collect();
     if items.is_empty() {
@@ -947,8 +939,7 @@ pub fn number_and_bound(
         if trimmed.is_empty() {
             sources[index].extract = None;
             sources[index].number = None;
-            sources[index].unread_reason =
-                Some("the fetch returned no readable text".to_owned());
+            sources[index].unread_reason = Some("the fetch returned no readable text".to_owned());
             continue;
         }
         let remaining = corpus_cap.saturating_sub(used);
@@ -1054,9 +1045,8 @@ pub fn coverage_statement(coverage: &Coverage) -> String {
         );
     }
     if coverage.corpus_exhausted {
-        statement.push_str(
-            ". The evidence budget filled before every fetched page could be included",
-        );
+        statement
+            .push_str(". The evidence budget filled before every fetched page could be included");
     }
     if coverage.deadline_hit {
         statement.push_str(
@@ -1672,8 +1662,7 @@ pub async fn run_deep_research(
                 for &index in &to_read {
                     if sources[index].extract.is_none() {
                         sources[index].unread_reason = Some(
-                            "the research time budget ran out before this page was read"
-                                .to_owned(),
+                            "the research time budget ran out before this page was read".to_owned(),
                         );
                     }
                 }
@@ -1757,7 +1746,10 @@ pub async fn run_deep_research(
         .step(
             STEP_SYNTHESIZE,
             "Skriver rapport",
-            &format!("Syntetiserer {} leste kilder med kildehenvisninger.", coverage.read),
+            &format!(
+                "Syntetiserer {} leste kilder med kildehenvisninger.",
+                coverage.read
+            ),
             "active",
         )
         .await;
@@ -1765,7 +1757,15 @@ pub async fn run_deep_research(
     let synthesized = guarded(
         cancel,
         deadline,
-        synthesize_report(state, request_id, org_id, inference_bearer, zdr, model, &prompt),
+        synthesize_report(
+            state,
+            request_id,
+            org_id,
+            inference_bearer,
+            zdr,
+            model,
+            &prompt,
+        ),
     )
     .await;
     let (report, resolved_model, synthesis_failure) = match synthesized {
@@ -1787,7 +1787,9 @@ pub async fn run_deep_research(
         (Some(text), _) => {
             let artifact_id = report_artifact_id(request_id);
             let title = report_artifact_title(question);
-            let version = state.artifact_versions.next_version(thread_id, &artifact_id);
+            let version = state
+                .artifact_versions
+                .next_version(thread_id, &artifact_id);
             events
                 .push(crate::artifacts::artifact_event(
                     &artifact_id,
@@ -2174,8 +2176,8 @@ async fn read_pages(
     sources: &[ResearchSource],
     selected: &[usize],
 ) -> Result<(Vec<(usize, Result<String, String>)>, usize, usize), &'static str> {
-    let dispatched = futures::future::join_all(selected.iter().enumerate().map(
-        |(slot, &source_index)| {
+    let dispatched =
+        futures::future::join_all(selected.iter().enumerate().map(|(slot, &source_index)| {
             let call = ToolCall {
                 id: format!("{request_id}-dr-read-{slot}"),
                 name: "fetch_url".to_owned(),
@@ -2196,9 +2198,8 @@ async fn read_pages(
                 .await;
                 (source_index, outcome)
             }
-        },
-    ))
-    .await;
+        }))
+        .await;
 
     let mut results: Vec<(usize, Result<String, String>)> = Vec::new();
     let mut ok = 0usize;
@@ -2225,9 +2226,11 @@ async fn read_pages(
             failed = failed.saturating_add(1);
             results.push((
                 source_index,
-                Err("the fetch succeeded but extracted no readable text (the page is most \
+                Err(
+                    "the fetch succeeded but extracted no readable text (the page is most \
                      likely rendered by JavaScript)"
-                    .to_owned()),
+                        .to_owned(),
+                ),
             ));
         }
     }
@@ -2278,8 +2281,8 @@ async fn synthesize_report(
                 tracing::debug!(%request_id, "deep research synthesis returned empty content");
                 return None;
             }
-            let resolved = Some(resp.model_used)
-                .filter(|model_used: &String| !model_used.trim().is_empty());
+            let resolved =
+                Some(resp.model_used).filter(|model_used: &String| !model_used.trim().is_empty());
             Some((content, resolved))
         }
         Ok(Err(error)) => {
@@ -2687,16 +2690,31 @@ mod tests {
             MIN_PAGES
         );
         assert_eq!(
-            clamped_usize(Some("not a number"), DEFAULT_MAX_PAGES, MIN_PAGES, MAX_PAGES_CEILING),
+            clamped_usize(
+                Some("not a number"),
+                DEFAULT_MAX_PAGES,
+                MIN_PAGES,
+                MAX_PAGES_CEILING
+            ),
             DEFAULT_MAX_PAGES
         );
         assert_eq!(clamped_usize(None, 6, 1, 10), 6);
         assert_eq!(
-            clamped_u64(Some("99999"), DEFAULT_WALL_CLOCK_SECS, MIN_WALL_CLOCK_SECS, MAX_WALL_CLOCK_SECS),
+            clamped_u64(
+                Some("99999"),
+                DEFAULT_WALL_CLOCK_SECS,
+                MIN_WALL_CLOCK_SECS,
+                MAX_WALL_CLOCK_SECS
+            ),
             MAX_WALL_CLOCK_SECS
         );
         assert_eq!(
-            clamped_i32(Some("1"), DEFAULT_REPORT_TOKENS, MIN_REPORT_TOKENS, MAX_REPORT_TOKENS),
+            clamped_i32(
+                Some("1"),
+                DEFAULT_REPORT_TOKENS,
+                MIN_REPORT_TOKENS,
+                MAX_REPORT_TOKENS
+            ),
             MIN_REPORT_TOKENS
         );
         // And the live accessors agree with their documented defaults when the
@@ -2888,11 +2906,7 @@ mod tests {
             deadline_hit: false,
             corpus_exhausted: false,
         };
-        let receipt = research_receipt(
-            &["a".to_owned(), "b".to_owned()],
-            &coverage,
-            12_000,
-        );
+        let receipt = research_receipt(&["a".to_owned(), "b".to_owned()], &coverage, 12_000);
         assert_eq!(receipt["sources_found"], 9);
         assert_eq!(receipt["sources_read"], 5);
         assert_eq!(receipt["sources_unread"], 4);
@@ -2903,7 +2917,10 @@ mod tests {
         assert!(receipt["caps"]["corpus_chars"].is_number());
         // The report text itself is NOT in the receipt.
         let serialized = receipt.to_string();
-        assert!(serialized.len() < 600, "receipt must stay compact: {serialized}");
+        assert!(
+            serialized.len() < 600,
+            "receipt must stay compact: {serialized}"
+        );
     }
 
     // --- context messages -------------------------------------------------
@@ -3018,10 +3035,7 @@ mod tests {
         );
         // An empty extraction is the JS-rendered-page case; it must not become
         // a citable source with no words in it.
-        assert_eq!(
-            extract_from_fetch_output(r#"{"content":"   "}"#),
-            None
-        );
+        assert_eq!(extract_from_fetch_output(r#"{"content":"   "}"#), None);
         assert_eq!(extract_from_fetch_output("not json"), None);
     }
 

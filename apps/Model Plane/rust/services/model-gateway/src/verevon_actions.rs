@@ -93,7 +93,11 @@ fn project(row: &Value, keys: &[&str]) -> Value {
 /// Row-cap a list and report what was withheld, so the model can say "showing
 /// 25 of 312" instead of silently treating a truncated page as the whole set.
 fn capped_rows(rows: &[Value], keys: &[&str]) -> (Vec<Value>, usize) {
-    let shown: Vec<Value> = rows.iter().take(MAX_ROWS).map(|r| project(r, keys)).collect();
+    let shown: Vec<Value> = rows
+        .iter()
+        .take(MAX_ROWS)
+        .map(|r| project(r, keys))
+        .collect();
     (shown, rows.len().saturating_sub(MAX_ROWS))
 }
 
@@ -489,12 +493,7 @@ pub async fn knowledge_list_documents(
         .clone()
         .list_documents(request)
         .await
-        .map_err(|status| {
-            format!(
-                "knowledge.list_documents failed: {}",
-                status.message()
-            )
-        })?
+        .map_err(|status| format!("knowledge.list_documents failed: {}", status.message()))?
         .into_inner();
 
     // `content` is deliberately NOT projected: a document inventory that inlined
@@ -513,10 +512,8 @@ pub async fn knowledge_list_documents(
             })
         })
         .collect();
-    let (documents, withheld) = capped_rows(
-        &rows,
-        &["document_id", "title", "source", "type", "status"],
-    );
+    let (documents, withheld) =
+        capped_rows(&rows, &["document_id", "title", "source", "type", "status"]);
 
     Ok(json!({
         "upstream": "data-plane-v2 DocumentService.ListDocuments",
@@ -540,7 +537,11 @@ mod tests {
         let long = Value::String("x".repeat(MAX_FIELD_CHARS + 50));
         let trimmed = trim_field(&long);
         let text = trimmed.as_str().expect("string");
-        assert_eq!(text.chars().count(), MAX_FIELD_CHARS + 1, "capped plus ellipsis");
+        assert_eq!(
+            text.chars().count(),
+            MAX_FIELD_CHARS + 1,
+            "capped plus ellipsis"
+        );
         assert!(text.ends_with('…'));
 
         // Numbers, arrays and objects pass through untouched.
@@ -559,8 +560,14 @@ mod tests {
         });
         let projected = project(&row, &["id", "title", "handle"]);
         assert_eq!(projected, json!({ "id": "post_1", "title": "Launch" }));
-        assert!(projected.get("connection_id").is_none(), "unlisted field dropped");
-        assert!(projected.get("metadata").is_none(), "unlisted field dropped");
+        assert!(
+            projected.get("connection_id").is_none(),
+            "unlisted field dropped"
+        );
+        assert!(
+            projected.get("metadata").is_none(),
+            "unlisted field dropped"
+        );
         assert!(projected.get("handle").is_none(), "null field dropped");
     }
 
@@ -606,7 +613,10 @@ mod tests {
     fn validate_filter_rejects_unknown_values_and_names_the_valid_set() {
         let err = validate_filter("status", "postponed", &POST_STATUSES)
             .expect_err("unknown status must be rejected");
-        assert!(err.contains("postponed"), "error names the bad input: {err}");
+        assert!(
+            err.contains("postponed"),
+            "error names the bad input: {err}"
+        );
         assert!(err.contains("scheduled"), "error lists valid values: {err}");
         // A campaign status is not a post status — the allow-lists are distinct.
         assert!(validate_filter("status", "active", &POST_STATUSES).is_err());
@@ -637,7 +647,10 @@ mod tests {
             json!(true),
             "a full page must be flagged as page-bounded"
         );
-        assert!(full.get("total").is_none(), "never label a page count 'total'");
+        assert!(
+            full.get("total").is_none(),
+            "never label a page count 'total'"
+        );
 
         // A short page cannot be hiding anything.
         let partial = social_list_payload("u", &json!({}), &rows, &["id"], 50);

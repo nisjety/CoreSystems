@@ -57,8 +57,7 @@ fn authenticated_server_contracts_are_additive_and_fail_closed() {
     }
 }
 
-const COMPOSE_PRODUCTION: &str =
-    include_str!("../../../../deploy/docker-compose.production.yml");
+const COMPOSE_PRODUCTION: &str = include_str!("../../../../deploy/docker-compose.production.yml");
 
 /// The gRPC compatibility ports may be probed locally, but must never be
 /// reachable from off the machine.
@@ -102,9 +101,6 @@ fn grpc_compatibility_ports_are_loopback_only_and_absent_in_production() {
             .lines()
             .take_while(|line| line.starts_with("    ") || line.trim().is_empty())
             .any(|line| line.trim() == "ports: !reset []");
-        assert!(
-            resets,
-            "{service} must publish no host ports in production"
-        );
+        assert!(resets, "{service} must publish no host ports in production");
     }
 }

@@ -800,7 +800,10 @@ pub async fn retrieve(
             // all. The `grounded` bool fed into confidence scoring
             // (`grounding.is_some_and(|g| !g.citations.is_empty())`) is
             // unaffected since it already requires non-empty citations.
-            Some(with_graph(build_grounding(query, &resp.into_inner()), graph))
+            Some(with_graph(
+                build_grounding(query, &resp.into_inner()),
+                graph,
+            ))
         }
         Err(error) => {
             tracing::warn!(
@@ -1093,7 +1096,9 @@ mod tests {
     #[test]
     fn honesty_notices_are_non_empty_and_on_topic() {
         assert!(NO_GROUNDING_SYSTEM_NOTICE.contains("knowledge base"));
-        assert!(NO_GROUNDING_SYSTEM_NOTICE.to_lowercase().contains("do not have this"));
+        assert!(NO_GROUNDING_SYSTEM_NOTICE
+            .to_lowercase()
+            .contains("do not have this"));
         assert!(LOW_CONFIDENCE_GROUNDING_NOTICE.contains("low-confidence"));
     }
 }

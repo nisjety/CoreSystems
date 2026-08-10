@@ -1194,7 +1194,10 @@ mod tests {
             .scrape_readable("https://ssb.no", "org-a", false)
             .await
             .expect("scrape succeeds");
-        assert!(result.text.is_empty(), "empty must stay empty, not invented");
+        assert!(
+            result.text.is_empty(),
+            "empty must stay empty, not invented"
+        );
     }
 
     /// An error is not an empty page: rendering cannot fix a 403, so it

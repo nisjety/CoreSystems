@@ -251,7 +251,9 @@ pub struct PreviousTurnRegistry {
 impl PreviousTurnRegistry {
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: Arc::new(DashMap::new()) }
+        Self {
+            inner: Arc::new(DashMap::new()),
+        }
     }
 
     /// Read the previous turn, then replace it with this one.

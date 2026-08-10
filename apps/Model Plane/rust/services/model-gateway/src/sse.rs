@@ -28,7 +28,7 @@ use tracing::info;
 use crate::{
     auth::{
         Claims, VerifiedCostBearer, VerifiedDataPlaneBearer as VerifiedBearer,
-        VerifiedExecutionBearer, VerifiedIngestionBearer, VerifiedInferenceBearer,
+        VerifiedExecutionBearer, VerifiedInferenceBearer, VerifiedIngestionBearer,
         VerifiedSessionBearer as VerifiedModelBearer,
     },
     gateway_metrics,
@@ -1168,13 +1168,12 @@ pub async fn invoke_stream_sse(
                     reason: "client cancelled".to_owned(),
                 };
                 let _ = tx.send(Ok(stopped.to_sse(&req_id))).await;
-                if let Err(error) =
-                    crate::session_flow::cancel_direct_inference_run_authenticated(
-                        &session_state,
-                        &session_run_for_terminal,
-                        &session_bearer,
-                    )
-                    .await
+                if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                )
+                .await
                 {
                     tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel deep-research run after client stop");
                 }
@@ -2138,8 +2137,7 @@ async fn load_context_assembly_messages(
 /// That suppressed the properly-wired grounding path in `retrieval.rs` -- the one
 /// with GraphRAG and citations -- so the good path was skipped precisely because
 /// the empty path had "succeeded".
-const GROUNDING_SEGMENT_KINDS: [&str; 5] =
-    ["retrieval", "knowledge", "graph", "evidence", "wiki"];
+const GROUNDING_SEGMENT_KINDS: [&str; 5] = ["retrieval", "knowledge", "graph", "evidence", "wiki"];
 
 fn is_grounding_segment_kind(kind: &str) -> bool {
     GROUNDING_SEGMENT_KINDS
@@ -2964,12 +2962,9 @@ async fn mark_run_plan_mode(state: &AppState, org_id: &str, run_id: &str, sessio
         rationale: "Planmodus enabled from the composer".to_owned(),
         ttl_seconds: 0,
     };
-    if let Err(error) = crate::coordinator::handle_enter_plan_mode(
-        &state.plan_mode,
-        &*state.publisher,
-        request,
-    )
-    .await
+    if let Err(error) =
+        crate::coordinator::handle_enter_plan_mode(&state.plan_mode, &*state.publisher, request)
+            .await
     {
         tracing::warn!(%error, %run_id, "entering plan mode failed (best-effort)");
     }
@@ -3161,9 +3156,15 @@ async fn serve_cached_answer(
             let _ = tx.send(Ok(event.to_sse(request_id))).await;
         }
     }
-    let suggestions =
-        generate_follow_ups(state, request_id, org_id, user_content, cached, inference_bearer)
-            .await;
+    let suggestions = generate_follow_ups(
+        state,
+        request_id,
+        org_id,
+        user_content,
+        cached,
+        inference_bearer,
+    )
+    .await;
     if !suggestions.is_empty() {
         let event = crate::sse_events::ChatEvent::FollowUps { suggestions };
         let _ = tx.send(Ok(event.to_sse(request_id))).await;
@@ -4103,7 +4104,11 @@ fn truncate_chars(text: &str, max_chars: usize) -> &str {
 /// survives. Pulled out of the old `sanitize_thread_title` so follow-up
 /// suggestions get the exact same hardening instead of a re-implementation
 /// that could quietly drift from it.
-fn sanitize_display_line(raw_line: &str, max_chars: usize, trim_trailing: &[char]) -> Option<String> {
+fn sanitize_display_line(
+    raw_line: &str,
+    max_chars: usize,
+    trim_trailing: &[char],
+) -> Option<String> {
     let line = raw_line.trim();
     if line.is_empty() {
         return None;
@@ -5164,7 +5169,8 @@ fn orchestration_event_to_step_update(
         ),
         Event::ApprovalContinuationVerified(p) => {
             let verification = p.verification.as_ref();
-            let status_enum = verification.and_then(|v| VerificationStatus::try_from(v.status).ok());
+            let status_enum =
+                verification.and_then(|v| VerificationStatus::try_from(v.status).ok());
             let status = match status_enum {
                 Some(VerificationStatus::VerifiedSuccess) => "done",
                 Some(VerificationStatus::VerifiedFailure) => "failed",
@@ -5325,7 +5331,9 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             if let Some(v) = payload.verification.as_ref() {
                 object.insert(
                     "verification_status".to_owned(),
-                    json!(enum_name(VerificationStatus::try_from(v.status).ok().as_ref())),
+                    json!(enum_name(
+                        VerificationStatus::try_from(v.status).ok().as_ref()
+                    )),
                 );
                 object.insert("verification_method".to_owned(), json!(v.method));
                 object.insert("verification_reason".to_owned(), json!(v.reason));
@@ -5382,7 +5390,6 @@ impl EnumName for SubagentRole {
         self.as_str_name()
     }
 }
-
 
 /// Detect and publish implicit dissatisfaction with the PREVIOUS turn.
 ///
@@ -5757,7 +5764,10 @@ mod tests {
         );
         assert!(
             message.content.to_lowercase().contains("may have changed")
-                || message.content.to_lowercase().contains("may no longer match"),
+                || message
+                    .content
+                    .to_lowercase()
+                    .contains("may no longer match"),
             "must instruct hedging for the common case where web_search isn't offered this turn"
         );
     }

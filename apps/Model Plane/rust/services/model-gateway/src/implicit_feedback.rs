@@ -124,26 +124,39 @@ mod tests {
     }
 
     fn signal(kind: SignalKind) -> Signal {
-        Signal { kind, strength: kind.strength() }
+        Signal {
+            kind,
+            strength: kind.strength(),
+        }
     }
 
     /// The bug this namespacing exists to prevent: an implicit signal silently
     /// replacing a user's real thumbs-down, or being replaced by one.
     #[test]
     fn an_implicit_key_can_never_collide_with_an_explicit_rating() {
-        let envelopes =
-            envelopes_for(&[signal(SignalKind::Correction)], &previous(), "org", "user", false);
+        let envelopes = envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &previous(),
+            "org",
+            "user",
+            false,
+        );
         let explicit_key = format!("feedback_{}_{}", "run-1", "user");
         assert_eq!(envelopes.len(), 1);
         assert_ne!(envelopes[0].idempotency_key, explicit_key);
-        assert!(envelopes[0].idempotency_key.starts_with("feedback_implicit_"));
+        assert!(envelopes[0]
+            .idempotency_key
+            .starts_with("feedback_implicit_"));
     }
 
     /// Two kinds on one turn are two samples; the same kind twice is one.
     #[test]
     fn keys_split_by_kind_but_not_by_occurrence() {
         let both = envelopes_for(
-            &[signal(SignalKind::Regenerate), signal(SignalKind::Correction)],
+            &[
+                signal(SignalKind::Regenerate),
+                signal(SignalKind::Correction),
+            ],
             &previous(),
             "org",
             "user",
@@ -152,8 +165,13 @@ mod tests {
         assert_eq!(both.len(), 2);
         assert_ne!(both[0].idempotency_key, both[1].idempotency_key);
 
-        let repeated =
-            envelopes_for(&[signal(SignalKind::Regenerate)], &previous(), "org", "user", false);
+        let repeated = envelopes_for(
+            &[signal(SignalKind::Regenerate)],
+            &previous(),
+            "org",
+            "user",
+            false,
+        );
         assert_eq!(repeated[0].idempotency_key, both[0].idempotency_key);
     }
 
@@ -161,8 +179,13 @@ mod tests {
     /// complained about, not the turn carrying the complaint.
     #[test]
     fn the_signal_attaches_to_the_previous_run_and_its_skills() {
-        let envelopes =
-            envelopes_for(&[signal(SignalKind::Correction)], &previous(), "org", "user", false);
+        let envelopes = envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &previous(),
+            "org",
+            "user",
+            false,
+        );
         let payload = &envelopes[0].payload;
         assert_eq!(payload["run_id"], "run-1");
         assert_eq!(envelopes[0].correlation_id, "run-1");
@@ -174,8 +197,13 @@ mod tests {
     /// would be counted as a stated judgement.
     #[test]
     fn the_payload_is_marked_implicit_with_its_kind_and_strength() {
-        let envelopes =
-            envelopes_for(&[signal(SignalKind::NearDuplicate)], &previous(), "org", "user", false);
+        let envelopes = envelopes_for(
+            &[signal(SignalKind::NearDuplicate)],
+            &previous(),
+            "org",
+            "user",
+            false,
+        );
         let payload = &envelopes[0].payload;
         assert_eq!(payload["source"], "implicit");
         assert_eq!(payload["signal_kind"], "near_duplicate");
@@ -186,34 +214,61 @@ mod tests {
     /// A ZDR turn must deposit nothing durable, and the feedback store is durable.
     #[test]
     fn a_zdr_turn_emits_nothing() {
-        let envelopes =
-            envelopes_for(&[signal(SignalKind::Correction)], &previous(), "org", "user", true);
-        assert!(envelopes.is_empty(), "ZDR must not reach the durable feedback store");
+        let envelopes = envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &previous(),
+            "org",
+            "user",
+            true,
+        );
+        assert!(
+            envelopes.is_empty(),
+            "ZDR must not reach the durable feedback store"
+        );
     }
 
     #[test]
     fn nothing_is_emitted_without_something_to_attach_to() {
         assert!(envelopes_for(&[], &previous(), "org", "user", false).is_empty());
 
-        let no_run = PreviousTurn { run_id: String::new(), ..previous() };
-        assert!(
-            envelopes_for(&[signal(SignalKind::Correction)], &no_run, "org", "user", false)
-                .is_empty()
-        );
-        assert!(
-            envelopes_for(&[signal(SignalKind::Correction)], &previous(), "", "user", false)
-                .is_empty()
-        );
+        let no_run = PreviousTurn {
+            run_id: String::new(),
+            ..previous()
+        };
+        assert!(envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &no_run,
+            "org",
+            "user",
+            false
+        )
+        .is_empty());
+        assert!(envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &previous(),
+            "",
+            "user",
+            false
+        )
+        .is_empty());
     }
 
     /// The user's message is the evidence; copying it here would move
     /// conversation content into the feedback store.
     #[test]
     fn no_conversation_content_is_carried_into_the_payload() {
-        let envelopes =
-            envelopes_for(&[signal(SignalKind::Correction)], &previous(), "org", "user", false);
+        let envelopes = envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &previous(),
+            "org",
+            "user",
+            false,
+        );
         let serialized = serde_json::to_string(&envelopes[0].payload).unwrap();
-        assert!(!serialized.contains("hva er saldoen"), "payload leaked the turn text");
+        assert!(
+            !serialized.contains("hva er saldoen"),
+            "payload leaked the turn text"
+        );
         assert!(envelopes[0].payload["note"].is_null());
     }
 
@@ -221,8 +276,13 @@ mod tests {
     /// non-ZDR turn, and a `true` here would make natsx suppress it.
     #[test]
     fn the_envelope_is_not_marked_zdr() {
-        let envelopes =
-            envelopes_for(&[signal(SignalKind::Correction)], &previous(), "org", "user", false);
+        let envelopes = envelopes_for(
+            &[signal(SignalKind::Correction)],
+            &previous(),
+            "org",
+            "user",
+            false,
+        );
         assert!(!envelopes[0].zdr);
     }
 }

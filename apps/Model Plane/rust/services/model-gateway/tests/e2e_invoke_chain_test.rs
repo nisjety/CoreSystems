@@ -1013,7 +1013,9 @@ impl SessionCore for MockSessionCore {
         &self,
         _: TReq<mp_contracts::model_plane::v1::SetAgentSkillEnabledRequest>,
     ) -> Result<Response<mp_contracts::model_plane::v1::SetAgentSkillEnabledResponse>, Status> {
-        Err(Status::unimplemented("set_agent_skill_enabled not needed in test"))
+        Err(Status::unimplemented(
+            "set_agent_skill_enabled not needed in test",
+        ))
     }
 
     async fn upsert_agent_skill(
@@ -2440,7 +2442,10 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
         authorization, "Bearer gateway-terminalizer-token",
         "terminalization must use the scoped workload token, not a user bearer"
     );
-    assert_eq!(receipt.run_id, format!("managed-run-for-{prepared_thread_id}"));
+    assert_eq!(
+        receipt.run_id,
+        format!("managed-run-for-{prepared_thread_id}")
+    );
     assert_eq!(
         receipt.source,
         ManagedRunSource::GatewayAgentDispatchRejected as i32,
@@ -3328,9 +3333,9 @@ async fn invoke_stream_runs_search_image_followup_sequence_with_context() {
             .any(|(_, content)| content.contains("Tool results")),
         "an image request should not drag a forced web search along with it",
     );
-    assert!(followup_messages.iter().any(|(role, content)| {
-        role == "user" && content.contains("svaret på model plane")
-    }));
+    assert!(followup_messages
+        .iter()
+        .any(|(role, content)| { role == "user" && content.contains("svaret på model plane") }));
     assert!(followup_messages.iter().any(|(role, content)| {
         role == "user" && content.contains("hva snakket vi om, og lagde vi et bilde?")
     }));
