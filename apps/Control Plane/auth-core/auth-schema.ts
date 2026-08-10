@@ -5,7 +5,11 @@ import {
   timestamp,
   boolean,
   integer,
+  uuid,
+  unique,
+  check,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -235,6 +239,68 @@ export const jwks = pgTable("jwks", {
   privateKey: text("private_key").notNull(),
   createdAt: timestamp("created_at").notNull(),
 });
+
+// D-A: an "account" grouping axis above org. Named org_group, not "account" —
+// the `account` table above (Better Auth's per-user OAuth-provider rows)
+// already uses that name for something unrelated. See migrations/028_org_group_grants.sql
+// for the full rationale.
+export const orgGroup = pgTable(
+  "org_group",
+  {
+    id: uuid("id").primaryKey(),
+    name: text("name").notNull(),
+    hostOrganizationId: text("host_organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [unique("org_group_host_unique").on(table.hostOrganizationId)],
+);
+
+// A row's existence represents an active grant of some kind; revoking the
+// last of the two flags should delete the row (see org_group_grant_has_a_grant).
+export const orgGroupGrant = pgTable(
+  "org_group_grant",
+  {
+    id: uuid("id").primaryKey(),
+    orgGroupId: uuid("org_group_id")
+      .notNull()
+      .references(() => orgGroup.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    dataAccess: boolean("data_access").default(false).notNull(),
+    billingConsolidation: boolean("billing_consolidation")
+      .default(false)
+      .notNull(),
+    grantedBy: text("granted_by")
+      .notNull()
+      .references(() => user.id),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .$onUpdate(() => /* @__PURE__ */ new Date())
+      .notNull(),
+  },
+  (table) => [
+    unique("org_group_grant_unique").on(
+      table.orgGroupId,
+      table.organizationId,
+    ),
+    check(
+      "org_group_grant_has_a_grant",
+      sql`${table.dataAccess} OR ${table.billingConsolidation}`,
+    ),
+  ],
+);
 
 export const rateLimit = pgTable("rate_limit", {
   id: text("id").primaryKey(),

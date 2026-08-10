@@ -4,6 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { db } from '../db';
 import { ConvexTokenService } from './convex-token.service';
 import {
+  buildAccountDataPlaneDecision,
   buildDataPlaneDecision,
   DataPlaneAuthorizationController,
   type DataPlaneDecision,
@@ -90,6 +91,44 @@ function mockMembershipLookup(rows: MembershipRecord[] | Error): void {
       where: () => ({ limit }),
     }),
   } as never);
+}
+
+/**
+ * decideAccountScoped runs the grant lookup (select→from→innerJoin→where→limit)
+ * then, only if a grant exists, the membership lookup (select→from→where→limit)
+ * — a different chain shape, so the two db.select() calls are mocked in the
+ * exact sequence the implementation actually issues them, not with one
+ * shape-agnostic mock.
+ */
+function mockAccountGrantThenMembership(
+  grantRows: Array<{ hostOrganizationId: string }> | Error,
+  membershipRows?: MembershipRecord[] | Error,
+): jest.SpyInstance {
+  const select = jest.spyOn(db, 'select');
+  const grantLimit =
+    grantRows instanceof Error
+      ? jest.fn().mockRejectedValue(grantRows)
+      : jest.fn().mockResolvedValue(grantRows);
+  select.mockReturnValueOnce({
+    from: () => ({
+      innerJoin: () => ({
+        where: () => ({ limit: grantLimit }),
+      }),
+    }),
+  } as never);
+
+  if (membershipRows !== undefined) {
+    const membershipLimit =
+      membershipRows instanceof Error
+        ? jest.fn().mockRejectedValue(membershipRows)
+        : jest.fn().mockResolvedValue(membershipRows);
+    select.mockReturnValueOnce({
+      from: () => ({
+        where: () => ({ limit: membershipLimit }),
+      }),
+    } as never);
+  }
+  return select;
 }
 
 async function expectHttpStatus(
@@ -343,6 +382,112 @@ describe('DataPlaneAuthorizationController caller authentication', () => {
       503,
     );
   });
+
+  const accountRequest: DecisionRequest = {
+    userId: 'user-a',
+    orgId: 'org-a',
+    action: 'account.data.read',
+  };
+
+  it('allows account.data.read when org-a granted access and the caller is a host admin', async () => {
+    mockAccountGrantThenMembership(
+      [{ hostOrganizationId: 'host-org' }],
+      [{ role: 'admin', createdAt: new Date('2026-07-10T10:00:00.000Z') }],
+    );
+    const service = new ConvexTokenService();
+
+    await expect(
+      newController(service).decide(
+        `Bearer ${issuePolicyToken(service)}`,
+        accountRequest,
+      ),
+    ).resolves.toEqual({
+      version: 'v1',
+      allowed: true,
+      role: 'admin',
+      permissions: ['data:read', 'account:data:read'],
+      membershipRevision: '2026-07-10T10:00:00.000Z',
+      reason: 'account_grant',
+    });
+  });
+
+  it('denies account.data.read when org-a granted nothing', async () => {
+    mockAccountGrantThenMembership([]);
+    const service = new ConvexTokenService();
+
+    await expect(
+      newController(service).decide(
+        `Bearer ${issuePolicyToken(service)}`,
+        accountRequest,
+      ),
+    ).resolves.toMatchObject({ allowed: false, reason: 'no_account_grant' });
+  });
+
+  it('denies account.data.read when the caller is only an ordinary host member', async () => {
+    mockAccountGrantThenMembership(
+      [{ hostOrganizationId: 'host-org' }],
+      [{ role: 'member', createdAt: new Date('2026-07-10T10:00:00.000Z') }],
+    );
+    const service = new ConvexTokenService();
+
+    await expect(
+      newController(service).decide(
+        `Bearer ${issuePolicyToken(service)}`,
+        accountRequest,
+      ),
+    ).resolves.toMatchObject({ allowed: false, reason: 'insufficient_role' });
+  });
+
+  it('never runs the membership lookup when there is no grant to check it against', async () => {
+    const select = mockAccountGrantThenMembership([]);
+    const service = new ConvexTokenService();
+
+    await newController(service).decide(
+      `Bearer ${issuePolicyToken(service)}`,
+      accountRequest,
+    );
+
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the account grant lookup itself is unavailable', async () => {
+    mockAccountGrantThenMembership(new Error('test-only database outage'));
+    const service = new ConvexTokenService();
+
+    await expectHttpStatus(
+      newController(service).decide(
+        `Bearer ${issuePolicyToken(service)}`,
+        accountRequest,
+      ),
+      503,
+    );
+  });
+
+  it('fails closed when the host membership lookup itself is unavailable', async () => {
+    mockAccountGrantThenMembership(
+      [{ hostOrganizationId: 'host-org' }],
+      new Error('test-only database outage'),
+    );
+    const service = new ConvexTokenService();
+
+    await expectHttpStatus(
+      newController(service).decide(
+        `Bearer ${issuePolicyToken(service)}`,
+        accountRequest,
+      ),
+      503,
+    );
+  });
+
+  it('still enforces caller-tenant match for account.data.read', async () => {
+    const service = new ConvexTokenService();
+    const token = issuePolicyToken(service, { orgId: 'org-b' });
+
+    await expectHttpStatus(
+      newController(service).decide(`Bearer ${token}`, accountRequest),
+      403,
+    );
+  });
 });
 
 describe('DataPlaneAuthorizationController decision contract', () => {
@@ -381,6 +526,65 @@ describe('DataPlaneAuthorizationController decision contract', () => {
       allowed: false,
       role: 'member',
       reason: 'insufficient_role',
+    });
+  });
+});
+
+describe('buildAccountDataPlaneDecision', () => {
+  it('denies with no_account_grant when the target org granted nothing', () => {
+    expect(buildAccountDataPlaneDecision(null, null)).toEqual({
+      version: 'v1',
+      allowed: false,
+      role: null,
+      permissions: [],
+      membershipRevision: null,
+      reason: 'no_account_grant',
+    });
+  });
+
+  it("allows an owner of the granted account's host org", () => {
+    const membership: MembershipRecord = {
+      role: 'owner',
+      createdAt: new Date('2026-07-10T10:00:00.000Z'),
+    };
+    expect(
+      buildAccountDataPlaneDecision(
+        { hostOrganizationId: 'host-org' },
+        membership,
+      ),
+    ).toEqual({
+      version: 'v1',
+      allowed: true,
+      role: 'owner',
+      permissions: ['data:read', 'account:data:read'],
+      membershipRevision: '2026-07-10T10:00:00.000Z',
+      reason: 'account_grant',
+    });
+  });
+
+  it('denies a grant to a plain member of the host org — not the admin principal', () => {
+    const membership: MembershipRecord = {
+      role: 'member',
+      createdAt: new Date('2026-07-10T10:00:00.000Z'),
+    };
+    expect(
+      buildAccountDataPlaneDecision(
+        { hostOrganizationId: 'host-org' },
+        membership,
+      ),
+    ).toMatchObject({ allowed: false, reason: 'insufficient_role' });
+  });
+
+  it('denies a grant when the caller is not even a member of the host org', () => {
+    expect(
+      buildAccountDataPlaneDecision({ hostOrganizationId: 'host-org' }, null),
+    ).toEqual({
+      version: 'v1',
+      allowed: false,
+      role: null,
+      permissions: [],
+      membershipRevision: null,
+      reason: 'not_member',
     });
   });
 });
