@@ -630,15 +630,73 @@ implements each — none of the three are built yet as of this entry.
      through. D-A's grant check is now a second predicate layered on a working org-level one,
      which is the order this sequencing decision asked for. **Nothing further is needed on
      this side before D-A's own schema/claim/grant work can begin.**
-  3. Data Plane v2's current JWT `Claims`/`AuthContext` (`retrieval-engine-rs/src/authz/
-     context.rs`) carry only `org_id` — no account concept anywhere in the propagation
-     chain yet. An account-scoped read needs a new claim (e.g. `account_id` +
-     `account_data_access: bool`) minted by auth-core once org-core can resolve it, which
-     depends on org-core having the account/grant schema in the first place.
-  - **Not started**: no schema, no migration, no claim, no grant-check code. This entry is
-    the scope, not the implementation. The one prerequisite this sequencing decision named —
-    org-level RLS, validated live, across both planes — is now done; D-A's own build is the
-    next unblocked step, not a further prerequisite.
+  3. **⚠ Correction to this entry's own earlier premise, verified directly against source
+     2026-08-09: org-membership authorization for Data Plane is NOT a JWT claim, at any
+     point in the chain.** The original scope above (item 3, as first written) assumed
+     `retrieval-engine-rs` would need a new `account_id`/`account_data_access` claim minted
+     by auth-core into a token. That mechanism does not exist for the equivalent, already-
+     shipped `org_id` case, so building one for `account_id` would be inventing a second,
+     inconsistent authorization path rather than extending the real one. What actually
+     happens, traced end to end:
+     - `retrieval-engine-rs/src/authz/policy.rs`'s `HttpPolicyClient` mints a short-lived
+       (≤300s), RS256, single-scope (`data:authorization:decide`) service token bound to one
+       org, then calls auth-core's `POST /api/v1/internal/authorization/data-plane/decision`
+       with `{userId, orgId, action}`, bearer-authed with that token.
+     - `auth-core/src/auth/data-plane-authorization.controller.ts` verifies the caller
+       (`ConvexTokenService.verifyPlaneServiceToken`), then answers by querying its **own**
+       `member` table (`lookupMembership`) — fresh, on every call. Nothing is read from or
+       written into a token claim; the decision is computed live.
+     - The Rust client caches only *positive* decisions, 30s TTL, keyed by `(user_id,
+       org_id)`; every failure mode (unreachable, malformed, wrong audience/org, expired
+       token) fails closed. Both sides are heavily tested (`policy.rs`'s `#[cfg(test)]`
+       module: 10 cases covering exactly these failure modes).
+     - A second, non-obvious fact this surfaced: **auth-core and org-core hold two distinct
+       "organization" records, not one.** `auth-core/auth-schema.ts` defines auth-core's own
+       `organization`/`member`/`account` tables (Better Auth, via Drizzle) — a different
+       store from org-core's business-entity `organizations`. The link between them is a
+       one-way, synchronous push: auth-core's transactional outbox calls org-core's internal
+       HTTP API directly on org creation. org-core's NATS handler for
+       `auth.organization.created` (`org-core/internal/nats/subscriber.go`) deliberately does
+       **not** mutate state on that event — the code comment states why: *"Auth Core's
+       transactional outbox reconciles canonical state directly through the internal HTTP
+       API. NATS is notification-only: mutating here would create a second, unordered
+       authority capable of restoring stale organization or membership state after a
+       deletion."* auth-core is upstream and transactional; org-core is a downstream mirror
+       enriched with business data (billing plan, Brreg, entitlements); NATS is fan-out for
+       anyone who only needs to react, not the system of record.
+     - The nearest existing *workflow* precedent for a grant — user-core's `resource_grants`
+       (`user-core/migrations/012_resource_grants.up.sql`: `grant_id, org_id, resource_type,
+       resource_id, subject_type, subject_id, role, granted_by, granted_at`, checked via
+       `GET .../authz/check`/`/visible` as a retrieval post-filter, revocation fanned out via
+       `PublishResourceGrantsChanged`) — is single-org: its `subject` is a user/team *inside*
+       the same org the resource belongs to. D-A's grant is inherently cross-boundary
+       (org → account), which that schema cannot express as-is. The *shape* — grantee +
+       scope + role, checked live by the consumer, revocation invalidated via a pub/sub
+       event — is the part worth reusing; the concrete table is not.
+  4. **Proposed extension, not yet decided or built — this is what item 3's tracing implies,
+     not a new independent idea:** add `account` and `account_org_grant` tables next to
+     `organization`/`member` in **auth-core** (not org-core), since that is the schema the
+     live decision endpoint already queries directly, in the hot authorization path, under a
+     3-second client timeout — routing the check through org-core instead would add a network
+     hop auth-core doesn't need today. Extend `DataPlaneDecisionRequest`/`DataPlaneDecision`
+     with an account-scoped variant (new `action`, e.g. `account.data.read`, or an added
+     `accountId` field), resolved by the same live, fail-closed query `lookupMembership`
+     already runs. On grant revocation, publish a NATS notification and have
+     `HttpPolicyClient` subscribe to invalidate its 30s cache early — the same mechanism
+     `resource_grants` already uses for the identical staleness problem.
+     **⚠ Open call, not resolved by reading code — this is an architectural decision, not a
+     fact the codebase settles on its own:** auth-core owns the live-query path, but org-core
+     is where "org as a business entity" conventionally lives in this codebase, and
+     billing-consolidation (item 1's second grant) will need whichever service ends up
+     owning the account concept to also be legible to **billing-core** — not yet researched
+     at all for this feature, so that half of item 1 has no grounding beyond the original
+     one-paragraph decision. Resolving the ownership question is what unblocks writing an
+     actual migration.
+  - **Not started**: no schema, no migration, no grant-check code, for either grant. The one
+    prerequisite this sequencing decision named — org-level RLS, validated live, across both
+    planes — is done; the data-access half now has a concrete, source-verified design to
+    build against (item 4) pending the ownership call above. The billing-consolidation half
+    has no design work done beyond the original decision in item 1.
 - **D-B (text embedder) — DECIDED: migrate to Cohere Embed v4 for dense text.** This
   resolves Phase 3 Step 4's sub-decision below in favor of the original blueprint
   requirement (line 40: "Cohere Embed v4 = dense text (multilingual chunks...)"). Driven by
