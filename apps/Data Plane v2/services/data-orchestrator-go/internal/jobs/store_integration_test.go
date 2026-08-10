@@ -151,8 +151,29 @@ func orchestratorIntegrationPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, up); err != nil {
 		t.Fatalf("reapply idempotent durability migration: %v", err)
 	}
+	// The leases migration is not optional for this fixture. It adds
+	// `attempts` / `lease_owner` / `lease_until`, and PostgresJobStore's
+	// transition SQL references lease_until unconditionally — so SetProgress,
+	// Complete and Fail all fail with `column "lease_until" does not exist`
+	// against a durability-only schema, not just ClaimNext/ExpireExhausted.
+	// The worker tests that cover claiming (TestClaimTakesOldestPendingJobAndLeasesIt
+	// and friends) run on memoryJobStore, never on Postgres, so this fixture is
+	// the only place the shipped lease SQL is exercised at all.
+	leases := readDurabilityMigration(t, "20260805150000_orchestrator_job_leases.sql")
+	if _, err := pool.Exec(ctx, leases); err != nil {
+		t.Fatalf("apply job-leases migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, leases); err != nil {
+		t.Fatalf("reapply idempotent job-leases migration: %v", err)
+	}
 	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 	t.Cleanup(func() {
+		// Roll back in reverse order: the leases rollback touches
+		// data_orchestrator_jobs, which the durability rollback drops.
+		leasesDown := readDurabilityMigration(t, "20260805150000_orchestrator_job_leases.down.sql")
+		if _, err := pool.Exec(context.Background(), leasesDown); err != nil {
+			t.Errorf("apply job-leases rollback: %v", err)
+		}
 		down := readDurabilityMigration(t, "20260711160000_quality_orchestrator_durability.down.sql")
 		if _, err := pool.Exec(context.Background(), down); err != nil {
 			t.Errorf("apply durability rollback: %v", err)
