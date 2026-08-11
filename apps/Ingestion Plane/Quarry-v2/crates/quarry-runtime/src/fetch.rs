@@ -43,6 +43,15 @@ pub struct StaticDriver {
     /// driver construction; reqwest's connection pool inside the
     /// client handles per-request reuse.
     proxy_clients: HashMap<String, reqwest::Client>,
+    /// Pinned resolvers for the subset of `proxy_clients` whose scheme
+    /// resolves the target hostname on the client side (plain `socks4://` /
+    /// `socks5://`; see `resolves_dns_locally`). No entry exists for
+    /// `socks4a://` / `socks5h://` / `http://` / `https://` proxies -- those
+    /// hand the raw hostname to the proxy for server-side resolution, so a
+    /// client-side resolver would never be consulted. Closing the DNS-guard
+    /// gap for those schemes is a proxy-trust-boundary question, not a
+    /// client-side fix; see the "Provider gates" section of `docs/POLICY.md`.
+    proxy_pin_resolvers: HashMap<String, Arc<PinnedDnsResolver>>,
     egress: EgressBroker,
 }
 
@@ -80,13 +89,22 @@ impl StaticDriver {
             Some(Arc::clone(&pinned_resolver)),
         )?;
         let mut proxy_clients = HashMap::with_capacity(pool.len());
+        let mut proxy_pin_resolvers = HashMap::new();
         for entry in pool.entries() {
-            let proxied = build_client(timeout, user_agent, Some(entry), None)?;
+            let resolver = if resolves_dns_locally(&entry.uri) {
+                let resolver = Arc::new(PinnedDnsResolver::default());
+                proxy_pin_resolvers.insert(entry.uri.clone(), Arc::clone(&resolver));
+                Some(resolver)
+            } else {
+                None
+            };
+            let proxied = build_client(timeout, user_agent, Some(entry), resolver)?;
             proxy_clients.insert(entry.uri.clone(), proxied);
         }
         if !pool.is_empty() {
             tracing::info!(
                 proxy_count = pool.len(),
+                pinned_proxy_count = proxy_pin_resolvers.len(),
                 "StaticDriver wired with proxy pool"
             );
         }
@@ -94,6 +112,7 @@ impl StaticDriver {
             pinned_client,
             pinned_resolver,
             proxy_clients,
+            proxy_pin_resolvers,
             egress: EgressBroker::new(pool, proxy_processor_id),
         })
     }
@@ -103,6 +122,12 @@ impl StaticDriver {
     /// missing (the caller didn't preflight), this preflights `url` itself
     /// via `resolve_public_url` before pinning, so there is no code path
     /// where a direct fetch reaches the network unpinned and unvalidated.
+    ///
+    /// Proxy egress pins the same way, but only for the subset of proxy
+    /// schemes that resolve the target hostname client-side (see
+    /// `resolves_dns_locally`); `proxy_pin_resolvers` has no entry for the
+    /// rest, so nothing is pinned for them and the proxy server resolves the
+    /// hostname itself, same as before this method existed.
     async fn client_for_decision(
         &self,
         decision: &EgressDecision,
@@ -118,12 +143,21 @@ impl StaticDriver {
                 self.pinned_resolver.pin(target)?;
                 Ok(&self.pinned_client)
             }
-            EgressIdentity::Proxy { uri, .. } => self.proxy_clients.get(uri).ok_or_else(|| {
-                QuarryError::new(
-                    ErrorCode::Internal,
-                    format!("egress proxy client missing for configured proxy: {uri}"),
-                )
-            }),
+            EgressIdentity::Proxy { uri, .. } => {
+                if let Some(resolver) = self.proxy_pin_resolvers.get(uri) {
+                    let target = match hints.resolved_target.as_ref() {
+                        Some(target) => target.clone(),
+                        None => resolve_public_url(url).await?,
+                    };
+                    resolver.pin(target)?;
+                }
+                self.proxy_clients.get(uri).ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("egress proxy client missing for configured proxy: {uri}"),
+                    )
+                })
+            }
         }
     }
 
@@ -331,6 +365,23 @@ impl Driver for StaticDriver {
     ) -> QuarryResult<FetchResponse> {
         self.do_fetch(url, hints).await
     }
+}
+
+/// True for proxy URI schemes where reqwest resolves the destination
+/// hostname itself, client-side, before it ever contacts the proxy: plain
+/// `socks4://` / `socks5://`. False for `socks4a://` / `socks5h://` (the
+/// raw hostname is sent to the proxy inside the SOCKS request, which
+/// resolves it) and for `http://` / `https://` (an HTTP CONNECT tunnel
+/// carries the hostname verbatim in the `CONNECT host:port` request line;
+/// the proxy resolves it, reqwest's resolver is never consulted). A URI
+/// that fails to parse returns false -- `reqwest::Proxy::all` in
+/// `build_client` rejects it with a clearer error at construction time.
+/// Confirmed against reqwest 0.13's `connect.rs` (`connect_socks` picks
+/// `DnsResolve::Local` only for `socks4`/`socks5`) rather than assumed.
+fn resolves_dns_locally(uri: &str) -> bool {
+    Url::parse(uri)
+        .map(|u| matches!(u.scheme(), "socks4" | "socks5"))
+        .unwrap_or(false)
 }
 
 /// Shared client builder used for both the direct-egress and proxy
@@ -567,5 +618,130 @@ mod tests {
         let err = driver.fetch(&url).await.unwrap_err();
 
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[test]
+    fn resolves_dns_locally_matches_socks_variant_not_the_h_suffix() {
+        assert!(resolves_dns_locally("socks5://proxy.example:1080"));
+        assert!(resolves_dns_locally("socks4://proxy.example:1080"));
+        assert!(!resolves_dns_locally("socks5h://proxy.example:1080"));
+        assert!(!resolves_dns_locally("socks4a://proxy.example:1080"));
+        assert!(!resolves_dns_locally("http://proxy.example:8080"));
+        assert!(!resolves_dns_locally("https://proxy.example:8443"));
+        assert!(!resolves_dns_locally("not a uri"));
+    }
+
+    #[test]
+    fn proxy_pool_only_pins_client_side_resolving_schemes() {
+        let pool = ProxyPool::from_env_string(
+            "socks5://p1.example:1080;socks5h://p2.example:1080;http://p3.example:8080",
+        );
+        let driver =
+            StaticDriver::with_proxy_pool(Duration::from_secs(2), "QuarryTest/1.0", pool).unwrap();
+
+        assert!(driver
+            .proxy_pin_resolvers
+            .contains_key("socks5://p1.example:1080"));
+        assert!(!driver
+            .proxy_pin_resolvers
+            .contains_key("socks5h://p2.example:1080"));
+        assert!(!driver
+            .proxy_pin_resolvers
+            .contains_key("http://p3.example:8080"));
+    }
+
+    #[tokio::test]
+    async fn proxy_egress_blocks_private_targets_for_a_client_side_resolving_proxy() {
+        // Mirrors direct_fetch_without_preflight_hints_still_blocks_private_targets:
+        // a socks5:// proxy entry now pins the same way Direct egress does, so a
+        // private/loopback target is rejected before it ever reaches the proxy.
+        let pool = ProxyPool::from_env_string("socks5://proxy.example:1080");
+        let driver =
+            StaticDriver::with_proxy_pool(Duration::from_secs(2), "QuarryTest/1.0", pool).unwrap();
+        let decision = EgressDecision {
+            identity: EgressIdentity::Proxy {
+                uri: "socks5://proxy.example:1080".to_string(),
+                processor_id: Some("quarry_proxy_pool".to_string()),
+            },
+            attempt: 0,
+            reason: "proxy egress".to_string(),
+        };
+        let url: Url = "http://127.0.0.1:9/".parse().unwrap();
+
+        let err = driver
+            .client_for_decision(&decision, &FetchHints::default(), &url)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn proxy_egress_selects_the_matching_client_for_preflighted_dns() {
+        let pool = ProxyPool::from_env_string("socks5://proxy.example:1080");
+        let driver =
+            StaticDriver::with_proxy_pool(Duration::from_secs(2), "QuarryTest/1.0", pool).unwrap();
+        let hints = FetchHints {
+            resolved_target: Some(crate::dns_guard::ResolvedTarget {
+                host: "rebind.example".to_string(),
+                addresses: vec!["203.0.113.17:443".parse().unwrap()],
+            }),
+            ..FetchHints::default()
+        };
+        let decision = EgressDecision {
+            identity: EgressIdentity::Proxy {
+                uri: "socks5://proxy.example:1080".to_string(),
+                processor_id: Some("quarry_proxy_pool".to_string()),
+            },
+            attempt: 0,
+            reason: "proxy egress".to_string(),
+        };
+        let url: Url = "https://rebind.example/".parse().unwrap();
+
+        let client = driver
+            .client_for_decision(&decision, &hints, &url)
+            .await
+            .unwrap();
+
+        assert!(std::ptr::eq(
+            client,
+            driver
+                .proxy_clients
+                .get("socks5://proxy.example:1080")
+                .unwrap()
+        ));
+    }
+
+    #[tokio::test]
+    async fn proxy_egress_does_not_pin_for_server_side_resolving_schemes() {
+        // socks5h:// hands the raw hostname to the proxy for resolution -- a
+        // client-side pin would never be consulted, so client_for_decision must
+        // not attempt one. Using a target that would fail preflight if it WERE
+        // (incorrectly) resolved locally proves this path is skipped entirely.
+        let pool = ProxyPool::from_env_string("socks5h://proxy.example:1080");
+        let driver =
+            StaticDriver::with_proxy_pool(Duration::from_secs(2), "QuarryTest/1.0", pool).unwrap();
+        let decision = EgressDecision {
+            identity: EgressIdentity::Proxy {
+                uri: "socks5h://proxy.example:1080".to_string(),
+                processor_id: Some("quarry_proxy_pool".to_string()),
+            },
+            attempt: 0,
+            reason: "proxy egress".to_string(),
+        };
+        let url: Url = "http://127.0.0.1:9/".parse().unwrap();
+
+        let client = driver
+            .client_for_decision(&decision, &FetchHints::default(), &url)
+            .await
+            .unwrap();
+
+        assert!(std::ptr::eq(
+            client,
+            driver
+                .proxy_clients
+                .get("socks5h://proxy.example:1080")
+                .unwrap()
+        ));
     }
 }
