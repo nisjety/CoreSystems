@@ -2214,6 +2214,20 @@ mod tests {
             Err(Status::unimplemented("create_thread not used"))
         }
 
+        async fn delete_thread(
+            &self,
+            _: Request<pb::DeleteThreadRequest>,
+        ) -> Result<Response<pb::DeleteThreadResponse>, Status> {
+            Err(Status::unimplemented("delete_thread not used"))
+        }
+
+        async fn delete_threads(
+            &self,
+            _: Request<pb::DeleteThreadsRequest>,
+        ) -> Result<Response<pb::DeleteThreadsResponse>, Status> {
+            Err(Status::unimplemented("delete_threads not used"))
+        }
+
         async fn append_message(
             &self,
             request: Request<pb::AppendMessageRequest>,
