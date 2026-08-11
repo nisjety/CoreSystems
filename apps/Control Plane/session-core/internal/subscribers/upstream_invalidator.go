@@ -1,9 +1,11 @@
 // Package subscribers wires NATS topics to session-core's cache + republish
 // pipeline. G34-followup: subscribe to the canonical "thing changed"
-// subjects published by user-core / org-core / billing-core on the shared
-// inter-plane-bus, invalidate the Redis cache for the affected user/org
-// pair, and re-publish `app.session.entitlements_changed` so
-// notification-core fires the user-visible toast.
+// subjects published by user-core / org-core / billing-core on the LOCAL
+// controlplane-nats bus (bare names — the aqencia.controlplane.* prefix is
+// a separate, shared-bus-only convention; these subjects are never mirrored
+// onto it), invalidate the Redis cache for the affected user/org pair, and
+// re-publish `app.session.entitlements_changed` on the shared bus (via
+// natsShared) so notification-core fires the user-visible toast.
 package subscribers
 
 import (
@@ -17,11 +19,13 @@ import (
 	"github.com/I-Dacosta/CoreSystem/apps/session-core/internal/redis"
 )
 
-// Upstream subjects. Subscribers are core NATS (not JetStream) — these
-// publishes are fire-and-forget on the cores' side, and our invalidation is
-// idempotent (DEL on Redis), so at-most-once delivery + the 30s TTL bound
-// is the correctness safety net. Missing one delivery just means the cache
-// entry expires naturally.
+// Upstream subjects. Bare, local-bus names only — published on
+// controlplane-nats and never mirrored onto the shared bus under any name
+// (see nats.conf's per-service ACLs). Subscribers are core NATS (not
+// JetStream) — these publishes are fire-and-forget on the cores' side, and
+// our invalidation is idempotent (DEL on Redis), so at-most-once delivery +
+// the 30s TTL bound is the correctness safety net. Missing one delivery
+// just means the cache entry expires naturally.
 const (
 	SubjectUserProfileUpdated    = "user.profile.updated"
 	SubjectOrgPlanChanged        = "organization.plan.changed"
@@ -45,22 +49,25 @@ type upstreamEvent struct {
 // UpstreamInvalidator binds the subscribers + drives the cache-bust +
 // republish loop.
 type UpstreamInvalidator struct {
-	client     *internalnats.Client
-	cache      *redis.Client
-	natsShared *internalnats.SharedPublisher
-	subs       []*nats.Subscription
+	localClient *internalnats.Client
+	cache       *redis.Client
+	natsShared  *internalnats.SharedPublisher
+	subs        []*nats.Subscription
 }
 
-func NewUpstreamInvalidator(client *internalnats.Client, cache *redis.Client, natsShared *internalnats.SharedPublisher) *UpstreamInvalidator {
-	return &UpstreamInvalidator{client: client, cache: cache, natsShared: natsShared}
+// NewUpstreamInvalidator takes the LOCAL controlplane-nats client — the
+// upstream subjects are bare, local-bus names (see the const block below).
+// natsShared is used only for the outbound entitlements_changed republish.
+func NewUpstreamInvalidator(localClient *internalnats.Client, cache *redis.Client, natsShared *internalnats.SharedPublisher) *UpstreamInvalidator {
+	return &UpstreamInvalidator{localClient: localClient, cache: cache, natsShared: natsShared}
 }
 
 // Start binds one queue subscriber per subject. Idempotent — calling
-// twice replaces previous handlers via re-subscribe. A nil client or
+// twice replaces previous handlers via re-subscribe. A nil local client or
 // cache makes Start a no-op (useful for tests / off-mode dev).
 func (u *UpstreamInvalidator) Start(ctx context.Context) error {
-	if u == nil || u.client == nil || u.cache == nil {
-		log.Warn().Msg("subscribers/upstream-invalidator: client or cache missing, skipping subscription")
+	if u == nil || u.localClient == nil || u.cache == nil {
+		log.Warn().Msg("subscribers/upstream-invalidator: local client or cache missing, skipping subscription")
 		return nil
 	}
 
@@ -78,7 +85,7 @@ func (u *UpstreamInvalidator) Start(ctx context.Context) error {
 		s := subject // capture for closure
 		// Queue group so multiple session-core replicas would share work
 		// (only one replica today, but the queue name future-proofs it).
-		sub, err := u.client.QueueSubscribe(s, "session-core-invalidator", u.handle(ctx, s))
+		sub, err := u.localClient.QueueSubscribe(s, "session-core-invalidator", u.handle(ctx, s))
 		if err != nil {
 			return err
 		}
