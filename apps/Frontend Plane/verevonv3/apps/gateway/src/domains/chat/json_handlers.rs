@@ -41,10 +41,11 @@ pub(super) async fn invoke_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message);
     }
-    let outbound_body = shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    let mut outbound_body =
+        shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
-    shared::record_zdr_thread(&state, &user, &org_id, &outbound_body).await;
     shared::proxy_model_json_with_data_plane(
         &state,
         Method::POST,

@@ -172,6 +172,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn page_request_allows_data_scheme() {
+        // `data:` belongs with `blob:` and for the same reason — the bytes are
+        // inline, so there is no host to resolve and nothing for the SSRF
+        // guard to decide. Covered separately because the two are handled by
+        // different arms: a scheme allow-list that grew `blob:` without
+        // `data:` would break inline images with no network error to explain
+        // it.
+        guard_page_request_target("data:text/plain;base64,aGk=")
+            .await
+            .expect("data resources have no network destination");
+    }
+
+    #[tokio::test]
     async fn page_request_rejects_private_target_same_as_navigation() {
         // The sub-resource path must be exactly as strict as the top-level
         // one; a page that cannot navigate to a private host must not be able

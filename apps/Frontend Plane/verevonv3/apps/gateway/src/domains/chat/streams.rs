@@ -47,10 +47,19 @@ pub(super) async fn stream_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message).into_response();
     }
-    let outbound_body = shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    let mut outbound_body =
+        shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     // Before the turn goes out, not after: a ZDR turn that fails midway is still
-    // a ZDR turn, and the thread must be non-persistable from that moment on.
-    shared::record_zdr_thread(&state, &user, &org_id, &outbound_body).await;
+    // a ZDR turn, so the posture has to be settled on the body that is sent.
+    shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    // Read the EFFECTIVE posture off that body rather than the header. The
+    // header alone misses both the SPA's body flag and the org's standing
+    // posture, so this argument used to disagree with the `zdr` field sitting
+    // in the very payload it accompanies.
+    let effective_zdr = outbound_body
+        .get("zdr")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     proxy_sse_stream_with_data_plane(
         &state,
         Method::POST,
@@ -65,7 +74,7 @@ pub(super) async fn stream_chat(
         ingestion_token.as_deref(),
         None,
         Some((&user.user_id, org_id.as_str())),
-        shared::zdr_flag(&headers),
+        effective_zdr,
     )
     .await
 }

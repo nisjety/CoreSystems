@@ -190,6 +190,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_public_url_returns_the_addresses_it_vetted() {
+        // The blocking cases are covered above; this is the positive path,
+        // which is what the pin is actually built from — a preflight that
+        // returned an empty or loopback set while reporting success would hand
+        // the driver something unusable.
+        //
+        // Uses an RFC 5737 TEST-NET-1 literal rather than a real hostname on
+        // purpose. An IP literal is resolved locally by `lookup_host`, so this
+        // test performs NO DNS and cannot hang or fail offline, and 192.0.2.0/24
+        // is reserved-but-not-private, so it passes `resolve_guard` for the
+        // right reason instead of by accident.
+        let target = resolve_public_url(&url("https://192.0.2.1/some/path"))
+            .await
+            .expect("a public, non-private literal must preflight cleanly");
+        assert_eq!(target.host, "192.0.2.1");
+        assert!(
+            !target.addresses.is_empty(),
+            "a successful preflight must yield at least one address to pin to"
+        );
+        assert!(
+            target
+                .addresses
+                .iter()
+                .all(|address| !address.ip().is_loopback()),
+            "no vetted address may be loopback"
+        );
+        assert!(
+            target.addresses.iter().all(|address| address.port() == 443),
+            "the scheme's default port must be carried into the pin"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_public_url_blocks_loopback_same_as_guard_url() {
         // The two entry points must agree: a caller that preflights through
         // resolve_public_url cannot end up with a target guard_url would have

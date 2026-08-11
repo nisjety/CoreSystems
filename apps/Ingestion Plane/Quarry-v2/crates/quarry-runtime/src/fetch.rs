@@ -559,6 +559,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn without_a_resolved_target_no_pin_is_applied() {
+        // Negative control for the pinning tests above. They assert the pinned
+        // client is SELECTED and that the resolver hands back only preflighted
+        // addresses; neither would notice if the pinned path were somehow taken
+        // for a request that never preflighted, which is the case that would
+        // let an unvetted host inherit another's pin.
+        //
+        // "…​.invalid" is reserved by RFC 2606 to never resolve, so the failure
+        // must come from resolution or connect — never from the security guard,
+        // because with no hint there is nothing for it to have vetted. Costs no
+        // network: a resolver answers .invalid NXDOMAIN locally.
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let url: Url = "http://quarry-pin-negative-control.invalid/"
+            .parse()
+            .unwrap();
+
+        let error = driver
+            .fetch_conditional(&url, &FetchHints::default())
+            .await
+            .expect_err("an unresolvable host cannot succeed");
+
+        assert_ne!(
+            error.code,
+            ErrorCode::SecurityBlocked,
+            "with no resolved_target there is nothing vetted, so this must fail \
+             on resolution/connect rather than as a guard decision: {error:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn static_driver_selects_the_pinned_client_for_preflighted_dns() {
         let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
         let hints = FetchHints {

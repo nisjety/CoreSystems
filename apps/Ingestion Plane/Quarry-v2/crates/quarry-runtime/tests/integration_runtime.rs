@@ -1,3 +1,4 @@
+use quarry_core::error::ErrorCode;
 use quarry_core::privacy::PrivacyPolicy;
 use quarry_runtime::driver::FetchHints;
 use quarry_runtime::proxy_pool::ProxyPool;
@@ -15,6 +16,38 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 // pinned-DNS guard is a Direct-only contract) and exercises the same
 // request-send / response-parse path (`StaticDriver::send_once`) that a
 // direct fetch would.
+/// The comment above explains that every other test here routes through proxy
+/// egress BECAUSE a direct fetch to a loopback mock is refused. That premise
+/// was load-bearing and untested — if the preflight ever regressed, the
+/// workaround would keep passing and quietly stop proving anything.
+///
+/// So assert the refusal itself. The second assertion is the one that matters:
+/// the mock must have received NOTHING, which is what distinguishes "blocked
+/// before any connection" from "connected, then errored".
+#[tokio::test]
+async fn a_direct_fetch_to_a_loopback_target_is_refused_before_any_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>hi</html>"))
+        .mount(&server)
+        .await;
+
+    let driver = StaticDriver::new(Duration::from_secs(5), "quarry-test").unwrap();
+    let url = Url::parse(&server.uri()).unwrap();
+
+    let error = driver
+        .fetch(&url)
+        .await
+        .expect_err("a loopback target must not be fetchable over direct egress");
+
+    assert_eq!(error.code, ErrorCode::SecurityBlocked);
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "the guard must refuse before connecting, not after"
+    );
+}
+
 fn approved_proxy_hints() -> FetchHints {
     FetchHints {
         org_id: "quarry_integration_test".to_string(),

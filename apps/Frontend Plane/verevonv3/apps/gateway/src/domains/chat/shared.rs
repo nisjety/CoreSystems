@@ -52,52 +52,47 @@ pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Val
     body
 }
 
-/// Stamps the verified org/user identity onto the outbound request so Model
-/// Gateway can tell the model who it's talking to (chat: "who are we" / "what
-/// do we offer" resolve to the signed-in org, "I"/"my" to the signed-in user).
-/// ALWAYS overwrites any client-supplied `org_name`/`user_name` — these are
-/// framing text only (never used for authorization or retrieval scoping, which
-/// stay keyed off the verified `org_id` claim), but a raw client has no way to
-/// know the real display name anyway, so trusting one would only ever be a
-/// spoofed persona, never a real value.
-/// Record the thread as Zero-Data-Retention when this turn is a ZDR turn.
+/// Raise this turn's Zero Data Retention posture to include the ORGANISATION's
+/// standing one, in place, before the body goes upstream.
 ///
-/// Reads the ALREADY-NORMALIZED body, so the marker is written from the exact
-/// posture forwarded to the Model Plane — header OR body, never the raw client
-/// claim. Without this the BFF's only notion of "temporary chat" was an
-/// in-memory `Set` in the browser, which a reload, a replay, or a non-SPA client
-/// simply does not have; the thread's own snapshot endpoint then happily stored
-/// 90 days of a conversation the Model Plane had guaranteed to leave no trace of.
+/// `normalized_model_body` already ORs the `x-zdr` header with the body's own
+/// `zdr` field, so a caller can RAISE the posture and never lower it. What it
+/// cannot see is the org: an organisation configured "retain nothing" was
+/// honoured only when some client remembered to say so on the request. A UI
+/// that forgot the flag — or any non-SPA caller — silently sent `zdr: false`
+/// and the Model Plane was entitled to persist the turn.
 ///
-/// A turn with no `thread_id` has nothing to mark — the SPA always sends one
-/// (it generates a provisional id before the first send, and a ZDR turn keeps
-/// it, since `zdr_direct_stream` creates no server-side thread to rename to).
-pub(crate) async fn record_zdr_thread(
+/// This is a one-way raise, matching the rest of the chain: the org can turn
+/// retention OFF for everyone, and nothing a request says can turn it back on.
+///
+/// Replaces an earlier durable per-thread ZDR marker. That marker guarded the
+/// BFF's own save path, which no longer exists — Session Core / Model Gateway
+/// is the sole conversation owner and this gateway retains no transcript to
+/// suppress. Propagating the posture is the part that still matters, and doing
+/// it here means the decision is made once, for both the streaming and the
+/// JSON path, from the same normalized body that is actually sent.
+pub(crate) async fn apply_org_zdr_posture(
     state: &AppState,
     user: &AuthenticatedUser,
-    org_id: &str,
-    normalized_body: &Value,
+    normalized_body: &mut Value,
 ) {
-    let is_zdr = normalized_body
+    let already_zdr = normalized_body
         .get("zdr")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !is_zdr {
+    // Skip the org lookup when the request already asks for ZDR: the result
+    // could only be the same `true`, and `org_zdr_enabled` fails CLOSED, so a
+    // needless call during an org-core blip would cost a cache miss to reach
+    // the answer we already have.
+    if already_zdr {
         return;
     }
-    let Some(thread_id) = normalized_body
-        .get("thread_id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    if !crate::zdr::org_zdr_enabled(state, user).await {
         return;
-    };
-    // The durable ZDR marker this used to write guarded the BFF's OWN save
-    // path, which no longer exists — this gateway retains no transcript to
-    // suppress. The posture still travels with the request to the Model
-    // Plane, which owns the conversation and the retention decision.
-    let _ = thread_id;
+    }
+    if let Some(object) = normalized_body.as_object_mut() {
+        object.insert("zdr".to_owned(), Value::Bool(true));
+    }
 }
 
 pub(crate) fn with_identity_context(mut body: Value, user_name: &str, org_name: &str) -> Value {
@@ -498,8 +493,9 @@ mod tests {
     };
 
     use super::{
-        data_plane_authorization_value, delegated_auth_unavailable, dev_bypass_model_token,
-        normalized_model_body, proxy_model_json_with_data_plane, proxy_model_json_with_session,
+        apply_org_zdr_posture, data_plane_authorization_value, delegated_auth_unavailable,
+        dev_bypass_model_token, normalized_model_body, proxy_model_json_with_data_plane,
+        proxy_model_json_with_session,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -557,6 +553,46 @@ mod tests {
             allow_dev_actor_headers: false,
             allow_dev_auth_bypass,
         }
+    }
+
+    #[tokio::test]
+    async fn an_orgs_standing_zdr_raises_a_request_that_did_not_ask_for_it() {
+        // The gap this closes: `normalized_model_body` ORs the header with the
+        // body, so a client can raise the posture — but an org configured
+        // "retain nothing" was honoured only when a client remembered to say
+        // so. A UI that forgot the flag, or any non-SPA caller, sent
+        // `zdr: false` and the Model Plane was entitled to persist the turn.
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+
+        // `test_state` points org-core at an unroutable address, and
+        // `org_zdr_enabled` fails CLOSED — so this also pins the failure
+        // direction: during an org-core outage the turn is treated as ZDR
+        // rather than persistable.
+        let mut body = json!({"content": "hello", "zdr": false});
+        apply_org_zdr_posture(&state, &user, &mut body).await;
+        assert_eq!(
+            body["zdr"],
+            json!(true),
+            "an org posture (or an unavailable org-core) must raise the turn"
+        );
+
+        // And the raise is one-way: an explicit true is never revisited.
+        let mut already = json!({"content": "hello", "zdr": true});
+        apply_org_zdr_posture(&state, &user, &mut already).await;
+        assert_eq!(already["zdr"], json!(true));
     }
 
     #[tokio::test]
