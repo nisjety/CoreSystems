@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    domains::knowledge::{enhanced_fetch, shared},
+    domains::knowledge::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
     public_url::normalize_public_http_url,
@@ -179,9 +179,19 @@ pub(super) async fn summarize_products(
 // ── page fetch (basic → owned escalation → optional enhanced) ───────────────
 
 /// Returns `(markdown, source)` for the listing. Tries quarry's `/v1/extract`
-/// first with the default plan, then with Quarry's TLS-first waterfall. A
-/// configured enhanced provider is only considered after owned paths fail.
+/// first with the default plan, then with Quarry's TLS-first waterfall.
 /// `None` when no path yields content.
+///
+/// Both attempts stay inside the Ingestion Plane, which owns web fetch. There is
+/// deliberately no third tier here: a commercial stealth-proxy fallback
+/// (Scrapfly / Bright Data Web Unlocker) used to run in-process at this point,
+/// which shipped the org's target URL and the page's full content to a
+/// third-party processor with no `zdr` bit, no org scoping, no robots check, no
+/// usage record and no step receipt — a page Quarry had just *refused* was
+/// fetched anyway, off the audit trail entirely. If a residential/stealth tier
+/// is genuinely needed it belongs behind `quarry-edge` as another `DriverKind`
+/// in Quarry's own waterfall, where it inherits ZDR gating, residency, cost
+/// accounting and receipts; a Quarry refusal must stay a refusal here.
 async fn fetch_listing_markdown(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -211,13 +221,7 @@ async fn fetch_listing_markdown(
         return Some((markdown, "quarry_tls"));
     }
 
-    // Blocked or empty → legacy enhanced provider tier (no-op when
-    // unconfigured). GDPR/default deployments should leave this unset.
-    if let Some(page) = enhanced_fetch::enhanced_fetch(state, target).await {
-        if !page.markdown.trim().is_empty() {
-            return Some((cap_content(&page.markdown), "enhanced"));
-        }
-    }
+    // Still blocked or empty after Quarry's own waterfall: that is the answer.
     None
 }
 

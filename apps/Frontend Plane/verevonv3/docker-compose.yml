@@ -112,15 +112,24 @@ services:
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
       AUTOCOMPLETE_CORE_URL: ${AUTOCOMPLETE_CORE_URL:-http://autocomplete-core:3219}
       AUTOCOMPLETE_INTERNAL_TOKEN: ${AUTOCOMPLETE_INTERNAL_TOKEN:-}
-      # Stealth/proxy escalation for bot-walled sites (e.g. elkjop.no → 429). When a
-      # basic render is blocked, scrape-preview retries through a managed scraping API
-      # with residential proxies + anti-bot bypass. Unset ⇒ disabled (clear error).
-      # FREE/default: SCRAPE_ENHANCED_PROVIDER=scrapfly + a Scrapfly key (1000 free credits).
-      # BEST: SCRAPE_ENHANCED_PROVIDER=brightdata + Bright Data API token + SCRAPE_ENHANCED_ZONE.
-      SCRAPE_ENHANCED_PROVIDER: ${SCRAPE_ENHANCED_PROVIDER:-}
-      SCRAPE_ENHANCED_API_KEY: ${SCRAPE_ENHANCED_API_KEY:-}
-      SCRAPE_ENHANCED_ZONE: ${SCRAPE_ENHANCED_ZONE:-}
-      SCRAPE_ENHANCED_COUNTRY: ${SCRAPE_ENHANCED_COUNTRY:-no}
+      # Cross-plane GDPR erasure consumer. Points at control-shared-nats (Control
+      # Plane), NOT this stack's own `nats` service: only control-shared-nats
+      # hosts the AQENCIA_CONTROLPLANE stream that org-core and user-core publish
+      # verevon.gdpr.erasure.requested into. Pointing this at verevon-nats would
+      # connect, bind nothing, and retry forever — a consumer that looks healthy
+      # and receives nothing. Both brokers sit on inter-plane-bus, so the name
+      # resolves. Unset ⇒ the consumer does not start (it warns), and org-scoped
+      # erasure will NOT purge the gateway's chat-history copy.
+      VEREVON_GATEWAY_GDPR_NATS_URL: ${VEREVON_GATEWAY_GDPR_NATS_URL:-nats://control-shared-nats:4222}
+      VEREVON_GATEWAY_GDPR_NATS_USER: ${VEREVON_GATEWAY_GDPR_NATS_USER:-verevon-gateway-gdpr}
+      VEREVON_GATEWAY_GDPR_NATS_PASSWORD: ${VEREVON_GATEWAY_GDPR_NATS_PASSWORD:?VEREVON_GATEWAY_GDPR_NATS_PASSWORD must match Control Plane control-shared-nats configuration}
+      # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
+      # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
+      # Data, which sent the org's target URL and the page's full content to a
+      # third-party processor with no zdr bit, no org scoping, no robots check
+      # and no step receipt — triggered by exactly the 403/429 that meant Quarry
+      # had refused. Web fetch belongs to the Ingestion Plane; a stealth tier, if
+      # needed, goes behind quarry-edge as another DriverKind in its waterfall.
       ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
       RUST_LOG: ${RUST_LOG:-info}
       VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}

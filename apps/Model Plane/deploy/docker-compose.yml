@@ -358,11 +358,13 @@ services:
       #   own model, never this one.
       DEEP_RESEARCH_PLAN_MODEL: ${DEEP_RESEARCH_PLAN_MODEL:-verevon-budget}
       # Local semantic-response cache (Dragonfly exact-match). Default ON,
-      # pointing at the Model Plane Dragonfly; set empty to disable. If the
-      # managed Redis LangCache (LANGCACHE_URL/_CACHE_ID/_API_KEY) is configured
-      # it takes precedence. Exact (org+model+prompt) match only — no embeddings
-      # and no cross-plane calls; the vector-similarity tier is owned by Data
-      # Plane v2 and layered on separately.
+      # pointing at the Model Plane Dragonfly; set empty to disable. Exact
+      # (org+user+model+prompt) match only — no embeddings and no cross-plane
+      # calls; the vector-similarity tier is owned by Data Plane v2 and layered
+      # on separately. There is deliberately NO hosted third-party tier: the
+      # managed Redis LangCache backend was removed because it POSTed the
+      # fully-assembled prompt and the model's answer to an outside host with no
+      # TTL and no delete path, so erasure could not reach the copy.
       SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379}
       SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
       # Semantic (vector) cache tier — owned by Data Plane v2 (embeddings +

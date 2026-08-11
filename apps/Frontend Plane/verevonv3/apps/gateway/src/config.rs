@@ -79,15 +79,6 @@ pub(crate) struct AppState {
     pub(crate) studio_store: crate::domains::studio::StudioStore,
     pub(crate) allow_dev_actor_headers: bool,
     pub(crate) allow_dev_auth_bypass: bool,
-    /// Stealth/proxy escalation for bot-walled sites (see domains/knowledge/enhanced_fetch).
-    /// Empty provider/key ⇒ disabled (callers return a clear "site blocked" error).
-    /// `scrapfly` (free tier) or `brightdata` (premium Web Unlocker).
-    pub(crate) enhanced_scrape_provider: String,
-    pub(crate) enhanced_scrape_api_key: String,
-    /// Bright Data Web Unlocker zone name (only used by the `brightdata` provider).
-    pub(crate) enhanced_scrape_zone: String,
-    /// Optional ISO country for proxy egress (e.g. `no`); blank lets the provider choose.
-    pub(crate) enhanced_scrape_country: String,
 }
 
 pub(crate) async fn build_state() -> Result<AppState> {
@@ -217,22 +208,6 @@ pub(crate) async fn build_state() -> Result<AppState> {
         studio_store: crate::domains::studio::StudioStore::new(),
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
-        enhanced_scrape_provider: env::var("SCRAPE_ENHANCED_PROVIDER")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase(),
-        enhanced_scrape_api_key: env::var("SCRAPE_ENHANCED_API_KEY")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
-        enhanced_scrape_zone: env::var("SCRAPE_ENHANCED_ZONE")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
-        enhanced_scrape_country: env::var("SCRAPE_ENHANCED_COUNTRY")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase(),
     })
 }
 

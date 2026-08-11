@@ -115,7 +115,7 @@ async fn erase(
     }
     let org_id = authorized_org_id(&state, &user).await;
     let url = erase_url(&state.user_core_url, &user.user_id);
-    proxy_json(
+    let response = proxy_json(
         &state,
         Method::DELETE,
         &url,
@@ -124,8 +124,38 @@ async fn erase(
         Some(&actor_for(&user)),
         None,
     )
-    .await
-    .into_response()
+    .await;
+
+    // The Frontend Plane holds its OWN copy of this subject's conversations —
+    // the chat-history index and per-thread transcripts in Dragonfly (see
+    // `domains::chat::history`) — and it sits outside every erasure path the
+    // owning planes run. session-core deletes the messages, events and threads
+    // it owns and reports success, while a complete copy of the same turns kept
+    // living here for up to 90 days, readable through the transcript endpoint.
+    // An erasure attestation that is inaccurate for its retention window is not
+    // an erasure, so purge the local copy as part of the same operation.
+    //
+    // AFTER the upstream call and only on success: erasure is the irreversible
+    // step, and dropping the local copy for a request user-core rejected (not
+    // confirmed, not permitted, unreachable) would destroy data on a no-op.
+    // Markers go too — `PurgeScope::Everything` — because a ZDR marker is itself
+    // a record that this person held a conversation under that id, and there is
+    // no longer a subject for it to protect.
+    let (status, _) = &response;
+    if status.is_success() {
+        let removed = crate::domains::chat::history::purge_user_history(
+            &state,
+            &org_id,
+            &user.user_id,
+            crate::domains::chat::history::PurgeScope::Everything,
+        )
+        .await;
+        tracing::info!(
+            removed,
+            "erasure: purged the Frontend Plane chat-history copy for the subject"
+        );
+    }
+    response.into_response()
 }
 
 #[cfg(test)]

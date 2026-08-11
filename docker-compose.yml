@@ -406,7 +406,9 @@ services:
             JWT_AUDIENCE: ${MP_JWT_AUDIENCE:-mp-gateway}
             JWT_SECRET: ${JWT_SECRET:-}
             # Local semantic-response cache (Dragonfly exact-match) → mp-dragonfly.
-            # Empty to disable; managed LANGCACHE_URL (if set) takes precedence.
+            # Empty to disable. There is no hosted third-party tier: the managed
+            # LangCache backend was removed because it shipped assembled prompts
+            # and answers to an outside host with no TTL and no delete path.
             SEMANTIC_CACHE_URL: ${SEMANTIC_CACHE_URL:-redis://mp-dragonfly:6379}
             SEMANTIC_CACHE_TTL_SECS: ${SEMANTIC_CACHE_TTL_SECS:-3600}
             # Semantic (vector) cache tier via Data Plane v2 (opt-in). With both this

@@ -10,6 +10,14 @@ import {
   submitFeedback,
 } from './chat-client'
 import { bindSupportChatThread, clearSupportChatThreads } from '@/shared/chat/support-chat-thread'
+import {
+  __resetRetentionForTests,
+  isLocalRetentionAllowed,
+} from '@/features/chat/lib/chat-retention'
+import {
+  readChatThreadHistory,
+  upsertChatThreadHistory,
+} from '@/features/chat/lib/chat-thread-history'
 import { ApiError } from './http'
 
 function sseResponse(frames: string[]): Response {
@@ -231,6 +239,56 @@ describe('chat-client server thread history', () => {
 
     // Strict `=== true`: a truthy non-boolean must not be read as a pin.
     expect(sessions.map((session) => session.pinned)).toEqual([true, false, false])
+  })
+
+  /**
+   * The retention verdict is applied in the CLIENT, not at each call site:
+   * `listChatThreads` has three independent callers, and a policy any one of
+   * them can forget to apply is the same defect class as the in-memory ZDR gate
+   * it replaces. Assert the wiring, not just the module.
+   */
+  it('applies the server ZDR posture carried on a threads listing', async () => {
+    __resetRetentionForTests()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: { sessions: [], retention: { zdr: true } },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    ))
+
+    expect(isLocalRetentionAllowed()).toBe(true)
+    await listChatThreads()
+    expect(isLocalRetentionAllowed()).toBe(false)
+    __resetRetentionForTests()
+  })
+
+  /** A save the server refused to retain must not leave a device-local copy. */
+  it('drops the local copy when a save comes back unretained', async () => {
+    __resetRetentionForTests()
+    upsertChatThreadHistory({
+      threadId: 'thread_zdr',
+      title: 'Temporary',
+      preview: 'secret',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          session: { threadId: 'thread_zdr', title: 'Verevon Chat', preview: '', updatedAt: '2026-06-17T10:00:00.000Z' },
+          retained: false,
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    ))
+
+    const saved = await saveChatThreadSnapshot('thread_zdr', {
+      title: 'Temporary',
+      preview: 'secret',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+      turns: [{ id: 'user_1', role: 'user', content: 'secret' }],
+      taskSteps: [],
+    })
+
+    expect(saved).toBeNull()
+    expect(readChatThreadHistory().map((item) => item.threadId)).not.toContain('thread_zdr')
   })
 
   it('saves a transcript snapshot to the thread endpoint', async () => {

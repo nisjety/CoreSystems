@@ -60,6 +60,42 @@ pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Val
 /// stay keyed off the verified `org_id` claim), but a raw client has no way to
 /// know the real display name anyway, so trusting one would only ever be a
 /// spoofed persona, never a real value.
+/// Record the thread as Zero-Data-Retention when this turn is a ZDR turn.
+///
+/// Reads the ALREADY-NORMALIZED body, so the marker is written from the exact
+/// posture forwarded to the Model Plane — header OR body, never the raw client
+/// claim. Without this the BFF's only notion of "temporary chat" was an
+/// in-memory `Set` in the browser, which a reload, a replay, or a non-SPA client
+/// simply does not have; the thread's own snapshot endpoint then happily stored
+/// 90 days of a conversation the Model Plane had guaranteed to leave no trace of.
+///
+/// A turn with no `thread_id` has nothing to mark — the SPA always sends one
+/// (it generates a provisional id before the first send, and a ZDR turn keeps
+/// it, since `zdr_direct_stream` creates no server-side thread to rename to).
+pub(crate) async fn record_zdr_thread(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    normalized_body: &Value,
+) {
+    let is_zdr = normalized_body
+        .get("zdr")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !is_zdr {
+        return;
+    }
+    let Some(thread_id) = normalized_body
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    super::history::mark_thread_zdr(state, org_id, &user.user_id, thread_id).await;
+}
+
 pub(crate) fn with_identity_context(mut body: Value, user_name: &str, org_name: &str) -> Value {
     if let Some(object) = body.as_object_mut() {
         if !user_name.trim().is_empty() {
@@ -516,10 +552,6 @@ mod tests {
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers: false,
             allow_dev_auth_bypass,
-            enhanced_scrape_provider: String::new(),
-            enhanced_scrape_api_key: String::new(),
-            enhanced_scrape_zone: String::new(),
-            enhanced_scrape_country: String::new(),
         }
     }
 

@@ -32,6 +32,7 @@ import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import {
   withBrregLookupAction,
 } from '@/features/chat/lib/brreg-action'
@@ -293,6 +294,13 @@ export function useChatController() {
     // for a ZDR turn, but a caller (e.g. `onTitle`) reaching here anyway must
     // still not write.
     if (isTemporaryThread(threadId)) return
+    // …and the SERVER's posture, which this in-memory Set cannot represent.
+    // `temporaryThreadIds` only knows about temporary chats started in THIS
+    // tab; it says nothing about an org-wide Zero Data Retention policy, and it
+    // is gone on reload. `chat-retention` carries the posture the gateway
+    // stated on the last threads listing, so a ZDR workspace writes no local
+    // copy even though the composer toggle was never touched.
+    if (!isLocalRetentionAllowed()) return
     const firstUserTurn = turns.find((turn) => turn.role === 'user')
     const lastTurn = turns.at(-1)
     const stored = readChatThreadHistory().find((item) => item.threadId === threadId)

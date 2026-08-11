@@ -598,17 +598,24 @@ func TestEnsureOrgErasureConsumerRejectsAnUnknownDurable(t *testing.T) {
 	}
 }
 
-// TestOrgErasureConsumerConfigsCoversAllFourteen pins the map's size against
+// TestOrgErasureConsumerConfigsCoversAllFifteen pins the map's size against
 // the doc comment on ProvisionControlSharedRuntime's consumer block ("The
 // eight Data Plane v2 / Model Plane... consumers added alongside
 // documents-api-gdpr/session-core-gdpr/conversation-core-gdpr/
 // quarry-control-gdpr/notification-core-gdpr"). Notification-core's three
 // org-DELETION consumers are excluded on purpose: they are not org-ERASURE
 // consumers and are not in provisioner.orgErasureConsumerConfigs.
-func TestOrgErasureConsumerConfigsCoversAllFourteen(t *testing.T) {
+//
+// 15 since 2026-08-10: the Frontend Plane's verevon-gateway-rs joined. It is
+// the first non-plane-service consumer here — the BFF keeps its own copy of
+// conversation content in Dragonfly, so erasure has to reach it too.
+func TestOrgErasureConsumerConfigsCoversAllFifteen(t *testing.T) {
 	configs := orgErasureConsumerConfigs()
-	if len(configs) != 14 {
-		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 14: %v", len(configs), configs)
+	if len(configs) != 15 {
+		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 15: %v", len(configs), configs)
+	}
+	if _, ok := configs[VerevonGatewayOrgErasureConsumerName]; !ok {
+		t.Fatalf("the Frontend Plane gateway's erasure consumer is missing from the map")
 	}
 	for name, cfg := range configs {
 		if cfg.Durable != name {

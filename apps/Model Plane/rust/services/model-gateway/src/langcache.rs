@@ -1,33 +1,42 @@
 //! Semantic-response cache for the model-gateway, behind one `SemanticCache`
-//! seam with two interchangeable backends selected from the environment:
+//! seam with backends selected from the environment:
 //!
-//!   - **Managed Redis `LangCache`** (`LANGCACHE_URL` / `LANGCACHE_CACHE_ID` /
-//!     `LANGCACHE_API_KEY`): a hosted REST service that generates embeddings
-//!     server-side and matches *semantically* above a similarity threshold, so
-//!     this client only ships prompt/response text plus scoping attributes
-//!     (`org_id` + `model`).
 //!   - **Local Dragonfly exact-match** (`SEMANTIC_CACHE_URL`): a boundary-safe
-//!     KV cache keyed by the *exact* `(org_id, model, prompt)`. No embeddings and
-//!     no cross-plane calls, so it honors the gateway's "does NOT embed a second
-//!     vector store" invariant; the vector-similarity tier is owned by Data Plane
-//!     v2 and layered on separately. A byte-identical prompt from the same
-//!     org + model hits; anything else misses — strictly stricter (and so safer)
-//!     than the semantic backend.
+//!     KV cache keyed by the *exact* `(org_id, user_id, model, prompt)`. No
+//!     embeddings and no cross-plane calls, so it honors the gateway's "does NOT
+//!     embed a second vector store" invariant; the vector-similarity tier is
+//!     owned by Data Plane v2 and layered on separately. A byte-identical prompt
+//!     from the same org + user + model hits; anything else misses.
+//!   - **Data Plane v2 semantic tier** (`SEMANTIC_CACHE_DATAPLANE_ENABLED`):
+//!     currently withheld pending a request-bound verified bearer, see
+//!     [`DataPlaneCache::from_env`].
 //!
-//! `org_id` scoping keeps one tenant from reading another's cached responses.
-//! Selection precedence: managed `LangCache` → local Dragonfly → disabled (every
-//! `Invoke` hits inference-core), matching the dev-friendly "disabled when
-//! unconfigured" pattern used elsewhere. Both backends are strictly best-effort:
-//! any transport/parse error degrades to a miss so inference still runs.
+//! # No hosted third-party cache backend
+//!
+//! A managed Redis `LangCache` backend (`LANGCACHE_URL` / `LANGCACHE_CACHE_ID` /
+//! `LANGCACHE_API_KEY`) used to take outright selection precedence here. It was
+//! removed, not merely deprioritised, because what it shipped was the whole
+//! problem: the cache key is the FULLY ASSEMBLED prompt — conversation history,
+//! injected memory, retrieved Data Plane context — and the value is the model's
+//! full answer, both POSTed to a third-party host that embeds them server-side.
+//! That hop had none of the residency machinery inference-core applies per
+//! provider (`provider/mod.rs` EU deny-by-default), carried no purpose/lawful
+//! basis/retention metadata, set no TTL, and exposed no delete call — so an
+//! org-erasure or DSAR fan-out could not reach the copy at all. Leaving the
+//! client in the tree behind an env var would mean one `LANGCACHE_URL` in one
+//! env file silently reopens it, which is why the code is gone rather than
+//! disabled. A vector tier belongs inside Data Plane v2 (which owns embedding
+//! generation and erasure), reached through [`DataPlaneCache`].
+//!
+//! `org_id` + `user_id` scoping keeps one tenant — and one colleague — from
+//! reading another's cached responses. Selection precedence: local Dragonfly
+//! exact-match → Data Plane v2 semantic → disabled (every `Invoke` hits
+//! inference-core), matching the dev-friendly "disabled when unconfigured"
+//! pattern used elsewhere. Every backend is strictly best-effort: any
+//! transport/parse error degrades to a miss so inference still runs.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
-use std::time::Duration;
-
-use serde::{Deserialize, Serialize};
-
-const DEFAULT_THRESHOLD: f64 = 0.9;
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default TTL for locally-cached responses (1 hour).
 const DEFAULT_CACHE_TTL_SECS: u64 = 3600;
@@ -146,11 +155,9 @@ pub fn global() -> Option<&'static SemanticCache> {
 }
 
 /// The active cache backend behind one `lookup`/`store` seam. Selection
-/// precedence (first match wins): managed Redis `LangCache` → local Dragonfly
-/// exact-match → disabled.
+/// precedence (first match wins): local Dragonfly exact-match → Data Plane v2
+/// semantic → disabled. No backend here leaves the trust boundary.
 pub enum SemanticCache {
-    /// Hosted Redis `LangCache` (server-side embeddings + similarity threshold).
-    Managed(LangCacheClient),
     /// Data-Plane-v2-owned semantic (vector-similarity) cache, reached over HTTP.
     DataPlane(DataPlaneCache),
     /// Local Dragonfly exact-match KV (no embeddings, no cross-plane calls).
@@ -166,12 +173,18 @@ pub enum SemanticCache {
 
 impl SemanticCache {
     fn from_env() -> Option<Self> {
-        // Hosted Redis LangCache wins outright when configured.
-        if let Some(client) = LangCacheClient::from_env() {
-            return Some(Self::Managed(client));
+        // A deployment still carrying the removed hosted-LangCache config must
+        // not silently believe it has a cache: say so once at startup rather
+        // than let an operator infer caching from a stale env file.
+        if std::env::var("LANGCACHE_URL").is_ok_and(|value| !value.is_empty()) {
+            tracing::warn!(
+                "LANGCACHE_* is set but the hosted LangCache backend was removed \
+                 (prompts/answers must not leave the trust boundary); \
+                 configure SEMANTIC_CACHE_URL for the local exact-match tier instead"
+            );
         }
-        // Otherwise compose the local tiers: a fast Dragonfly exact-match in
-        // front of the Data Plane v2 semantic fallback. Either alone is used solo.
+        // Compose the local tiers: a fast Dragonfly exact-match in front of the
+        // Data Plane v2 semantic fallback. Either alone is used solo.
         match (DragonflyCache::from_env(), DataPlaneCache::from_env()) {
             (Some(exact), Some(semantic)) => Some(Self::Layered { exact, semantic }),
             (Some(exact), None) => Some(Self::Local(exact)),
@@ -187,7 +200,6 @@ impl SemanticCache {
             return None;
         }
         match self {
-            Self::Managed(c) => c.lookup(prompt, scope).await,
             Self::DataPlane(c) => c.lookup(prompt, scope).await,
             Self::Local(c) => c.lookup(prompt, scope).await,
             Self::Layered { exact, semantic } => {
@@ -210,7 +222,6 @@ impl SemanticCache {
             return;
         }
         match self {
-            Self::Managed(c) => c.store(prompt, scope, response).await,
             Self::DataPlane(c) => c.store(prompt, scope, response).await,
             Self::Local(c) => c.store(prompt, scope, response).await,
             Self::Layered { exact, semantic } => {
@@ -406,128 +417,6 @@ impl DataPlaneCache {
     }
 }
 
-#[derive(Clone)]
-pub struct LangCacheClient {
-    http: reqwest::Client,
-    base_url: String,
-    cache_id: String,
-    api_key: String,
-    threshold: f64,
-}
-
-#[derive(Serialize)]
-struct SearchRequest<'a> {
-    prompt: &'a str,
-    #[serde(rename = "similarityThreshold")]
-    similarity_threshold: f64,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    attributes: BTreeMap<&'static str, String>,
-}
-
-#[derive(Serialize)]
-struct StoreRequest<'a> {
-    prompt: &'a str,
-    response: &'a str,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    attributes: BTreeMap<&'static str, String>,
-}
-
-#[derive(Deserialize)]
-struct Entry {
-    #[serde(default)]
-    response: String,
-}
-
-impl LangCacheClient {
-    /// Build from the environment. Returns `None` when any required variable is
-    /// missing or empty.
-    pub fn from_env() -> Option<Self> {
-        let base_url = non_empty_env("LANGCACHE_URL")?;
-        let cache_id = non_empty_env("LANGCACHE_CACHE_ID")?;
-        let api_key = non_empty_env("LANGCACHE_API_KEY")?;
-        let threshold = std::env::var("LANGCACHE_THRESHOLD")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|t| *t > 0.0)
-            .unwrap_or(DEFAULT_THRESHOLD);
-        let http = reqwest::Client::builder()
-            .timeout(DEFAULT_TIMEOUT)
-            .build()
-            .ok()?;
-        tracing::info!("langcache enabled");
-        Some(Self {
-            http,
-            base_url: base_url.trim_end_matches('/').to_owned(),
-            cache_id,
-            api_key,
-            threshold,
-        })
-    }
-
-    /// Look up a cached response for `prompt`, scoped to org + model. Returns the
-    /// cached text on a hit; any miss or error yields `None` so the caller falls
-    /// through to inference.
-    pub async fn lookup(&self, prompt: &str, scope: CacheScope<'_>) -> Option<String> {
-        let body = SearchRequest {
-            prompt,
-            similarity_threshold: self.threshold,
-            attributes: scope.attributes(),
-        };
-        let url = format!(
-            "{}/v1/caches/{}/entries/search",
-            self.base_url, self.cache_id
-        );
-        let bytes = serde_json::to_vec(&body).ok()?;
-        let resp = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .body(bytes)
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            tracing::debug!(status = %resp.status(), "langcache search non-success");
-            return None;
-        }
-        let raw = resp.bytes().await.ok()?;
-        parse_entries(&raw)?
-            .into_iter()
-            .map(|e| e.response)
-            .find(|r| !r.is_empty())
-    }
-
-    /// Store a prompt/response pair for future semantically-similar prompts.
-    /// Best-effort: errors are logged, never propagated.
-    pub async fn store(&self, prompt: &str, scope: CacheScope<'_>, response: &str) {
-        if response.is_empty() {
-            return;
-        }
-        let body = StoreRequest {
-            prompt,
-            response,
-            attributes: scope.attributes(),
-        };
-        let url = format!("{}/v1/caches/{}/entries", self.base_url, self.cache_id);
-        let Ok(bytes) = serde_json::to_vec(&body) else {
-            return;
-        };
-        let result = self
-            .http
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .body(bytes)
-            .send()
-            .await;
-        if let Err(error) = result {
-            tracing::debug!(%error, "langcache store failed");
-        }
-    }
-}
-
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|s| !s.is_empty())
 }
@@ -542,66 +431,13 @@ fn env_flag(key: &str) -> bool {
     })
 }
 
-/// Parse a search response that may be a bare JSON array of entries or a
-/// `{"data": [...]}` envelope, tolerating either documented shape.
-fn parse_entries(raw: &[u8]) -> Option<Vec<Entry>> {
-    let first = *raw.iter().find(|&&b| !b.is_ascii_whitespace())?;
-    match first {
-        b'[' => serde_json::from_slice::<Vec<Entry>>(raw).ok(),
-        b'{' => {
-            #[derive(Deserialize)]
-            struct Wrapper {
-                #[serde(default)]
-                data: Vec<Entry>,
-            }
-            serde_json::from_slice::<Wrapper>(raw).ok().map(|w| w.data)
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn test_client(base_url: String) -> LangCacheClient {
-        LangCacheClient {
-            http: reqwest::Client::new(),
-            base_url,
-            cache_id: "c1".to_owned(),
-            api_key: "k".to_owned(),
-            threshold: 0.9,
-        }
-    }
-
-    #[test]
-    fn parses_bare_array() {
-        let entries = parse_entries(br#"[{"response":"hi"}]"#).unwrap();
-        assert_eq!(entries[0].response, "hi");
-    }
-
-    #[test]
-    fn parses_data_envelope() {
-        let entries = parse_entries(br#"{"data":[{"response":"yo"}]}"#).unwrap();
-        assert_eq!(entries[0].response, "yo");
-    }
-
-    #[test]
-    fn empty_response_body_is_none() {
-        assert!(parse_entries(b"   ").is_none());
-    }
-
     /// The failure this policy exists to prevent: replaying answer TEXT for a
     /// turn that also emitted citations or a tool timeline, leaving the user
     /// with claims and no sources.
-    fn test_scope() -> CacheScope<'static> {
-        CacheScope {
-            org_id: "org-1",
-            user_id: "user-1",
-            model: "model-x",
-        }
-    }
-
     #[test]
     fn a_turn_whose_answer_came_from_outside_the_prompt_is_never_cached() {
         for exclusion in [
@@ -708,57 +544,43 @@ mod tests {
         assert!(cache_io_allowed(false));
     }
 
-    #[tokio::test]
-    async fn lookup_returns_cached_response_on_hit() {
-        use wiremock::matchers::{header, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/caches/c1/entries/search"))
-            .and(header("Authorization", "Bearer k"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_string(r#"[{"response":"cached answer"}]"#),
-            )
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri());
-        let hit = client.lookup("hello", test_scope()).await;
-        assert_eq!(hit.as_deref(), Some("cached answer"));
+    /// The residency hole this module's shape exists to prevent: a backend that
+    /// POSTs the fully-assembled prompt and the model's answer to a host outside
+    /// the trust boundary. Every remaining backend either stays on our own
+    /// Dragonfly or goes to the plane that owns embeddings and erasure — so
+    /// enumerate them here, and fail the build if a third one is ever bolted on
+    /// without a residency decision.
+    #[test]
+    fn every_cache_backend_stays_inside_the_trust_boundary() {
+        fn assert_boundary_safe(cache: &SemanticCache) {
+            match cache {
+                // Our own Dragonfly, same deployment.
+                SemanticCache::Local(_) => {}
+                // Data Plane v2: owns embedding generation AND GDPR erasure, so
+                // a stored prompt/answer is reachable by an org-erasure fan-out.
+                SemanticCache::DataPlane(_) | SemanticCache::Layered { .. } => {}
+            }
+        }
+        // Compile-time exhaustiveness is the real assertion above; this keeps
+        // the helper live so the match cannot rot.
+        if let Some(cache) = global() {
+            assert_boundary_safe(cache);
+        }
     }
 
-    #[tokio::test]
-    async fn lookup_returns_none_on_miss() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/caches/c1/entries/search"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri());
-        assert!(client.lookup("hello", test_scope()).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn store_posts_to_entries_endpoint() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/caches/c1/entries"))
-            .respond_with(ResponseTemplate::new(201))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = test_client(server.uri());
-        client.store("hello", test_scope(), "fresh").await;
-        // MockServer verifies the expected POST on drop.
+    /// `LANGCACHE_*` must no longer be able to select anything. Setting it is
+    /// inert: selection depends only on `SEMANTIC_CACHE_*`.
+    #[test]
+    fn langcache_env_selects_no_backend() {
+        // `from_env` reads only SEMANTIC_CACHE_URL / SEMANTIC_CACHE_DATAPLANE_ENABLED.
+        // With neither set there is no cache at all, whatever LANGCACHE_* says.
+        assert!(
+            DragonflyCache::from_env().is_none() || non_empty_env("SEMANTIC_CACHE_URL").is_some(),
+            "the local tier is selected by SEMANTIC_CACHE_URL alone"
+        );
+        assert!(
+            DataPlaneCache::from_env().is_none(),
+            "the Data Plane tier stays withheld pending a request-bound bearer"
+        );
     }
 }

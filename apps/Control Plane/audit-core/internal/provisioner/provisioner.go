@@ -86,6 +86,7 @@ const (
 	CostCoreOrgErasureConsumerName               = "cost-core-org-erasure"
 	CostCoreOrgErasureDelivery                   = "_VEREVON.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
 	EmbeddingEngineOrgErasureConsumerName        = "embedding-engine-org-erasure"
+	VerevonGatewayOrgErasureConsumerName         = "verevon-gateway-gdpr-erasure-v1"
 
 	// TEMPORARY rename-migration compatibility (added 2026-08-05, remove once
 	// every publisher AND every consumer on this bus is confirmed running
@@ -632,6 +633,22 @@ func indexEngineOrgErasureConsumerConfig() *nats.ConsumerConfig {
 	}
 }
 
+// verevonGatewayOrgErasureConsumerConfig is the Frontend Plane's
+// verevon-gateway-rs GDPR erasure PULL consumer. Same shape and
+// STREAM.INFO-free reasoning as indexEngineOrgErasureConsumerConfig above.
+//
+// Unlike its siblings this one acts on BOTH subject types on the subject:
+// "organization" purges every user's retained chat history in the org, and
+// "user"/"user_anonymize" purges one subject's — the gateway's copy is keyed
+// per (org, user), so a per-user erasure is a direct hit rather than a no-op.
+func verevonGatewayOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: VerevonGatewayOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
 // graphIndexOrgErasureConsumerConfig is Data Plane v2's graph-index-rs GDPR
 // org-erasure PULL consumer. Same shape and STREAM.INFO-free reasoning as
 // indexEngineOrgErasureConsumerConfig above.
@@ -899,10 +916,11 @@ func orgErasureConsumerConfigs() map[string]*nats.ConsumerConfig {
 		QuickwitAdapterOrgErasureConsumerName:  quickwitAdapterOrgErasureConsumerConfig(),
 		CostCoreOrgErasureConsumerName:         costCoreOrgErasureConsumerConfig(),
 		EmbeddingEngineOrgErasureConsumerName:  embeddingEngineOrgErasureConsumerConfig(),
+		VerevonGatewayOrgErasureConsumerName:   verevonGatewayOrgErasureConsumerConfig(),
 	}
 }
 
-// EnsureOrgErasureConsumer converges exactly one of the 14 named org-erasure
+// EnsureOrgErasureConsumer converges exactly one of the 15 named org-erasure
 // consumers on the given stream to its current wanted config (create if
 // missing; error, never mutate, if an existing one has drifted -- same
 // contract as ensureFixedConsumer). The desired shape lives in exactly one

@@ -48,6 +48,9 @@ pub(super) async fn stream_chat(
         return shared::invalid_chat_request(message).into_response();
     }
     let outbound_body = shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    // Before the turn goes out, not after: a ZDR turn that fails midway is still
+    // a ZDR turn, and the thread must be non-persistable from that moment on.
+    shared::record_zdr_thread(&state, &user, &org_id, &outbound_body).await;
     proxy_sse_stream_with_data_plane(
         &state,
         Method::POST,
