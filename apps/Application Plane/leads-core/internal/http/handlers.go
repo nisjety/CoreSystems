@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/billing"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/brreg"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/leads"
@@ -21,10 +22,15 @@ type Handler struct {
 	// nil when INTEGRATION_CORE_URL is not configured; routes answer 503.
 	providerLeadSyncer *providerleads.Syncer
 	providerLeadRepo   providerleads.Repository
+	entitlements       billing.EntitlementChecker
 }
 
 func NewHandler(cfg *config.Config, service *leads.Service) *Handler {
 	return &Handler{cfg: cfg, service: service}
+}
+
+func (h *Handler) SetEntitlementChecker(checker billing.EntitlementChecker) {
+	h.entitlements = checker
 }
 
 func errorPayload(code, message string) gin.H {
@@ -45,6 +51,32 @@ func actorUserID(c *gin.Context) string {
 		return v
 	}
 	return "internal-service"
+}
+
+func (h *Handler) requireLeadsEntitlement(c *gin.Context, orgID string) bool {
+	if h.entitlements == nil {
+		c.JSON(http.StatusServiceUnavailable, errorPayload(
+			"entitlement_check_unavailable",
+			"Lead actions are unavailable until Billing Core can verify the organization entitlement.",
+		))
+		return false
+	}
+	allowed, err := h.entitlements.Allowed(c.Request.Context(), orgID, billing.LeadsFeature())
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, errorPayload(
+			"entitlement_check_unavailable",
+			"Lead actions are unavailable until Billing Core can verify the organization entitlement.",
+		))
+		return false
+	}
+	if !allowed {
+		c.JSON(http.StatusPaymentRequired, errorPayload(
+			"entitlement_required",
+			"The lead-builder add-on is required for this action.",
+		))
+		return false
+	}
+	return true
 }
 
 func (h *Handler) Health(c *gin.Context) {
@@ -153,6 +185,9 @@ func (h *Handler) BuildList(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Request body is invalid."))
 		return
 	}
+	if !h.requireLeadsEntitlement(c, orgID) {
+		return
+	}
 	list, err := h.service.BuildList(c.Request.Context(), leads.BuildListInput{
 		OrgID:           orgID,
 		Name:            body.Name,
@@ -250,6 +285,9 @@ func (h *Handler) DeleteList(c *gin.Context) {
 func (h *Handler) ExportCSV(c *gin.Context) {
 	orgID := requireOrgID(c)
 	if orgID == "" {
+		return
+	}
+	if !h.requireLeadsEntitlement(c, orgID) {
 		return
 	}
 	listID := c.Param("id")

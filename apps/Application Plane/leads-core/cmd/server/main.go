@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/audit"
+	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/billing"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/brreg"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/leads-core/internal/database"
@@ -77,6 +78,11 @@ func main() {
 	}
 
 	handler := apphttp.NewHandler(cfg, service)
+	if entitlements := billing.NewClient(cfg.BillingCoreURL, cfg.BillingServiceID, cfg.BillingServiceToken); entitlements != nil {
+		handler.SetEntitlementChecker(entitlements)
+	} else {
+		log.Printf("leads-core: Billing Core entitlement gate unavailable; build/export requests will fail closed")
+	}
 	handler.SetProviderLeads(syncer, providerLeadRepo)
 	server := apphttp.NewServer(cfg.HTTPPort, handler, cfg.InternalAPIKey)
 

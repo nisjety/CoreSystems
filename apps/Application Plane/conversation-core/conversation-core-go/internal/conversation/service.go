@@ -23,11 +23,19 @@ type OutboundSender interface {
 	Send(ctx context.Context, req integration.SendRequest) (*integration.SendResult, error)
 }
 
+// AIProposalPolicy is the Control Plane-backed policy decision required before
+// a proposed AI action is retained. The durable service boundary invokes it so
+// HTTP callers, Model Plane consumers, and future workers follow one rule.
+type AIProposalPolicy interface {
+	AllowAIProposal(ctx context.Context, orgID string) error
+}
+
 type Service struct {
-	repository Repository
-	publisher  EventPublisher
-	sender     OutboundSender
-	now        func() time.Time
+	repository       Repository
+	publisher        EventPublisher
+	sender           OutboundSender
+	aiProposalPolicy AIProposalPolicy
+	now              func() time.Time
 	// feedbackMirrorOrgID is FEEDBACK_MIRROR_ORG_ID (see config.Config), the
 	// Verevon-owned monitored org every feedback submission is mirrored into.
 	// Empty disables mirroring -- see Service.mirrorFeedback.
@@ -49,6 +57,12 @@ func WithNow(now func() time.Time) Option {
 func WithSender(sender OutboundSender) Option {
 	return func(s *Service) {
 		s.sender = sender
+	}
+}
+
+func WithAIProposalPolicy(policy AIProposalPolicy) Option {
+	return func(s *Service) {
+		s.aiProposalPolicy = policy
 	}
 }
 
@@ -799,6 +813,11 @@ func (s *Service) CreateAIAction(ctx context.Context, input CreateAIActionInput)
 	}
 	if !allowedAIActionKinds[input.Kind] {
 		return nil, fmt.Errorf("%w: unsupported action kind %q", ErrInvalidInput, input.Kind)
+	}
+	if s.aiProposalPolicy != nil {
+		if err := s.aiProposalPolicy.AllowAIProposal(ctx, input.OrgID); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := s.repository.GetConversation(ctx, input.OrgID, input.ConversationID); err != nil {
 		return nil, err

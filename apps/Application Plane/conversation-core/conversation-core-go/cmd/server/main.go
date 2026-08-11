@@ -79,6 +79,11 @@ func main() {
 	}
 
 	repository := conversation.NewRepository(db.Pool)
+	// Org Core remains the source of truth for retained-AI and recurrence
+	// policy. The typed nil is intentional: its methods fail closed when the
+	// service-principal configuration is absent, while the optional corpus
+	// builder below remains disabled in that configuration.
+	orgCoreClient := clients.NewOrgCoreClient(cfg.OrgCoreBaseURL, cfg.OrgCoreServicePrincipal, cfg.OrgCoreServiceToken)
 
 	// Outbound client to integration-corev2, shared by the draft.reply act-leg
 	// AND the human-typed Inbox reply path. Constructed only when configured, so
@@ -124,6 +129,7 @@ func main() {
 	// FeedbackMirrorOrgID disables mirroring inside the Service itself.
 	serviceOpts := []conversation.Option{
 		conversation.WithFeedbackMirrorOrgID(cfg.FeedbackMirrorOrgID),
+		conversation.WithAIProposalPolicy(orgCoreClient),
 	}
 	if cfg.FeedbackMirrorOrgID != "" {
 		log.Printf("conversation-core-go: feedback mirroring enabled into org %s", cfg.FeedbackMirrorOrgID)
@@ -149,7 +155,6 @@ func main() {
 	// bounded per-org ticket-similarity embedding corpus. Disabled — not
 	// fatal — when org-core or embedding-engine-rs aren't configured, since
 	// this is optional preview infrastructure, not a durable data path.
-	orgCoreClient := clients.NewOrgCoreClient(cfg.OrgCoreBaseURL, cfg.OrgCoreServicePrincipal, cfg.OrgCoreServiceToken)
 	embeddingClient := clients.NewEmbeddingClient(cfg.EmbeddingEngineBaseURL)
 	if orgCoreClient != nil && embeddingClient != nil {
 		corpusBuilder := consumers.NewSupportRecurrenceCorpusBuilder(
@@ -231,6 +236,7 @@ func main() {
 	}
 
 	handler := apphttp.NewHandler(cfg, service)
+	handler.SetSupportPolicyReader(orgCoreClient)
 	delegationVerifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "conversation-core",
 		Keys:     cfg.DelegationKeys,

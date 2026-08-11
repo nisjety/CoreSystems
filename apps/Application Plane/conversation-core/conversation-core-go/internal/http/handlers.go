@@ -1,12 +1,14 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
 	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/delegation"
@@ -14,12 +16,23 @@ import (
 )
 
 type Handler struct {
-	cfg     *config.Config
-	service *conversation.Service
+	cfg           *config.Config
+	service       *conversation.Service
+	supportPolicy SupportPolicyReader
+}
+
+// SupportPolicyReader is a narrow Control Plane read used only where a
+// caller-role-dependent policy is required at the Conversation Core boundary.
+type SupportPolicyReader interface {
+	SupportPolicy(ctx context.Context, orgID, role string) (clients.SupportPolicy, error)
 }
 
 func NewHandler(cfg *config.Config, service *conversation.Service) *Handler {
 	return &Handler{cfg: cfg, service: service}
+}
+
+func (h *Handler) SetSupportPolicyReader(reader SupportPolicyReader) {
+	h.supportPolicy = reader
 }
 
 type addMessageBody struct {
@@ -1763,6 +1776,12 @@ func mapValue(value *map[string]any) map[string]any {
 
 func writeServiceError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, conversation.ErrPolicyUnavailable):
+		c.JSON(http.StatusServiceUnavailable, errorPayload("support_ai_policy_unavailable", "AI proposals are unavailable until the organization policy can be verified."))
+	case errors.Is(err, conversation.ErrZDRAIProposalForbidden):
+		c.JSON(http.StatusPreconditionFailed, errorPayload("zdr_ai_proposal_forbidden", "AI proposals are not retained while Zero Data Retention is enabled."))
+	case errors.Is(err, conversation.ErrAIReviewModeRequired):
+		c.JSON(http.StatusPreconditionFailed, errorPayload("ai_review_mode_required", "Retained AI proposals require the organization's Support AI review mode."))
 	case errors.Is(err, conversation.ErrNotFound):
 		c.JSON(http.StatusNotFound, errorPayload("not_found", "Conversation resource was not found."))
 	case errors.Is(err, conversation.ErrConflict):

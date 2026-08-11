@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/I-Dacosta/AquatiqCMS/apps/conversation-core/conversation-core-go/internal/conversation"
 )
 
 // OrgCoreClient calls org-core's machine-to-machine /internal/orgs surface.
@@ -24,9 +27,9 @@ type OrgCoreClient struct {
 	httpClient       *http.Client
 }
 
-// NewOrgCoreClient returns nil when any piece is unset, so a caller can fail
-// open (feature disabled) rather than fail startup — this client is only
-// used by the optional support-recurrence corpus builder.
+// NewOrgCoreClient returns nil when any piece is unset. The process may still
+// start for read-only traffic, but any AI proposal or support-recurrence
+// action that requires this client will fail closed at its durable boundary.
 func NewOrgCoreClient(baseURL, servicePrincipal, serviceToken string) *OrgCoreClient {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	servicePrincipal = strings.TrimSpace(servicePrincipal)
@@ -50,6 +53,16 @@ type orgCoreOrganization struct {
 type orgCoreListOrganizationsResponse struct {
 	Organizations []orgCoreOrganization `json:"organizations"`
 	HasMore       bool                  `json:"hasMore"`
+}
+
+// SupportPolicy is the small, current Control Plane decision Conversation Core
+// needs at its own durable boundaries. It deliberately excludes membership:
+// the signed gateway delegation has already bound the caller role, while
+// Org Core remains authoritative for organization retention and capabilities.
+type SupportPolicy struct {
+	ZDREnabled        bool
+	AIReviewEnabled   bool
+	RecurrenceAllowed bool
 }
 
 // maxOrgListPages bounds the enumeration below so a bug in org-core's
@@ -112,4 +125,129 @@ func isZDREnabled(metadata map[string]any) bool {
 	}
 	zdr, _ := retention["zdr"].(bool)
 	return zdr
+}
+
+// SupportPolicy resolves exact organization policy and the effective capability
+// set for the verified caller role. A failure is surfaced to the Conversation
+// Core resource server so it can fail closed, never as a cached gateway hint.
+func (c *OrgCoreClient) SupportPolicy(ctx context.Context, orgID, role string) (SupportPolicy, error) {
+	if c == nil {
+		return SupportPolicy{}, fmt.Errorf("org-core client is not configured")
+	}
+	orgID = strings.TrimSpace(orgID)
+	role = strings.TrimSpace(strings.ToLower(role))
+	if orgID == "" || role == "" {
+		return SupportPolicy{}, fmt.Errorf("organization id and role are required")
+	}
+
+	organization, err := c.getOrganization(ctx, orgID)
+	if err != nil {
+		return SupportPolicy{}, err
+	}
+	capabilities, err := c.getEffectiveCapabilities(ctx, orgID, role)
+	if err != nil {
+		return SupportPolicy{}, err
+	}
+	return SupportPolicy{
+		ZDREnabled:        isZDREnabled(organization.Metadata),
+		AIReviewEnabled:   supportAIReviewEnabled(organization.Metadata),
+		RecurrenceAllowed: containsCapability(capabilities, "support:recurrence:read"),
+	}, nil
+}
+
+// AllowAIProposal implements conversation.AIProposalPolicy. Every failure is
+// converted into a stable domain error so HTTP and asynchronous producers have
+// identical fail-closed behavior without exposing Control Plane internals.
+func (c *OrgCoreClient) AllowAIProposal(ctx context.Context, orgID string) error {
+	if c == nil {
+		return conversation.ErrPolicyUnavailable
+	}
+	organization, err := c.getOrganization(ctx, strings.TrimSpace(orgID))
+	if err != nil {
+		return fmt.Errorf("%w: %v", conversation.ErrPolicyUnavailable, err)
+	}
+	if isZDREnabled(organization.Metadata) {
+		return conversation.ErrZDRAIProposalForbidden
+	}
+	if !supportAIReviewEnabled(organization.Metadata) {
+		return conversation.ErrAIReviewModeRequired
+	}
+	return nil
+}
+
+func (c *OrgCoreClient) getOrganization(ctx context.Context, orgID string) (*orgCoreOrganization, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/internal/orgs/%s", c.baseURL, url.PathEscape(orgID)),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build org-core organization request: %w", err)
+	}
+	request.Header.Set("X-Service-Id", c.servicePrincipal)
+	request.Header.Set("X-Service-Token", c.serviceToken)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("call org-core organization: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("org-core organization returned status %d", response.StatusCode)
+	}
+	var organization orgCoreOrganization
+	if err := json.NewDecoder(response.Body).Decode(&organization); err != nil {
+		return nil, fmt.Errorf("decode org-core organization: %w", err)
+	}
+	if strings.TrimSpace(organization.ID) != orgID {
+		return nil, fmt.Errorf("org-core organization response did not match requested organization")
+	}
+	return &organization, nil
+}
+
+func (c *OrgCoreClient) getEffectiveCapabilities(ctx context.Context, orgID, role string) ([]string, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("%s/internal/orgs/%s/roles/%s/capabilities", c.baseURL, url.PathEscape(orgID), url.PathEscape(role)),
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build org-core capability request: %w", err)
+	}
+	request.Header.Set("X-Service-Id", c.servicePrincipal)
+	request.Header.Set("X-Service-Token", c.serviceToken)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("call org-core capabilities: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("org-core capabilities returned status %d", response.StatusCode)
+	}
+	var payload struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("decode org-core capabilities: %w", err)
+	}
+	return payload.Capabilities, nil
+}
+
+func supportAIReviewEnabled(metadata map[string]any) bool {
+	supportAI, ok := metadata["supportAi"].(map[string]any)
+	if !ok {
+		return true
+	}
+	mode, ok := supportAI["mode"].(string)
+	return !ok || strings.TrimSpace(strings.ToLower(mode)) == "review"
+}
+
+func containsCapability(capabilities []string, expected string) bool {
+	for _, capability := range capabilities {
+		if strings.TrimSpace(capability) == expected {
+			return true
+		}
+	}
+	return false
 }

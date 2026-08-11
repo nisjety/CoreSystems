@@ -24,6 +24,11 @@ type Config struct {
 	IntegrationCoreURL       string
 	ProviderLeadSyncEnabled  bool
 	ProviderLeadSyncInterval time.Duration
+	// Billing Core owns plan and entitlement decisions. Leads Core uses this
+	// service principal only for the resource-server `leads` gate.
+	BillingCoreURL      string
+	BillingServiceID    string
+	BillingServiceToken string
 }
 
 func Load() (*Config, error) {
@@ -39,12 +44,24 @@ func Load() (*Config, error) {
 			getEnv("INTEGRATION_CORE_URL", "http://integration-api:3026"), "/"),
 		ProviderLeadSyncEnabled:  getEnvBool("PROVIDER_LEAD_SYNC_ENABLED", true),
 		ProviderLeadSyncInterval: getEnvDuration("PROVIDER_LEAD_SYNC_INTERVAL", time.Hour),
+		BillingCoreURL:           strings.TrimSpace(os.Getenv("BILLING_CORE_URL")),
+		BillingServiceID:         strings.TrimSpace(os.Getenv("LEADS_BILLING_SERVICE_ID")),
+		BillingServiceToken:      strings.TrimSpace(os.Getenv("LEADS_BILLING_SERVICE_TOKEN")),
 	}
 	if cfg.InternalAPIKey == "" {
 		return nil, fmt.Errorf("INTERNAL_API_KEY is required")
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
+	}
+	billingConfigured := 0
+	for _, value := range []string{cfg.BillingCoreURL, cfg.BillingServiceID, cfg.BillingServiceToken} {
+		if value != "" {
+			billingConfigured++
+		}
+	}
+	if billingConfigured != 0 && billingConfigured != 3 {
+		return nil, fmt.Errorf("BILLING_CORE_URL, LEADS_BILLING_SERVICE_ID, and LEADS_BILLING_SERVICE_TOKEN must be configured together")
 	}
 	return cfg, nil
 }

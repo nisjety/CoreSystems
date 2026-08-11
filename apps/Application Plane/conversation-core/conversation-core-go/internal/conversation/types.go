@@ -71,11 +71,17 @@ const (
 )
 
 var (
-	ErrNotFound       = errors.New("conversation not found")
-	ErrInvalidInput   = errors.New("invalid input")
-	ErrForbidden      = errors.New("forbidden")
-	ErrAlreadyHandled = errors.New("event already handled")
-	ErrConflict       = errors.New("conversation resource conflict")
+	ErrNotFound     = errors.New("conversation not found")
+	ErrInvalidInput = errors.New("invalid input")
+	ErrForbidden    = errors.New("forbidden")
+	// Policy denials are returned by the durable Conversation Core boundary,
+	// not inferred from gateway-only preflight checks. They protect every AI
+	// proposal producer, including asynchronous Model Plane consumers.
+	ErrPolicyUnavailable      = errors.New("support policy unavailable")
+	ErrZDRAIProposalForbidden = errors.New("ai proposals forbidden by zero data retention")
+	ErrAIReviewModeRequired   = errors.New("support ai review mode required")
+	ErrAlreadyHandled         = errors.New("event already handled")
+	ErrConflict               = errors.New("conversation resource conflict")
 	// ErrSendFailed is returned when a human agent's reply to a channel-backed
 	// conversation was attempted but could not be delivered to the customer (the
 	// integration-corev2 send errored). The HTTP layer surfaces it as 502 so the
