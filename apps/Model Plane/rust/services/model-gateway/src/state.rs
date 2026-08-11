@@ -140,6 +140,18 @@ pub struct AppState {
     /// Base URL of insight-core's HTTP API (Application Plane metrics/scorecard
     /// projection), e.g. "<http://insight-core:3163>". Used by the
     /// `insights.overview` read tool.
+    /// Base URL of org-core's HTTP API (Control Plane), e.g.
+    /// "<http://org-core:3010>". Read-only use: the per-org spend/token
+    /// ceilings live there (`org_quotas`) because Control Plane owns quotas,
+    /// and the gateway hands them to cost-core's budget check.
+    pub org_core_base_url: String,
+    /// Service identity presented to org-core (`x-service-id`). Must be
+    /// registered in org-core's `ORG_CORE_SERVICE_CREDENTIALS`.
+    pub org_core_service_id: String,
+    /// Matching secret (`x-service-token`). Empty means "quotas unconfigured":
+    /// no org ceiling is applied, and `SetPolicy` refuses the cap fields rather
+    /// than pretending to store them.
+    pub org_core_service_token: String,
     pub insight_core_base_url: String,
     /// Base URL of social-core's HTTP API (Application Plane social accounts,
     /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
@@ -249,8 +261,6 @@ pub struct AppState {
     /// Wave 10i — command, hook, permission, policy registries.
     pub commands: crate::runtime_registries::CommandRegistry,
     pub hooks: crate::runtime_registries::HookRegistry,
-    pub permissions: crate::runtime_registries::PermissionRegistry,
-    pub policy: crate::runtime_registries::PolicyStore,
     /// Wave 10j — thread messages, analytics counters, task records.
     pub messages: crate::runtime_registries::MessageStore,
     pub analytics: crate::runtime_registries::AnalyticsStore,
@@ -299,6 +309,9 @@ impl AppState {
             shipping_core_base_url: "http://localhost:8080".to_owned(),
             information_core_base_url: "http://localhost:3190".to_owned(),
             information_core_internal_key: String::new(),
+            org_core_base_url: "http://localhost:3010".to_owned(),
+            org_core_service_id: "model-gateway".to_owned(),
+            org_core_service_token: String::new(),
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
             application_core_internal_key: String::new(),
@@ -339,8 +352,6 @@ impl AppState {
             plugins: crate::runtime_registries::PluginRegistry::new(),
             commands: crate::runtime_registries::CommandRegistry::new(),
             hooks: crate::runtime_registries::HookRegistry::new(),
-            permissions: crate::runtime_registries::PermissionRegistry::new(),
-            policy: crate::runtime_registries::PolicyStore::new(),
             messages: crate::runtime_registries::MessageStore::new(),
             analytics: crate::runtime_registries::AnalyticsStore::new(),
             tasks: crate::runtime_registries::TaskStore::new(),
@@ -474,6 +485,17 @@ impl AppState {
         let information_core_internal_key = std::env::var("INFORMATION_CORE_INTERNAL_KEY")
             .or_else(|_| std::env::var("INTERNAL_API_KEY"))
             .unwrap_or_default();
+        // Control Plane's org-core. On `inter-plane-bus` it has no explicit
+        // alias, so Docker resolves it by its COMPOSE SERVICE NAME (`org-core`),
+        // not its container_name (`org-core-service`) — and its HTTP API is on
+        // container port 8080, not the host-published 18080. Same shape as
+        // AUTH_CORE_URL's `http://auth-core:3011`.
+        let org_core_service_id = std::env::var("MODEL_GATEWAY_SERVICE_ID")
+            .unwrap_or_else(|_| "model-gateway".to_owned());
+        let org_core_service_token =
+            std::env::var("MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN").unwrap_or_default();
+        let org_core_base_url =
+            std::env::var("ORG_CORE_URL").unwrap_or_else(|_| "http://org-core:8080".to_owned());
         let insight_core_base_url = std::env::var("INSIGHT_CORE_URL")
             .unwrap_or_else(|_| "http://insight-core:3163".to_owned());
         let social_core_base_url = std::env::var("SOCIAL_CORE_URL")
@@ -588,6 +610,9 @@ impl AppState {
             state.shipping_core_base_url = shipping_core_base_url.clone();
             state.information_core_base_url = information_core_base_url.clone();
             state.information_core_internal_key = information_core_internal_key.clone();
+            state.org_core_base_url = org_core_base_url.clone();
+            state.org_core_service_id = org_core_service_id.clone();
+            state.org_core_service_token = org_core_service_token.clone();
             state.insight_core_base_url = insight_core_base_url.clone();
             state.social_core_base_url = social_core_base_url.clone();
             state.application_core_internal_key = application_core_internal_key.clone();
@@ -629,6 +654,9 @@ impl AppState {
             state.shipping_core_base_url = shipping_core_base_url.clone();
             state.information_core_base_url = information_core_base_url;
             state.information_core_internal_key = information_core_internal_key;
+            state.org_core_base_url = org_core_base_url;
+            state.org_core_service_id = org_core_service_id;
+            state.org_core_service_token = org_core_service_token;
             state.insight_core_base_url = insight_core_base_url;
             state.social_core_base_url = social_core_base_url;
             state.application_core_internal_key = application_core_internal_key;

@@ -140,6 +140,20 @@ message EvaluatePolicyResponse {
 
   // Budget context (remaining tokens, cost, etc.).
   string budget_context = 3;
+
+  // Stable correlation identifier for this evaluated request and capability
+  // snapshot. This identifies the decision in audit/event records; it is not
+  // itself an authorization token or proof that execution occurred.
+  string decision_id = 4;
+
+  // Exact capability version evaluated by the policy engine. Callers must
+  // bind execution to this version instead of re-resolving a mutable name.
+  string capability_version = 5;
+
+  // Short-lived Ed25519-signed, per-call authorization evidence. The proof
+  // binds capability id/version, tenant, run, agent, scope, decision, reason,
+  // and budget context; execution runtimes must verify it before dispatch.
+  string decision_evidence = 6;
 }
 
 message ValidateSkillBundleRequest {

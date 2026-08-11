@@ -16,8 +16,10 @@
 //! bearer `token` is an operational secret the catalog does NOT store (H.1), so
 //! the cache cannot be safely reconstructed from a catalog event without caching
 //! a tokenless, broken entry — and the gateway that registered the server
-//! already holds it. Cross-instance refresh needs a separate, secure
-//! token-conveyance design and is out of scope here (recorded in matrix §4.3).
+//! already holds it. Cross-instance refresh of the tokenless catalog is handled
+//! by authenticated request-path hydration in `runtime_registries`; this
+//! consumer remains the low-latency removal path and never transports
+//! credentials.
 //!
 //! ## Verification
 //!
@@ -89,9 +91,10 @@ pub fn apply(action: &CacheAction, mcp: &McpRegistry) {
 ///
 /// Best-effort and self-contained: if `NATS_URL` is unset or the bus is
 /// unreachable it logs and returns, never breaking the gateway. Spawn once at
-/// startup. capability-core publishes via core NATS (not `JetStream`), so a core
-/// subscription with at-most-once delivery is the right fit — a missed removal
-/// is corrected by the next event or a cache TTL, and never causes a write.
+/// startup. capability-core publishes via core NATS (not `JetStream`), so this
+/// subscription is a low-latency optimization; authenticated chat/list paths
+/// perform a durable catalog replacement as the recovery path when an event is
+/// missed. No credential is carried by the event.
 pub async fn run(mcp: McpRegistry) {
     use futures::StreamExt as _;
     let Ok(url) = std::env::var("NATS_URL") else {

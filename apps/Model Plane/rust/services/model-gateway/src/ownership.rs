@@ -157,6 +157,24 @@ impl OwnershipStore {
         self.inner.remove(&Self::key(org_id, kind, resource_id));
     }
 
+    /// Replace all ownership records for one registry kind in one tenant.
+    ///
+    /// The capability registry is the durable owner of this projection. A
+    /// refresh must therefore remove records that disappeared upstream before
+    /// inserting the current set; retaining an old share after a restart or
+    /// revoke would turn a stale cache into an authorization grant.
+    pub fn replace_org_kind(
+        &self,
+        org_id: &str,
+        kind: &str,
+        entries: impl IntoIterator<Item = (String, Ownership)>,
+    ) {
+        self.inner.retain(|key, _| key.0 != org_id || key.1 != kind);
+        for (resource_id, ownership) in entries {
+            self.set(org_id, kind, &resource_id, ownership);
+        }
+    }
+
     #[must_use]
     pub fn get(&self, org_id: &str, kind: &str, resource_id: &str) -> Option<Ownership> {
         self.inner

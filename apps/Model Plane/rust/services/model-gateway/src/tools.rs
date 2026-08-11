@@ -153,7 +153,10 @@ pub async fn handle_code_interpreter(
         // same posture a ChatGPT-style interpreter takes. Execution-core's hook
         // rules can still deny the tool outright per deployment.
         permission_mode: "auto".to_owned(),
-        hook_context: String::new(),
+        // Forward the org's registered hook rules so execution-core can apply
+        // them. Without this the comment above was false: no rule ever reached
+        // the engine, so a deployment could not deny this tool.
+        hook_context: crate::runtime_registries::hook_context_json(&state.hooks, org_id),
         org_id: org_id.to_owned(),
         user_id: user_id.to_owned(),
         zdr,

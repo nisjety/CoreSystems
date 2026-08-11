@@ -26,21 +26,20 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use mp_ids::new_ulid;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tonic::Status;
 
 use mp_contracts::model_plane::v1::{
-    AppendThreadMessageRequest, AppendThreadMessageResponse, CheckPermissionRequest,
-    CheckPermissionResponse, Command, CreateTaskRequest, CreateTaskResponse, ExecuteCommandRequest,
-    ExecuteCommandResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest,
-    GetPolicyResponse, Hook, ListCommandsRequest, ListCommandsResponse, ListHooksRequest,
+    AppendThreadMessageRequest, AppendThreadMessageResponse, Command, CreateTaskRequest,
+    CreateTaskResponse, ExecuteCommandRequest, ExecuteCommandResponse, GetAnalyticsRequest,
+    GetAnalyticsResponse, Hook, ListCommandsRequest, ListCommandsResponse, ListHooksRequest,
     ListHooksResponse, ListMcpServersRequest, ListMcpServersResponse, ListPluginsRequest,
     ListPluginsResponse, ListTasksRequest, ListTasksResponse, ListThreadMessagesRequest,
-    ListThreadMessagesResponse, McpServer, OrgPolicy, Plugin, ProxyMcpToolRequest,
-    ProxyMcpToolResponse, RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest,
-    RegisterMcpServerResponse, RegisterPluginRequest, RegisterPluginResponse, SetPermissionRequest,
-    SetPermissionResponse, SetPluginEnabledRequest, SetPluginEnabledResponse, SetPolicyRequest,
-    SetPolicyResponse, TaskRecord, ThreadMessage, ToolCallCount, ToolDefinition,
+    ListThreadMessagesResponse, McpServer, Plugin, ProxyMcpToolRequest, ProxyMcpToolResponse,
+    RegisterHookRequest, RegisterHookResponse, RegisterMcpServerRequest, RegisterMcpServerResponse,
+    RegisterPluginRequest, RegisterPluginResponse, SetPluginEnabledRequest,
+    SetPluginEnabledResponse, TaskRecord, ThreadMessage, ToolCallCount, ToolDefinition,
 };
 
 use crate::mcp_jsonrpc::McpToolDef;
@@ -184,6 +183,19 @@ impl McpRegistry {
         self.inner.remove(&key).is_some()
     }
 
+    /// Replace one tenant's cached MCP servers from the capability-core
+    /// projection. This is deliberately a whole-tenant replacement: a missing
+    /// row must revoke a cached server after restart, not leave an orphan that
+    /// can still be advertised to the model.
+    pub fn replace_org(&self, org_id: &str, servers: impl IntoIterator<Item = McpServer>) {
+        self.inner.retain(|key, _| key.0 != org_id);
+        self.catalog.retain(|key, _| key.0 != org_id);
+        for server in servers {
+            self.inner
+                .insert((org_id.to_owned(), server.server_id.clone()), server);
+        }
+    }
+
     /// Whether a server is cached for (org, `server_id`). Test/observability helper.
     #[must_use]
     pub fn contains(&self, org_id: &str, server_id: &str) -> bool {
@@ -208,6 +220,180 @@ impl McpRegistry {
             (Instant::now(), tools),
         );
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CatalogMcpResponse {
+    #[serde(default)]
+    servers: Vec<CatalogMcpServer>,
+}
+
+/// The tenant capability-core uses for servers offered to every org. Its rows
+/// come back from a single-tenant list query (`WHERE org_id=$1 OR
+/// org_id='global'`), so a row under this tenant is legitimately not the
+/// requested one and must not be mistaken for cross-tenant bleed.
+const CATALOG_GLOBAL_ORG: &str = "global";
+
+#[derive(Debug, Deserialize)]
+struct CatalogMcpServer {
+    #[serde(alias = "server_id")]
+    id: String,
+    /// The tenant capability-core actually returned this row under. Carried
+    /// solely so hydration can confirm it matches the tenant being written —
+    /// see the confinement check in [`catalog_mcp_parts`].
+    #[serde(default)]
+    org_id: String,
+    name: String,
+    #[serde(alias = "url")]
+    endpoint_url: String,
+    transport: String,
+    #[serde(default)]
+    tool_allowlist: Vec<String>,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    scope: String,
+    #[serde(default)]
+    owner_user_id: String,
+    #[serde(default)]
+    shared_with: Vec<String>,
+}
+
+/// Convert the capability-core public projection into the gateway's execution
+/// record and its durable ownership sidecar. The projection intentionally does
+/// not contain an operational token; OAuth credentials are resolved through
+/// capability-core's encrypted token endpoint at dispatch time.
+fn catalog_mcp_parts(
+    current_org_id: &str,
+    raw: CatalogMcpServer,
+) -> Result<(McpServer, crate::ownership::Ownership), String> {
+    let server_id = raw.id.trim();
+    if server_id.is_empty() {
+        return Err("catalog MCP record has no id".to_owned());
+    }
+    let scope = raw.scope.trim().to_ascii_lowercase();
+    let ownership = match scope.as_str() {
+        "org" | "workspace" | "" => crate::ownership::Ownership::org(),
+        "user" => {
+            let owner = raw.owner_user_id.trim();
+            if owner.is_empty() {
+                return Err("user-scoped catalog MCP record has no owner".to_owned());
+            }
+            crate::ownership::Ownership {
+                scope: crate::ownership::Scope::User,
+                owner_user_id: owner.to_owned(),
+                shared_with: raw
+                    .shared_with
+                    .into_iter()
+                    .map(|user| user.trim().to_owned())
+                    .filter(|user| !user.is_empty() && user != owner)
+                    .collect(),
+            }
+        }
+        other => return Err(format!("unsupported catalog MCP scope: {other}")),
+    };
+    let server = McpServer {
+        server_id: server_id.to_owned(),
+        name: raw.name,
+        url: raw.endpoint_url,
+        transport: raw.transport,
+        // Never import a credential from a registry projection. The only
+        // supported durable credential path is the encrypted OAuth resolver.
+        token: String::new(),
+        tool_allowlist: raw.tool_allowlist,
+        enabled: raw.enabled,
+    };
+    // Keep the org argument explicit so a future multi-org response cannot be
+    // accidentally written under a catalog-supplied tenant.
+    let current_org_id = current_org_id.trim();
+    if current_org_id.is_empty() {
+        return Err("catalog hydration requires an organization".to_owned());
+    }
+    // Confinement check, and NOT a redundant one. capability-core scopes
+    // `GET /api/v1/mcp` by the VERIFIED PRINCIPAL on the bearer
+    // (`mcpVerifiedOrganization`, registry_apis.go:364) and ignores the
+    // `org_id` query parameter hydration sends entirely — while the gateway
+    // writes whatever comes back under the `org_id` it was *asked* for. Those
+    // two tenants agree today only because the chat path derives both from one
+    // verified request. Nothing enforced it, and the obvious way to extend
+    // hydration to a service path (hand it a service credential) would silently
+    // cache the service principal's tenant under the caller's, which is
+    // cross-tenant tool exposure rather than a stale-cache bug.
+    let row_org_id = raw.org_id.trim();
+    if !row_org_id.is_empty() && row_org_id != current_org_id && row_org_id != CATALOG_GLOBAL_ORG {
+        return Err(format!(
+            "catalog MCP record belongs to org '{row_org_id}', not '{current_org_id}'"
+        ));
+    }
+    Ok((server, ownership))
+}
+
+/// Refresh one tenant's MCP cache from capability-core using a verified,
+/// user-bound capability bearer. A failed refresh clears the tenant cache and
+/// ownership projection so a registry outage cannot leave revoked tools
+/// callable from stale process memory.
+pub async fn hydrate_mcp_registry(
+    reg: &McpRegistry,
+    ownership: &crate::ownership::OwnershipStore,
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    org_id: &str,
+    capability_bearer: &str,
+) -> Result<usize, String> {
+    if capability_core_base_url.trim().is_empty() || capability_bearer.trim().is_empty() {
+        reg.replace_org(org_id, std::iter::empty());
+        ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, std::iter::empty());
+        return Err("capability registry or bearer is unavailable".to_owned());
+    }
+    let mut url = reqwest::Url::parse(capability_core_base_url.trim())
+        .map_err(|_| "capability registry URL is invalid".to_owned())?;
+    url.set_path("/api/v1/mcp");
+    url.query_pairs_mut().append_pair("org_id", org_id);
+
+    // Clear before the request: if capability-core is unreachable, the safe
+    // result is no advertised/callable MCP capability for this tenant.
+    reg.replace_org(org_id, std::iter::empty());
+    ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, std::iter::empty());
+
+    let response = http_client
+        .get(url)
+        .bearer_auth(capability_bearer.trim())
+        .send()
+        .await
+        .map_err(|error| format!("capability registry request failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "capability registry returned HTTP {}",
+            response.status()
+        ));
+    }
+    let payload = response
+        .json::<CatalogMcpResponse>()
+        .await
+        .map_err(|error| format!("capability registry response was invalid: {error}"))?;
+
+    let mut servers = Vec::with_capacity(payload.servers.len());
+    let mut ownership_entries = Vec::with_capacity(payload.servers.len());
+    for raw in payload.servers {
+        match catalog_mcp_parts(org_id, raw) {
+            Ok((server, resource_ownership)) => {
+                // Reuse the exact write-time validation, but never let one
+                // malformed legacy row poison the rest of the tenant cache.
+                let mut checked = server.clone();
+                if validate_mcp_server(org_id, &mut checked).is_ok() {
+                    servers.push(checked.clone());
+                    ownership_entries.push((checked.server_id, resource_ownership));
+                } else {
+                    tracing::warn!(org_id, server_id = %server.server_id, "skipping invalid catalog MCP record");
+                }
+            }
+            Err(error) => tracing::warn!(org_id, %error, "skipping malformed catalog MCP record"),
+        }
+    }
+    let count = servers.len();
+    reg.replace_org(org_id, servers);
+    ownership.replace_org_kind(org_id, crate::ownership::KIND_MCP, ownership_entries);
+    Ok(count)
 }
 
 /// Discover an MCP server's tools over the real **Streamable HTTP** transport
@@ -634,7 +820,23 @@ pub async fn mcp_tool_defs(
     http_client: &reqwest::Client,
     capability_core_base_url: &str,
     mcp_oauth_service_token: &str,
+    capability_bearer: Option<&str>,
 ) -> Vec<ToolDefinition> {
+    if let Some(bearer) = capability_bearer {
+        if let Err(error) = hydrate_mcp_registry(
+            reg,
+            ownership,
+            http_client,
+            capability_core_base_url,
+            org_id,
+            bearer,
+        )
+        .await
+        {
+            tracing::warn!(%org_id, %error, "MCP catalog hydration failed; MCP tools disabled for this turn");
+            return Vec::new();
+        }
+    }
     let full = full_mcp_tool_defs(
         reg,
         ownership,
@@ -980,6 +1182,139 @@ mod mcp_writethrough_tests {
 }
 
 #[cfg(test)]
+mod mcp_hydration_tests {
+    use super::*;
+
+    #[test]
+    fn catalog_projection_restores_owner_and_shares_without_credentials() {
+        let (server, ownership) = catalog_mcp_parts(
+            "org-1",
+            CatalogMcpServer {
+                id: "mcp-1".to_owned(),
+                org_id: "org-1".to_owned(),
+                name: "finance".to_owned(),
+                endpoint_url: "https://mcp.example.test/mcp".to_owned(),
+                transport: "http".to_owned(),
+                tool_allowlist: vec!["records.read".to_owned()],
+                enabled: true,
+                scope: "user".to_owned(),
+                owner_user_id: "alice".to_owned(),
+                shared_with: vec!["bob".to_owned(), "alice".to_owned(), "".to_owned()],
+            },
+        )
+        .expect("valid catalog projection");
+
+        assert_eq!(server.server_id, "mcp-1");
+        assert_eq!(server.url, "https://mcp.example.test/mcp");
+        assert!(
+            server.token.is_empty(),
+            "catalog projections never carry tokens"
+        );
+        assert_eq!(ownership.scope, crate::ownership::Scope::User);
+        assert_eq!(ownership.owner_user_id, "alice");
+        assert_eq!(ownership.shared_with, vec!["bob"]);
+    }
+
+    /// Builds a catalog row owned by `row_org`, varying nothing else.
+    fn catalog_row_for(row_org: &str) -> CatalogMcpServer {
+        CatalogMcpServer {
+            id: "mcp-1".to_owned(),
+            org_id: row_org.to_owned(),
+            name: "finance".to_owned(),
+            endpoint_url: "https://mcp.example.test/mcp".to_owned(),
+            transport: "http".to_owned(),
+            tool_allowlist: vec![],
+            enabled: true,
+            scope: "org".to_owned(),
+            owner_user_id: String::new(),
+            shared_with: vec![],
+        }
+    }
+
+    #[test]
+    fn a_row_from_another_tenant_is_refused_not_cached_under_the_caller() {
+        // capability-core scopes this list by the bearer's principal and
+        // ignores the org_id query parameter, so a bearer/argument mismatch
+        // would otherwise write another tenant's MCP servers into this
+        // tenant's registry — and every one of their tools becomes callable.
+        let error = catalog_mcp_parts("org-1", catalog_row_for("org-2"))
+            .expect_err("a foreign tenant's row must not hydrate");
+        assert!(
+            error.contains("org-2"),
+            "error should name the foreign org: {error}"
+        );
+        assert!(
+            error.contains("org-1"),
+            "error should name the expected org: {error}"
+        );
+    }
+
+    #[test]
+    fn the_caller_own_tenant_and_global_rows_both_hydrate() {
+        // `global` is not bleed: capability-core's list query is
+        // `WHERE org_id=$1 OR org_id='global'`, so refusing it would silently
+        // drop every org-wide server from the catalog.
+        assert!(catalog_mcp_parts("org-1", catalog_row_for("org-1")).is_ok());
+        assert!(catalog_mcp_parts("org-1", catalog_row_for("global")).is_ok());
+    }
+
+    #[test]
+    fn a_projection_without_an_org_field_still_hydrates() {
+        // Tolerated for compatibility: an absent org_id is capability-core
+        // not stating one, which is not evidence of a mismatch. A *stated*
+        // and differing tenant is the case worth refusing.
+        assert!(catalog_mcp_parts("org-1", catalog_row_for("")).is_ok());
+    }
+
+    #[test]
+    fn replacing_a_tenant_drops_revoked_servers_and_shares() {
+        let registry = McpRegistry::new();
+        let ownership = crate::ownership::OwnershipStore::new();
+        let mut old = McpServer {
+            server_id: "old".to_owned(),
+            name: "old".to_owned(),
+            url: "https://old.example.test".to_owned(),
+            transport: "http".to_owned(),
+            token: String::new(),
+            tool_allowlist: vec!["read".to_owned()],
+            enabled: true,
+        };
+        handle_register_mcp_server(
+            &registry,
+            RegisterMcpServerRequest {
+                request_id: "r".to_owned(),
+                org_id: "org-1".to_owned(),
+                server: Some(old.clone()),
+            },
+        )
+        .expect("seed old server");
+        ownership.set(
+            "org-1",
+            crate::ownership::KIND_MCP,
+            "old",
+            crate::ownership::Ownership::user("alice"),
+        );
+
+        old.server_id = "new".to_owned();
+        registry.replace_org("org-1", vec![old]);
+        ownership.replace_org_kind(
+            "org-1",
+            crate::ownership::KIND_MCP,
+            vec![("new".to_owned(), crate::ownership::Ownership::org())],
+        );
+
+        assert!(!registry.contains("org-1", "old"));
+        assert!(registry.contains("org-1", "new"));
+        assert!(ownership
+            .get("org-1", crate::ownership::KIND_MCP, "old")
+            .is_none());
+        assert!(ownership
+            .get("org-1", crate::ownership::KIND_MCP, "new")
+            .is_some());
+    }
+}
+
+#[cfg(test)]
 mod mcp_secure_registration_tests {
     use super::*;
     use mp_contracts::model_plane::v1::McpServer;
@@ -1115,11 +1450,13 @@ mod mcp_secure_registration_tests {
                 name: "search".to_owned(),
                 description: String::new(),
                 input_schema_json: "{}".to_owned(),
+                annotations: Default::default(),
             },
             McpToolDef {
                 name: "search_and_delete".to_owned(),
                 description: String::new(),
                 input_schema_json: "{}".to_owned(),
+                annotations: Default::default(),
             },
         ];
         let filtered = filter_allowlist(tools, &["search".to_owned()]);
@@ -1138,6 +1475,7 @@ mod mcp_exposure_tests {
             name: name.to_owned(),
             description: String::new(),
             input_schema_json: "{}".to_owned(),
+            annotations: Default::default(),
         }
     }
 
@@ -1161,6 +1499,7 @@ mod mcp_exposure_tests {
             &reqwest::Client::new(),
             "",
             "",
+            None,
         )
         .await
     }
@@ -1588,6 +1927,55 @@ impl HookRegistry {
     }
 }
 
+/// Serialize an org's enabled hooks into the `hook_context` JSON that
+/// execution-core's hook engine parses (`execution-core/src/hook/mod.rs`).
+///
+/// This is the wire that makes a registered hook actually do something. The
+/// gateway used to hold hooks in memory and send `hook_context: ""` on every
+/// dispatch, so execution-core — which has a working hook engine — never
+/// received a single rule. An operator could register a `deny` on a dangerous
+/// tool, list it back, and have it enforce nothing.
+///
+/// Two deliberate narrowings:
+/// - Only `pre_tool`/`post_tool` are emitted. execution-core evaluates exactly
+///   `PreToolUse` and `PostToolUse`; `on_error`/`on_complete` have no evaluator
+///   there, so forwarding them would imply an enforcement that does not exist.
+/// - Disabled hooks are omitted entirely rather than emitted as `allow`, so a
+///   disabled rule cannot out-rank an enabled one during matching.
+///
+/// Returns an empty string when the org has no applicable rules — identical on
+/// the wire to today's behaviour, so orgs without hooks are unaffected.
+#[must_use]
+pub fn hook_context_json(reg: &HookRegistry, org_id: &str) -> String {
+    let rules: Vec<Value> = reg
+        .inner
+        .iter()
+        .filter(|entry| entry.key().0 == org_id && entry.value().enabled)
+        .filter_map(|entry| {
+            let hook = entry.value();
+            // Gateway spells the event `pre_tool`; execution-core expects
+            // `pre_tool_use`. Translate rather than relying on its normalizer,
+            // which folds case and separators but would not add the suffix.
+            let event = match hook.event.as_str() {
+                "pre_tool" => "pre_tool_use",
+                "post_tool" => "post_tool_use",
+                _ => return None,
+            };
+            Some(json!({
+                "event": event,
+                // Empty scope means "any tool" on both sides.
+                "tools": if hook.tool_scope.trim().is_empty() { "*" } else { hook.tool_scope.trim() },
+                "decision": hook.decision,
+                "reason": hook.reason,
+            }))
+        })
+        .collect();
+    if rules.is_empty() {
+        return String::new();
+    }
+    json!({ "rules": rules }).to_string()
+}
+
 /// Registers (or upserts) a lifecycle hook in the gateway-scoped registry.
 ///
 /// # Errors
@@ -1639,130 +2027,6 @@ pub fn handle_list_hooks(
     Ok(ListHooksResponse {
         request_id: req.request_id,
         hooks,
-    })
-}
-
-#[derive(Debug, Clone)]
-struct PermEntry {
-    verdict: String, // "allow" | "deny"
-    reason: String,
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct PermissionRegistry {
-    // (org, tool_name) → verdict. Missing = allow (default-open).
-    inner: Arc<DashMap<(String, String), PermEntry>>,
-}
-impl PermissionRegistry {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-/// Resolves the tool-ACL verdict for `(org_id, tool_name)` (default-open).
-///
-/// # Errors
-///
-/// Infallible in practice; returns `Result` to match the gRPC handler contract.
-pub fn handle_check_permission(
-    reg: &PermissionRegistry,
-    req: CheckPermissionRequest,
-) -> Result<CheckPermissionResponse, Status> {
-    if let Some(e) = reg.inner.get(&(req.org_id.clone(), req.tool_name.clone())) {
-        let allowed = e.verdict == "allow";
-        return Ok(CheckPermissionResponse {
-            request_id: req.request_id,
-            allowed,
-            reason: e.reason.clone(),
-        });
-    }
-    Ok(CheckPermissionResponse {
-        request_id: req.request_id,
-        allowed: true,
-        reason: "default allow".into(),
-    })
-}
-
-/// Sets the tool-ACL verdict for `(org_id, tool_name)`.
-///
-/// # Errors
-///
-/// Returns `Status::invalid_argument` if `req.verdict` is not `allow` or `deny`.
-pub fn handle_set_permission(
-    reg: &PermissionRegistry,
-    req: SetPermissionRequest,
-) -> Result<SetPermissionResponse, Status> {
-    if !matches!(req.verdict.as_str(), "allow" | "deny") {
-        return Err(Status::invalid_argument(
-            "verdict must be 'allow' or 'deny'",
-        ));
-    }
-    reg.inner.insert(
-        (req.org_id.clone(), req.tool_name.clone()),
-        PermEntry {
-            verdict: req.verdict,
-            reason: req.reason,
-        },
-    );
-    Ok(SetPermissionResponse {
-        request_id: req.request_id,
-    })
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct PolicyStore {
-    inner: Arc<DashMap<String, OrgPolicy>>, // org → policy
-}
-impl PolicyStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-/// Returns the runtime policy for `req.org_id`, or a default when unset.
-///
-/// # Errors
-///
-/// Infallible in practice; returns `Result` to match the gRPC handler contract.
-pub fn handle_get_policy(
-    store: &PolicyStore,
-    req: GetPolicyRequest,
-) -> Result<GetPolicyResponse, Status> {
-    let p = store
-        .inner
-        .get(&req.org_id)
-        .map(|e| e.value().clone())
-        .unwrap_or(OrgPolicy {
-            org_id: req.org_id.clone(),
-            ..Default::default()
-        });
-    Ok(GetPolicyResponse {
-        request_id: req.request_id,
-        policy: Some(p),
-    })
-}
-
-/// Stores the runtime policy for an org.
-///
-/// # Errors
-///
-/// Returns `Status::invalid_argument` if `req.policy` is absent or its `org_id` is empty.
-pub fn handle_set_policy(
-    store: &PolicyStore,
-    req: SetPolicyRequest,
-) -> Result<SetPolicyResponse, Status> {
-    let p = req
-        .policy
-        .ok_or_else(|| Status::invalid_argument("policy is required"))?;
-    if p.org_id.is_empty() {
-        return Err(Status::invalid_argument("policy.org_id is required"));
-    }
-    store.inner.insert(p.org_id.clone(), p.clone());
-    Ok(SetPolicyResponse {
-        request_id: req.request_id,
-        policy: Some(p),
     })
 }
 
@@ -2070,6 +2334,80 @@ mod tests {
         assert!(parsed["error"].as_str().unwrap().contains("no such tool"));
     }
 
+    // `callback_url` is deprecated (hooks are policy rules, not webhooks) but
+    // the field still exists on the wire, so a literal must set it.
+    #[allow(deprecated)]
+    fn hook(event: &str, scope: &str, decision: &str, enabled: bool) -> Hook {
+        Hook {
+            hook_id: format!("h_{event}_{scope}_{decision}"),
+            event: event.to_owned(),
+            tool_scope: scope.to_owned(),
+            callback_url: String::new(),
+            enabled,
+            decision: decision.to_owned(),
+            reason: "policy".to_owned(),
+        }
+    }
+
+    fn register(reg: &HookRegistry, org: &str, h: Hook) {
+        handle_register_hook(
+            reg,
+            RegisterHookRequest {
+                request_id: "t".into(),
+                org_id: org.into(),
+                hook: Some(h),
+            },
+        )
+        .expect("registers");
+    }
+
+    #[test]
+    fn hook_rules_reach_execution_core_in_the_shape_its_engine_parses() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("pre_tool", "shell", "deny", true));
+
+        let ctx: Value = serde_json::from_str(&hook_context_json(&reg, "org")).expect("valid json");
+        let rule = &ctx["rules"][0];
+        // execution-core spells the event `pre_tool_use`; the gateway spells it
+        // `pre_tool`. A missed translation here silently disables every rule.
+        assert_eq!(rule["event"], "pre_tool_use");
+        assert_eq!(rule["tools"], "shell");
+        assert_eq!(rule["decision"], "deny");
+        assert_eq!(rule["reason"], "policy");
+    }
+
+    #[test]
+    fn an_empty_tool_scope_becomes_the_any_tool_matcher() {
+        let reg = HookRegistry::new();
+        register(&reg, "org", hook("post_tool", "", "ask", true));
+        let ctx: Value = serde_json::from_str(&hook_context_json(&reg, "org")).expect("json");
+        assert_eq!(ctx["rules"][0]["event"], "post_tool_use");
+        assert_eq!(ctx["rules"][0]["tools"], "*");
+    }
+
+    #[test]
+    fn disabled_hooks_and_unevaluated_events_are_omitted_entirely() {
+        let reg = HookRegistry::new();
+        // Disabled: emitting it as `allow` could out-rank an enabled deny.
+        register(&reg, "org", hook("pre_tool", "shell", "deny", false));
+        // execution-core has no evaluator for these two, so forwarding them
+        // would imply enforcement that does not exist.
+        register(&reg, "org", hook("on_error", "*", "deny", true));
+        register(&reg, "org", hook("on_complete", "*", "deny", true));
+
+        // No applicable rules ⇒ empty string, byte-identical to the behaviour
+        // before hooks were wired, so an org without usable hooks is unaffected.
+        assert_eq!(hook_context_json(&reg, "org"), "");
+    }
+
+    #[test]
+    fn one_orgs_hook_rules_never_travel_with_another_orgs_dispatch() {
+        let reg = HookRegistry::new();
+        register(&reg, "org_a", hook("pre_tool", "shell", "deny", true));
+        assert!(hook_context_json(&reg, "org_a").contains("shell"));
+        assert_eq!(hook_context_json(&reg, "org_b"), "");
+    }
+
     #[test]
     fn mcp_register_assigns_id() {
         let reg = McpRegistry::new();
@@ -2104,6 +2442,7 @@ mod tests {
                     name: "foo".into(),
                     kind: "tool".into(),
                     enabled: true,
+                    installed_at_unix: 0,
                     ..Default::default()
                 }),
             },
@@ -2121,63 +2460,6 @@ mod tests {
         )
         .unwrap();
         assert!(!toggled.plugin.unwrap().enabled);
-    }
-
-    #[test]
-    fn permission_defaults_open() {
-        let reg = PermissionRegistry::new();
-        let r = handle_check_permission(
-            &reg,
-            CheckPermissionRequest {
-                request_id: "t".into(),
-                org_id: "o".into(),
-                tool_name: "bash".into(),
-            },
-        )
-        .unwrap();
-        assert!(r.allowed);
-    }
-
-    #[test]
-    fn permission_deny_takes_effect() {
-        let reg = PermissionRegistry::new();
-        handle_set_permission(
-            &reg,
-            SetPermissionRequest {
-                request_id: "t".into(),
-                org_id: "o".into(),
-                tool_name: "bash".into(),
-                verdict: "deny".into(),
-                reason: "policy".into(),
-            },
-        )
-        .unwrap();
-        let r = handle_check_permission(
-            &reg,
-            CheckPermissionRequest {
-                request_id: "t".into(),
-                org_id: "o".into(),
-                tool_name: "bash".into(),
-            },
-        )
-        .unwrap();
-        assert!(!r.allowed);
-    }
-
-    #[test]
-    fn policy_get_returns_default_when_unset() {
-        let store = PolicyStore::new();
-        let r = handle_get_policy(
-            &store,
-            GetPolicyRequest {
-                request_id: "t".into(),
-                org_id: "o".into(),
-            },
-        )
-        .unwrap();
-        let p = r.policy.unwrap();
-        assert_eq!(p.org_id, "o");
-        assert!(p.max_cost_per_run_usd.abs() < f64::EPSILON);
     }
 
     #[test]

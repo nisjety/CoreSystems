@@ -33,6 +33,31 @@ const STREAM_TTL_SECS: i64 = 600;
 
 const REDIS_PREFIX: &str = "mp:gw:stream:";
 
+/// Separator between the identity components of a buffer key. ASCII unit
+/// separator, which cannot occur in an org id, a user id, or a ULID request
+/// id — so no combination of those values can be made to collide with a
+/// different combination.
+const KEY_SEPARATOR: char = '\u{1f}';
+
+/// The key a stream's buffered deltas live under.
+///
+/// **The identity prefix is the access control.** A resume names only a
+/// `request_id`, and that id is not a secret: it is emitted in the `connected`
+/// SSE event, echoed in every chunk, and used as a URL path segment, so it
+/// reaches browser history, proxy logs, and screenshots. Keying the buffer on
+/// the request id alone therefore let any authenticated caller — including one
+/// from another tenant — replay someone else's assistant output for the whole
+/// TTL window.
+///
+/// Deriving the key from the *verified* caller identity closes that by
+/// construction: a caller from another org (or another user in the same org)
+/// computes a different key, misses, and gets the same 404 as an unknown id.
+/// There is no comparison to forget and no owner record to look up.
+#[must_use]
+pub fn scoped_stream_key(org_id: &str, user_id: &str, request_id: &str) -> String {
+    format!("{org_id}{KEY_SEPARATOR}{user_id}{KEY_SEPARATOR}{request_id}")
+}
+
 /// A single buffered delta plus its SSE sequence id.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BufferedDelta {
@@ -133,7 +158,18 @@ impl InMemoryStreamBuffer {
                     .filter(|d| after_seq.is_none_or(|a| d.seq > a))
                     .cloned()
                     .collect(),
-                done: entry.done.clone(),
+                // `done` is itself an SSE frame and carries the terminal
+                // sequence id.  Once a client has acknowledged that cursor,
+                // replaying it again creates a duplicate terminal frame (and
+                // some clients treat the duplicate as a second completed
+                // turn).  Keep the terminal frame in the buffer for clients
+                // resuming before it, but make the cursor contract apply to
+                // it just like it does to deltas.
+                done: entry
+                    .done
+                    .as_ref()
+                    .filter(|done| after_seq.is_none_or(|a| done.seq > a))
+                    .cloned(),
                 found: true,
             },
         }
@@ -218,12 +254,17 @@ impl RedisStreamBuffer {
                 };
             }
         };
-        let done = raw_done
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str::<StreamDone>(&s).ok());
+        let raw_done = raw_done.ok().flatten();
+        // A terminal stream remains a known stream even when the caller's
+        // cursor is already at (or beyond) the terminal frame. Keep `found`
+        // independent from the cursor-filtered payload so Redis and the
+        // in-memory backend agree: a valid, fully-acknowledged stream is not a
+        // 404 just because it has nothing left to replay.
+        let parsed_done = raw_done.and_then(|s| serde_json::from_str::<StreamDone>(&s).ok());
+        let done_present = parsed_done.is_some();
+        let done = parsed_done.filter(|done| after_seq.is_none_or(|a| done.seq > a));
 
-        let found = !entries.is_empty() || done.is_some();
+        let found = !entries.is_empty() || done_present;
         let deltas = entries
             .iter()
             .filter_map(|s| serde_json::from_str::<BufferedDelta>(s).ok())
@@ -352,6 +393,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_frame_is_not_replayed_after_its_cursor() {
+        let store = StreamBufferStore::new();
+        store.append("req_terminal_cursor", 0, "answer").await;
+        store
+            .finish(
+                "req_terminal_cursor",
+                StreamDone {
+                    seq: 1,
+                    model_used: "m".into(),
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            )
+            .await;
+
+        let replay = store.replay_after("req_terminal_cursor", Some(1)).await;
+        assert!(replay.found);
+        assert!(replay.deltas.is_empty());
+        assert!(
+            replay.done.is_none(),
+            "a client that acknowledged done must not receive a duplicate terminal frame"
+        );
+
+        let before_done = store.replay_after("req_terminal_cursor", Some(0)).await;
+        assert!(before_done.done.is_some());
+    }
+
+    #[tokio::test]
     async fn unknown_request_is_not_found() {
         let store = StreamBufferStore::new();
         let r = store.replay_after("nope", None).await;
@@ -367,5 +436,100 @@ mod tests {
         let r = store.replay_after("req_cap", None).await;
         assert_eq!(r.deltas.len(), MAX_DELTAS_PER_STREAM);
         assert_eq!(r.deltas[0].seq, 10);
+    }
+
+    /// Regression: a buffered stream was addressable by `request_id` alone, so
+    /// any authenticated caller who saw an id — and it travels in the
+    /// `connected` event, every chunk, and the cancel URL — could replay
+    /// another tenant's assistant output for the whole TTL window.
+    #[tokio::test]
+    async fn a_stream_never_replays_for_another_org_or_user() {
+        let store = StreamBufferStore::new();
+        let request_id = "req_shared_id";
+        let owner = scoped_stream_key("org_a", "user_a", request_id);
+        store.append(&owner, 0, "tenant a's answer").await;
+
+        // The owner still resumes.
+        let mine = store.replay_after(&owner, None).await;
+        assert!(mine.found);
+        assert_eq!(mine.deltas[0].delta, "tenant a's answer");
+
+        // Another tenant knowing the exact request id derives a different key.
+        let other_org = scoped_stream_key("org_b", "user_a", request_id);
+        assert!(!store.replay_after(&other_org, None).await.found);
+
+        // So does a different user inside the SAME tenant.
+        let colleague = scoped_stream_key("org_a", "user_b", request_id).clone();
+        assert!(!store.replay_after(&colleague, None).await.found);
+
+        // And the bare id — the pre-fix key — addresses nothing at all.
+        assert!(!store.replay_after(request_id, None).await.found);
+    }
+
+    /// Release-shaped Redis proof. The shell harness runs this test once to
+    /// write a completed stream, restarts the Redis container, then runs it
+    /// again in read mode. Keeping the test ignored avoids requiring Redis for
+    /// normal unit suites while still making the cross-replica/restart claim
+    /// executable in CI and release verification.
+    #[tokio::test]
+    #[ignore = "requires REDIS_URL and REDIS_DURABILITY_PHASE=write|read"]
+    async fn redis_resume_survives_store_restart_and_preserves_identity_scope() {
+        let phase = std::env::var("REDIS_DURABILITY_PHASE").expect("REDIS_DURABILITY_PHASE");
+        let request_id =
+            std::env::var("REDIS_DURABILITY_REQUEST_ID").expect("REDIS_DURABILITY_REQUEST_ID");
+        let owner = scoped_stream_key("org_redis_e2e", "user_redis_e2e", &request_id);
+        let store = StreamBufferStore::from_env().await;
+        assert!(
+            matches!(store, StreamBufferStore::Redis(_)),
+            "REDIS_URL must resolve"
+        );
+
+        match phase.as_str() {
+            "write" => {
+                store.append(&owner, 0, "persisted answer").await;
+                store
+                    .finish(
+                        &owner,
+                        StreamDone {
+                            seq: 1,
+                            model_used: "redis-e2e".to_owned(),
+                            input_tokens: 2,
+                            output_tokens: 3,
+                        },
+                    )
+                    .await;
+                let replay = store.replay_after(&owner, Some(0)).await;
+                assert!(replay.found);
+                assert_eq!(replay.deltas.len(), 0, "cursor 0 filters seq 0");
+                assert!(replay.done.is_some());
+            }
+            "read" => {
+                let replay = store.replay_after(&owner, Some(0)).await;
+                assert!(replay.found, "completed stream must survive Redis restart");
+                assert_eq!(replay.deltas.len(), 0, "cursor 0 filters seq 0");
+                assert_eq!(replay.done.expect("terminal frame").seq, 1);
+                let acknowledged = store.replay_after(&owner, Some(1)).await;
+                assert!(acknowledged.found);
+                assert!(acknowledged.done.is_none());
+
+                let other = scoped_stream_key("org_other", "user_redis_e2e", &request_id);
+                assert!(!store.replay_after(&other, None).await.found);
+            }
+            invalid => panic!("unsupported REDIS_DURABILITY_PHASE={invalid}"),
+        }
+    }
+
+    #[test]
+    fn scoped_keys_cannot_be_made_to_collide_across_identities() {
+        // Without a separator that cannot occur in the components, an org
+        // ending in part of a user id could address another pair's stream.
+        assert_ne!(
+            scoped_stream_key("org", "a", "b"),
+            scoped_stream_key("org", "a\u{1f}b", "")
+        );
+        assert_ne!(
+            scoped_stream_key("orga", "user", "req"),
+            scoped_stream_key("org", "auser", "req")
+        );
     }
 }

@@ -969,6 +969,52 @@ impl SessionCore for MockSessionCore {
         Ok(Response::new(ListThreadsResponse { threads: vec![] }))
     }
 
+    async fn update_thread_presentation(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::UpdateThreadPresentationRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::UpdateThreadPresentationResponse>, Status>
+    {
+        Err(Status::unimplemented(
+            "update_thread_presentation not needed in this test",
+        ))
+    }
+
+    async fn archive_thread(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::ArchiveThreadRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::ArchiveThreadResponse>, Status> {
+        Err(Status::unimplemented(
+            "archive_thread not needed in this test",
+        ))
+    }
+
+    async fn archive_threads(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::ArchiveThreadsRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::ArchiveThreadsResponse>, Status> {
+        Err(Status::unimplemented(
+            "archive_threads not needed in this test",
+        ))
+    }
+
+    async fn delete_thread(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::DeleteThreadRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::DeleteThreadResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete_thread not needed in this test",
+        ))
+    }
+
+    async fn delete_threads(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::DeleteThreadsRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::DeleteThreadsResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete_threads not needed in this test",
+        ))
+    }
+
     async fn replay_thread(
         &self,
         _: TReq<ReplayThreadRequest>,
@@ -2198,7 +2244,15 @@ async fn invoke_stream_never_presents_or_replays_done_before_terminal_receipt() 
                 .map(str::to_owned)
         })
         .expect("connected SSE event must expose its request id");
-    let replay = stream_buffers.replay_after(&request_id, None).await;
+    // Buffers are addressed by verified identity + request id so one tenant
+    // cannot replay another's stream; this router authenticates as
+    // org_placeholder/user_placeholder.
+    let buffer_key = model_gateway::stream_buffer::scoped_stream_key(
+        "org_placeholder",
+        "user_placeholder",
+        &request_id,
+    );
+    let replay = stream_buffers.replay_after(&buffer_key, None).await;
     assert!(replay.found);
     assert!(
         replay.done.is_none(),
@@ -2309,7 +2363,12 @@ async fn invoke_stream_completes_and_persists_after_the_client_disconnects_mid_s
         "a disconnected client must still see its run terminalize Completed, not Cancelled",
     );
 
-    let replay = stream_buffers.replay_after(&request_id, None).await;
+    let buffer_key = model_gateway::stream_buffer::scoped_stream_key(
+        "org_placeholder",
+        "user_placeholder",
+        &request_id,
+    );
+    let replay = stream_buffers.replay_after(&buffer_key, None).await;
     assert!(replay.found, "the disconnected run must still be resumable");
     let full: String = replay.deltas.iter().map(|d| d.delta.as_str()).collect();
     assert_eq!(

@@ -79,6 +79,29 @@ service SessionCore {
   // chat history. Timestamps are based on creation/message writes, never reads.
   rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse);
 
+  // Set user-facing presentation attributes for a thread. Session Core remains
+  // the single writer; edge gateways may normalize the request but must not
+  // keep a competing history index or presentation cache.
+  rpc UpdateThreadPresentation(UpdateThreadPresentationRequest) returns (UpdateThreadPresentationResponse);
+
+  // Hide one thread from the user's ordinary history without erasing its
+  // append-only model/audit evidence. Data-subject erasure is a separate,
+  // explicitly authorized Control-Plane workflow.
+  rpc ArchiveThread(ArchiveThreadRequest) returns (ArchiveThreadResponse);
+
+  // Archive every currently visible thread for one authenticated user. This is
+  // the durable equivalent of "clear chat history" in a client sidebar.
+  rpc ArchiveThreads(ArchiveThreadsRequest) returns (ArchiveThreadsResponse);
+
+  // Permanently erase one thread and its thread-owned durable evidence. This is
+  // owner-bound: Session Core checks the verified caller against the thread's
+  // user (or exact system owner) before deleting any row.
+  rpc DeleteThread(DeleteThreadRequest) returns (DeleteThreadResponse);
+
+  // Permanently erase every thread owned by one authenticated user. This is
+  // the durable equivalent of a destructive "clear chat history" action.
+  rpc DeleteThreads(DeleteThreadsRequest) returns (DeleteThreadsResponse);
+
   // Set a run's mode (execute | plan | reactive | research) durably on the
   // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
   // write-throughs here so plan mode survives restart — auditability/resume
@@ -573,10 +596,93 @@ message ThreadSummary {
   string preview = 4;
   google.protobuf.Timestamp created_at = 5;
   google.protobuf.Timestamp updated_at = 6;
+
+  // Whether the user has pinned this thread in the cross-device chat list.
+  bool pinned = 7;
 }
 
 message ListThreadsResponse {
   repeated ThreadSummary threads = 1;
+}
+
+// User-facing presentation state for a thread, written only by Session Core.
+message UpdateThreadPresentationRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required canonical thread identifier.
+  string thread_id = 2;
+
+  // Optional title override. Omission leaves it unchanged; an empty value
+  // clears it and restores the canonical message-derived title.
+  optional string title = 3;
+  // Optional preview override. Omission leaves it unchanged; an empty value
+  // clears it and restores the canonical message-derived preview.
+  optional string preview = 4;
+  // Optional pin state. Omission leaves the existing state unchanged.
+  optional bool pinned = 5;
+}
+
+// Receipt for a durable presentation update.
+message UpdateThreadPresentationResponse {
+  // Canonical thread identifier whose presentation changed.
+  string thread_id = 1;
+}
+
+// Request to archive one thread from ordinary history.
+message ArchiveThreadRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required canonical thread identifier.
+  string thread_id = 2;
+}
+
+// Durable archive receipt for one thread.
+message ArchiveThreadResponse {
+  // Canonical archived thread identifier.
+  string thread_id = 1;
+  // Server timestamp at which the thread was first archived.
+  google.protobuf.Timestamp archived_at = 2;
+}
+
+// Request to archive every visible thread belonging to one user.
+message ArchiveThreadsRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required owner. Session Core checks it against the verified caller.
+  string user_id = 2;
+}
+
+// Receipt for a bulk archive operation.
+message ArchiveThreadsResponse {
+  // Number of threads newly archived by this request.
+  uint32 archived_count = 1;
+}
+
+// Request to permanently erase one thread.
+message DeleteThreadRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required canonical thread identifier.
+  string thread_id = 2;
+}
+
+// Receipt for a durable thread erasure.
+message DeleteThreadResponse {
+  string thread_id = 1;
+  bool deleted = 2;
+}
+
+// Request to permanently erase all threads for one authenticated user.
+message DeleteThreadsRequest {
+  // Server-authoritative tenant scope from verified gateway claims.
+  string org_id = 1;
+  // Required owner. Session Core checks it against the verified caller.
+  string user_id = 2;
+}
+
+// Receipt for a bulk durable thread erasure.
+message DeleteThreadsResponse {
+  uint32 deleted_count = 1;
 }
 
 // --- SetRunMode (ROADMAP P3 run modes) ---

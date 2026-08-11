@@ -561,12 +561,16 @@ message CreateApprovalRequest {
   string idempotency_key = 10;
 
   // Optional canonical JSON descriptor for the exact suspended action. It is
-  // validated, scope-bound, and written once with the approval record; it
-  // contains no bearer, refresh token, or provider credential. Empty means
-  // this approval is proposal-only and can never be resumed by a worker.
+  // validated, scope-bound, and encrypted into the dedicated continuation
+  // descriptor table; it contains no bearer, refresh token, or provider
+  // credential. The session-core deployment key is required whenever this
+  // field is non-empty. Empty means this approval is proposal-only and can
+  // never be resumed by a worker.
   //
-  // ZDR callers must leave this empty: retained continuation descriptors are
-  // intentionally incompatible with zero-data-retention execution.
+  // Descriptors are removed when the approval expires/denies or its delivery
+  // reaches terminal/settled state. ZDR callers must leave this empty:
+  // retained continuation descriptors are intentionally incompatible with
+  // zero-data-retention execution.
   string continuation_descriptor_json = 11;
 }
 
@@ -713,7 +717,9 @@ message GetApprovalContinuationResponse {
   // These cases remain indistinguishable to avoid leaking durable state.
   bool available = 1;
 
-  // Canonical descriptor JSON. Set only when available is true.
+  // Canonical descriptor JSON. Set only when available is true. This is
+  // sensitive action data; transport callers must use authenticated TLS. The
+  // backing descriptor is encrypted at rest and removed on terminal cleanup.
   string continuation_descriptor_json = 2;
 }
 

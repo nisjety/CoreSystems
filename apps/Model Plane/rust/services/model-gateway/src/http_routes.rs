@@ -110,7 +110,16 @@ pub fn build_router_with_readiness(
         // chat-parity §4: cooperative stop/cancel of an in-flight stream.
         .route("/v1/invoke/:request_id/cancel", post(invoke_cancel))
         // chat-parity §1: reload a thread's conversation (cross-device resume).
-        .route("/v1/threads", get(list_threads))
+        .route("/v1/threads", get(list_threads).delete(delete_threads))
+        // Archiving remains available as a non-destructive administrative
+        // operation; DELETE is reserved for the durable erase contract below.
+        .route("/v1/threads/archive", post(archive_threads))
+        .route(
+            "/v1/threads/:thread_id/presentation",
+            post(update_thread_presentation),
+        )
+        .route("/v1/threads/:thread_id/archive", post(archive_thread))
+        .route("/v1/threads/:thread_id", delete(delete_thread))
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Memory management ("what do you remember about me") — user-scoped,
         // backed by session-core's MemoryService.ListMemory/DeleteMemory.
@@ -2460,8 +2469,25 @@ async fn register_plain_mcp_server(
 async fn mcp_list(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    capability_bearer: VerifiedCapabilityBearer,
     headers: HeaderMap,
 ) -> Result<Json<Value>, HttpJsonError> {
+    if let Err(error) = crate::runtime_registries::hydrate_mcp_registry(
+        &state.mcp,
+        &state.ownership,
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer.as_str(),
+    )
+    .await
+    {
+        warn!(org_id = %claims.org_id, %error, "MCP catalog hydration failed for list");
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "capability registry is unavailable"})),
+        ));
+    }
     let is_admin = req_is_admin(&claims, &headers);
     let resp = crate::runtime_registries::handle_list_mcp_servers(
         &state.mcp,
@@ -2563,12 +2589,35 @@ async fn mcp_delete(
 async fn mcp_share(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
+    capability_bearer: VerifiedCapabilityBearer,
     Path(server_id): Path<String>,
     Json(body): Json<McpShareBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
     // Sharing changes durable tool exposure policy and is never an ephemeral
     // operation, regardless of any caller-supplied body fields.
     require_non_zdr_durable_mutation(&claims)?;
+    // Rehydrate first so a fresh gateway replica cannot make a share decision
+    // from an empty sidecar. A failed read is a safe refusal, not a local-only
+    // grant that would disappear on the next replica.
+    crate::runtime_registries::hydrate_mcp_registry(
+        &state.mcp,
+        &state.ownership,
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| {
+        warn!(org_id = %claims.org_id, %error, "MCP catalog hydration failed before share");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "capability registry is unavailable"})),
+        )
+    })?;
+    let prior = state
+        .ownership
+        .get(&claims.org_id, crate::ownership::KIND_MCP, &server_id);
     let updated = state
         .ownership
         .set_shares(
@@ -2579,6 +2628,39 @@ async fn mcp_share(
             body.user_ids,
         )
         .map_err(|e| (StatusCode::FORBIDDEN, Json(json!({ "error": e }))))?;
+    let catalog_url = format!("{}/api/v1/mcp/{server_id}", state.capability_core_base_url);
+    let catalog_response = state
+        .http_client
+        .patch(catalog_url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&json!({ "shared_with": updated.shared_with }))
+        .send()
+        .await;
+    let catalog_ok = catalog_response
+        .as_ref()
+        .is_ok_and(|response| response.status().is_success());
+    if !catalog_ok {
+        if let Some(previous) = prior {
+            state.ownership.set(
+                &claims.org_id,
+                crate::ownership::KIND_MCP,
+                &server_id,
+                previous,
+            );
+        } else {
+            state
+                .ownership
+                .remove(&claims.org_id, crate::ownership::KIND_MCP, &server_id);
+        }
+        match catalog_response {
+            Ok(response) => warn!(status = %response.status(), "MCP catalog share update rejected"),
+            Err(error) => warn!(error = %error, "MCP catalog share update unavailable"),
+        }
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "capability registry rejected MCP sharing"})),
+        ));
+    }
     Ok(Json(json!({ "data": {
         "server_id": server_id,
         "scope": updated.scope.as_wire(),
@@ -4942,8 +5024,8 @@ fn not_found(message: &str) -> HttpJsonError {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
 }
 
-/// Map a session-core gRPC error from the chat thread read surfaces
-/// (`list_threads`, `list_thread_messages`) to an HTTP error.
+/// Map a session-core gRPC error from the chat thread history surfaces to an
+/// HTTP error.
 ///
 /// A stale or deleted `thread_id` surfaces as `tonic::Code::NotFound` from
 /// session-core (`authorize_thread_owner` returns `not_found` when the row is
@@ -4953,11 +5035,30 @@ fn not_found(message: &str) -> HttpJsonError {
 /// model-gateway and could not self-heal by dropping the thread. Map `NotFound`
 /// to `404` with a stable `thread_not_found` code so the SPA can evict the
 /// thread from its list, and `PermissionDenied` (cross-org / cross-user read)
-/// to `403`. Every other code — including transport failures (`Unavailable`,
+/// to `403`. Invalid input and ZDR policy denials preserve their client-visible
+/// semantics. Every other code — including transport failures (`Unavailable`,
 /// `Internal`, …) — stays `502`, preserving the prior "upstream is unhappy"
 /// default for these routes.
 fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     match error.code() {
+        tonic::Code::InvalidArgument => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_thread_request",
+                    "message": error.message(),
+                }
+            })),
+        ),
+        tonic::Code::FailedPrecondition => (
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({
+                "error": {
+                    "code": "thread_persistence_not_permitted",
+                    "message": error.message(),
+                }
+            })),
+        ),
         tonic::Code::NotFound => (
             StatusCode::NOT_FOUND,
             Json(json!({
@@ -5800,8 +5901,18 @@ mod invoke_response_contract_tests {
 /// chat-parity §4 — cooperatively cancel an in-flight `/v1/invoke/stream`.
 /// Flips the registered cancel flag; the SSE loop emits a terminal `stopped`
 /// event and closes. 404 when no active stream matches the id.
-async fn invoke_cancel(State(state): State<AppState>, Path(request_id): Path<String>) -> Response {
-    if state.cancels.cancel(&request_id) {
+async fn invoke_cancel(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(request_id): Path<String>,
+) -> Response {
+    // The stream registry binds request ids to the authenticated tenant/user at
+    // registration time. A mismatched owner gets the same 404 as an inactive
+    // stream, avoiding unauthorized cancellation and an existence oracle.
+    if state
+        .cancels
+        .cancel_for(&request_id, &claims.org_id, &claims.user_id)
+    {
         (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "request_id": request_id, "cancelled": true })),
@@ -5983,11 +6094,52 @@ struct ThreadSummaryResponse {
     preview: String,
     created_at: String,
     updated_at: String,
+    pinned: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct ListThreadsResponse {
     threads: Vec<ThreadSummaryResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UpdateThreadPresentationBody {
+    title: Option<String>,
+    preview: Option<String>,
+    pinned: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateThreadPresentationResponse {
+    thread_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveThreadResponse {
+    thread_id: String,
+    archived_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveThreadsResponse {
+    archived_count: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteThreadResponse {
+    thread_id: String,
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteThreadsResponse {
+    deleted_count: u32,
 }
 
 async fn list_threads(
@@ -6023,10 +6175,187 @@ async fn list_threads(
             preview: thread.preview,
             created_at: timestamp_to_rfc3339(thread.created_at),
             updated_at: timestamp_to_rfc3339(thread.updated_at),
+            pinned: thread.pinned,
         })
         .collect();
 
     Ok(Json(ListThreadsResponse { threads }))
+}
+
+/// Persist user-facing title, preview, and pin state through Session Core.
+/// The Model Gateway derives tenant/user scope exclusively from verified claims;
+/// callers cannot select another user's thread presentation.
+async fn update_thread_presentation(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Json(body): Json<UpdateThreadPresentationBody>,
+) -> Result<Json<UpdateThreadPresentationResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::UpdateThreadPresentationRequest;
+
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+
+    let response = state
+        .session_client
+        .clone()
+        .update_thread_presentation(authenticated_session_request(
+            UpdateThreadPresentationRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+                title: body.title,
+                preview: body.preview,
+                pinned: body.pinned,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| {
+            session_thread_error("session-core update_thread_presentation failed", &error)
+        })?
+        .into_inner();
+
+    Ok(Json(UpdateThreadPresentationResponse {
+        thread_id: response.thread_id,
+    }))
+}
+
+/// Archive one history item without erasing its Model-Plane record or audit
+/// evidence. A separately authorized subject-erasure workflow owns deletion.
+async fn archive_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<ArchiveThreadResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ArchiveThreadRequest;
+
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    let response = state
+        .session_client
+        .clone()
+        .archive_thread(authenticated_session_request(
+            ArchiveThreadRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core archive_thread failed", &error))?
+        .into_inner();
+
+    Ok(Json(ArchiveThreadResponse {
+        thread_id: response.thread_id,
+        archived_at: timestamp_to_rfc3339(response.archived_at),
+    }))
+}
+
+/// Archive every currently visible thread belonging to the authenticated user.
+async fn archive_threads(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Json<ArchiveThreadsResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ArchiveThreadsRequest;
+
+    let response = state
+        .session_client
+        .clone()
+        .archive_threads(authenticated_session_request(
+            ArchiveThreadsRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core archive_threads failed", &error))?
+        .into_inner();
+
+    Ok(Json(ArchiveThreadsResponse {
+        archived_count: response.archived_count,
+    }))
+}
+
+/// Permanently erase one thread in Session Core before any edge presentation
+/// cache is allowed to disappear. The BFF's DELETE endpoint delegates here;
+/// this route is deliberately owner-bound by Session Core, not by a gateway
+/// index or caller-supplied user id.
+async fn delete_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<DeleteThreadResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteThreadRequest;
+
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    let response = state
+        .session_client
+        .clone()
+        .delete_thread(authenticated_session_request(
+            DeleteThreadRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core delete_thread failed", &error))?
+        .into_inner();
+
+    Ok(Json(DeleteThreadResponse {
+        thread_id: response.thread_id,
+        deleted: response.deleted,
+    }))
+}
+
+/// Permanently erase all threads for the authenticated user in Session Core.
+/// Session Core performs the owner check and transaction; this handler only
+/// forwards verified claims and returns the durable receipt.
+async fn delete_threads(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Json<DeleteThreadsResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteThreadsRequest;
+
+    let response = state
+        .session_client
+        .clone()
+        .delete_threads(authenticated_session_request(
+            DeleteThreadsRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core delete_threads failed", &error))?
+        .into_inner();
+
+    Ok(Json(DeleteThreadsResponse {
+        deleted_count: response.deleted_count,
+    }))
 }
 
 fn timestamp_to_rfc3339(value: Option<prost_types::Timestamp>) -> String {
@@ -6232,6 +6561,7 @@ async fn invoke(
     Extension(claims): Extension<Claims>,
     model_bearer: VerifiedModelBearer,
     inference_bearer: VerifiedInferenceBearer,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     Json(req): Json<InvokeRequest>,
 ) -> Result<Json<InvokeResponse>, (StatusCode, Json<serde_json::Value>)> {
@@ -6241,13 +6571,23 @@ async fn invoke(
     let normalized = normalize::normalize(&req)?;
     let effective_zdr = claims.effective_zdr(normalized.zdr);
     let persistence = effective_invoke_persistence_plan(&claims, normalized.zdr);
+    let capability_bearer = capability_bearer.map(|Extension(bearer)| bearer);
+    let pii_redaction_required = crate::moderation::pii_redaction_required(
+        &req.features,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer
+            .as_ref()
+            .map(VerifiedCapabilityBearer::as_str),
+    )
+    .await;
 
     // ZDR is a separate, deliberately narrow path. It must branch before the
     // idempotency registry, budget/session clients, event publisher, and any
     // response cache so request or response content cannot become durable.
     if !persistence.all_durable_effects_allowed() {
         let request_id = new_ulid();
-        let user_content = if crate::moderation::wants_moderation(&req.features) {
+        let user_content = if pii_redaction_required {
             crate::moderation::redact_pii(&normalized.content).0
         } else {
             normalized.content.clone()
@@ -6357,12 +6697,23 @@ async fn invoke(
     let verified_bearer = cost_bearer
         .as_ref()
         .map_or("", |Extension(bearer)| bearer.as_str());
+    // Same org ceilings the streaming path applies, so the two entry points
+    // cannot disagree about what an org is allowed to spend.
+    let org_limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        &claims.org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
     crate::budget::check_budget(
         &state.http_client,
         &claims.org_id,
         &claims.user_id,
         verified_bearer,
         &normalized,
+        org_limits,
     )
     .await?;
 
@@ -6465,9 +6816,9 @@ async fn invoke(
         ));
     }
 
-    // chat-parity safety (pii_filter): opt-in redaction before the prompt
-    // reaches an external provider. Off by default → unchanged behavior.
-    let user_content = if crate::moderation::wants_moderation(&req.features) {
+    // Safety policy is resolved from capability-core per request; client
+    // features can add PII redaction but cannot disable the org's policy.
+    let user_content = if pii_redaction_required {
         crate::moderation::redact_pii(&normalized.content).0
     } else {
         normalized.content.clone()
@@ -7068,10 +7419,15 @@ mod capability_contract_tests {
             0,
             "ZDR MCP registration was forwarded"
         );
-        let listed = mcp_list(State(state.clone()), Extension(zdr), HeaderMap::new())
-            .await
-            .expect("read-only MCP listing remains allowed")
-            .0;
+        let listed = mcp_list(
+            State(state.clone()),
+            Extension(zdr),
+            bearer.clone(),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("read-only MCP listing remains allowed")
+        .0;
         assert_eq!(listed["data"]["servers"], json!([]));
 
         let non_zdr = proxy_claims(false);
@@ -7085,13 +7441,15 @@ mod capability_contract_tests {
         )
         .await
         .expect("explicit non-ZDR mutation should forward to Capability Core");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // The authenticated MCP listing performs one durable catalog read;
+        // the non-ZDR capability mutation is the second upstream call.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         let _ =
             proxy_to_capability_core(&state, &proxy_claims(true), &bearer, "memory", "GET", None)
                 .await
                 .expect("ZDR read should preserve normal capability discovery");
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         task.abort();
     }
 }
@@ -7636,15 +7994,15 @@ mod session_thread_error_tests {
 
     #[test]
     fn transport_and_unknown_errors_stay_502() {
-        // Every non-NotFound/PermissionDenied code — including transport
-        // failures and server-side faults — must keep the 502 default so a
-        // genuine upstream problem is never misreported as a client error.
+        // Every non-NotFound/PermissionDenied/InvalidArgument code — including
+        // transport failures and server-side faults — must keep the 502
+        // default so a genuine upstream problem is never misreported as a
+        // client error.
         for code in [
             tonic::Code::Unavailable,
             tonic::Code::Internal,
             tonic::Code::DeadlineExceeded,
             tonic::Code::Unknown,
-            tonic::Code::InvalidArgument,
             tonic::Code::Unauthenticated,
         ] {
             let (status, Json(body)) = session_thread_error(
@@ -7658,6 +8016,14 @@ mod session_thread_error_tests {
                 "code {code:?} keeps the contextual string body",
             );
         }
+
+        let (status, Json(body)) = session_thread_error(
+            "session-core list_threads failed",
+            &tonic::Status::invalid_argument("thread id is required"),
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_thread_request");
+        assert_eq!(body["error"]["message"], "thread id is required");
     }
 }
 

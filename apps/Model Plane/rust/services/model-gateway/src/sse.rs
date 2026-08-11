@@ -27,8 +27,9 @@ use tracing::info;
 
 use crate::{
     auth::{
-        Claims, VerifiedCostBearer, VerifiedDataPlaneBearer as VerifiedBearer,
-        VerifiedExecutionBearer, VerifiedInferenceBearer, VerifiedIngestionBearer,
+        Claims, VerifiedCapabilityBearer, VerifiedCostBearer,
+        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
+        VerifiedInferenceBearer, VerifiedIngestionBearer,
         VerifiedSessionBearer as VerifiedModelBearer,
     },
     gateway_metrics,
@@ -254,6 +255,7 @@ pub async fn invoke_stream_sse(
     inference_bearer: VerifiedInferenceBearer,
     execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
     data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     ingestion_bearer: Option<Extension<VerifiedIngestionBearer>>,
     axum::Json(req): axum::Json<InvokeRequest>,
@@ -271,11 +273,21 @@ pub async fn invoke_stream_sse(
     let org_id = claims.org_id.clone();
     let user_id = claims.user_id.clone();
     let data_plane_bearer = data_plane_bearer.map(|Extension(bearer)| bearer);
+    let capability_bearer = capability_bearer.map(|Extension(bearer)| bearer);
     let execution_bearer = execution_bearer.map(|Extension(bearer)| bearer);
     let cost_bearer = cost_bearer.map(|Extension(bearer)| bearer);
     let ingestion_bearer = ingestion_bearer.map(|Extension(bearer)| bearer);
     let features = req.features.clone();
     let effective_zdr = claims.effective_zdr(req.zdr);
+    let pii_redaction_required = crate::moderation::pii_redaction_required(
+        &features,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer
+            .as_ref()
+            .map(VerifiedCapabilityBearer::as_str),
+    )
+    .await;
 
     // ZDR takes a deliberately narrow, persistence-free path: no session/run,
     // event, stream-buffer, idempotency, memory, cache, artifact, or tool write.
@@ -312,7 +324,7 @@ pub async fn invoke_stream_sse(
         } else {
             None
         };
-        let user_content = if crate::moderation::wants_moderation(&features) {
+        let user_content = if pii_redaction_required {
             crate::moderation::redact_pii(&req.content).0
         } else {
             req.content.clone()
@@ -371,12 +383,24 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, "invalid_request", message, false);
         }
     };
+    // Control Plane owns the org's spend/token ceilings; read them so an
+    // operator's cap actually applies to a turn that did not name its own.
+    // Fails open on an org-core outage — see `org_quota::fetch_org_limits`.
+    let org_limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        &org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
     if let Err((status, Json(error))) = crate::budget::check_budget(
         &state.http_client,
         &org_id,
         &user_id,
         cost_bearer.as_ref().map_or("", VerifiedCostBearer::as_str),
         &normalized,
+        org_limits,
     )
     .await
     {
@@ -432,6 +456,10 @@ pub async fn invoke_stream_sse(
     let req_id = request_id.clone();
     let org_clone = org_id.clone();
     let user_clone = user_id.clone();
+    // Buffered deltas are addressed by verified identity + request id, so a
+    // resume from another tenant cannot name this stream. See
+    // `stream_buffer::scoped_stream_key`.
+    let buffer_key = crate::stream_buffer::scoped_stream_key(&org_clone, &user_clone, &req_id);
     let model_clone = model.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
 
@@ -671,6 +699,7 @@ pub async fn invoke_stream_sse(
             features,
             agentic_tools,
             effective_zdr,
+            posture.to_owned(),
             execution_bearer,
             data_plane_bearer,
             model_bearer,
@@ -702,11 +731,11 @@ pub async fn invoke_stream_sse(
         .await;
     }
 
-    // chat-parity safety (pii_filter): opt-in redaction of PII from the user
-    // message before it reaches an external provider. Retrieval below uses
-    // the RAW query (Data Plane is internal); only the provider-bound prompt
-    // is redacted. Off by default → plain chat is unchanged.
-    let user_content = if crate::moderation::wants_moderation(&features) {
+    // Safety policy is resolved from capability-core per request; client
+    // features can add PII redaction but cannot disable the org's policy.
+    // Retrieval below uses the raw query (Data Plane is internal); only the
+    // provider-bound prompt is redacted.
+    let user_content = if pii_redaction_required {
         crate::moderation::redact_pii(&req.content).0
     } else {
         req.content.clone()
@@ -979,31 +1008,10 @@ pub async fn invoke_stream_sse(
                 defs.push(builtin);
             }
         }
-        // The org's own connected MCP servers (namespaced mcp__<server_id>__<tool>
-        // — see runtime_registries::mcp_tool_defs) are first-class chat tools, not
-        // gated behind a separate "agent" concept: the chat surface IS the
-        // product. Same dedupe rule as builtins — a client-declared spec wins.
-        let mcp_tools = crate::runtime_registries::mcp_tool_defs(
-            &state.mcp,
-            &state.ownership,
-            &org_id,
-            &user_id,
-            &state.http_client,
-            &state.capability_core_base_url,
-            &state.mcp_oauth_service_token,
-        )
-        .await;
-        tracing::debug!(
-            %org_id,
-            count = mcp_tools.len(),
-            names = ?mcp_tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-            "inline chat: mcp tool advertisement for this turn"
-        );
-        for mcp_tool in mcp_tools {
-            if !defs.iter().any(|d| d.name == mcp_tool.name) {
-                defs.push(mcp_tool);
-            }
-        }
+        // MCP tools are intentionally not advertised in the inline loop. They
+        // are effectful remote capabilities and must be routed through the
+        // execution-core policy/HITL path; dispatch_tool also denies forged
+        // `mcp__*`/`mcp_call` names as defense in depth.
         defs
     } else {
         Vec::new()
@@ -1019,7 +1027,7 @@ pub async fn invoke_stream_sse(
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
     let cancels = state.cancels.clone();
-    let cancel_flag = cancels.register(&request_id);
+    let cancel_flag = cancels.register(&request_id, &org_id, &user_id);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let session_state = state.clone();
@@ -1571,7 +1579,7 @@ pub async fn invoke_stream_sse(
                     let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
                     // Buffer the delta for resumability before sending so a
                     // reconnect never races ahead of what we retained.
-                    stream_buffers.append(&req_id, seq, &chunk.delta).await;
+                    stream_buffers.append(&buffer_key, seq, &chunk.delta).await;
                     if client_connected
                         && tx
                             .send(Ok(Event::default()
@@ -1603,7 +1611,7 @@ pub async fn invoke_stream_sse(
                             output_tokens: 0,
                         };
                         let data = serde_json::to_string(&sse_chunk).unwrap_or_default();
-                        stream_buffers.append(&req_id, seq, &chunk.delta).await;
+                        stream_buffers.append(&buffer_key, seq, &chunk.delta).await;
                         if client_connected {
                             // Ignore a send failure: this is the last delta
                             // before the terminal work (persist, terminalize
@@ -1716,7 +1724,7 @@ pub async fn invoke_stream_sse(
 
                     stream_buffers
                         .finish(
-                            &req_id,
+                            &buffer_key,
                             crate::stream_buffer::StreamDone {
                                 seq,
                                 model_used: model_used.clone(),
@@ -1754,11 +1762,12 @@ pub async fn invoke_stream_sse(
                         assembly_grounded: assembly_supplied_grounding,
                         ..turn_evidence
                     };
-                    let confidence = crate::confidence::score(
+                    let confidence = crate::confidence::score_with_retrieval_confidence(
                         &assistant_output,
                         output_tokens,
                         answer_token_budget().max(0) as u32,
                         evidence,
+                        grounding.as_ref().is_some_and(|g| g.low_confidence),
                     );
                     let usage_event = crate::sse_events::ChatEvent::Usage {
                         input_tokens,
@@ -3219,6 +3228,7 @@ async fn run_infer_fallback(
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
+    let buffer_key = crate::stream_buffer::scoped_stream_key(org_id, user_id, request_id);
     let thread_id = run.thread_id.clone();
     let result = state
         .inference_client
@@ -3240,7 +3250,7 @@ async fn run_infer_fallback(
 
             let mut seq: u64 = 0;
             for piece in chunk_for_stream(&resp.content, 48) {
-                buffers.append(request_id, seq, &piece).await;
+                buffers.append(&buffer_key, seq, &piece).await;
                 let sse_chunk = SseChunk {
                     request_id: request_id.to_owned(),
                     delta: piece,
@@ -3353,7 +3363,7 @@ async fn run_infer_fallback(
             gateway_metrics::stream_closed();
             buffers
                 .finish(
-                    request_id,
+                    &buffer_key,
                     crate::stream_buffer::StreamDone {
                         seq,
                         model_used: model_used.clone(),
@@ -3385,11 +3395,12 @@ async fn run_infer_fallback(
                 ..crate::confidence::Evidence::default()
             };
             // Real answer budget, not a stale 1024 — see the streaming site.
-            let confidence = crate::confidence::score(
+            let confidence = crate::confidence::score_with_retrieval_confidence(
                 &resp.content,
                 output_tokens,
                 answer_token_budget().max(0) as u32,
                 evidence,
+                grounding.as_ref().is_some_and(|g| g.low_confidence),
             );
             let usage_event = crate::sse_events::ChatEvent::Usage {
                 input_tokens,
@@ -3563,16 +3574,29 @@ pub async fn invoke_resume_sse(
     State(state): State<AppState>,
     Path(request_id): Path<String>,
     headers: HeaderMap,
-    Extension(_claims): Extension<Claims>,
+    Extension(claims): Extension<Claims>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, HttpJsonError> {
     let after_seq = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
+    // Address the buffer through the CALLER's verified identity, never the
+    // bare request id. A request id is not a secret — it ships in the
+    // `connected` event, every chunk, and the cancel URL — so keying on it
+    // alone let any authenticated caller, in any tenant, replay this stream.
+    // A foreign caller now derives a different key and takes the same
+    // not-found path as an unknown id, so there is no oracle either.
+    // `user_id`, NOT `sub`: the streaming path keys on `claims.user_id`
+    // (sse.rs:272), and for a service principal acting for a user the two
+    // differ — reading with `sub` would miss every such stream and resume
+    // would fail silently rather than loudly.
+    let buffer_key =
+        crate::stream_buffer::scoped_stream_key(&claims.org_id, &claims.user_id, &request_id);
+
     let replay = state
         .stream_buffers
-        .replay_after(&request_id, after_seq)
+        .replay_after(&buffer_key, after_seq)
         .await;
     if !replay.found {
         return Err((
@@ -3583,6 +3607,7 @@ pub async fn invoke_resume_sse(
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let req_id = request_id.clone();
+    let tail_key = buffer_key.clone();
     let buffers = state.stream_buffers.clone();
     tokio::spawn(async move {
         let send_delta = |delta: crate::stream_buffer::BufferedDelta| {
@@ -3645,7 +3670,7 @@ pub async fn invoke_resume_sse(
             if tx.is_closed() {
                 return; // client went away again; the next resume replays from its cursor
             }
-            let tail = buffers.replay_after(&req_id, cursor).await;
+            let tail = buffers.replay_after(&tail_key, cursor).await;
             for delta in tail.deltas {
                 cursor = Some(cursor.map_or(delta.seq, |c| c.max(delta.seq)));
                 last_progress = std::time::Instant::now();
@@ -4441,6 +4466,7 @@ fn spawn_run_dispatch(
     content: &str,
     tools: &[ToolDefinition],
     zdr: bool,
+    permission_mode: &str,
     execution_bearer: &VerifiedExecutionBearer,
     data_plane_bearer: &VerifiedBearer,
     session_bearer: &VerifiedModelBearer,
@@ -4458,7 +4484,9 @@ fn spawn_run_dispatch(
         // loop gates risky/destructive tools (e.g. `shell`) behind a human
         // approval. Read-only tools still auto-allow. `auto` would silently run
         // risky tools, so it is never the default for the agentic run path.
-        mode: "ask".to_owned(),
+        // Forward the server-resolved posture recorded in STREAM_OPENED so
+        // the audit envelope and execution-core's gate cannot diverge.
+        mode: permission_mode.to_owned(),
         max_rounds: 4,
         // GDPR ZDR: the run's Zero-Data-Retention flag (from the chat request),
         // threaded into execution-core so every inference round + tool audit
@@ -4532,6 +4560,7 @@ fn agentic_run_stream(
     features: Vec<String>,
     tools: Vec<ToolDefinition>,
     zdr: bool,
+    permission_mode: String,
     execution_bearer: VerifiedExecutionBearer,
     data_plane_bearer: VerifiedBearer,
     model_bearer: VerifiedModelBearer,
@@ -4571,6 +4600,7 @@ fn agentic_run_stream(
             &content,
             &tools,
             zdr,
+            &permission_mode,
             &execution_bearer,
             &data_plane_bearer,
             &model_bearer,

@@ -1,7 +1,7 @@
 //! Gateway tool-execution loop support (chat-parity §2 function-calling).
 //!
-//! Reuses the gateway's existing tool handlers (`tools.rs` → Quarry, etc.) and
-//! the MCP registry — no new tool runtime. The loop itself lives in `sse.rs`
+//! Reuses the gateway's existing tool handlers (`tools.rs` → Quarry, etc.). MCP
+//! calls are intentionally excluded here; the loop itself lives in `sse.rs`
 //! (`tool_loop_stream`); this module holds the name→handler dispatcher and the
 //! pure helpers (argument parsing, result framing) that are unit-tested here.
 //!
@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use chrono::{Datelike, Utc};
 use mp_contracts::dataplane::retrieval_v2::RetrieveRequest;
 use mp_contracts::model_plane::v1::{
-    ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest, ProxyMcpToolRequest,
+    ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
     ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
 };
 use serde_json::Value;
@@ -430,13 +430,24 @@ fn arg_i64(args_json: &str, key: &str) -> Option<i64> {
 }
 
 /// Inline chat tools execute without the execution-core approval workflow, so
-/// only the two tools whose side effects genuinely require that signed approval
-/// contract are withheld here. MCP tools are deliberately NOT withheld: chat is
-/// the product surface, so an org's own connected servers must work in plain
-/// chat, with the dedicated-agent surface layered on top rather than gating it.
+/// only read-only, side-effect-free tools may pass this gate. MCP tools are
+/// deliberately denied here: their remote side effects are unverifiable and
+/// must go through execution-core's capability policy, hooks, and durable HITL
+/// approval path. Keeping this deny here also protects forged synthetic names
+/// such as `mcp_call`, even when they are not advertised.
+///
+/// Routing this surface through `ExecuteStep` is intentionally not attempted
+/// here: the inline loop has no established execution-run/permission-mode
+/// continuation contract, and execution-core's capability policy rejects
+/// dynamic MCP names until capability-core provides a durable binding. A
+/// direct gateway proxy would therefore be an authority bypass; fail closed
+/// until those two contracts exist.
 #[must_use]
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
     !matches!(name, "save_memory" | "browser_agent")
+        && !name.starts_with("mcp__")
+        && name != "mcp_call"
+        && name != "mcp_catalog"
 }
 
 /// Split `mcp__<server_id>__<tool>` into `(server_id, tool)`. Mirrors
@@ -1390,14 +1401,36 @@ async fn dispatch_shipping_quotes_tool(
 /// upstream returns, and every round re-sends the whole accumulated history.
 /// `Err` becomes an honest `err_outcome` naming the cause — never an empty
 /// success the model would read as "the organization has no data".
-fn verevon_read_outcome(call: &ToolCall, result: Result<String, String>) -> ToolOutcome {
+fn verevon_read_outcome(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    call: &ToolCall,
+    result: Result<String, String>,
+) -> ToolOutcome {
     match result {
-        Ok(output) => ToolOutcome {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            output: truncate_chars(&output, MAX_TOOL_OUTPUT_CHARS),
-            error: None,
-        },
+        Ok(output) => {
+            // §23.6: park an oversized JSON result under a handle and hand the
+            // model a description plus an id, instead of a blind truncation
+            // that silently drops rows.
+            let parked = handle_or_inline_output(state, org_id, user_id, zdr, &call.name, output);
+            ToolOutcome {
+                call_id: call.id.clone(),
+                name: call.name.clone(),
+                // The ceiling still applies, and is not redundant:
+                // `handle_or_inline_output` passes the payload straight
+                // through whenever it cannot park it — a ZDR turn, an already
+                // small result, or a body that is not queryable JSON — and on
+                // those paths this is the one bound that holds no matter what
+                // an upstream returns, with every round re-sending the whole
+                // accumulated history. A handle note is a small fixed envelope
+                // (`projection_hints` is capped at `MAX_PROJECTION_HINTS`), so
+                // parking is never affected by it.
+                output: truncate_chars(&parked, MAX_TOOL_OUTPUT_CHARS),
+                error: None,
+            }
+        }
         Err(message) => err_outcome(call, message),
     }
 }
@@ -1414,6 +1447,8 @@ fn knowledge_search_request(org_id: &str, query: &str, top_k: i32, zdr: bool) ->
         // identity in the message is deliberately absent.
         user_id: None,
         zdr_mode: crate::retrieval::data_plane_zdr_mode(zdr),
+        context_budget_tokens: Some(crate::retrieval::DEFAULT_CONTEXT_BUDGET_TOKENS),
+        context_format: Some(crate::retrieval::CONTEXT_FORMAT.to_owned()),
         ..Default::default()
     }
 }
@@ -1968,14 +2003,26 @@ pub async fn dispatch_tool(
         // rejects '.' in tool names); the dotted forms are accepted so the Agent
         // Console's explicit action ids resolve to the same handler.
         "insights_overview" | "insights.overview" => verevon_read_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr,
             call,
             crate::verevon_actions::insights_overview(state, org_id).await,
         ),
         "social_list_accounts" | "social.list_accounts" => verevon_read_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr,
             call,
             crate::verevon_actions::social_list_accounts(state, org_id).await,
         ),
         "social_list_posts" | "social.list_posts" => verevon_read_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr,
             call,
             crate::verevon_actions::social_list_posts(
                 state,
@@ -1987,6 +2034,10 @@ pub async fn dispatch_tool(
             .await,
         ),
         "social_list_campaigns" | "social.list_campaigns" => verevon_read_outcome(
+            state,
+            org_id,
+            user_id,
+            zdr,
             call,
             crate::verevon_actions::social_list_campaigns(
                 state,
@@ -2004,6 +2055,10 @@ pub async fn dispatch_tool(
                 );
             };
             verevon_read_outcome(
+                state,
+                org_id,
+                user_id,
+                zdr,
                 call,
                 crate::verevon_actions::knowledge_list_documents(
                     state,
@@ -2015,119 +2070,22 @@ pub async fn dispatch_tool(
                 .await,
             )
         }
-        // The org's own connected MCP servers (see runtime_registries::mcp_tool_defs,
-        // which advertises these under the same mcp__<server_id>__<tool> names).
-        // Calls the same handler execution-core's governed ProxyMcpTool RPC uses —
-        // that RPC's identity.is_service() gate lives in grpc.rs's wrapper around
-        // handle_proxy_mcp_tool, not in the function itself, so calling it directly
-        // from inline chat (already an authenticated, per-user context) is not a
-        // bypass of anything.
-        other if other.starts_with("mcp__") => {
-            let Some((server_id, tool_name)) = parse_mcp_tool_name(other) else {
-                return err_outcome(call, format!("malformed mcp tool name '{other}'"));
-            };
-            dispatch_mcp_tool_call(
-                state,
-                org_id,
-                user_id,
-                zdr,
-                call,
-                server_id,
-                tool_name,
-                call.arguments_json.clone(),
-            )
-            .await
-        }
-        // Staged disclosure (§23.1/§23.12): once a catalog exceeds
-        // `mcp_disclosure_threshold`, the individual `mcp__<server>__<tool>`
-        // definitions above are replaced by these two synthetic tools
-        // (`stage_mcp_tool_defs`), so a large connected catalog never floods
-        // every turn with every tool's full schema. Below threshold neither
-        // name is ever advertised, so this arm is unreachable and today's
-        // behavior (including Visma's proven-live setup) is unaffected.
-        crate::runtime_registries::MCP_CATALOG_TOOL_NAME => {
-            let tool_name_filter = arg_str(&call.arguments_json, "tool_name");
-            let full = crate::runtime_registries::full_mcp_tool_defs(
-                &state.mcp,
-                &state.ownership,
-                org_id,
-                user_id,
-                &state.http_client,
-                &state.capability_core_base_url,
-                &state.mcp_oauth_service_token,
-            )
-            .await;
-            let filter = (!tool_name_filter.is_empty()).then_some(tool_name_filter.as_str());
-            ToolOutcome {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                output: crate::runtime_registries::format_mcp_catalog(&full, filter),
-                error: None,
-            }
-        }
-        crate::runtime_registries::MCP_CALL_TOOL_NAME => {
-            let qualified_name = arg_str(&call.arguments_json, "tool_name");
-            if qualified_name.is_empty() {
-                return err_outcome(call, "mcp_call requires a 'tool_name' argument");
-            }
-            let arguments = arg_value(&call.arguments_json, "arguments")
-                .unwrap_or_else(|| serde_json::json!({}));
-            // Re-check against the live discovered+allowlisted set rather than
-            // trusting the model's `tool_name` string outright — a stale or
-            // hallucinated qualified name must not reach the proxy dispatch
-            // below with an unverified server_id/tool_name split.
-            let full = crate::runtime_registries::full_mcp_tool_defs(
-                &state.mcp,
-                &state.ownership,
-                org_id,
-                user_id,
-                &state.http_client,
-                &state.capability_core_base_url,
-                &state.mcp_oauth_service_token,
-            )
-            .await;
-            let Some(selected) = full.iter().find(|def| def.name == qualified_name) else {
-                return err_outcome(
-                    call,
-                    format!("unknown or unavailable mcp tool '{qualified_name}'"),
-                );
-            };
-            // §23.8 — check the arguments against this tool's own declared
-            // schema before anything leaves the gateway. The schema is already
-            // in hand from the lookup above, so this costs nothing, and a
-            // malformed call is answered with exact field errors instead of a
-            // remote round-trip that returns whatever prose the server picks.
-            // The validator fails open by design (see `argument_repair`), so
-            // it can only ever catch what the schema is unambiguous about.
-            let argument_errors = crate::argument_repair::validate_arguments(
-                &selected.parameters_json,
-                &arguments.to_string(),
-            );
-            if !argument_errors.is_empty() {
-                return err_outcome(
-                    call,
-                    crate::argument_repair::repair_message(
-                        &qualified_name,
-                        &argument_errors,
-                        &selected.parameters_json,
-                    ),
-                );
-            }
-            let Some((server_id, tool_name)) = parse_mcp_tool_name(&qualified_name) else {
-                return err_outcome(call, format!("malformed mcp tool name '{qualified_name}'"));
-            };
-            dispatch_mcp_tool_call(
-                state,
-                org_id,
-                user_id,
-                zdr,
-                call,
-                server_id,
-                tool_name,
-                arguments.to_string(),
-            )
-            .await
-        }
+        // MCP tools are denied by the inline gate above. This arm remains as a
+        // defense-in-depth fallback for callers that forge a tool name after
+        // dispatch_tool has been entered; governed MCP execution belongs to the
+        // execution-core path and must not call handle_proxy_mcp_tool directly.
+        other if other.starts_with("mcp__") => err_outcome(
+            call,
+            format!("MCP tool '{other}' requires governed agentic execution and approval"),
+        ),
+        crate::runtime_registries::MCP_CATALOG_TOOL_NAME => err_outcome(
+            call,
+            "mcp_catalog requires governed agentic execution and approval",
+        ),
+        crate::runtime_registries::MCP_CALL_TOOL_NAME => err_outcome(
+            call,
+            "mcp_call requires governed agentic execution and approval",
+        ),
         // §23.6 — read a slice of a result parked under a handle by
         // `handle_or_inline_output`. The handle resolves only for the exact
         // (org, user) that produced it, so a replayed or guessed id from
@@ -2207,64 +2165,6 @@ pub async fn dispatch_tool(
             }
         }
         other => err_outcome(call, format!("unknown tool '{other}'")),
-    }
-}
-
-/// Proxy one MCP tool call by its already-split `(server_id, tool_name)` to
-/// the governed [`crate::runtime_registries::handle_proxy_mcp_tool`] path —
-/// the same handler execution-core's `ProxyMcpTool` RPC uses. Shared by the
-/// direct `mcp__<server>__<tool>` dispatch arm and the `mcp_call` synthetic
-/// tool (reachable once catalog staging is active, see
-/// [`crate::runtime_registries::stage_mcp_tool_defs`]), so both reach
-/// execution through the exact same authority regardless of which name the
-/// model used to get there — staging adds a name-indirection layer, never a
-/// new capability.
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_mcp_tool_call(
-    state: &AppState,
-    org_id: &str,
-    user_id: &str,
-    zdr: bool,
-    call: &ToolCall,
-    server_id: &str,
-    tool_name: &str,
-    arguments_json: String,
-) -> ToolOutcome {
-    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
-        &state.http_client,
-        &state.capability_core_base_url,
-        &state.mcp_oauth_service_token,
-        org_id,
-        server_id,
-    )
-    .await;
-    match crate::runtime_registries::handle_proxy_mcp_tool(
-        &state.mcp,
-        &state.ownership,
-        ProxyMcpToolRequest {
-            request_id: String::new(),
-            org_id: org_id.to_owned(),
-            server_id: server_id.to_owned(),
-            tool_name: tool_name.to_owned(),
-            input_json: arguments_json,
-            user_id: user_id.to_owned(),
-        },
-        oauth_token.as_deref(),
-    )
-    .await
-    {
-        Ok(resp) if resp.error_message.is_empty() => {
-            let output =
-                handle_or_inline_output(state, org_id, user_id, zdr, &call.name, resp.output_json);
-            ToolOutcome {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                output,
-                error: None,
-            }
-        }
-        Ok(resp) => err_outcome(call, resp.error_message),
-        Err(status) => err_outcome(call, format!("mcp tool call failed: {}", status.message())),
     }
 }
 
@@ -2528,6 +2428,16 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
             name: "update_artifact".to_owned(),
             description: "Replace the content of an artifact you created earlier with create_artifact, producing a new version the user can step back through. Use this whenever the user asks to change, extend, shorten, translate, or fix an existing artifact — never create a second artifact for a revision of the same thing. Always send the COMPLETE new content, not a diff or a fragment.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"id":{"type":"string","description":"The id you used with create_artifact"},"content":{"type":"string","description":"The complete replacement content"},"title":{"type":"string","description":"Optional new title; omit to keep the current one"}},"required":["id","content"]}"#.to_owned(),
+        },
+        // §23.6. Only usable with a `handle_id` the model was given in an
+        // earlier tool result, so advertising it unconditionally is safe: a
+        // turn that produced no handle (every ZDR turn, and any result small
+        // enough to inline) gives the model no id to pass, and the arm returns
+        // a plain error naming the unknown handle if one is invented.
+        ToolDefinition {
+            name: "result_query".to_owned(),
+            description: "Read part of a large tool result that was parked under a handle instead of being returned in full. When a tool result is too big to show, you get a description of it (row count, fields, size) and a handle_id — pass that id here to pull exactly the slice you need. Use `select` to keep only the fields you care about, `where` to filter rows, `offset`/`limit` to page, and `aggregate` to get a count/sum/min/max/avg over the WHOLE filtered set without reading any rows. Prefer an aggregate or a narrow select over paging through everything. Set as_artifact=true to hand the user the slice as a downloadable file instead of reading it yourself. The handle belongs to this conversation and expires, so query it in the same turn or re-run the original tool.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"handle_id":{"type":"string","description":"The id from the parked-result description you were shown"},"select":{"type":"array","items":{"type":"string"},"description":"Field names to keep; omit for all fields"},"where":{"type":"object","properties":{"field":{"type":"string","description":"Field to filter on"},"op":{"type":"string","enum":["eq","ne","contains","gt","gte","lt","lte"],"description":"Comparison; defaults to eq"},"value":{"description":"Value to compare against"}},"required":["field"],"description":"Row filter applied before aggregate, projection and paging"},"aggregate":{"type":"object","properties":{"op":{"type":"string","enum":["count","sum","min","max","avg"],"description":"Aggregate over the whole filtered set"},"field":{"type":"string","description":"Field to aggregate; required for every op except count"}},"required":["op"],"description":"Returns only the aggregate, never rows"},"offset":{"type":"integer","description":"Rows to skip"},"limit":{"type":"integer","description":"Max rows to return"},"as_artifact":{"type":"boolean","description":"Materialize the slice as a downloadable artifact for the user instead of returning it to you"}},"required":["handle_id"]}"#.to_owned(),
         },
         ToolDefinition {
             name: "fetch_url".to_owned(),
@@ -3387,6 +3297,162 @@ mod tests {
         serde_json::to_string(&rows).expect("serializes")
     }
 
+    /// §23.6 is only a feature if something actually calls it. Both halves were
+    /// implemented, tested and committed while remaining unreachable in
+    /// production — no caller created a handle, and `result_query` was in no
+    /// tool list, so the model was never offered the tool that reads one.
+    /// These three tests fail if either half comes unwired again.
+    #[test]
+    fn result_query_is_advertised_with_a_contract_the_parser_accepts() {
+        let defs = builtin_tool_defs();
+        let def = defs
+            .iter()
+            .find(|d| d.name == "result_query")
+            .expect("result_query must be advertised or handles are unreadable");
+
+        let schema: serde_json::Value =
+            serde_json::from_str(&def.parameters_json).expect("schema must be valid JSON");
+        let props = &schema["properties"];
+
+        // Every argument the dispatch arm and parse_handle_query read.
+        for arg in [
+            "handle_id",
+            "select",
+            "where",
+            "aggregate",
+            "offset",
+            "limit",
+            "as_artifact",
+        ] {
+            assert!(!props[arg].is_null(), "schema must document '{arg}'");
+        }
+        assert_eq!(schema["required"], serde_json::json!(["handle_id"]));
+
+        // An advertised operator the parser rejects would be a tool call the
+        // model is invited to make and always loses a turn to.
+        for op in ["eq", "ne", "contains", "gt", "gte", "lt", "lte"] {
+            assert!(
+                crate::tool_result_handles::FilterOp::parse(op).is_ok(),
+                "advertised filter op '{op}' must parse"
+            );
+        }
+        for op in ["count", "sum", "min", "max", "avg"] {
+            assert!(
+                crate::tool_result_handles::AggregateOp::parse(op).is_ok(),
+                "advertised aggregate op '{op}' must parse"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_read_result_is_parked_and_then_readable_by_handle() {
+        let state = crate::state::AppState::new();
+        let call = ToolCall {
+            id: "call-1".to_owned(),
+            name: "social_list_posts".to_owned(),
+            arguments_json: "{}".to_owned(),
+        };
+        let payload = oversized_rows_json();
+
+        let outcome = verevon_read_outcome(&state, "org", "user", false, &call, Ok(payload));
+
+        // The model is handed a description plus an id, not a blind truncation.
+        assert!(
+            outcome.output.contains("handle_id") || outcome.output.contains("result_query"),
+            "an oversized result must be parked under a handle: {}",
+            outcome.output
+        );
+        assert_eq!(state.tool_results.len(), 1, "the handle must be stored");
+
+        // And the parked payload is genuinely queryable for the same identity.
+        let handle_id = serde_json::from_str::<serde_json::Value>(&outcome.output)
+            .ok()
+            .and_then(|v| v["handle_id"].as_str().map(str::to_owned))
+            .expect("the note must carry a handle_id the model can pass back");
+        let resolved = state
+            .tool_results
+            .resolve("org", "user", &handle_id)
+            .expect("the advertised handle must resolve");
+        let counted = crate::tool_result_handles::apply_query(
+            &resolved.payload,
+            &crate::tool_result_handles::HandleQuery {
+                select: Vec::new(),
+                filter: None,
+                aggregate: Some(crate::tool_result_handles::Aggregate {
+                    op: crate::tool_result_handles::AggregateOp::Count,
+                    field: None,
+                }),
+                offset: 0,
+                limit: 0,
+            },
+        )
+        .expect("count over a row payload must succeed");
+        assert!(
+            counted.to_string().contains("400"),
+            "all 400 rows must survive parking, not just the truncated head: {counted}"
+        );
+    }
+
+    /// `every_advertised_builtin_tool_has_a_dispatch_arm` covers this for the
+    /// whole advertised set, but it dispatches network tools against
+    /// unconfigured endpoints and blocks for minutes, so in practice nobody
+    /// runs it. This proves the same two properties for `result_query` alone,
+    /// in microseconds: it reaches its arm, and the inline gate lets it
+    /// through. A tool advertised and then refused would burn a turn on every
+    /// call.
+    #[tokio::test]
+    async fn advertised_result_query_reaches_its_arm_and_is_not_refused_inline() {
+        assert!(
+            inline_tool_allowed("result_query"),
+            "advertised inline, so it must be permitted inline"
+        );
+        let state = crate::state::AppState::new();
+        let call = tool_call("result_query", "{}");
+        let outcome = dispatch_tool(
+            &state,
+            "run_test",
+            "org_test",
+            "user_test",
+            "thread_test",
+            None,
+            None,
+            "",
+            "",
+            true,
+            &call,
+            None,
+        )
+        .await;
+
+        let error = outcome.error.unwrap_or_default();
+        assert!(!error.contains("unknown tool"), "no dispatch arm: {error}");
+        assert!(
+            !error.contains("side-effecting tools require governed agentic execution"),
+            "advertised but refused inline: {error}"
+        );
+        // Reached the arm proper: it asks for the one required argument.
+        assert!(
+            error.contains("handle_id"),
+            "expected the arm's own error, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_small_read_result_is_still_returned_inline() {
+        let state = crate::state::AppState::new();
+        let call = ToolCall {
+            id: "call-2".to_owned(),
+            name: "insights_overview".to_owned(),
+            arguments_json: "{}".to_owned(),
+        };
+        let small = r#"[{"id":1,"name":"one"}]"#.to_owned();
+
+        let outcome = verevon_read_outcome(&state, "org", "user", false, &call, Ok(small.clone()));
+
+        assert_eq!(outcome.output, small, "a small result must not be parked");
+        assert_eq!(state.tool_results.len(), 0);
+    }
+
     #[tokio::test]
     async fn a_zdr_turn_never_parks_a_result_in_the_handle_store() {
         let state = crate::state::AppState::new();
@@ -3650,6 +3716,7 @@ mod tests {
                 name: "create_order".to_owned(),
                 description: "Create a sales order".to_owned(),
                 input_schema_json: schema_json.to_owned(),
+                annotations: Default::default(),
             }],
         );
     }
@@ -3672,21 +3739,15 @@ mod tests {
         )
         .await;
 
-        let error = outcome.error.expect("malformed arguments are rejected");
-        // Names both problems, and says plainly that nothing was sent — a
-        // model that believes the call half-happened may compensate wrongly.
-        assert!(error.contains("segment"), "got: {error}");
-        assert!(error.contains("order_id"), "got: {error}");
-        assert!(error.contains("NOT called") && error.contains("nothing was sent"));
-        // Carries the schema so the repair needs no extra catalog round-trip.
-        assert!(error.contains("\"required\""));
-        // Proof it never dialled: a real attempt to https://mcp.example.test
-        // would surface as a transport error, not a schema complaint.
-        assert!(!error.contains("transport"), "got: {error}");
+        let error = outcome.error.expect("MCP must be denied in inline chat");
+        assert!(
+            error.contains("governed agentic execution and approval"),
+            "got: {error}"
+        );
     }
 
     #[tokio::test]
-    async fn mcp_call_lets_well_formed_arguments_through_to_dispatch() {
+    async fn mcp_call_denies_well_formed_arguments_before_dispatch() {
         let state = crate::state::AppState::new();
         seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
 
@@ -3699,17 +3760,13 @@ mod tests {
         )
         .await;
 
-        // It still fails — there is no server at that URL — but it must fail
-        // at the TRANSPORT, not at validation. That is what proves the
-        // validator let a good call through rather than blocking it.
-        let error = outcome.error.expect("no server is listening");
+        // A well-formed call is still denied because inline chat has no
+        // execution-core policy/HITL authority. It must never reach the
+        // direct gateway proxy.
+        let error = outcome.error.expect("MCP must be denied before dispatch");
         assert!(
-            !error.contains("NOT called"),
-            "validator blocked a valid call: {error}"
-        );
-        assert!(
-            !error.contains("did not match"),
-            "validator blocked a valid call: {error}"
+            error.contains("governed agentic execution and approval"),
+            "got: {error}"
         );
     }
 
@@ -3727,16 +3784,38 @@ mod tests {
         )
         .await;
 
-        let error = outcome.error.expect("unknown tool is refused");
-        assert!(error.contains("unknown or unavailable"), "got: {error}");
+        let error = outcome.error.expect("MCP must be denied in inline chat");
+        assert!(
+            error.contains("governed agentic execution and approval"),
+            "got: {error}"
+        );
     }
 
     #[tokio::test]
-    async fn mcp_catalog_lists_summaries_and_inspects_one_tool_in_full() {
+    async fn direct_mcp_tool_is_denied_before_registry_dispatch() {
+        let state = crate::state::AppState::new();
+        seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
+        let call = tool_call(
+            "mcp__srv__create_order",
+            r#"{"order_id":"SO-1","segment":"b2b"}"#,
+        );
+        let outcome = dispatch_tool(
+            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+        )
+        .await;
+        let error = outcome.error.expect("direct MCP must be denied");
+        assert!(
+            error.contains("governed agentic execution and approval"),
+            "got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_catalog_is_denied_in_inline_chat() {
         let state = crate::state::AppState::new();
         seed_mcp_server(&state, ORDER_TOOL_SCHEMA);
 
-        let list = dispatch_tool(
+        let outcome = dispatch_tool(
             &state,
             "run",
             "org",
@@ -3751,34 +3830,11 @@ mod tests {
             None,
         )
         .await;
-        let listed: Value = serde_json::from_str(&list.output).expect("json");
-        assert_eq!(listed["count"], 1);
-        assert_eq!(listed["tools"][0]["name"], "mcp__srv__create_order");
-        // Level 1: a summary, with no input schema in sight.
-        assert!(listed["tools"][0].get("input_schema").is_none());
-
-        let inspect = dispatch_tool(
-            &state,
-            "run",
-            "org",
-            "user",
-            "thread",
-            None,
-            None,
-            "",
-            "",
-            false,
-            &tool_call(
-                crate::runtime_registries::MCP_CATALOG_TOOL_NAME,
-                r#"{"tool_name":"mcp__srv__create_order"}"#,
-            ),
-            None,
-        )
-        .await;
-        let inspected: Value = serde_json::from_str(&inspect.output).expect("json");
-        // Level 2: the real schema, for exactly the one tool asked about.
-        assert_eq!(inspected["name"], "mcp__srv__create_order");
-        assert_eq!(inspected["input_schema"]["required"][0], "order_id");
+        let error = outcome.error.expect("MCP catalog must be denied");
+        assert!(
+            error.contains("governed agentic execution and approval"),
+            "got: {error}"
+        );
     }
 
     #[test]
@@ -3829,6 +3885,14 @@ mod tests {
         assert_eq!(request.top_k, 7);
         assert_eq!(request.user_id, None);
         assert_eq!(request.zdr_mode.as_deref(), Some("ephemeral"));
+        assert_eq!(
+            request.context_budget_tokens,
+            Some(crate::retrieval::DEFAULT_CONTEXT_BUDGET_TOKENS)
+        );
+        assert_eq!(
+            request.context_format.as_deref(),
+            Some(crate::retrieval::CONTEXT_FORMAT)
+        );
     }
 
     #[test]
@@ -4053,11 +4117,16 @@ mod tests {
         assert!(error.contains("verified user bearer"), "{error}");
     }
 
-    #[test]
-    fn verevon_read_outcome_truncates_output_and_preserves_call_identity() {
+    // `AppState::new()` builds clients that need a reactor, so this is a
+    // tokio test even though `verevon_read_outcome` itself is sync.
+    #[tokio::test]
+    async fn verevon_read_outcome_truncates_output_and_preserves_call_identity() {
         let call = tool_call("insights_overview", "{}");
         let long = "y".repeat(MAX_TOOL_OUTPUT_CHARS + 500);
-        let outcome = verevon_read_outcome(&call, Ok(long));
+        // Not JSON, so it cannot be parked under a handle — the ceiling is
+        // what has to hold, and this asserts it still does after §23.6 wiring.
+        let state = crate::state::AppState::new();
+        let outcome = verevon_read_outcome(&state, "org", "user", false, &call, Ok(long));
         assert_eq!(outcome.call_id, call.id);
         assert_eq!(outcome.name, "insights_overview");
         assert!(outcome.error.is_none());
@@ -4067,7 +4136,14 @@ mod tests {
             "capped at MAX_TOOL_OUTPUT_CHARS plus the ellipsis"
         );
 
-        let outcome = verevon_read_outcome(&call, Err("insight-core returned HTTP 503".to_owned()));
+        let outcome = verevon_read_outcome(
+            &state,
+            "org",
+            "user",
+            false,
+            &call,
+            Err("insight-core returned HTTP 503".to_owned()),
+        );
         assert_eq!(
             outcome.error.as_deref(),
             Some("insight-core returned HTTP 503")
@@ -4076,12 +4152,13 @@ mod tests {
     }
 
     #[test]
-    fn inline_loop_admits_the_orgs_own_connected_mcp_servers() {
-        // The chat surface IS the product: an org's connected MCP server must
-        // be usable from inline chat, not gated behind a separate "agent"
-        // concept — only save_memory/browser_agent remain agentic-only.
-        assert!(inline_tool_allowed("mcp__github__create_issue"));
-        assert!(inline_tool_allowed("mcp__srv__a__b"));
+    fn inline_loop_denies_mcp_until_governed_agentic_dispatch_exists() {
+        // MCP calls must never reach the direct gateway proxy: execution-core
+        // owns capability policy, hooks, and durable approval for remote tools.
+        assert!(!inline_tool_allowed("mcp__github__create_issue"));
+        assert!(!inline_tool_allowed("mcp__srv__a__b"));
+        assert!(!inline_tool_allowed("mcp_call"));
+        assert!(!inline_tool_allowed("mcp_catalog"));
     }
 
     #[test]

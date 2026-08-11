@@ -48,8 +48,94 @@ pub fn build_initialized_notification() -> Value {
     json!({ "jsonrpc": JSONRPC_VERSION, "method": "notifications/initialized" })
 }
 
+/// What a tool's side effects are, as far as the SERVER is willing to say.
+///
+/// These are MCP's optional `annotations` hints. Every field is `Option` on
+/// purpose: "the server said false" and "the server said nothing" are
+/// different facts, and collapsing them would silently invent a claim the
+/// server never made. The spec's own interpretation defaults (`readOnlyHint`
+/// false, `destructiveHint` true, …) are applied by
+/// [`McpToolAnnotations::side_effect`], never at parse time.
+///
+/// **These are advisory claims by a third party, not guarantees.** A server
+/// can omit them, get them wrong, or lie. Treat a `read_only_hint: Some(true)`
+/// as evidence, never as authorization — the ceiling on what a tool may do
+/// stays the operator's per-server `tool_allowlist`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpToolAnnotations {
+    /// A human-facing title for the tool, distinct from its callable `name`.
+    pub title: Option<String>,
+    /// Server claims this tool does not modify its environment.
+    pub read_only_hint: Option<bool>,
+    /// Server claims this tool may perform destructive updates. Per spec this
+    /// is meaningful only when the tool is NOT read-only.
+    pub destructive_hint: Option<bool>,
+    /// Server claims repeated calls with the same arguments have no additional
+    /// effect.
+    pub idempotent_hint: Option<bool>,
+    /// Server claims this tool touches an open world (e.g. the public web)
+    /// rather than a closed domain.
+    pub open_world_hint: Option<bool>,
+}
+
+/// What the server's annotations amount to, once the spec's interpretation
+/// defaults are applied. `Undeclared` is deliberately its own variant so a
+/// caller must decide what to do about silence rather than being handed a
+/// default that looks like a statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSideEffect {
+    /// `readOnlyHint: true` — the server claims this only reads.
+    ReadOnly,
+    /// Not read-only, and `destructiveHint` is true or absent (the spec's
+    /// default is true), so it may destroy or overwrite.
+    Destructive,
+    /// Not read-only, but the server explicitly said `destructiveHint: false`
+    /// — it writes, additively.
+    NonDestructiveWrite,
+    /// The server supplied no usable annotation at all.
+    Undeclared,
+}
+
+impl McpToolAnnotations {
+    /// Collapse the hints into a single classification, applying the MCP
+    /// spec's interpretation rules: `destructiveHint` matters only when the
+    /// tool is not read-only, and defaults to `true` when omitted.
+    ///
+    /// Returns [`McpSideEffect::Undeclared`] when the server said nothing —
+    /// the caller decides whether silence means "ask a human" or "allow", and
+    /// that decision belongs in policy, not here.
+    #[must_use]
+    pub fn side_effect(&self) -> McpSideEffect {
+        match self.read_only_hint {
+            Some(true) => McpSideEffect::ReadOnly,
+            // Explicitly not read-only: destructive unless the server said
+            // otherwise (spec default for destructiveHint is true).
+            Some(false) => match self.destructive_hint {
+                Some(false) => McpSideEffect::NonDestructiveWrite,
+                _ => McpSideEffect::Destructive,
+            },
+            // Silence on read-only. A lone `destructiveHint: true` is still a
+            // statement worth honouring; anything else is undeclared.
+            None => match self.destructive_hint {
+                Some(true) => McpSideEffect::Destructive,
+                _ => McpSideEffect::Undeclared,
+            },
+        }
+    }
+
+    /// True when the server supplied no annotation fields whatsoever.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.read_only_hint.is_none()
+            && self.destructive_hint.is_none()
+            && self.idempotent_hint.is_none()
+            && self.open_world_hint.is_none()
+    }
+}
+
 /// One tool advertised by an MCP server's `tools/list` response.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpToolDef {
     /// The tool's name as the server reports it (NOT yet namespaced).
     pub name: String,
@@ -58,6 +144,8 @@ pub struct McpToolDef {
     /// The tool's `inputSchema` object, serialized as a JSON string. Defaults
     /// to an open object schema when the server omits it.
     pub input_schema_json: String,
+    /// The server's own side-effect hints. Empty when it supplied none.
+    pub annotations: McpToolAnnotations,
 }
 
 /// Build a `tools/list` request — discovers the tools an MCP server exposes,
@@ -146,7 +234,30 @@ pub fn parse_one_tool(tool: &Value) -> Option<McpToolDef> {
         name,
         description,
         input_schema_json,
+        annotations: parse_tool_annotations(tool.get("annotations")),
     })
+}
+
+/// Extract MCP's optional `annotations` object. A missing object, a
+/// non-object, or a field of the wrong JSON type all yield `None` for that
+/// field rather than a guess — see [`McpToolAnnotations`] on why silence and
+/// `false` must stay distinguishable.
+#[must_use]
+fn parse_tool_annotations(annotations: Option<&Value>) -> McpToolAnnotations {
+    let Some(object) = annotations.and_then(Value::as_object) else {
+        return McpToolAnnotations::default();
+    };
+    let flag = |key: &str| object.get(key).and_then(Value::as_bool);
+    McpToolAnnotations {
+        title: object
+            .get("title")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        read_only_hint: flag("readOnlyHint"),
+        destructive_hint: flag("destructiveHint"),
+        idempotent_hint: flag("idempotentHint"),
+        open_world_hint: flag("openWorldHint"),
+    }
 }
 
 /// Build a `tools/call` request. `arguments` is the already-parsed JSON value
@@ -341,6 +452,87 @@ mod tests {
         assert_eq!(page.tools[1].name, "list_dir");
         assert_eq!(page.tools[1].input_schema_json, "{\"type\":\"object\"}");
         assert_eq!(page.next_cursor, None);
+        // Neither tool annotated itself, so nothing is claimed on its behalf.
+        assert!(page.tools[0].annotations.is_empty());
+        assert_eq!(
+            page.tools[0].annotations.side_effect(),
+            McpSideEffect::Undeclared
+        );
+    }
+
+    #[test]
+    fn parse_extracts_every_annotation_hint_the_server_supplies() {
+        let line = r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[
+            {"name":"search","annotations":{"title":"Search","readOnlyHint":true,"idempotentHint":true,"openWorldHint":true}}
+        ]}}"#;
+        let page = parse_list_tools_response(3, line).expect("parse ok");
+        let a = &page.tools[0].annotations;
+        assert_eq!(a.title.as_deref(), Some("Search"));
+        assert_eq!(a.read_only_hint, Some(true));
+        assert_eq!(a.idempotent_hint, Some(true));
+        assert_eq!(a.open_world_hint, Some(true));
+        // Absent stays absent — never coerced to a value the server never sent.
+        assert_eq!(a.destructive_hint, None);
+        assert_eq!(a.side_effect(), McpSideEffect::ReadOnly);
+    }
+
+    #[test]
+    fn side_effect_applies_the_specs_defaults_without_inventing_claims() {
+        let annotated = |json: &str| -> McpToolAnnotations {
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":3,"result":{{"tools":[{{"name":"t","annotations":{json}}}]}}}}"#
+            );
+            parse_list_tools_response(3, &line).expect("parse ok").tools[0]
+                .annotations
+                .clone()
+        };
+
+        // readOnlyHint wins outright.
+        assert_eq!(
+            annotated(r#"{"readOnlyHint":true,"destructiveHint":true}"#).side_effect(),
+            McpSideEffect::ReadOnly
+        );
+        // Explicitly not read-only, destructiveHint omitted ⇒ spec default is
+        // destructive. Assuming otherwise would understate a real write.
+        assert_eq!(
+            annotated(r#"{"readOnlyHint":false}"#).side_effect(),
+            McpSideEffect::Destructive
+        );
+        // Not read-only but explicitly non-destructive ⇒ an additive write.
+        assert_eq!(
+            annotated(r#"{"readOnlyHint":false,"destructiveHint":false}"#).side_effect(),
+            McpSideEffect::NonDestructiveWrite
+        );
+        // A lone destructiveHint:true is still a statement worth honouring.
+        assert_eq!(
+            annotated(r#"{"destructiveHint":true}"#).side_effect(),
+            McpSideEffect::Destructive
+        );
+        // Silence is Undeclared, NOT ReadOnly — the caller must decide what to
+        // do about a server that says nothing, and must not be handed a
+        // default that reads like a safety claim.
+        assert_eq!(
+            annotated(r#"{"idempotentHint":true}"#).side_effect(),
+            McpSideEffect::Undeclared
+        );
+    }
+
+    #[test]
+    fn malformed_annotations_yield_no_claims_rather_than_a_guess() {
+        // Wrong JSON types and a non-object annotations value must not be
+        // coerced into booleans.
+        let line = r#"{"jsonrpc":"2.0","id":3,"result":{"tools":[
+            {"name":"a","annotations":{"readOnlyHint":"yes","destructiveHint":1}},
+            {"name":"b","annotations":"nonsense"}
+        ]}}"#;
+        let page = parse_list_tools_response(3, line).expect("parse ok");
+        assert_eq!(page.tools[0].annotations.read_only_hint, None);
+        assert_eq!(page.tools[0].annotations.destructive_hint, None);
+        assert_eq!(
+            page.tools[0].annotations.side_effect(),
+            McpSideEffect::Undeclared
+        );
+        assert!(page.tools[1].annotations.is_empty());
     }
 
     #[test]

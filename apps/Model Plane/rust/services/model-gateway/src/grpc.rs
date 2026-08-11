@@ -37,6 +37,9 @@ use mp_contracts::model_plane::v1::{
     TextToSpeechRequest, TextToSpeechResponse, TranscribeSpeechRequest, WebSearchRequest,
     WebSearchResponse,
 };
+use mp_contracts::model_plane::v1::{
+    Command, EvaluatePolicyRequest, OrgPolicy, Plugin, TaskRecord,
+};
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use tokio_stream::StreamExt;
@@ -131,6 +134,137 @@ impl TenantScopedRequest for SetPolicyRequest {
             .as_ref()
             .map_or("", |policy| policy.org_id.as_str())
     }
+}
+
+/// A string field from a capability-core JSON row, or empty.
+fn json_str(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Policy fields that still have no owning service.
+///
+/// The spend/token ceilings now live in Control Plane (`org_quotas`), so only
+/// `allowed_models` remains homeless. It is refused by name rather than banked
+/// locally: accepting a model allowlist that nothing consults would tell an
+/// operator they had restricted models when they had not.
+fn unowned_policy_fields(policy: &OrgPolicy) -> Vec<&'static str> {
+    let mut unowned = Vec::new();
+    if !policy.allowed_models.trim().is_empty() {
+        unowned.push("allowed_models");
+    }
+    unowned
+}
+
+/// Map one capability-core task row onto the gateway's wire `TaskRecord`.
+/// `created_at` crosses as a unix second count; an unparseable or absent
+/// timestamp becomes 0 rather than "now", so a missing value cannot read as a
+/// task that was just created.
+fn task_from_catalog(row: &serde_json::Value) -> TaskRecord {
+    TaskRecord {
+        task_id: json_str(row, "id"),
+        org_id: json_str(row, "org_id"),
+        description: json_str(row, "description"),
+        status: json_str(row, "status"),
+        parent_run_id: json_str(row, "parent_run_id"),
+        cron: json_str(row, "cron"),
+        created_at_unix: row
+            .get("created_at")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map_or(0, |parsed| parsed.timestamp()),
+    }
+}
+
+/// Map one capability-core command row onto the gateway's wire `Command`.
+/// capability-core names the executor `handler`; this contract calls it
+/// `tool_name`.
+fn command_from_catalog(row: &serde_json::Value) -> Command {
+    Command {
+        command_id: json_str(row, "id"),
+        name: json_str(row, "name"),
+        description: json_str(row, "description"),
+        tool_name: json_str(row, "handler"),
+        // capability-core's catalogue has no remote-URL or default-payload
+        // concept; leaving these empty is honest rather than inventing values.
+        remote_url: String::new(),
+        default_payload_json: String::new(),
+    }
+}
+
+/// Convert the gateway's JSON arg object into capability-core's flat
+/// `map[string]string`.
+///
+/// # Errors
+/// Returns a message naming the offending field when a value is not a string.
+/// Stringifying a nested object here would hand capability-core an argument the
+/// caller never wrote, so a mismatch is refused instead.
+fn command_args(args_json: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let trimmed = args_json.trim();
+    if trimmed.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let parsed: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|error| format!("args_json is not valid JSON: {error}"))?;
+    let Some(object) = parsed.as_object() else {
+        return Err("args_json must be a JSON object".to_owned());
+    };
+    object
+        .iter()
+        .map(|(key, value)| match value {
+            serde_json::Value::String(text) => Ok((key.clone(), text.clone())),
+            // Numbers and booleans have one unambiguous textual form, so they
+            // cross safely; structures do not.
+            serde_json::Value::Number(number) => Ok((key.clone(), number.to_string())),
+            serde_json::Value::Bool(flag) => Ok((key.clone(), flag.to_string())),
+            _ => Err(format!(
+                "argument '{key}' must be a string, number, or boolean"
+            )),
+        })
+        .collect()
+}
+
+/// Map one capability-core `plugin_packages` row onto the gateway's wire
+/// `Plugin`. The manifest URL round-trips inside `manifest_json` because the
+/// catalog stores a manifest document while this contract carries a URL.
+fn plugin_from_catalog(row: &serde_json::Value) -> Plugin {
+    Plugin {
+        plugin_id: json_str(row, "id"),
+        name: json_str(row, "name"),
+        version: json_str(row, "version"),
+        kind: json_str(row, "description"),
+        manifest_url: row
+            .get("manifest_json")
+            .and_then(|m| m.get("manifest_url"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        enabled: row
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        status: json_str(row, "rollout_state"),
+        installed_at_unix: row
+            .get("installed_at_unix")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default(),
+    }
+}
+
+/// The caller's own `authorization` header, for forwarding to a plane the
+/// gateway is proxying to. A BFF acts with the caller's authority, not with an
+/// ambient service identity — so an upstream can apply its own tenant checks
+/// rather than trusting whatever org the gateway names.
+fn forwarded_authorization<T>(request: &Request<T>) -> String {
+    request
+        .metadata()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 #[allow(clippy::result_large_err)]
@@ -344,66 +478,6 @@ async fn publish_ingress_accepted(
     }
 }
 
-/// Semantic-cache lookup (best-effort). On a hit, records the assistant turn so
-/// thread history stays consistent and returns a zero-token `InvokeResponse`.
-/// Returns `Ok(None)` on a miss so the caller proceeds to inference-core.
-#[allow(clippy::too_many_arguments)]
-async fn try_serve_from_cache(
-    state: &AppState,
-    identity: &VerifiedIdentity,
-    run: &session_flow::SessionRun,
-    request_id: &str,
-    org_id: &str,
-    user_id: &str,
-    model: &str,
-    content: &str,
-    zdr: bool,
-) -> Result<Option<InvokeResponse>, Status> {
-    let Some(cache) = crate::langcache::global() else {
-        return Ok(None);
-    };
-    let scope = crate::langcache::CacheScope {
-        org_id,
-        user_id,
-        model,
-    };
-    let Some(cached) = cache.lookup(content, scope, zdr).await else {
-        return Ok(None);
-    };
-    if !zdr {
-        session_flow::append_assistant_message_with_token(
-            state,
-            &run.thread_id,
-            &cached,
-            identity.session_bearer()?,
-        )
-        .await
-        .map_err(|error| {
-            Status::internal(format!("session-core append assistant failed: {error}"))
-        })?;
-    }
-    session_flow::terminalize_direct_inference_run_with_token(
-        state,
-        run,
-        session_flow::DirectInferenceTerminal::Completed,
-        identity.session_bearer()?,
-    )
-    .await
-    .map_err(|error| {
-        Status::unavailable(format!("session-core terminalization failed: {error}"))
-    })?;
-    info!(request_id = %request_id, "gateway invoke served from langcache");
-    Ok(Some(InvokeResponse {
-        request_id: request_id.to_owned(),
-        content: cached,
-        model_used: model.to_owned(),
-        stop_reason: "end_turn".to_owned(),
-        input_tokens: 0,
-        output_tokens: 0,
-        sources: Vec::new(),
-    }))
-}
-
 /// Publish the per-request usage envelope (best-effort; publish failures are logged).
 async fn publish_usage_envelope(
     state: &AppState,
@@ -451,10 +525,90 @@ async fn publish_usage_envelope(
     }
 }
 
-#[tonic::async_trait]
 // invoke/invoke_stream are sequential request pipelines (session preamble + cache +
 // inference/streaming relay); per-method #[allow] doesn't survive the async_trait
 // macro expansion, so the allow lives on the impl block. Both read clearer inline.
+impl GatewayService {
+    /// Write one org quota to Control Plane.
+    ///
+    /// Authenticates as a SERVICE (`x-service-id`/`x-service-token`), not with
+    /// the caller's token: the gRPC caller holds a Model Plane audience token
+    /// that org-core does not accept. The caller's authority is still checked —
+    /// `authorize_rpc` gated this RPC before we got here — and org-core applies
+    /// its own scope check on the service credential.
+    async fn put_org_quota(&self, org_id: &str, key: &str, limit: i64) -> Result<(), Status> {
+        if self.state.org_core_base_url.trim().is_empty()
+            || self.state.org_core_service_token.trim().is_empty()
+        {
+            // Refuse rather than no-op: an operator told the cap was accepted
+            // while it was never stored is the failure this whole cleanup
+            // exists to remove.
+            return Err(Status::unavailable(
+                "org-core credentials are not configured; the spend ceiling cannot be recorded",
+            ));
+        }
+        let url = format!(
+            "{}/api/v1/organizations/{org_id}/quotas/{key}",
+            self.state.org_core_base_url.trim_end_matches('/')
+        );
+        let response = self
+            .state
+            .http_client
+            .put(&url)
+            .header("x-service-id", &self.state.org_core_service_id)
+            .header("x-service-token", &self.state.org_core_service_token)
+            .json(&serde_json::json!({ "limit": limit }))
+            .send()
+            .await
+            .map_err(|error| Status::unavailable(format!("org-core unreachable: {error}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(Status::internal(format!(
+                "org-core rejected the quota write for '{key}': HTTP {status}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// One authenticated call to capability-core's HTTP API, forwarding the
+    /// caller's own credential so capability-core applies its own tenant
+    /// checks rather than trusting an org this gateway names.
+    async fn capability_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        bearer: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, Status> {
+        if self.state.capability_core_base_url.is_empty() {
+            return Err(Status::unavailable("capability registry is unavailable"));
+        }
+        let url = format!("{}{path}", self.state.capability_core_base_url);
+        let mut builder = self
+            .state
+            .http_client
+            .request(method, &url)
+            .bearer_auth(bearer.trim_start_matches("Bearer ").trim());
+        if let Some(body) = body {
+            builder = builder.json(&body);
+        }
+        let response = builder.send().await.map_err(|error| {
+            Status::unavailable(format!("capability registry unreachable: {error}"))
+        })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Status::internal(format!(
+                "capability registry returned HTTP {status}"
+            )));
+        }
+        response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| Status::internal(format!("capability registry sent no JSON: {error}")))
+    }
+}
+
+#[tonic::async_trait]
 #[allow(clippy::too_many_lines)]
 impl ModelGateway for GatewayService {
     async fn invoke(
@@ -541,21 +695,31 @@ impl ModelGateway for GatewayService {
         let infer_req =
             build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
 
-        if let Some(hit) = try_serve_from_cache(
-            &self.state,
-            &identity,
-            &session_run,
-            &request_id,
-            &org_id,
-            user_id,
-            &model,
-            &content,
-            req.zdr,
-        )
-        .await?
-        {
-            return Ok(Response::new(hit));
-        }
+        // The gateway used to consult its own response cache here, BEFORE
+        // calling inference-core. It was removed rather than repaired.
+        //
+        // It keyed on `(org_id, user_id, model)` plus the raw last user
+        // message — while the two lines above had just built the memory-loaded
+        // `messages` and an `infer_req` carrying `structured_output_schema`,
+        // `temperature` and `max_tokens`, none of which reached the key. So a
+        // structured-output call whose last user message matched an earlier
+        // plain-text call from the same (org, user, model) was served that
+        // plain-text answer as a normal response with `stop_reason: "end_turn"`
+        // and zero tokens; the caller parsed it as JSON and failed with nothing
+        // anywhere to explain why. Memory drift had the same shape: the context
+        // is in the prompt but not in the key, so a pre-change answer replayed
+        // after the user's memory changed. A hit also short-circuited
+        // inference-core's ZDR handling, routing and its own cache.
+        //
+        // inference-core already caches behind this same call and does it
+        // correctly: `PromptCache::cache_key` (inference-core/src/cache.rs:67)
+        // hashes org, user, provider hint, model, EVERY message role+content,
+        // temperature, max_tokens, tools, tool_choice and the structured-output
+        // schema, and `get` refuses ZDR requests outright — a strict superset.
+        // It is live on the path at provider/fallback.rs:701 and :741.
+        //
+        // The SSE path keeps its cache: that one keys on the rendered prompt
+        // and gates on `langcache::TurnCacheability`, which this path never had.
 
         let mut client = self.state.inference_client.clone();
         let infer = match client.infer(identity.inference_request(infer_req)?).await {
@@ -617,22 +781,8 @@ impl ModelGateway for GatewayService {
             Status::unavailable(format!("session-core terminalization failed: {error}"))
         })?;
 
-        // Store the fresh response so future semantically-similar prompts hit
-        // the cache. Best-effort: never fails the request.
-        if let Some(cache) = crate::langcache::global() {
-            cache
-                .store(
-                    &content,
-                    crate::langcache::CacheScope {
-                        org_id: &org_id,
-                        user_id: &user_id,
-                        model: &model,
-                    },
-                    &infer.content,
-                    req.zdr,
-                )
-                .await;
-        }
+        // No gateway-tier store: inference-core cached this response itself,
+        // keyed on the whole request rather than on the raw user message.
 
         let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         publish_usage_envelope(
@@ -752,71 +902,9 @@ impl ModelGateway for GatewayService {
         let infer_req =
             build_infer_request(&request_id, &org_id, &model, &req.provider, messages, &req);
 
-        // Semantic-cache lookup (best-effort). On a hit, stream the cached
-        // response as a single terminal chunk, record the assistant turn, and
-        // skip inference-core entirely.
-        if let Some(cache) = crate::langcache::global() {
-            let scope = crate::langcache::CacheScope {
-                org_id: &org_id,
-                user_id: &user_id,
-                model: &model,
-            };
-            if let Some(cached) = cache.lookup(&content, scope, req.zdr).await {
-                if !req.zdr {
-                    if let Err(error) = session_flow::append_assistant_message_with_token(
-                        &self.state,
-                        &session_run.thread_id,
-                        &cached,
-                        identity.session_bearer()?,
-                    )
-                    .await
-                    {
-                        session_flow::terminalize_direct_inference_run_with_token(
-                            &self.state,
-                            &session_run,
-                            session_flow::DirectInferenceTerminal::Failed(
-                                "assistant_persist_failed",
-                            ),
-                            identity.session_bearer()?,
-                        )
-                        .await
-                        .map_err(|terminal_error| {
-                            Status::unavailable(format!(
-                                "session-core terminalization failed: {terminal_error}"
-                            ))
-                        })?;
-                        return Err(Status::internal(format!(
-                            "session-core append assistant failed: {error}"
-                        )));
-                    }
-                }
-                session_flow::terminalize_direct_inference_run_with_token(
-                    &self.state,
-                    &session_run,
-                    session_flow::DirectInferenceTerminal::Completed,
-                    identity.session_bearer()?,
-                )
-                .await
-                .map_err(|error| {
-                    Status::unavailable(format!("session-core terminalization failed: {error}"))
-                })?;
-                let (tx, rx) = tokio::sync::mpsc::channel::<Result<InvokeChunk, Status>>(1);
-                let _ = tx
-                    .send(Ok(InvokeChunk {
-                        request_id: request_id.clone(),
-                        delta: cached,
-                        done: true,
-                        model_used: model.clone(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                    }))
-                    .await;
-                info!(request_id = %request_id, "gateway invoke_stream served from langcache");
-                return Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
-                    rx,
-                )));
-            }
-        }
+        // No gateway-tier cache lookup here — see the `invoke` site. The
+        // streaming variant had the same defect and additionally reported a
+        // cache hit as a single terminal chunk with zero token counts.
 
         let mut client = self.state.inference_client.clone();
         let upstream = match client
@@ -849,12 +937,11 @@ impl ModelGateway for GatewayService {
         let fallback_request_id = request_id.clone();
         let state = self.state.clone();
         let managed_run = session_run.clone();
-        // Captured for the post-stream semantic-cache write.
-        let cache_content = content.clone();
-        let cache_org = org_id.clone();
-        let cache_user = user_id.to_owned();
-        let cache_model = model.clone();
-        let cache_zdr = req.zdr;
+        // Captured so the streaming task can decide whether the assembled
+        // assistant turn may be persisted. Named for retention, not for the
+        // cache that used to live here — the four prompt/scope clones beside
+        // it existed only to key that cache and went with it.
+        let zdr = req.zdr;
         let session_bearer = identity.session_bearer()?.to_owned();
 
         tokio::spawn(async move {
@@ -973,7 +1060,7 @@ impl ModelGateway for GatewayService {
                 return;
             };
 
-            if !cache_zdr {
+            if !zdr {
                 if let Err(error) = session_flow::append_assistant_message_with_token(
                     &state,
                     &managed_run.thread_id,
@@ -1018,21 +1105,10 @@ impl ModelGateway for GatewayService {
                 return;
             }
 
-            // Store the fully-assembled streamed response for future cache hits.
-            if let Some(cache) = crate::langcache::global() {
-                cache
-                    .store(
-                        &cache_content,
-                        crate::langcache::CacheScope {
-                            org_id: &cache_org,
-                            user_id: &cache_user,
-                            model: &cache_model,
-                        },
-                        &assistant_output,
-                        cache_zdr,
-                    )
-                    .await;
-            }
+            // No gateway-tier response cache on this path: inference-core's
+            // `PromptCache` already caches behind the same call, and its key is
+            // a strict superset of anything we could key on here. See the
+            // `invoke` lookup site for why the gateway copy was removed.
 
             let _ = tx.send(Ok(terminal_chunk)).await;
         });
@@ -1501,12 +1577,17 @@ impl ModelGateway for GatewayService {
                 .await
             {
                 Ok(resp) => {
-                    for a in resp.into_inner().skills {
-                        self.state
+                    // Reconcile, don't merely append: a disabled/deleted
+                    // learned skill must stop steering MatchSkills results on
+                    // the gRPC path just as it does on the SSE path.
+                    self.state.skills.replace_learned(
+                        &req.org_id,
+                        resp.into_inner()
                             .skills
-                            .upsert(&req.org_id, skills::agent_skill_to_skill(a));
-                    }
-                    self.state.skills.mark_org_loaded(&req.org_id);
+                            .into_iter()
+                            .map(skills::agent_skill_to_skill)
+                            .collect(),
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, org_id = %req.org_id, "lazy-load learned skills failed (best-effort)");
@@ -1595,6 +1676,7 @@ impl ModelGateway for GatewayService {
             &self.state.http_client,
             &self.state.capability_core_base_url,
             &self.state.mcp_oauth_service_token,
+            None,
         )
         .await;
         Ok(Response::new(ListMcpToolsResponse {
@@ -1612,8 +1694,60 @@ impl ModelGateway for GatewayService {
         request: Request<RegisterPluginRequest>,
     ) -> Result<Response<RegisterPluginResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Write)?;
-        runtime_registries::handle_register_plugin(&self.state.plugins, request.into_inner())
-            .map(Response::new)
+        // capability-core's `plugin_packages` is the system of record (its own
+        // handler says so). The gateway previously kept a per-replica in-memory
+        // copy instead, so a registered plugin never reached the durable
+        // catalog and vanished on the next restart.
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let plugin = req
+            .plugin
+            .ok_or_else(|| Status::invalid_argument("plugin is required"))?;
+        if plugin.name.trim().is_empty() || plugin.version.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "plugin name and version are required",
+            ));
+        }
+        let created: serde_json::Value = self
+            .capability_json(
+                reqwest::Method::POST,
+                "/api/v1/plugins",
+                &bearer,
+                Some(serde_json::json!({
+                    "name": plugin.name,
+                    "version": plugin.version,
+                    "description": plugin.kind,
+                    // capability-core stores a manifest DOCUMENT; the gateway
+                    // contract carries a manifest URL. Keep the URL rather than
+                    // fetch-and-inline it here — fetching a caller-supplied URL
+                    // from the gateway would be an SSRF surface, and the host
+                    // that loads the manifest is the right place to resolve it.
+                    "manifest_json": {"manifest_url": plugin.manifest_url},
+                })),
+            )
+            .await?;
+        // capability-core deliberately creates plugins DISABLED (safe rollout)
+        // and assigns its own id, so report what it stored rather than echoing
+        // what the caller asked for.
+        Ok(Response::new(RegisterPluginResponse {
+            request_id: req.request_id,
+            plugin: Some(Plugin {
+                plugin_id: json_str(&created, "id"),
+                name: json_str(&created, "name"),
+                version: json_str(&created, "version"),
+                kind: plugin.kind,
+                manifest_url: plugin.manifest_url,
+                enabled: created
+                    .get("enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                status: json_str(&created, "rollout_state"),
+                installed_at_unix: created
+                    .get("installed_at_unix")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_else(|| Utc::now().timestamp()),
+            }),
+        }))
     }
 
     async fn list_plugins(
@@ -1621,8 +1755,20 @@ impl ModelGateway for GatewayService {
         request: Request<ListPluginsRequest>,
     ) -> Result<Response<ListPluginsResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Read)?;
-        runtime_registries::handle_list_plugins(&self.state.plugins, request.into_inner())
-            .map(Response::new)
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let listed: serde_json::Value = self
+            .capability_json(reqwest::Method::GET, "/api/v1/plugins", &bearer, None)
+            .await?;
+        let plugins = listed
+            .get("plugins")
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| rows.iter().map(plugin_from_catalog).collect())
+            .unwrap_or_default();
+        Ok(Response::new(ListPluginsResponse {
+            request_id: req.request_id,
+            plugins,
+        }))
     }
 
     async fn set_plugin_enabled(
@@ -1630,8 +1776,23 @@ impl ModelGateway for GatewayService {
         request: Request<SetPluginEnabledRequest>,
     ) -> Result<Response<SetPluginEnabledResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Write)?;
-        runtime_registries::handle_set_plugin_enabled(&self.state.plugins, request.into_inner())
-            .map(Response::new)
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        if req.plugin_id.trim().is_empty() {
+            return Err(Status::invalid_argument("plugin_id is required"));
+        }
+        let updated: serde_json::Value = self
+            .capability_json(
+                reqwest::Method::PATCH,
+                &format!("/api/v1/plugins/{}", req.plugin_id),
+                &bearer,
+                Some(serde_json::json!({ "enabled": req.enabled })),
+            )
+            .await?;
+        Ok(Response::new(SetPluginEnabledResponse {
+            request_id: req.request_id,
+            plugin: Some(plugin_from_catalog(&updated)),
+        }))
     }
 
     // ------------------------------------------------------------------
@@ -1643,8 +1804,38 @@ impl ModelGateway for GatewayService {
         request: Request<ListCommandsRequest>,
     ) -> Result<Response<ListCommandsResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Read)?;
-        runtime_registries::handle_list_commands(&self.state.commands, request.into_inner())
-            .map(Response::new)
+        // capability-core owns the slash-command catalogue. The gateway kept a
+        // per-replica in-memory copy, so a command registered through the
+        // product was invisible here and vice versa.
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let listed = self
+            .capability_json(reqwest::Method::GET, "/api/v1/commands", &bearer, None)
+            .await?;
+        // capability-core returns either a bare array or an envelope depending
+        // on the route; accept both rather than assuming one.
+        let rows = listed
+            .as_array()
+            .or_else(|| listed.get("commands").and_then(serde_json::Value::as_array));
+        let commands = rows
+            .map(|rows| {
+                rows.iter()
+                    // A disabled command must not be offered: the gateway's
+                    // wire `Command` has no enabled flag, so filtering here is
+                    // the only way not to advertise something switched off.
+                    .filter(|row| {
+                        row.get("enabled")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true)
+                    })
+                    .map(command_from_catalog)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Response::new(ListCommandsResponse {
+            request_id: req.request_id,
+            commands,
+        }))
     }
 
     async fn execute_command(
@@ -1653,8 +1844,50 @@ impl ModelGateway for GatewayService {
     ) -> Result<Response<ExecuteCommandResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
         require_explicit_zdr_contract(&identity, "command execution")?;
-        runtime_registries::handle_execute_command(&self.state.commands, request.into_inner())
-            .map(Response::new)
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        // capability-core's exec contract takes flat string args; the gateway's
+        // carries a JSON object. Only string-valued members can cross, so a
+        // nested or non-string arg is REJECTED rather than stringified — a
+        // silently coerced argument would execute a command the caller did not
+        // describe.
+        let args = match command_args(&req.args_json) {
+            Ok(args) => args,
+            Err(message) => return Err(Status::invalid_argument(message)),
+        };
+        let result = self
+            .capability_json(
+                reqwest::Method::POST,
+                "/api/v1/commands/exec",
+                &bearer,
+                Some(serde_json::json!({
+                    "commandName": req.command_name,
+                    "args": args,
+                    // capability-core re-derives the tenant from the verified
+                    // caller; these are context for its audit trail.
+                    "orgId": req.org_id,
+                    "userId": identity.user_id(),
+                })),
+            )
+            .await?;
+        let success = result
+            .get("success")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        Ok(Response::new(ExecuteCommandResponse {
+            request_id: req.request_id,
+            output_json: json_str(&result, "output"),
+            error_message: if success {
+                String::new()
+            } else {
+                let error = json_str(&result, "error");
+                if error.is_empty() {
+                    "command execution failed".to_owned()
+                } else {
+                    error
+                }
+            },
+        }))
     }
 
     async fn register_hook(
@@ -1680,8 +1913,48 @@ impl ModelGateway for GatewayService {
         request: Request<CheckPermissionRequest>,
     ) -> Result<Response<CheckPermissionResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Read)?;
-        runtime_registries::handle_check_permission(&self.state.permissions, request.into_inner())
-            .map(Response::new)
+        // capability-core owns tool permission; the gateway proxies to it.
+        // It used to answer from its own in-memory map that nothing enforced,
+        // defaulting to "allow" — so a caller was told a tool was permitted
+        // when nothing had evaluated it.
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let mut upstream = Request::new(EvaluatePolicyRequest {
+            capability_id: req.tool_name.clone(),
+            run_id: String::new(),
+            agent_id: "model-gateway".to_owned(),
+            org_id: req.org_id.clone(),
+            // Mirrors execution-core's own call (capability_policy.rs) — the
+            // two must ask the same question or they can disagree.
+            scope: "global".to_owned(),
+        });
+        if !bearer.is_empty() {
+            upstream.metadata_mut().insert(
+                "authorization",
+                bearer
+                    .parse()
+                    .map_err(|_| Status::unauthenticated("malformed authorization"))?,
+            );
+        }
+        let decision = self
+            .state
+            .capability_client
+            .clone()
+            .evaluate_policy(upstream)
+            .await?
+            .into_inner();
+        // Only an explicit "allow" is permission. "ask" and "fallback" are not
+        // denials, but they are not authorization either — reporting them as
+        // allowed would be the same false assurance the local store gave.
+        Ok(Response::new(CheckPermissionResponse {
+            request_id: req.request_id,
+            allowed: decision.decision == "allow",
+            reason: if decision.reason.is_empty() {
+                decision.decision
+            } else {
+                decision.reason
+            },
+        }))
     }
 
     async fn set_permission(
@@ -1689,8 +1962,56 @@ impl ModelGateway for GatewayService {
         request: Request<SetPermissionRequest>,
     ) -> Result<Response<SetPermissionResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Write)?;
-        runtime_registries::handle_set_permission(&self.state.permissions, request.into_inner())
-            .map(Response::new)
+        // Written through to capability-core's scope store, which is the
+        // system of record. Previously this landed in a per-replica in-memory
+        // map that no dispatch path read and no restart survived.
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let action = match req.verdict.as_str() {
+            "allow" => "grant",
+            "deny" => "revoke",
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "verdict must be 'allow' or 'deny', got '{other}'"
+                )))
+            }
+        };
+        if self.state.capability_core_base_url.is_empty() {
+            return Err(Status::unavailable(
+                "capability registry is unavailable; tool permission cannot be recorded",
+            ));
+        }
+        let url = format!(
+            "{}/api/v1/capabilities/scopes/{action}",
+            self.state.capability_core_base_url
+        );
+        // `scope_kind: org` with the org from the request; capability-core
+        // re-derives the tenant from the verified caller on its own side, so
+        // this cannot be used to write into another tenant.
+        let response = self
+            .state
+            .http_client
+            .post(&url)
+            .bearer_auth(bearer.trim_start_matches("Bearer ").trim())
+            .json(&serde_json::json!({
+                "capability_id": req.tool_name,
+                "scope_kind": "org",
+                "scope_value": req.org_id,
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                Status::unavailable(format!("capability registry unreachable: {error}"))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(Status::internal(format!(
+                "capability registry rejected the permission write: HTTP {status}"
+            )));
+        }
+        Ok(Response::new(SetPermissionResponse {
+            request_id: req.request_id,
+        }))
     }
 
     async fn get_policy(
@@ -1698,8 +2019,34 @@ impl ModelGateway for GatewayService {
         request: Request<GetPolicyRequest>,
     ) -> Result<Response<GetPolicyResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Read)?;
-        runtime_registries::handle_get_policy(&self.state.policy, request.into_inner())
-            .map(Response::new)
+        let req = request.into_inner();
+        // `OrgPolicy` was one gateway-owned blob that nothing enforced. It is
+        // now decomposed per owner and read back from those owners, so what an
+        // operator sees here is what is actually applied. `allowed_models`
+        // stays zero-valued because nothing stores it yet.
+        let limits = crate::org_quota::fetch_org_limits(
+            &self.state.http_client,
+            &self.state.org_core_base_url,
+            &req.org_id,
+            &self.state.org_core_service_id,
+            &self.state.org_core_service_token,
+        )
+        .await;
+        Ok(Response::new(GetPolicyResponse {
+            request_id: req.request_id,
+            policy: Some(OrgPolicy {
+                org_id: req.org_id.clone(),
+                rate_limit_rpm: i32::try_from(
+                    self.state.rate_limiter.org_rpm(&req.org_id).round() as i64
+                )
+                .unwrap_or(i32::MAX),
+                max_cost_per_run_usd: limits.max_cost_usd.unwrap_or(0.0),
+                max_tokens_per_run: limits
+                    .max_tokens
+                    .map_or(0, |tokens| i32::try_from(tokens).unwrap_or(i32::MAX)),
+                ..OrgPolicy::default()
+            }),
+        }))
     }
 
     async fn set_policy(
@@ -1707,8 +2054,86 @@ impl ModelGateway for GatewayService {
         request: Request<SetPolicyRequest>,
     ) -> Result<Response<SetPolicyResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Write)?;
-        runtime_registries::handle_set_policy(&self.state.policy, request.into_inner())
-            .map(Response::new)
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let policy = req
+            .policy
+            .ok_or_else(|| Status::invalid_argument("policy is required"))?;
+
+        // Refuse BEFORE applying anything, so a partially-applied policy cannot
+        // be reported as accepted. These fields have no owner that can store
+        // them: cost-core's /budget/check takes the caps as request parameters
+        // (it accounts spend, it does not configure limits), and org-core has
+        // an `org_quotas` table but a dead `Quota` type and no route. Silently
+        // banking them here is exactly the behaviour being removed — an
+        // operator would set a spend cap that nothing ever applies.
+        let unowned = unowned_policy_fields(&policy);
+        if !unowned.is_empty() {
+            return Err(Status::unimplemented(format!(
+                "no service stores these yet, so they cannot be enforced: {}. Everything else in OrgPolicy now routes to its owner: spend/token caps to Control Plane quotas (org-core org_quotas), denied_tools to capability-core, rate_limit_rpm to this gateway's own limiter.",
+                unowned.join(", ")
+            )));
+        }
+
+        // denied_tools -> capability-core, which owns tool permission (the same
+        // service CheckPermission now consults).
+        for tool in policy
+            .denied_tools
+            .split(',')
+            .map(str::trim)
+            .filter(|tool| !tool.is_empty())
+        {
+            self.capability_json(
+                reqwest::Method::POST,
+                "/api/v1/capabilities/scopes/revoke",
+                &bearer,
+                Some(serde_json::json!({
+                    "capability_id": tool,
+                    "scope_kind": "org",
+                    "scope_value": policy.org_id,
+                })),
+            )
+            .await?;
+        }
+
+        // Spend/token ceilings -> Control Plane, which owns quotas. Stored in
+        // micro-dollars because `org_quotas.quota_limit` is BIGINT; see
+        // `org_quota` for why the key names its unit.
+        if policy.max_cost_per_run_usd > 0.0 {
+            self.put_org_quota(
+                &policy.org_id,
+                crate::org_quota::MAX_COST_PER_RUN_USD_MICROS,
+                crate::org_quota::usd_to_micros(policy.max_cost_per_run_usd),
+            )
+            .await?;
+        }
+        if policy.max_tokens_per_run > 0 {
+            self.put_org_quota(
+                &policy.org_id,
+                crate::org_quota::MAX_TOKENS_PER_RUN,
+                i64::from(policy.max_tokens_per_run),
+            )
+            .await?;
+        }
+
+        // rate_limit_rpm stays local: it protects THIS process, so no plane can
+        // enforce it for us. 0 clears the override back to the process default.
+        self.state.rate_limiter.set_org_rpm(
+            &policy.org_id,
+            (policy.rate_limit_rpm > 0).then(|| f64::from(policy.rate_limit_rpm)),
+        );
+
+        Ok(Response::new(SetPolicyResponse {
+            request_id: req.request_id,
+            policy: Some(OrgPolicy {
+                org_id: policy.org_id.clone(),
+                rate_limit_rpm: policy.rate_limit_rpm,
+                denied_tools: policy.denied_tools,
+                max_cost_per_run_usd: policy.max_cost_per_run_usd,
+                max_tokens_per_run: policy.max_tokens_per_run,
+                ..OrgPolicy::default()
+            }),
+        }))
     }
 
     // ------------------------------------------------------------------
@@ -1812,8 +2237,30 @@ impl ModelGateway for GatewayService {
         request: Request<CreateTaskRequest>,
     ) -> Result<Response<CreateTaskResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Write)?;
-        runtime_registries::handle_create_task(&self.state.tasks, request.into_inner())
-            .map(Response::new)
+        // capability-core owns tasks, and this gateway's own HTTP routes
+        // already proxy there (`create_task_proxy`, http_routes.rs). Only the
+        // gRPC surface kept a separate in-memory store, so a task created over
+        // gRPC was invisible to the task UI, to capability-core and to
+        // Temporal — and gone on the next restart.
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let created = self
+            .capability_json(
+                reqwest::Method::POST,
+                "/api/v1/tasks",
+                &bearer,
+                Some(serde_json::json!({
+                    "org_id": req.org_id,
+                    "description": req.description,
+                    "parent_run_id": req.parent_run_id,
+                    "cron": req.cron,
+                })),
+            )
+            .await?;
+        Ok(Response::new(CreateTaskResponse {
+            request_id: req.request_id,
+            task: Some(task_from_catalog(&created)),
+        }))
     }
 
     async fn list_tasks(
@@ -1821,8 +2268,31 @@ impl ModelGateway for GatewayService {
         request: Request<ListTasksRequest>,
     ) -> Result<Response<ListTasksResponse>, Status> {
         authorize_rpc(&request, RpcAccess::Read)?;
-        runtime_registries::handle_list_tasks(&self.state.tasks, request.into_inner())
-            .map(Response::new)
+        let bearer = forwarded_authorization(&request);
+        let req = request.into_inner();
+        let listed = self
+            .capability_json(reqwest::Method::GET, "/api/v1/tasks", &bearer, None)
+            .await?;
+        let rows = listed
+            .as_array()
+            .or_else(|| listed.get("tasks").and_then(serde_json::Value::as_array));
+        let tasks = rows
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| {
+                        // The wire contract exposes a status filter; apply it
+                        // here so a gRPC caller gets the same subset an HTTP
+                        // caller would.
+                        req.status_filter.is_empty() || json_str(row, "status") == req.status_filter
+                    })
+                    .map(task_from_catalog)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Response::new(ListTasksResponse {
+            request_id: req.request_id,
+            tasks,
+        }))
     }
 
     // ------------------------------------------------------------------
@@ -2124,6 +2594,106 @@ pub async fn serve_with_readiness(
 
 #[cfg(test)]
 mod tests {
+    use super::unowned_policy_fields;
+    use super::{command_args, command_from_catalog, json_str, task_from_catalog};
+
+    #[test]
+    fn policy_fields_with_no_owning_service_are_named_not_silently_banked() {
+        // Spend/token ceilings now have an owner — Control Plane `org_quotas`,
+        // written through by SetPolicy — so they are stored rather than
+        // refused. Only the model allowlist is still homeless.
+        let unowned = unowned_policy_fields(&mp_contracts::model_plane::v1::OrgPolicy {
+            org_id: "org".into(),
+            max_cost_per_run_usd: 5.0,
+            max_tokens_per_run: 1000,
+            allowed_models: "gpt-4".into(),
+            ..Default::default()
+        });
+        assert_eq!(unowned, vec!["allowed_models"]);
+    }
+
+    #[test]
+    fn the_two_fields_that_do_have_owners_are_accepted() {
+        // rate_limit_rpm is the gateway's own (it protects THIS process),
+        // denied_tools routes to capability-core, and the ceilings go to
+        // Control Plane quotas. None of these is "unowned".
+        let unowned = unowned_policy_fields(&mp_contracts::model_plane::v1::OrgPolicy {
+            org_id: "org".into(),
+            rate_limit_rpm: 60,
+            denied_tools: "book_shipment".into(),
+            max_cost_per_run_usd: 5.0,
+            max_tokens_per_run: 1000,
+            ..Default::default()
+        });
+        assert!(unowned.is_empty(), "got: {unowned:?}");
+    }
+
+    #[test]
+    fn command_args_pass_scalars_and_refuse_structures() {
+        let args =
+            command_args(r#"{"path":"/tmp","depth":3,"force":true}"#).expect("scalars convert");
+        assert_eq!(args.get("path").map(String::as_str), Some("/tmp"));
+        // Numbers and booleans have one unambiguous textual form.
+        assert_eq!(args.get("depth").map(String::as_str), Some("3"));
+        assert_eq!(args.get("force").map(String::as_str), Some("true"));
+
+        // A nested value has no single correct string form. Stringifying it
+        // would hand capability-core an argument the caller never wrote, so it
+        // is refused and the offending field is named.
+        let error = command_args(r#"{"filter":{"kind":"a"}}"#).unwrap_err();
+        assert!(error.contains("filter"), "got: {error}");
+        assert!(command_args(r#"{"tags":["a"]}"#).is_err());
+
+        // Empty is a legitimate no-args call, not an error.
+        assert!(command_args("").expect("empty is fine").is_empty());
+        assert!(command_args("not json").is_err());
+        assert!(command_args("[1,2]").unwrap_err().contains("object"));
+    }
+
+    #[test]
+    fn a_catalog_command_maps_handler_onto_tool_name() {
+        let row = serde_json::json!({
+            "id": "cmd_1", "name": "/plan", "description": "plan it",
+            "handler": "planner_tool", "enabled": true
+        });
+        let command = command_from_catalog(&row);
+        assert_eq!(command.command_id, "cmd_1");
+        assert_eq!(command.name, "/plan");
+        // capability-core calls the executor `handler`; this contract calls it
+        // `tool_name`.
+        assert_eq!(command.tool_name, "planner_tool");
+        // No remote-URL or default-payload concept exists upstream; empty is
+        // honest rather than invented.
+        assert!(command.remote_url.is_empty());
+        assert!(command.default_payload_json.is_empty());
+    }
+
+    #[test]
+    fn a_missing_task_timestamp_is_zero_not_now() {
+        let row = serde_json::json!({
+            "id": "task_1", "org_id": "org", "description": "d", "status": "created"
+        });
+        let task = task_from_catalog(&row);
+        assert_eq!(task.task_id, "task_1");
+        assert_eq!(task.status, "created");
+        // Defaulting to the current time would make an undated task look as if
+        // it had just been created.
+        assert_eq!(task.created_at_unix, 0);
+
+        let dated = task_from_catalog(&serde_json::json!({
+            "id": "t", "created_at": "2026-08-10T12:00:00Z"
+        }));
+        assert_eq!(dated.created_at_unix, 1_786_363_200);
+    }
+
+    #[test]
+    fn json_str_never_panics_on_a_wrong_or_missing_field() {
+        let row = serde_json::json!({"a": 1, "b": null});
+        assert_eq!(json_str(&row, "a"), "");
+        assert_eq!(json_str(&row, "b"), "");
+        assert_eq!(json_str(&row, "missing"), "");
+    }
+
     use super::*;
     use crate::state::DynPublisher;
     use mp_contracts::model_plane::v1::{
@@ -2805,6 +3375,52 @@ mod tests {
             Ok(Response::new(
                 mp_contracts::model_plane::v1::ListThreadsResponse { threads: vec![] },
             ))
+        }
+
+        async fn update_thread_presentation(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::UpdateThreadPresentationRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UpdateThreadPresentationResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "update_thread_presentation not needed in test",
+            ))
+        }
+
+        async fn archive_thread(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ArchiveThreadRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ArchiveThreadResponse>, Status>
+        {
+            Err(Status::unimplemented("archive_thread not needed in test"))
+        }
+
+        async fn archive_threads(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ArchiveThreadsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ArchiveThreadsResponse>, Status>
+        {
+            Err(Status::unimplemented("archive_threads not needed in test"))
+        }
+
+        // These deliberately remain unimplemented: gateway gRPC unit tests
+        // exercise ModelGateway RPCs, while thread erasure is covered at the
+        // Session Core/Postgres boundary. They keep this exhaustive mock in
+        // lock-step with the generated SessionCore contract so unrelated
+        // gateway tests still link after a durable API expansion.
+        async fn delete_thread(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::DeleteThreadRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::DeleteThreadResponse>, Status> {
+            Err(Status::unimplemented("delete_thread not needed in test"))
+        }
+
+        async fn delete_threads(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::DeleteThreadsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::DeleteThreadsResponse>, Status>
+        {
+            Err(Status::unimplemented("delete_threads not needed in test"))
         }
     }
 

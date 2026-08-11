@@ -1216,15 +1216,30 @@ message ExecuteCommandResponse {
 
 // Hook — pre/post lifecycle handler for tool calls. Hooks are run by
 // execution-core's middleware; the gateway holds the registry.
+// A hook is a POLICY RULE evaluated by execution-core before (or after) a tool
+// runs — not a webhook. The gateway registers them and forwards the matching
+// rules as `ExecuteStepRequest.hook_context`, which execution-core's hook
+// engine evaluates alongside capability policy and the permission gate.
 message Hook {
   string hook_id = 1;
-  // "pre_tool" | "post_tool" | "on_error" | "on_complete".
+  // "pre_tool" | "post_tool" | "on_error" | "on_complete". Only pre_tool and
+  // post_tool reach execution-core; it evaluates no other events, so the other
+  // two are recorded and never enforced.
   string event = 2;
-  // Tool name to scope to, or empty for all tools.
+  // Tool matcher: empty or "*" for any tool, a "prefix*" glob, or an exact
+  // tool name. Matches execution-core's own matcher semantics.
   string tool_scope = 3;
-  // URL the bridge POSTs to with the hook payload.
-  string callback_url = 4;
+  // DEPRECATED — hooks are policy rules, not webhooks; nothing has ever POSTed
+  // to this. Retained so existing callers keep parsing. Use `decision`.
+  string callback_url = 4 [deprecated = true];
   bool enabled = 5;
+  // What this rule does when it matches: "deny" blocks the call outright,
+  // "ask" escalates it to human approval, "allow" (or anything unrecognised)
+  // permits it. Empty means allow — a rule with no decision must not silently
+  // become a block.
+  string decision = 6;
+  // Human-readable reason surfaced to the user on deny/ask.
+  string reason = 7;
 }
 
 message RegisterHookRequest {

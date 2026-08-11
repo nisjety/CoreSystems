@@ -17,6 +17,25 @@
 //! and is therefore owned by an inference-core moderation route — not faked
 //! here with a keyword list that would produce false verdicts.
 
+use serde::Deserialize;
+
+/// Capability Core's public safety-policy list projection. This intentionally
+/// carries only the fields needed to decide whether provider-bound user input
+/// must be redacted; credentials and arbitrary `config_json` never enter the
+/// gateway's prompt path.
+#[derive(Debug, Deserialize)]
+struct SafetyPolicyList {
+    policies: Vec<SafetyPolicy>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SafetyPolicy {
+    kind: String,
+    enabled: bool,
+    #[serde(default)]
+    applies_to: Vec<String>,
+}
+
 /// Prompt-injection markers (lower-cased substring match). Conservative — these
 /// are phrases that only appear in instruction-override attempts, not normal
 /// prose, to keep false positives low.
@@ -39,11 +58,101 @@ const INJECTION_MARKERS: &[&str] = &[
     "ignore your instructions",
 ];
 
-/// Opt-in flag: apply user-input moderation (PII redaction). Injection defense
-/// on retrieved content is always-on and not gated by this.
+/// Client opt-in to stricter user-input moderation (PII redaction). The
+/// capability-core policy remains authoritative; this signal can never turn a
+/// server-mandated filter off. Injection defense on retrieved content is
+/// always-on and not gated by this.
 #[must_use]
 pub fn wants_moderation(features: &[String]) -> bool {
     features.iter().any(|f| f == "moderation" || f == "pii")
+}
+
+fn policy_applies_to_input(policy: &SafetyPolicy) -> bool {
+    // An empty `applies_to` has historically meant the policy applies to all
+    // content directions (the registry migration defaults it to `{}`). Treat
+    // it as input rather than letting an omitted field silently weaken a PII
+    // policy. Explicit output-only policies do not affect this boundary.
+    policy.applies_to.is_empty()
+        || policy.applies_to.iter().any(|target| {
+            matches!(
+                target.trim().to_ascii_lowercase().as_str(),
+                "input" | "*" | "all"
+            )
+        })
+}
+
+fn pii_policy_requires_redaction(policies: &[SafetyPolicy]) -> bool {
+    policies.iter().any(|policy| {
+        policy.enabled
+            && policy.kind.trim().eq_ignore_ascii_case("pii_filter")
+            && policy_applies_to_input(policy)
+    })
+}
+
+/// Resolve whether user input must be redacted before it crosses the external
+/// provider boundary.
+///
+/// Capability Core is the policy authority. Caller-supplied features are
+/// additive only: they may request stricter redaction, but cannot disable an
+/// enabled policy. Any inability to prove the authoritative policy (missing
+/// delegated credential, unavailable service, non-success response, malformed
+/// projection) defaults to redaction, preventing a control-plane outage from
+/// leaking PII to a provider.
+pub async fn pii_redaction_required(
+    features: &[String],
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    capability_bearer: Option<&str>,
+) -> bool {
+    if wants_moderation(features) {
+        return true;
+    }
+
+    let Some(capability_bearer) = capability_bearer
+        .map(str::trim)
+        .filter(|bearer| !bearer.is_empty())
+    else {
+        tracing::warn!("capability-core bearer absent while resolving PII policy; redacting");
+        return true;
+    };
+
+    let mut url = match reqwest::Url::parse(capability_core_base_url.trim()) {
+        Ok(url) => url,
+        Err(_) => {
+            tracing::warn!("capability-core URL invalid while resolving PII policy; redacting");
+            return true;
+        }
+    };
+    url.set_path("/api/v1/safety");
+    url.set_query(None);
+
+    let response = match http_client
+        .get(url)
+        .bearer_auth(capability_bearer)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            tracing::warn!(
+                status = %response.status(),
+                "capability-core rejected PII policy read; redacting"
+            );
+            return true;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "capability-core PII policy read failed; redacting");
+            return true;
+        }
+    };
+
+    match response.json::<SafetyPolicyList>().await {
+        Ok(policies) => pii_policy_requires_redaction(&policies.policies),
+        Err(error) => {
+            tracing::warn!(%error, "capability-core PII policy response was malformed; redacting");
+            true
+        }
+    }
 }
 
 /// True if `text` contains a known prompt-injection marker (case-insensitive).
@@ -150,5 +259,101 @@ mod tests {
         assert!(!looks_like_email("a@b")); // no dot in domain
         assert!(looks_like_email("user@host.com"));
         assert!(looks_like_email("user@host.com,")); // trailing punctuation tolerated
+    }
+
+    #[tokio::test]
+    async fn capability_core_pii_policy_is_enforced_without_a_client_feature() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/safety"))
+            .and(header("authorization", "Bearer delegated-capability-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "policies": [{
+                    "id": "pii-input",
+                    "kind": "pii_filter",
+                    "enabled": true,
+                    "applies_to": ["input"]
+                }]
+            })))
+            .expect(1)
+            .mount(&capability_core)
+            .await;
+
+        assert!(
+            pii_redaction_required(
+                &[],
+                &reqwest::Client::new(),
+                &capability_core.uri(),
+                Some("delegated-capability-token"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn client_feature_can_only_add_pii_redaction() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/safety"))
+            .and(header("authorization", "Bearer delegated-capability-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "policies": [{
+                    "id": "pii-disabled",
+                    "kind": "pii_filter",
+                    "enabled": false,
+                    "applies_to": ["input"]
+                }]
+            })))
+            .expect(1)
+            .mount(&capability_core)
+            .await;
+
+        assert!(
+            !pii_redaction_required(
+                &[],
+                &reqwest::Client::new(),
+                &capability_core.uri(),
+                Some("delegated-capability-token"),
+            )
+            .await
+        );
+
+        // Explicit caller intent remains available as a stricter setting even
+        // when capability-core has no enabled PII policy.
+        assert!(
+            pii_redaction_required(&["pii".to_owned()], &reqwest::Client::new(), "", None,).await
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_or_malformed_safety_policy_fails_closed_to_redaction() {
+        let client = reqwest::Client::new();
+
+        assert!(pii_redaction_required(&[], &client, "", Some("token")).await);
+        assert!(pii_redaction_required(&[], &client, "http://127.0.0.1:1", None).await);
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/safety"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&capability_core)
+            .await;
+        assert!(
+            pii_redaction_required(
+                &[],
+                &client,
+                &capability_core.uri(),
+                Some("delegated-capability-token"),
+            )
+            .await
+        );
     }
 }

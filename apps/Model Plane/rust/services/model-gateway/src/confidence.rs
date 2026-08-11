@@ -60,6 +60,8 @@ const HEDGING_PENALTY: f64 = 0.18;
 const EMPTY_SCORE: f64 = 0.10;
 const FLOOR: f64 = 0.05;
 const CEIL: f64 = 0.98;
+const LOW_CONFIDENCE_RETRIEVAL_PENALTY: f64 = 0.20;
+const LOW_CONFIDENCE_RETRIEVAL_CEIL: f64 = 0.74;
 /// Debit per failed tool call this turn, capped at [`MAX_FAILURE_PENALTY`].
 /// Evidence gathered alongside failures is weaker than evidence gathered
 /// cleanly — some of what the answer needed never arrived.
@@ -150,6 +152,25 @@ pub fn score(answer: &str, output_tokens: u32, max_tokens: u32, evidence: Eviden
     value -= (f64::from(evidence.tool_failures) * TOOL_FAILURE_PENALTY).min(MAX_FAILURE_PENALTY);
 
     Some(value.clamp(FLOOR, CEIL))
+}
+
+/// Score a completion while preserving Data Plane's retrieval-confidence
+/// verdict. Weak retrieval evidence must not receive the normal citation bonus
+/// and then render above the UI's "uncertain" threshold.
+#[must_use]
+pub fn score_with_retrieval_confidence(
+    answer: &str,
+    output_tokens: u32,
+    max_tokens: u32,
+    evidence: Evidence,
+    retrieval_low_confidence: bool,
+) -> Option<f64> {
+    let score = score(answer, output_tokens, max_tokens, evidence)?;
+    if retrieval_low_confidence {
+        Some((score - LOW_CONFIDENCE_RETRIEVAL_PENALTY).clamp(FLOOR, LOW_CONFIDENCE_RETRIEVAL_CEIL))
+    } else {
+        Some(score)
+    }
 }
 
 #[cfg(test)]
@@ -330,6 +351,24 @@ mod tests {
             grounded >= 0.75,
             "grounded tool answer should not be flagged: {grounded}"
         );
+    }
+
+    #[test]
+    fn data_plane_low_confidence_cannot_render_as_high_confidence() {
+        let evidence = Evidence {
+            kb_citations: 5,
+            ..Evidence::default()
+        };
+        let score = score_with_retrieval_confidence(
+            "The policy says refunds are accepted.",
+            30,
+            4096,
+            evidence,
+            true,
+        )
+        .unwrap();
+        assert!(score <= LOW_CONFIDENCE_RETRIEVAL_CEIL);
+        assert!(score < 0.75);
     }
 
     #[test]

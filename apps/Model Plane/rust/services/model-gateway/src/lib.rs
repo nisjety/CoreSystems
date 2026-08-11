@@ -37,6 +37,7 @@ pub mod moderation;
 pub mod nats_connection;
 pub mod nats_publisher;
 pub mod normalize;
+pub mod org_quota;
 pub mod ownership;
 pub mod pricing;
 pub mod profile;

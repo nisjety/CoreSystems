@@ -41,14 +41,27 @@ struct BudgetCheckResponse {
 /// Returns a `402 PAYMENT_REQUIRED` JSON error when cost-core reports the user
 /// is over budget. Authentication, transport, and parse failures fail closed
 /// with 503 so an unavailable budget authority cannot silently allow spend.
+/// `org_limits` are the ceilings Control Plane has configured for this org
+/// (`org_quota`). A cap supplied on the REQUEST wins over the org default —
+/// a caller may tighten its own run, but the org ceiling still applies to any
+/// dimension the request left unset, so a caller cannot loosen it by omission.
 pub async fn check_budget(
     http_client: &reqwest::Client,
     org_id: &str,
     user_id: &str,
     verified_bearer: &str,
     normalized: &NormalizedRequest,
+    org_limits: crate::org_quota::OrgQuotaLimits,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    if normalized.max_cost_usd.is_none() && normalized.max_tokens.is_none() {
+    let effective_cost = normalized.max_cost_usd.or(org_limits.max_cost_usd);
+    // The quota column is i64; the wire field is u32. Clamp rather than wrap:
+    // a ceiling larger than u32 is effectively "no limit", and wrapping would
+    // turn a huge cap into a tiny one and reject everything.
+    let org_tokens = org_limits
+        .max_tokens
+        .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
+    let effective_tokens = normalized.max_tokens.or(org_tokens);
+    if effective_cost.is_none() && effective_tokens.is_none() {
         return Ok(());
     }
 
@@ -60,7 +73,8 @@ pub async fn check_budget(
         org_id,
         user_id,
         verified_bearer,
-        normalized,
+        effective_cost,
+        effective_tokens,
     )
     .await
 }
@@ -71,7 +85,8 @@ async fn check_budget_at(
     org_id: &str,
     user_id: &str,
     verified_bearer: &str,
-    normalized: &NormalizedRequest,
+    max_cost_usd: Option<f64>,
+    max_tokens: Option<u32>,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let bearer = verified_bearer.trim();
     if org_id.trim().is_empty()
@@ -88,8 +103,8 @@ async fn check_budget_at(
     let body = BudgetCheckRequest {
         org_id: org_id.to_owned(),
         user_id: user_id.to_owned(),
-        max_cost_usd: normalized.max_cost_usd,
-        max_tokens: normalized.max_tokens,
+        max_cost_usd,
+        max_tokens,
     };
 
     let resp = http_client
@@ -197,7 +212,8 @@ mod tests {
             "org-a",
             "user-a",
             "verified-cost-token",
-            &normalized(),
+            Some(10.0),
+            Some(1_000),
         )
         .await
         .expect("within budget");
@@ -217,7 +233,8 @@ mod tests {
             "org-a",
             "user-a",
             "rejected-token",
-            &normalized(),
+            Some(10.0),
+            Some(1_000),
         )
         .await
         .expect_err("auth failure must block inference");
@@ -229,10 +246,66 @@ mod tests {
             "org-a",
             "user-a",
             "verified-cost-token",
-            &normalized(),
+            Some(10.0),
+            Some(1_000),
         )
         .await
         .expect_err("transport failure must block inference");
         assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A request that names no cap of its own must still be held to the org's
+    /// configured ceiling — otherwise omitting the field would be a way to opt
+    /// out of the operator's limit.
+    #[tokio::test]
+    async fn an_org_ceiling_applies_to_a_request_that_names_no_cap() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/budget/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "allowed": false,
+                "reason": "org ceiling exceeded"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let uncapped = NormalizedRequest {
+            max_cost_usd: None,
+            max_tokens: None,
+            ..normalized()
+        };
+        let error = check_budget_at(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "org-a",
+            "user-a",
+            "verified-cost-token",
+            // What check_budget would resolve: request None, org 2.5.
+            uncapped.max_cost_usd.or(Some(2.5)),
+            None,
+        )
+        .await
+        .expect_err("the org ceiling must block this");
+        assert_eq!(error.0, StatusCode::PAYMENT_REQUIRED);
+    }
+
+    #[test]
+    fn a_request_cap_wins_over_the_org_ceiling_only_where_it_is_set() {
+        let org = crate::org_quota::OrgQuotaLimits {
+            max_cost_usd: Some(2.5),
+            max_tokens: Some(500),
+        };
+        let request = normalized(); // cost 10.0, tokens 1_000
+
+        // A caller may TIGHTEN its own run…
+        assert_eq!(request.max_cost_usd.or(org.max_cost_usd), Some(10.0));
+        // …but a dimension it left unset still falls back to the org ceiling,
+        // so omission cannot be used to escape the operator's limit.
+        let partial = NormalizedRequest {
+            max_cost_usd: None,
+            ..normalized()
+        };
+        assert_eq!(partial.max_cost_usd.or(org.max_cost_usd), Some(2.5));
     }
 }

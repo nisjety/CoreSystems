@@ -26,6 +26,12 @@ use crate::{auth::VerifiedDataPlaneBearer as VerifiedBearer, state::AppState};
 
 /// Default number of chunks to retrieve for grounding.
 const DEFAULT_TOP_K: i32 = 6;
+/// Match session-core's bounded context assembly contract. The retrieval
+/// owner uses this to pack pinned facts before ranked candidates; the gateway
+/// must request that pack instead of silently rebuilding a character-capped
+/// candidate list locally.
+pub(crate) const DEFAULT_CONTEXT_BUDGET_TOKENS: i32 = 1_600;
+pub(crate) const CONTEXT_FORMAT: &str = "toon";
 /// Max number of facts surfaced to the UI / prompt summary.
 const FACT_LIMIT: usize = 5;
 /// Per-snippet character cap (keeps the injected context bounded).
@@ -315,38 +321,98 @@ fn build_context_entries(
     let mut citations: Vec<GroundingCitation> = Vec::new();
     let mut injection_flagged = false;
 
+    // Data Plane's context pack is the authority for ordering and budget. It
+    // includes pinned permanent-memory facts before ranked retrieval facts.
+    // Render it first and only fall back to candidates for older deployments
+    // that do not return a pack.
+    if let Some(pack) = resp.context_pack.as_ref() {
+        for fact in &pack.facts {
+            let Some(text) = non_empty(&fact.text) else {
+                continue;
+            };
+            let doc_id = non_empty(&fact.document_id)
+                .or_else(|| non_empty(&fact.knowledge_id))
+                .unwrap_or_else(|| format!("src-{}", citations.len() + 1));
+            let source = sources_by_doc.get(fact.document_id.as_str()).copied();
+            let title = non_empty(&fact.source_title)
+                .or_else(|| source.and_then(|item| non_empty(&item.title)))
+                .or_else(|| Some(doc_id.clone()));
+            let url = source.map_or_else(String::new, |item| item.source.clone());
+            add_context_entry(
+                &mut entries,
+                &mut citations,
+                &mut seen,
+                &mut injection_flagged,
+                text.as_str(),
+                doc_id,
+                title,
+                url,
+            );
+            if entries.len() >= MAX_ENTRIES {
+                break;
+            }
+        }
+        if !entries.is_empty() {
+            return (entries, citations, injection_flagged);
+        }
+    }
+
     for cand in &resp.candidates {
         if citations.len() >= MAX_ENTRIES {
             break;
         }
-        let snippet = truncate_chars(&cand.text, MAX_SNIPPET_CHARS);
-        if snippet.is_empty() {
-            continue;
-        }
-        if crate::moderation::scan_injection(&snippet) {
-            injection_flagged = true;
-        }
-        entries.push(format!("[{}] {}", entries.len() + 1, snippet));
-
         let doc_id = non_empty(&cand.document_id)
             .or_else(|| non_empty(&cand.knowledge_id))
             .unwrap_or_else(|| format!("src-{}", citations.len() + 1));
-        if seen.insert(doc_id.clone()) {
-            let source = sources_by_doc.get(cand.document_id.as_str()).copied();
-            let title = source
-                .and_then(|item| non_empty(&item.title))
-                .unwrap_or_else(|| doc_id.clone());
-            let url = source.map_or_else(String::new, |item| item.source.clone());
-            citations.push(GroundingCitation {
-                id: doc_id,
-                title,
-                url,
-                snippet,
-            });
-        }
+        let source = sources_by_doc.get(cand.document_id.as_str()).copied();
+        let title = source
+            .and_then(|item| non_empty(&item.title))
+            .or_else(|| Some(doc_id.clone()));
+        let url = source.map_or_else(String::new, |item| item.source.clone());
+        add_context_entry(
+            &mut entries,
+            &mut citations,
+            &mut seen,
+            &mut injection_flagged,
+            &cand.text,
+            doc_id,
+            title,
+            url,
+        );
     }
 
     (entries, citations, injection_flagged)
+}
+
+fn add_context_entry(
+    entries: &mut Vec<String>,
+    citations: &mut Vec<GroundingCitation>,
+    seen: &mut HashSet<String>,
+    injection_flagged: &mut bool,
+    text: &str,
+    doc_id: String,
+    title: Option<String>,
+    url: String,
+) {
+    if entries.len() >= MAX_ENTRIES {
+        return;
+    }
+    let snippet = truncate_chars(text, MAX_SNIPPET_CHARS);
+    if snippet.is_empty() {
+        return;
+    }
+    if crate::moderation::scan_injection(&snippet) {
+        *injection_flagged = true;
+    }
+    entries.push(format!("[{}] {}", entries.len() + 1, snippet));
+    if seen.insert(doc_id.clone()) {
+        citations.push(GroundingCitation {
+            id: doc_id,
+            title: title.unwrap_or_else(|| "Internal knowledge".to_owned()),
+            url,
+            snippet,
+        });
+    }
 }
 
 fn read_score(
@@ -370,6 +436,43 @@ fn build_grounding_facts(
     resp: &RetrieveResponse,
     sources_by_doc: &HashMap<&str, &Source>,
 ) -> Vec<GroundingFact> {
+    if let Some(pack) = resp.context_pack.as_ref() {
+        if !pack.facts.is_empty() {
+            return pack
+                .facts
+                .iter()
+                .take(FACT_LIMIT)
+                .filter_map(|fact| {
+                    let knowledge_id = non_empty(&fact.knowledge_id)?;
+                    let document_id =
+                        non_empty(&fact.document_id).or_else(|| Some(knowledge_id.clone()))?;
+                    let source = sources_by_doc.get(document_id.as_str()).copied();
+                    let text = normalize_whitespace(&fact.text);
+                    if text.is_empty() {
+                        return None;
+                    }
+                    Some(GroundingFact {
+                        knowledge_id,
+                        document_id,
+                        text: truncate_chars(&text, FACT_TEXT_LIMIT),
+                        score: fact.score,
+                        source_title: non_empty(&fact.source_title)
+                            .or_else(|| source.and_then(|item| non_empty(&item.title)))
+                            .unwrap_or_else(|| "Internal knowledge".to_owned()),
+                        source_type: non_empty(&fact.source_type)
+                            .or_else(|| source.and_then(|item| non_empty(&item.r#type)))
+                            .unwrap_or_else(|| "document".to_owned()),
+                        provider: source.map_or_else(
+                            || "Internal knowledge".to_owned(),
+                            |item| source_label(&item.source),
+                        ),
+                        chunk_index: 0,
+                    })
+                })
+                .collect();
+        }
+    }
+
     let packed_by_knowledge: HashMap<String, &ContextFact> = resp
         .context_pack
         .as_ref()
@@ -775,6 +878,8 @@ pub async fn retrieve(
         top_k: DEFAULT_TOP_K,
         user_id: None,
         zdr_mode: data_plane_zdr_mode(zdr),
+        context_budget_tokens: Some(DEFAULT_CONTEXT_BUDGET_TOKENS),
+        context_format: Some(CONTEXT_FORMAT.to_owned()),
         ..Default::default()
     };
 
@@ -977,6 +1082,40 @@ mod tests {
         assert_eq!(g.sources[0].provider, "Notion");
         assert_eq!(g.sources[0].href, "/knowledge");
         assert!(g.graph.is_none());
+    }
+
+    #[test]
+    fn context_pack_pinned_fact_precedes_candidates_and_is_cited() {
+        let resp = RetrieveResponse {
+            candidates: vec![candidate("doc-ranked", "Ranked result.", 0.91)],
+            sources: vec![
+                source("doc-pinned", "Pinned policy", "https://kb/pinned"),
+                source("doc-ranked", "Ranked result", "https://kb/ranked"),
+            ],
+            context_pack: Some(ContextPack {
+                facts: vec![ContextFact {
+                    knowledge_id: "k-doc-pinned".to_owned(),
+                    document_id: "doc-pinned".to_owned(),
+                    text: "Pinned organization policy.".to_owned(),
+                    score: 1.0,
+                    source_title: "Pinned policy".to_owned(),
+                    source_type: "policy".to_owned(),
+                    estimated_tokens: 8,
+                }],
+                total_tokens: 8,
+                budget_tokens: 1_600,
+                format: "toon".to_owned(),
+            }),
+            ..Default::default()
+        };
+
+        let grounding = build_grounding("policy", &resp);
+        assert!(grounding
+            .context_block
+            .contains("[1] Pinned organization policy."));
+        assert_eq!(grounding.facts[0].document_id, "doc-pinned");
+        assert_eq!(grounding.citations[0].id, "doc-pinned");
+        assert!(!grounding.context_block.contains("Ranked result."));
     }
 
     #[test]

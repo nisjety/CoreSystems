@@ -408,6 +408,9 @@ async fn browser_run_start(
 
     let mut execution_client = state.execution_client.clone();
     let terminal_state = state.clone();
+    // Resolved before the spawn, while `state` and `org_id` are both still
+    // borrowable here; the rules then move into the task with the request.
+    let hook_context = crate::runtime_registries::hook_context_json(&state.hooks, &org_id);
     let step_id = new_ulid();
     let dispatch_run_id = run_id.clone();
     tokio::spawn(async move {
@@ -417,7 +420,7 @@ async fn browser_run_start(
             tool_name: "browser_agent".to_owned(),
             tool_input,
             permission_mode: "auto".to_owned(),
-            hook_context: String::new(),
+            hook_context,
             org_id,
             user_id,
             zdr: false,
