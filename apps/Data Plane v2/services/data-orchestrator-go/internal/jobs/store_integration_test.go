@@ -151,8 +151,25 @@ func orchestratorIntegrationPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, up); err != nil {
 		t.Fatalf("reapply idempotent durability migration: %v", err)
 	}
+	// P2-4 lease columns. ClaimNext and ExpireExhausted read `attempts`,
+	// `lease_owner` and `lease_until`, which the durability migration above does
+	// not create — without this the claim tests in claim_integration_test.go
+	// would fail on a missing column instead of on behaviour.
+	leases := readDurabilityMigration(t, "20260805150000_orchestrator_job_leases.sql")
+	if _, err := pool.Exec(ctx, leases); err != nil {
+		t.Fatalf("apply job-leases migration: %v", err)
+	}
+	if _, err := pool.Exec(ctx, leases); err != nil {
+		t.Fatalf("reapply idempotent job-leases migration: %v", err)
+	}
 	grantScopedRuntimeRoleIn(ctx, t, pool, schema)
 	t.Cleanup(func() {
+		// Reverse order: the durability rollback drops the table the lease
+		// rollback still has to read.
+		leaseDown := readDurabilityMigration(t, "20260805150000_orchestrator_job_leases.down.sql")
+		if _, err := pool.Exec(context.Background(), leaseDown); err != nil {
+			t.Errorf("apply job-leases rollback: %v", err)
+		}
 		down := readDurabilityMigration(t, "20260711160000_quality_orchestrator_durability.down.sql")
 		if _, err := pool.Exec(context.Background(), down); err != nil {
 			t.Errorf("apply durability rollback: %v", err)

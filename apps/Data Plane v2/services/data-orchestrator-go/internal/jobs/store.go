@@ -244,7 +244,11 @@ func (s *PostgresJobStore) ClaimNext(
 ) (*model.Job, error) {
 	job, err := scanJob(s.pool.QueryRow(ctx, `
 		WITH candidate AS (
-			SELECT job_id
+			-- Aliased to candidate_job_id, NOT job_id: the FROM clause below puts
+			-- this CTE's columns in scope for RETURNING, and jobColumns selects an
+			-- unqualified job_id. Naming it job_id here makes that reference
+			-- ambiguous, and every claim fails with SQLSTATE 42702.
+			SELECT job_id AS candidate_job_id
 			FROM data_orchestrator_jobs
 			WHERE attempts < $3
 			  AND (
@@ -263,7 +267,7 @@ func (s *PostgresJobStore) ClaimNext(
 		    attempts = j.attempts + 1,
 		    updated_at = NOW()
 		FROM candidate c
-		WHERE j.job_id = c.job_id
+		WHERE j.job_id = c.candidate_job_id
 		RETURNING `+jobColumns,
 		owner, lease.Seconds(), maxAttempts,
 	))
