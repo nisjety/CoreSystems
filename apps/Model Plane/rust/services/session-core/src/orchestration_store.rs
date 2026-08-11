@@ -13,6 +13,7 @@ use serde_json::Value as JsonValue;
 use sqlx::types::chrono::{DateTime, Utc};
 use tracing::info;
 
+use crate::continuation_crypto::DescriptorCipher;
 use crate::store::Pool;
 
 // ---------------------------------------------------------------------------
@@ -237,8 +238,10 @@ pub async fn request_approval(
     user_id: &str,
     idempotency_key: &str,
     metadata: &JsonValue,
+    continuation_descriptor: Option<&JsonValue>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<Option<String>> {
+    let mut transaction = pool.begin().await?;
     let row: Option<(String,)> = sqlx::query_as(
         "INSERT INTO approvals (id, run_id, plan_id, kind, status, requested_by, \
          org_id, user_id, idempotency_key, metadata, expires_at) \
@@ -256,10 +259,65 @@ pub async fn request_approval(
     .bind(idempotency_key)
     .bind(metadata)
     .bind(expires_at)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await?;
 
-    Ok(row.map(|r| r.0))
+    let Some((approval_id,)) = row else {
+        transaction.commit().await?;
+        return Ok(None);
+    };
+
+    if let Some(descriptor) = continuation_descriptor {
+        let version = descriptor
+            .get("version")
+            .and_then(JsonValue::as_u64)
+            .and_then(|value| i16::try_from(value).ok())
+            .ok_or_else(|| anyhow::anyhow!("continuation descriptor version is invalid"))?;
+        let descriptor_run_id = descriptor
+            .get("run_id")
+            .and_then(JsonValue::as_str)
+            .filter(|value| *value == run_id)
+            .ok_or_else(|| anyhow::anyhow!("continuation descriptor run scope is invalid"))?;
+        let descriptor_org_id = descriptor
+            .get("org_id")
+            .and_then(JsonValue::as_str)
+            .filter(|value| *value == org_id)
+            .ok_or_else(|| anyhow::anyhow!("continuation descriptor org scope is invalid"))?;
+        let descriptor_user_id = descriptor
+            .get("user_id")
+            .and_then(JsonValue::as_str)
+            .filter(|value| *value == user_id)
+            .ok_or_else(|| anyhow::anyhow!("continuation descriptor user scope is invalid"))?;
+        let fingerprint = descriptor
+            .get("action_fingerprint")
+            .and_then(JsonValue::as_str)
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| anyhow::anyhow!("continuation descriptor fingerprint is invalid"))?;
+        let plaintext = serde_json::to_string(descriptor)?;
+        let ciphertext = DescriptorCipher::from_env()?.encrypt(
+            &approval_id,
+            descriptor_org_id,
+            descriptor_user_id,
+            &plaintext,
+        )?;
+        sqlx::query(
+            "INSERT INTO approval_continuation_descriptors \
+             (approval_id, run_id, org_id, user_id, descriptor_version, action_fingerprint, ciphertext) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&approval_id)
+        .bind(descriptor_run_id)
+        .bind(descriptor_org_id)
+        .bind(descriptor_user_id)
+        .bind(version)
+        .bind(fingerprint)
+        .bind(ciphertext)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    transaction.commit().await?;
+    Ok(Some(approval_id))
 }
 
 /// Result of a durable approval decision transaction.
@@ -311,6 +369,17 @@ pub async fn decide_approval(
         .await?;
     let updated = updated.is_some();
 
+    if updated && matches!(status, "denied" | "timed_out") {
+        sqlx::query(
+            "DELETE FROM approval_continuation_descriptors \
+             WHERE approval_id = $1 AND org_id = $2",
+        )
+        .bind(id)
+        .bind(org_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
+
     let delivery_id = if status == "granted" && updated {
         let delivery_id = format!("approval_delivery_{}", mp_ids::new_ulid());
         let inserted = sqlx::query_as::<_, (String,)>(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL)
@@ -342,7 +411,10 @@ pub async fn decide_approval(
 
 const DECIDE_APPROVAL_SQL: &str =
     "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
+     metadata = CASE WHEN $3 IN ('denied', 'timed_out') \
+       THEN metadata - 'continuation_descriptor' ELSE metadata END, \
      decided_at = now() WHERE id = $1 AND org_id = $2 AND status = 'requested' \
+     AND ($3 <> 'granted' OR expires_at IS NULL OR expires_at > now()) \
      AND ($6::text IS NULL OR user_id = $6) \
      RETURNING id";
 
@@ -350,6 +422,7 @@ const INSERT_APPROVAL_DELIVERY_OUTBOX_SQL: &str = "INSERT INTO approval_delivery
          (delivery_id, approval_id, run_id, org_id, user_id) \
      SELECT $1, id, run_id, org_id, user_id FROM approvals \
      WHERE id = $2 AND org_id = $3 AND status = 'granted' \
+       AND (expires_at IS NULL OR expires_at > now()) \
        AND ($4::text IS NULL OR user_id = $4) \
      RETURNING delivery_id";
 
@@ -1025,7 +1098,16 @@ mod tests {
         assert!(DECIDE_APPROVAL_SQL.contains("id = $1 AND org_id = $2"));
         assert!(DECIDE_APPROVAL_SQL.contains("($6::text IS NULL OR user_id = $6)"));
         assert!(DECIDE_APPROVAL_SQL.contains("status = 'requested'"));
+        assert!(DECIDE_APPROVAL_SQL
+            .contains("$3 <> 'granted' OR expires_at IS NULL OR expires_at > now()"));
+        assert!(DECIDE_APPROVAL_SQL.contains("metadata - 'continuation_descriptor'"));
         assert!(DECIDE_APPROVAL_SQL.contains("RETURNING id"));
+    }
+
+    #[test]
+    fn approval_delivery_insert_rejects_expired_grants() {
+        assert!(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL
+            .contains("expires_at IS NULL OR expires_at > now()"));
     }
 
     #[test]

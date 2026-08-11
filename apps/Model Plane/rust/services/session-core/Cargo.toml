@@ -31,6 +31,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 prost-types = { workspace = true }
 async-nats = { workspace = true }
 blake3 = { workspace = true }
+ring = { workspace = true }
 futures = { workspace = true }
 redis = { workspace = true }
 prost = { workspace = true }

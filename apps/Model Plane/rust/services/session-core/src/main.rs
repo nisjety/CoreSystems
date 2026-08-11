@@ -12,6 +12,7 @@ mod approval_delivery;
 mod audit_publisher;
 mod auth;
 mod compaction;
+mod continuation_crypto;
 mod dream_extractor;
 mod dreaming;
 mod finetune_grpc;

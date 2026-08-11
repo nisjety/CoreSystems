@@ -30,7 +30,7 @@ use tracing::{info, warn};
 
 use crate::auth::{
     authorize_operation, authorize_owner_row, authorize_system_run_owner, identity,
-    DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
+    is_system_run_owner, DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
     DATA_PLANE_AUTH_METADATA_KEY,
 };
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
@@ -54,6 +54,9 @@ const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTermi
 const CHECKPOINT_SAVED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.CheckpointSaved";
 const THREAD_CREATED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ThreadCreated";
 const MESSAGE_APPENDED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.MessageAppended";
+const THREAD_PRESENTATION_UPDATED_TYPE_URL: &str =
+    "type.googleapis.com/model_plane.v1.ThreadPresentationUpdated";
+const THREAD_ARCHIVED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ThreadArchived";
 const CONTEXT_MESSAGE_LIMIT: i64 = 20;
 const CONTEXT_MEMORY_LIMIT: i64 = 64;
 const DEFAULT_THREAD_LIST_LIMIT: i64 = 80;
@@ -135,6 +138,27 @@ fn compact_thread_text(value: Option<String>, fallback: &str, max_chars: usize) 
         .collect::<String>();
     truncated = truncated.trim_end().to_owned();
     format!("{truncated}...")
+}
+
+/// Normalize a user-facing thread title or preview before durable storage.
+///
+/// An explicitly empty value clears the corresponding presentation override;
+/// an omitted field is handled by the RPC layer and means "leave unchanged".
+/// Values are rejected rather than silently truncated so a caller cannot claim
+/// that a title/preview was preserved when it was materially altered.
+#[allow(clippy::result_large_err)]
+fn normalize_thread_presentation_text(
+    value: &str,
+    field: &'static str,
+    max_chars: usize,
+) -> Result<Option<String>, Status> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() > max_chars {
+        return Err(Status::invalid_argument(format!(
+            "{field} must not exceed {max_chars} characters"
+        )));
+    }
+    Ok((!normalized.is_empty()).then_some(normalized))
 }
 
 fn record_metrics(method: &'static str, started: Instant, is_ok: bool) {
@@ -247,6 +271,174 @@ async fn authorize_thread_owner(
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
     authorize_owner_row(caller, &org_id, &user_id, intent)
+}
+
+/// Require the verified caller to be the exact owner of a thread.
+///
+/// `authorize_owner_row` intentionally lets a service principal mutate a
+/// human-owned row inside its org on a number of pre-existing service paths.
+/// Destructive thread erasure is narrower: a gateway/service credential must
+/// never be able to erase a person's conversation merely because it shares the
+/// tenant. Human callers must match `threads.user_id`; the only service escape
+/// hatch is an exact allowlisted system-run owner.
+#[allow(clippy::result_large_err)]
+async fn authorize_thread_deletion_owner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    thread_id: &str,
+) -> Result<(), Status> {
+    let owner: Option<(String, String)> =
+        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    caller.authorize_org(&org_id)?;
+    match caller.user_id() {
+        Some(caller_user) if caller_user == user_id => Ok(()),
+        Some(_) => Err(Status::permission_denied("thread owner required")),
+        None if is_system_run_owner(&user_id) && caller.principal_id() == user_id => Ok(()),
+        None => Err(Status::permission_denied(
+            "only the exact thread owner may erase a thread",
+        )),
+    }
+}
+
+/// Delete every durable row owned by one thread while `tx` holds the caller's
+/// transaction. The order is explicit because the original schema predates
+/// this operation and most foreign keys do not have `ON DELETE CASCADE`.
+///
+/// This helper intentionally removes audit/event rows as well as transcript
+/// rows. A user-facing erase must not leave the content the user asked to
+/// remove in replay, checkpoints, approvals, task artifacts, or the learning
+/// outbox. It does not touch org/user-level memory, skills, billing, or other
+/// threads.
+async fn delete_thread_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    thread_id: &str,
+) -> Result<(), Status> {
+    // Direct thread evidence and content-bearing side ledgers.
+    for query in [
+        "DELETE FROM events
+         WHERE run_id = $1
+            OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR resource_ref = 'thread:' || $1
+            OR payload ->> 'thread_id' = $1",
+        "DELETE FROM session_audit_outbox
+         WHERE payload ->> 'thread_id' = $1
+            OR payload ->> 'run_id' IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR payload ->> 'subject' IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM dream_runs WHERE thread_id = $1
+            OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM agent_memory WHERE session_id = $1",
+        "DELETE FROM memory_index WHERE thread_id = $1",
+    ] {
+        sqlx::query(query)
+            .bind(thread_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
+
+    // Tasks are run-owned rather than thread-owned. Remove their descendants
+    // before the task rows, and detach surviving task parents so a task from an
+    // unrelated run cannot retain an FK to deleted work.
+    for query in [
+        "DELETE FROM task_dependencies
+         WHERE task_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))
+            OR depends_on_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))",
+        "DELETE FROM task_events
+         WHERE task_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))",
+        "DELETE FROM task_assignments
+         WHERE task_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))
+            OR run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM task_artifacts
+         WHERE task_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))",
+        "UPDATE cron_fires SET task_id = NULL
+         WHERE task_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))",
+        "UPDATE tasks SET parent_task_id = NULL
+         WHERE parent_task_id IN (SELECT id FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1))",
+        "DELETE FROM tasks WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+    ] {
+        sqlx::query(query)
+            .bind(thread_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
+
+    // Plans and approval continuations hang off runs/plans and are not all
+    // cascaded in the legacy schema. Remove the leaf records first.
+    for query in [
+        "DELETE FROM approval_continuation_outcomes
+         WHERE receipt_id IN (
+             SELECT receipt_id FROM approval_continuation_receipts
+             WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+                OR approval_id IN (
+                    SELECT id FROM approvals
+                    WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+                       OR plan_id IN (SELECT id FROM plans WHERE thread_id = $1)
+                )
+         )",
+        "DELETE FROM approval_continuation_descriptors
+         WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR approval_id IN (
+                SELECT id FROM approvals
+                WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+                   OR plan_id IN (SELECT id FROM plans WHERE thread_id = $1)
+            )",
+        "DELETE FROM approval_continuation_receipts
+         WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR approval_id IN (
+                SELECT id FROM approvals
+                WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+                   OR plan_id IN (SELECT id FROM plans WHERE thread_id = $1)
+            )",
+        "DELETE FROM approval_delivery_outbox
+         WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR approval_id IN (
+                SELECT id FROM approvals
+                WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+                   OR plan_id IN (SELECT id FROM plans WHERE thread_id = $1)
+            )",
+        "DELETE FROM approvals
+         WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR plan_id IN (SELECT id FROM plans WHERE thread_id = $1)",
+        "DELETE FROM todos
+         WHERE thread_id = $1
+            OR plan_id IN (SELECT id FROM plans WHERE thread_id = $1)",
+        "DELETE FROM plan_steps WHERE plan_id IN (SELECT id FROM plans WHERE thread_id = $1)",
+        "DELETE FROM plans WHERE thread_id = $1",
+    ] {
+        sqlx::query(query)
+            .bind(thread_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
+
+    // Remaining run-owned records. The two tables with explicit cascades are
+    // listed too, so the erasure contract stays obvious if their FK policy is
+    // ever relaxed in a later migration.
+    for query in [
+        "DELETE FROM subagent_edges
+         WHERE parent_run_id IN (SELECT id FROM runs WHERE thread_id = $1)
+            OR child_run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM checkpoints WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM session_tool_audit_intents WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM managed_run_terminalization_outbox WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM runs WHERE thread_id = $1",
+        "DELETE FROM messages WHERE thread_id = $1",
+    ] {
+        sqlx::query(query)
+            .bind(thread_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+    }
+
+    Ok(())
 }
 
 /// Require that `thread_id` is owned by EXACTLY `owner` in the caller's org.
@@ -1372,7 +1564,7 @@ type ReplayEventRow = (
     String,
     String,
     serde_json::Value,
-    chrono::NaiveDateTime,
+    chrono::DateTime<chrono::Utc>,
     String,
     String,
     String,
@@ -1406,8 +1598,8 @@ fn replay_event_row_to_proto(row: ReplayEventRow) -> pb::Event {
         event_type: event_type_to_i32(&event_type),
         schema_version: u32::try_from(schema_version).unwrap_or(0),
         ts: Some(prost_types::Timestamp {
-            seconds: ts.and_utc().timestamp(),
-            nanos: nanos_to_i32(ts.and_utc().timestamp_subsec_nanos()),
+            seconds: ts.timestamp(),
+            nanos: nanos_to_i32(ts.timestamp_subsec_nanos()),
         }),
         producer,
         correlation_id,
@@ -1431,11 +1623,16 @@ async fn replay_thread_task(
     req: pb::ReplayThreadRequest,
     tx: tokio::sync::mpsc::Sender<Result<pb::Event, Status>>,
 ) {
+    // Thread-created/message-appended events use the owning thread id in the
+    // legacy `events.run_id` column because no run exists yet. Run lifecycle
+    // events use the actual run id. Replay both shapes so a newly reloaded
+    // conversation does not silently lose its opening user turn or its
+    // assistant transcript from the canonical event stream.
     let rows = sqlx::query_as::<_, ReplayEventRow>(
         "SELECT e.id, e.event_type, e.payload, e.ts, e.org_id, e.user_id, e.correlation_id, e.causation_id, e.type_url, e.idempotency_key, e.resource_ref, e.producer, e.schema_version
          FROM events e
-         JOIN runs r ON e.run_id = r.id
-         WHERE r.thread_id = $1
+         LEFT JOIN runs r ON e.run_id = r.id
+         WHERE (e.run_id = $1 OR r.thread_id = $1)
          AND ($2 = '' OR e.id > $2)
          ORDER BY e.ts ASC, e.id ASC
          LIMIT CASE WHEN $3 = 0 THEN 10000 ELSE $3 END",
@@ -2450,14 +2647,16 @@ impl SessionCore for SessionService {
                 DateTime<Utc>,
                 Option<String>,
                 Option<String>,
+                Option<DateTime<Utc>>,
                 DateTime<Utc>,
             )> = sqlx::query_as(
                 "SELECT
                     t.id,
                     t.session_key,
                     t.created_at,
-                    first_user.content AS title,
-                    last_message.content AS preview,
+                    COALESCE(t.presentation_title, first_user.content) AS title,
+                    COALESCE(t.presentation_preview, last_message.content) AS preview,
+                    t.pinned_at,
                     COALESCE(last_message.created_at, t.created_at) AS updated_at
                  FROM threads t
                  LEFT JOIN LATERAL (
@@ -2474,8 +2673,8 @@ impl SessionCore for SessionService {
                     ORDER BY sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
-                 WHERE t.org_id = $1 AND t.user_id = $2
-                 ORDER BY COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
+                 WHERE t.org_id = $1 AND t.user_id = $2 AND t.archived_at IS NULL
+                 ORDER BY (t.pinned_at IS NOT NULL) DESC, COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
                  LIMIT $3",
             )
             .bind(&req.org_id)
@@ -2491,7 +2690,7 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, updated_at)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -2508,6 +2707,7 @@ impl SessionCore for SessionService {
                             preview,
                             created_at: Some(to_proto_timestamp(created_at)),
                             updated_at: Some(to_proto_timestamp(updated_at)),
+                            pinned: pinned_at.is_some(),
                         }
                     },
                 )
@@ -2517,6 +2717,406 @@ impl SessionCore for SessionService {
         }
         .await;
         record_metrics("list_threads", started, result.is_ok());
+        result
+    }
+
+    async fn update_thread_presentation(
+        &self,
+        request: Request<pb::UpdateThreadPresentationRequest>,
+    ) -> Result<Response<pb::UpdateThreadPresentationResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            if caller.zdr() {
+                return Err(Status::failed_precondition(
+                    "ZDR callers cannot persist thread presentation",
+                ));
+            }
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "org_id and thread_id are required",
+                ));
+            }
+            if req.title.is_none() && req.preview.is_none() && req.pinned.is_none() {
+                return Err(Status::invalid_argument(
+                    "at least one presentation field is required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                .await?;
+
+            let title = req
+                .title
+                .as_deref()
+                .map(|value| {
+                    normalize_thread_presentation_text(value, "title", THREAD_TITLE_MAX_CHARS)
+                })
+                .transpose()?;
+            let preview = req
+                .preview
+                .as_deref()
+                .map(|value| {
+                    normalize_thread_presentation_text(value, "preview", THREAD_PREVIEW_MAX_CHARS)
+                })
+                .transpose()?;
+            let now = Utc::now();
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            let changed: Option<(String, String)> = sqlx::query_as(
+                "UPDATE threads
+                 SET presentation_title = CASE WHEN $3 THEN $4 ELSE presentation_title END,
+                     presentation_preview = CASE WHEN $5 THEN $6 ELSE presentation_preview END,
+                     pinned_at = CASE
+                         WHEN $7 THEN CASE WHEN $8 THEN $9 ELSE NULL END
+                         ELSE pinned_at
+                     END
+                 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+                 RETURNING id, user_id",
+            )
+            .bind(&req.thread_id)
+            .bind(&req.org_id)
+            .bind(title.is_some())
+            .bind(title.as_ref().and_then(|value| value.as_deref()))
+            .bind(preview.is_some())
+            .bind(preview.as_ref().and_then(|value| value.as_deref()))
+            .bind(req.pinned.is_some())
+            .bind(req.pinned.unwrap_or_default())
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            let (_, thread_owner) =
+                changed.ok_or_else(|| Status::not_found("thread not found or archived"))?;
+
+            let resource = format!("thread:{}", req.thread_id);
+            let event_id = new_ulid();
+            sqlx::query(
+                "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+                 VALUES ($1, 'THREAD_PRESENTATION_UPDATED', $2, $3, $4, $5, $6, $7, '', $8, $9, $10, 'session-core', 1)",
+            )
+            .bind(&event_id)
+            .bind(&req.thread_id)
+            .bind(serde_json::json!({
+                "thread_id": &req.thread_id,
+                "title_overridden": title.is_some(),
+                "preview_overridden": preview.is_some(),
+                "pinned": req.pinned,
+            }))
+            .bind(now)
+            .bind(&req.org_id)
+            .bind(thread_owner)
+            .bind(&req.thread_id)
+            .bind(derive_idempotency_hash(
+                "session-core",
+                "THREAD_PRESENTATION_UPDATED",
+                &resource,
+                &format!("{}:{event_id}", req.thread_id),
+            ))
+            .bind(&resource)
+            .bind(THREAD_PRESENTATION_UPDATED_TYPE_URL)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
+            Ok(Response::new(pb::UpdateThreadPresentationResponse {
+                thread_id: req.thread_id,
+            }))
+        }
+        .await;
+        record_metrics("update_thread_presentation", started, result.is_ok());
+        result
+    }
+
+    async fn archive_thread(
+        &self,
+        request: Request<pb::ArchiveThreadRequest>,
+    ) -> Result<Response<pb::ArchiveThreadResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            if caller.zdr() {
+                return Err(Status::failed_precondition(
+                    "ZDR callers cannot archive durable threads",
+                ));
+            }
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "org_id and thread_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                .await?;
+            let now = Utc::now();
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            let newly_archived_at: Option<(DateTime<Utc>,)> = sqlx::query_as(
+                "UPDATE threads
+                 SET archived_at = $3
+                 WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
+                 RETURNING archived_at",
+            )
+            .bind(&req.thread_id)
+            .bind(&req.org_id)
+            .bind(now)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            let archived_at = if let Some((archived_at,)) = newly_archived_at {
+                let resource = format!("thread:{}", req.thread_id);
+                sqlx::query(
+                    "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+                     SELECT $1, 'THREAD_ARCHIVED', $2, $3, $4, t.org_id, t.user_id, $5, '', $6, $7, $8, 'session-core', 1
+                     FROM threads t WHERE t.id = $2",
+                )
+                .bind(new_ulid())
+                .bind(&req.thread_id)
+                .bind(serde_json::json!({"thread_id": &req.thread_id}))
+                .bind(archived_at)
+                .bind(&req.thread_id)
+                .bind(derive_idempotency_hash(
+                    "session-core",
+                    "THREAD_ARCHIVED",
+                    &resource,
+                    &format!("{}:archived", req.thread_id),
+                ))
+                .bind(&resource)
+                .bind(THREAD_ARCHIVED_TYPE_URL)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+                archived_at
+            } else {
+                sqlx::query_scalar::<_, DateTime<Utc>>(
+                    "SELECT archived_at FROM threads WHERE id = $1 AND org_id = $2 AND archived_at IS NOT NULL",
+                )
+                .bind(&req.thread_id)
+                .bind(&req.org_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .ok_or_else(|| Status::not_found("thread not found"))?
+            };
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
+            Ok(Response::new(pb::ArchiveThreadResponse {
+                thread_id: req.thread_id,
+                archived_at: Some(to_proto_timestamp(archived_at)),
+            }))
+        }
+        .await;
+        record_metrics("archive_thread", started, result.is_ok());
+        result
+    }
+
+    async fn archive_threads(
+        &self,
+        request: Request<pb::ArchiveThreadsRequest>,
+    ) -> Result<Response<pb::ArchiveThreadsResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            if caller.zdr() {
+                return Err(Status::failed_precondition(
+                    "ZDR callers cannot archive durable threads",
+                ));
+            }
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
+                return Err(Status::invalid_argument("org_id and user_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            caller.authorize_user(&req.user_id)?;
+            let now = Utc::now();
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            let thread_ids: Vec<(String,)> = sqlx::query_as(
+                "UPDATE threads
+                 SET archived_at = $3
+                 WHERE org_id = $1 AND user_id = $2 AND archived_at IS NULL
+                 RETURNING id",
+            )
+            .bind(&req.org_id)
+            .bind(&req.user_id)
+            .bind(now)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+
+            for (thread_id,) in &thread_ids {
+                let resource = format!("thread:{thread_id}");
+                sqlx::query(
+                    "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
+                     VALUES ($1, 'THREAD_ARCHIVED', $2, $3, $4, $5, $6, $7, '', $8, $9, $10, 'session-core', 1)",
+                )
+                .bind(new_ulid())
+                .bind(thread_id)
+                .bind(serde_json::json!({"thread_id": thread_id}))
+                .bind(now)
+                .bind(&req.org_id)
+                .bind(&req.user_id)
+                .bind(thread_id)
+                .bind(derive_idempotency_hash(
+                    "session-core",
+                    "THREAD_ARCHIVED",
+                    &resource,
+                    &format!("{thread_id}:archived"),
+                ))
+                .bind(&resource)
+                .bind(THREAD_ARCHIVED_TYPE_URL)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
+            Ok(Response::new(pb::ArchiveThreadsResponse {
+                archived_count: u32::try_from(thread_ids.len()).unwrap_or(u32::MAX),
+            }))
+        }
+        .await;
+        record_metrics("archive_threads", started, result.is_ok());
+        result
+    }
+
+    async fn delete_thread(
+        &self,
+        request: Request<pb::DeleteThreadRequest>,
+    ) -> Result<Response<pb::DeleteThreadResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
+                return Err(Status::invalid_argument(
+                    "org_id and thread_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            authorize_thread_deletion_owner(&self.pool, &caller, &req.thread_id).await?;
+
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            // Lock the owner row before removing children. Appenders acquire a
+            // key-share lock through the messages FK; taking FOR UPDATE first
+            // makes an in-flight append wait and prevents it from racing the
+            // final thread DELETE and resurrecting residue after this method's
+            // child deletes have run.
+            let owner: Option<(String, String)> =
+                sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1 FOR UPDATE")
+                    .bind(&req.thread_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+            let (owner_org, owner_user) =
+                owner.ok_or_else(|| Status::not_found("thread not found"))?;
+            let caller_owner = caller.user_id().unwrap_or(caller.principal_id());
+            if owner_org != req.org_id || owner_user != caller_owner {
+                return Err(Status::permission_denied("thread owner required"));
+            }
+            delete_thread_rows(&mut tx, &req.thread_id).await?;
+            let deleted = sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2")
+                .bind(&req.thread_id)
+                .bind(&req.org_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .rows_affected()
+                == 1;
+            if !deleted {
+                return Err(Status::not_found("thread not found"));
+            }
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
+            Ok(Response::new(pb::DeleteThreadResponse {
+                thread_id: req.thread_id,
+                deleted: true,
+            }))
+        }
+        .await;
+        record_metrics("delete_thread", started, result.is_ok());
+        result
+    }
+
+    async fn delete_threads(
+        &self,
+        request: Request<pb::DeleteThreadsRequest>,
+    ) -> Result<Response<pb::DeleteThreadsResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
+                return Err(Status::invalid_argument("org_id and user_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+            caller.authorize_user(&req.user_id)?;
+
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            // Lock the owner set before reading it so one bulk erase cannot
+            // race a concurrent append/create into the same user's history.
+            let thread_ids: Vec<(String,)> = sqlx::query_as(
+                "SELECT id FROM threads WHERE org_id = $1 AND user_id = $2 ORDER BY id FOR UPDATE",
+            )
+            .bind(&req.org_id)
+            .bind(&req.user_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+
+            for (thread_id,) in &thread_ids {
+                delete_thread_rows(&mut tx, thread_id).await?;
+                sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3")
+                    .bind(thread_id)
+                    .bind(&req.org_id)
+                    .bind(&req.user_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
+            Ok(Response::new(pb::DeleteThreadsResponse {
+                deleted_count: u32::try_from(thread_ids.len()).unwrap_or(u32::MAX),
+            }))
+        }
+        .await;
+        record_metrics("delete_threads", started, result.is_ok());
         result
     }
 
@@ -3435,18 +4035,37 @@ pub async fn serve(
 mod tests {
     use super::{
         append_letta_memory_rows, assemble_segments, authorize_dataplane, complete_step_inner,
-        derive_idempotency_hash, finalize_tool_action_inner, pb, reserve_tool_action_inner,
-        resolve_dataplane_addr, resolve_residency, semantic_context_search_status,
-        support_thread_id, sync_dream_memory_unless_zdr, validate_user_checkpoint, AssemblyInputs,
-        DelegatedDataPlaneBearer, LettaMemoryAdapter, MemoryRetention, SemanticContextSearchStatus,
-        VerifiedIdentity, DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
-        MAX_USER_CHECKPOINT_STATE_BYTES, STEP_COMPLETED_TYPE_URL, ZDR_MEMORY_READ_SUPPRESSED,
+        derive_idempotency_hash, finalize_tool_action_inner, normalize_thread_presentation_text,
+        pb, reserve_tool_action_inner, resolve_dataplane_addr, resolve_residency,
+        semantic_context_search_status, support_thread_id, sync_dream_memory_unless_zdr,
+        validate_user_checkpoint, AssemblyInputs, DelegatedDataPlaneBearer, LettaMemoryAdapter,
+        MemoryRetention, SemanticContextSearchStatus, VerifiedIdentity, DEFAULT_RESIDENCY,
+        HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES,
+        MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL, THREAD_TITLE_MAX_CHARS,
+        ZDR_MEMORY_READ_SUPPRESSED,
     };
     use crate::dreaming::DreamMemoryCandidate;
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
     use tonic::Request;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn thread_presentation_text_preserves_explicit_clear_and_rejects_oversize_values() {
+        assert_eq!(
+            normalize_thread_presentation_text("  An   explicit title  ", "title", 96)
+                .expect("valid title"),
+            Some("An explicit title".to_owned())
+        );
+        assert_eq!(
+            normalize_thread_presentation_text("   ", "title", 96).expect("explicit clear"),
+            None
+        );
+        let oversized = "x".repeat(THREAD_TITLE_MAX_CHARS + 1);
+        let error = normalize_thread_presentation_text(&oversized, "title", THREAD_TITLE_MAX_CHARS)
+            .expect_err("oversize title must not be silently truncated");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
 
     /// A Letta adapter whose Auth Core is a mock and whose memory endpoint is
     /// the discard port. Every adapter surface mints an Auth Core token before
@@ -4368,6 +4987,246 @@ mod tests {
         ] {
             sqlx::query(q).bind(&org).execute(&pool).await.ok();
         }
+    }
+
+    /// Replay must include the thread-owned events emitted before a run exists.
+    /// Those rows use `events.run_id = threads.id` for compatibility with the
+    /// original non-null schema; a run-only join silently dropped them on
+    /// reconnect. This integration test exercises the actual replay SQL against
+    /// Postgres rather than asserting on the query text.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn replay_thread_includes_thread_owned_events_against_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let thread_id = format!("thread-replay-{suffix}");
+        let org_id = format!("org-replay-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind("user-replay")
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+
+        // This is the shape produced by append_message_inner before a run is
+        // created: run_id carries the thread id, not a run id.
+        sqlx::query(
+            "INSERT INTO events (id, event_type, run_id, payload, org_id, user_id, type_url, producer, schema_version)
+             VALUES ($1, 'MESSAGE_APPENDED', $2, '{}', $3, 'user-replay', $4, 'session-core', 1)",
+        )
+        .bind(format!("event-replay-{suffix}"))
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(MESSAGE_APPENDED_TYPE_URL)
+        .execute(&pool)
+        .await
+        .expect("seed thread event");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        super::replay_thread_task(
+            pool.clone(),
+            pb::ReplayThreadRequest {
+                thread_id: thread_id.clone(),
+                after_event_id: String::new(),
+                limit: 0,
+            },
+            tx,
+        )
+        .await;
+        let event_types: Vec<i32> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|event| event.expect("replay event"))
+            .map(|event| event.event_type)
+            .collect();
+        assert_eq!(event_types, vec![121], "thread event must be replayed");
+
+        sqlx::query("DELETE FROM events WHERE run_id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// A destructive thread erase is owner-bound and removes transcript,
+    /// run, event, and thread rows atomically. The bulk form must remove only
+    /// the authenticated user's threads, not every thread in the org.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    #[allow(clippy::too_many_lines)]
+    async fn delete_thread_and_bulk_delete_are_owner_bound_against_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-delete-{suffix}");
+        let owner = format!("user-delete-{suffix}");
+        let foreign = format!("user-foreign-{suffix}");
+        let thread_one = format!("thread-delete-one-{suffix}");
+        let thread_two = format!("thread-delete-two-{suffix}");
+        let foreign_thread = format!("thread-delete-foreign-{suffix}");
+        let run_id = format!("run-delete-{suffix}");
+
+        for (thread_id, user_id) in [
+            (&thread_one, &owner),
+            (&thread_two, &owner),
+            (&foreign_thread, &foreign),
+        ] {
+            sqlx::query(
+                "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+            )
+            .bind(thread_id)
+            .bind(&org_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("seed thread");
+        }
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'secret', $3, $4)",
+        )
+        .bind(&run_id)
+        .bind(&thread_one)
+        .bind(&org_id)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'secret transcript')",
+        )
+        .bind(format!("message-{suffix}"))
+        .bind(&thread_one)
+        .execute(&pool)
+        .await
+        .expect("seed message");
+        sqlx::query(
+            "INSERT INTO events (id, event_type, run_id, payload, org_id, user_id) VALUES ($1, 'RUN_STARTED', $2, '{\"secret\":\"payload\"}', $3, $4)",
+        )
+        .bind(format!("event-{suffix}"))
+        .bind(&run_id)
+        .bind(&org_id)
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .expect("seed event");
+
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+
+        let mut cross_request = Request::new(pb::DeleteThreadRequest {
+            org_id: org_id.clone(),
+            thread_id: thread_one.clone(),
+        });
+        cross_request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org_id, &foreign));
+        assert_eq!(
+            svc.delete_thread(cross_request)
+                .await
+                .expect_err("foreign user must not erase thread")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let (remaining,): (i64,) = sqlx::query_as("SELECT count(*) FROM threads WHERE id = $1")
+            .bind(&thread_one)
+            .fetch_one(&pool)
+            .await
+            .expect("check foreign delete rejection");
+        assert_eq!(remaining, 1);
+
+        let mut owner_request = Request::new(pb::DeleteThreadRequest {
+            org_id: org_id.clone(),
+            thread_id: thread_one.clone(),
+        });
+        owner_request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org_id, &owner));
+        let receipt = svc
+            .delete_thread(owner_request)
+            .await
+            .expect("owner delete")
+            .into_inner();
+        assert!(receipt.deleted);
+        for (table, column, id) in [
+            ("threads", "id", thread_one.as_str()),
+            ("messages", "thread_id", thread_one.as_str()),
+            ("runs", "thread_id", thread_one.as_str()),
+            ("events", "run_id", run_id.as_str()),
+        ] {
+            let query = format!("SELECT count(*) FROM {table} WHERE {column} = $1");
+            let (count,): (i64,) = sqlx::query_as(&query)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .expect("check erased row");
+            assert_eq!(count, 0, "{table}.{column} retained erased content");
+        }
+
+        let mut bulk_request = Request::new(pb::DeleteThreadsRequest {
+            org_id: org_id.clone(),
+            user_id: owner.clone(),
+        });
+        bulk_request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(&org_id, &owner));
+        let bulk = svc
+            .delete_threads(bulk_request)
+            .await
+            .expect("owner bulk delete")
+            .into_inner();
+        assert_eq!(bulk.deleted_count, 1);
+        let (owned_left,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM threads WHERE org_id = $1 AND user_id = $2")
+                .bind(&org_id)
+                .bind(&owner)
+                .fetch_one(&pool)
+                .await
+                .expect("check bulk erase");
+        assert_eq!(owned_left, 0);
+        let (foreign_left,): (i64,) =
+            sqlx::query_as("SELECT count(*) FROM threads WHERE org_id = $1 AND user_id = $2")
+                .bind(&org_id)
+                .bind(&foreign)
+                .fetch_one(&pool)
+                .await
+                .expect("check foreign thread retained");
+        assert_eq!(foreign_left, 1);
+
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&foreign_thread)
+            .execute(&pool)
+            .await
+            .expect("cleanup foreign thread");
     }
 
     #[tokio::test]

@@ -397,17 +397,43 @@ impl FinetuneJobs for FinetuneJobsService {
                 return Err(Status::invalid_argument("org_id required"));
             }
 
-            // Conservative ceiling: estimate for in-flight rows (we don't
-            // know the final cost yet) + actual for terminal rows (the
-            // polling worker has written the real number). Same calendar
-            // month UTC so monthly budgets reset cleanly at month boundary.
+            // Conservative ceiling: a job contributes its REAL cost once one
+            // has been recorded, and its submit-time estimate until then.
+            // Same calendar month UTC so monthly budgets reset cleanly at the
+            // month boundary.
+            //
+            // The `actual_cost_usd > 0` test is what makes the ceiling
+            // conservative, and it is load-bearing rather than defensive. The
+            // previous form switched to `actual_cost_usd` for every terminal
+            // row on the stated grounds that "the polling worker has written
+            // the real number" — it does not. Every write of that column in
+            // the tree is a hardcoded 0.0 (model-gateway finetune_poller.rs
+            // :255, :333, :614; finetune_routes.rs :764, :850, :1034, :1737),
+            // so a job's contribution dropped to $0 the instant it succeeded
+            // and an org's month-to-date fine-tune spend fell back to zero as
+            // its jobs completed. A monthly cap that stops binding once work
+            // finishes is not a cap, so the estimate has to stand until a real
+            // cost replaces it.
+            //
+            // `cancelled` is the one status that does NOT fall back to the
+            // estimate. Cancellation is a deliberate user act, and charging an
+            // org the full estimate for training it explicitly stopped would
+            // burn a monthly cap on work nobody bought. `failed` does fall
+            // back, because a failure generally means compute was consumed
+            // before it happened — and for a guard, that is the safe
+            // direction. Both are superseded the moment a real cost lands.
+            //
+            // This is the safe half of CBU-1. The rest — routing fine-tune
+            // spend through cost-core's ledger and budget check instead of
+            // gateway env caps, which needs Azure's billed cost — is still
+            // open; see GATEWAY_DEDUPLICATION_PLAN.md.
             let row: (Option<f64>, i64) = sqlx::query_as(
                 "SELECT
                     COALESCE(SUM(
                         CASE
-                            WHEN status IN ('queued', 'running')
-                                THEN estimated_cost_usd
-                            ELSE actual_cost_usd
+                            WHEN actual_cost_usd > 0 THEN actual_cost_usd
+                            WHEN status = 'cancelled' THEN 0
+                            ELSE estimated_cost_usd
                         END
                     )::float8, 0.0) AS total_usd,
                     COUNT(*) AS job_count

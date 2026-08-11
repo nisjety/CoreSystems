@@ -502,6 +502,15 @@ fn validate_continuation_descriptor(
     if raw.is_empty() {
         return Ok(None);
     }
+    // A retained action payload must have a finite lifecycle. `0` means
+    // "no deadline" for proposal-only approvals, but allowing it here would
+    // retain action input indefinitely; the validated descriptor is encrypted
+    // into the dedicated continuation table before it is persisted.
+    if req.expires_in_seconds == 0 {
+        return Err(Status::invalid_argument(
+            "continuation descriptor requires a finite approval expiry",
+        ));
+    }
     if raw.len() > MAX_CONTINUATION_DESCRIPTOR_BYTES {
         return Err(Status::invalid_argument(
             "continuation descriptor is too large",
@@ -1778,9 +1787,6 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if !req.step_id.is_empty() {
                 metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
             }
-            if let Some(descriptor) = continuation_descriptor {
-                metadata_map.insert("continuation_descriptor".to_owned(), descriptor);
-            }
             let metadata = JsonValue::Object(metadata_map);
 
             let created = store::request_approval(
@@ -1799,6 +1805,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 // gate may legitimately fire more than once per run/step).
                 &req.idempotency_key,
                 &metadata,
+                continuation_descriptor.as_ref(),
                 expires_at,
             )
             .await
@@ -2536,6 +2543,7 @@ mod tests {
             run_id: "run-1".to_owned(),
             org_id: "org-1".to_owned(),
             user_id: "user-1".to_owned(),
+            expires_in_seconds: 3600,
             ..Default::default()
         };
         let valid = serde_json::json!({
@@ -2562,6 +2570,17 @@ mod tests {
         assert_eq!(
             validate_continuation_descriptor(&credential, &req)
                 .expect_err("credentials must never be persisted")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let no_expiry = proto::CreateApprovalRequest {
+            expires_in_seconds: 0,
+            ..req
+        };
+        assert_eq!(
+            validate_continuation_descriptor(&valid, &no_expiry)
+                .expect_err("descriptor retention must have a finite expiry")
                 .code(),
             tonic::Code::InvalidArgument
         );

@@ -11,6 +11,7 @@ use mp_ids::new_ulid;
 use sqlx::FromRow;
 use uuid::Uuid;
 
+use crate::continuation_crypto::DescriptorCipher;
 use crate::store::Pool;
 
 /// Maximum number of durable delivery leases before a poison delivery becomes
@@ -160,6 +161,7 @@ const CLAIM_APPROVAL_DELIVERY_SQL: &str = "WITH candidate AS ( \
       AND r.user_id = d.user_id \
     WHERE d.org_id = $1 \
       AND a.status = 'granted' \
+      AND (a.expires_at IS NULL OR a.expires_at > now()) \
       AND r.status NOT IN ('completed', 'failed', 'cancelled') \
       AND d.attempts < $2 \
       AND ( \
@@ -191,7 +193,8 @@ SET state = 'terminal', \
     terminal_at = now(), \
     last_failure_code = CASE \
       WHEN r.status IN ('completed', 'failed', 'cancelled') THEN 'run_not_resumable' \
-      WHEN a.status <> 'granted' THEN 'approval_not_granted' \
+      WHEN a.status <> 'granted' \
+        OR (a.expires_at IS NOT NULL AND a.expires_at <= now()) THEN 'approval_not_granted' \
       ELSE 'max_attempts_exhausted' \
     END, \
     lease_owner = NULL, \
@@ -209,6 +212,7 @@ WHERE d.approval_id = a.id \
   AND ( \
     r.status IN ('completed', 'failed', 'cancelled') \
     OR a.status <> 'granted' \
+    OR (a.expires_at IS NOT NULL AND a.expires_at <= now()) \
     OR (d.state = 'processing' AND d.attempts >= $2 AND d.lease_expires_at <= now()) \
   )";
 
@@ -249,13 +253,16 @@ FOR UPDATE";
 /// A descriptor can be read only through the same live worker lease that will
 /// later consume it. Normal approval APIs deliberately never project this
 /// retained action input.
-const LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL: &str =
-    "SELECT a.metadata -> 'continuation_descriptor' \
+const LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL: &str = "SELECT cd.ciphertext, cd.user_id \
 FROM approval_delivery_outbox AS d \
 JOIN approvals AS a ON a.id = d.approval_id \
   AND a.run_id = d.run_id \
   AND a.org_id = d.org_id \
   AND a.user_id = d.user_id \
+JOIN approval_continuation_descriptors AS cd ON cd.approval_id = a.id \
+  AND cd.run_id = d.run_id \
+  AND cd.org_id = d.org_id \
+  AND cd.user_id = d.user_id \
 WHERE d.org_id = $1 \
   AND d.lease_owner = $2 \
   AND d.lease_token_hash = $3 \
@@ -264,7 +271,7 @@ WHERE d.org_id = $1 \
   AND d.state = 'processing' \
   AND d.lease_expires_at > now() \
   AND a.status = 'granted' \
-  AND a.metadata ? 'continuation_descriptor'";
+  AND (a.expires_at IS NULL OR a.expires_at > now())";
 
 /// The descriptor's version and action fingerprint come exclusively from the
 /// persisted descriptor. A worker cannot choose either. The receipt ID is
@@ -273,14 +280,18 @@ const INSERT_CONTINUATION_START_RECEIPT_SQL: &str = "INSERT INTO approval_contin
     (receipt_id, delivery_id, approval_id, run_id, org_id, user_id, descriptor_version, \
      action_fingerprint, execution_service_id) \
 SELECT $6, d.delivery_id, d.approval_id, d.run_id, d.org_id, d.user_id, \
-       (a.metadata -> 'continuation_descriptor' ->> 'version')::smallint, \
-       a.metadata -> 'continuation_descriptor' ->> 'action_fingerprint', \
+       cd.descriptor_version, \
+       cd.action_fingerprint, \
        $2 \
 FROM approval_delivery_outbox AS d \
 JOIN approvals AS a ON a.id = d.approval_id \
   AND a.run_id = d.run_id \
   AND a.org_id = d.org_id \
   AND a.user_id = d.user_id \
+JOIN approval_continuation_descriptors AS cd ON cd.approval_id = a.id \
+  AND cd.run_id = d.run_id \
+  AND cd.org_id = d.org_id \
+  AND cd.user_id = d.user_id \
 WHERE d.org_id = $1 \
   AND d.lease_owner = $2 \
   AND d.lease_token_hash = $3 \
@@ -289,10 +300,7 @@ WHERE d.org_id = $1 \
   AND d.state = 'processing' \
   AND d.lease_expires_at > now() \
   AND a.status = 'granted' \
-  AND a.metadata ? 'continuation_descriptor' \
-  AND a.metadata -> 'continuation_descriptor' ->> 'run_id' = d.run_id \
-  AND a.metadata -> 'continuation_descriptor' ->> 'org_id' = d.org_id \
-  AND a.metadata -> 'continuation_descriptor' ->> 'user_id' = d.user_id \
+  AND (a.expires_at IS NULL OR a.expires_at > now()) \
 ON CONFLICT (delivery_id) DO NOTHING \
 RETURNING receipt_id";
 
@@ -368,6 +376,29 @@ WHERE d.org_id = $1 \
   AND o.outcome = 'completed' \
   AND o.provider_receipt_id IS NOT NULL \
 RETURNING d.attempts, d.state, d.next_attempt_at";
+
+/// Retained action input is useful only while a delivery can still be
+/// attempted. Once the delivery is terminal/settled, remove its encrypted
+/// descriptor so normal approval reads and future backups do not keep the
+/// action payload indefinitely.
+const CLEAR_CONTINUATION_DESCRIPTOR_FOR_DELIVERY_SQL: &str =
+    "DELETE FROM approval_continuation_descriptors AS cd \
+     USING approval_delivery_outbox AS d \
+     WHERE d.approval_id = cd.approval_id \
+       AND d.org_id = $1 \
+       AND d.delivery_id = $2 \
+       AND d.state IN ('terminal', 'settled')";
+
+/// Expired approvals may never be delivered again. This is called from the
+/// delivery reaper so descriptors are removed even when no worker claims the
+/// expired row. The query is tenant-scoped and content-free.
+const CLEAR_EXPIRED_CONTINUATION_DESCRIPTORS_SQL: &str =
+    "DELETE FROM approval_continuation_descriptors AS cd \
+     USING approvals AS a \
+     WHERE a.id = cd.approval_id \
+       AND a.org_id = $1 \
+       AND a.expires_at IS NOT NULL \
+       AND a.expires_at <= now()";
 
 /// Deterministic capped exponential backoff. Attempt 1 waits 5 seconds,
 /// attempt 2 waits 10, etc.; the server, not a worker, owns the schedule.
@@ -500,11 +531,17 @@ pub async fn claim_due_deliveries(
 /// resumed. No run state or event is changed here.
 pub async fn reap_undeliverable_deliveries(pool: &Pool, org_id: &str) -> Result<u64> {
     validate_nonempty_bounded(org_id, "org_id", 128)?;
+    let mut transaction = pool.begin().await?;
     let result = sqlx::query(REAP_UNDELIVERABLE_APPROVALS_SQL)
         .bind(org_id)
         .bind(i32::try_from(MAX_APPROVAL_DELIVERY_ATTEMPTS).unwrap_or(i32::MAX))
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
+    sqlx::query(CLEAR_EXPIRED_CONTINUATION_DESCRIPTORS_SQL)
+        .bind(org_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -590,6 +627,18 @@ pub async fn acknowledge_delivery(
         }
     };
     let acknowledged = row.as_ref().map(row_to_acknowledged).transpose()?;
+    if acknowledged.is_some()
+        && matches!(
+            acknowledgement,
+            DeliveryAcknowledgement::Terminal | DeliveryAcknowledgement::Settled
+        )
+    {
+        sqlx::query(CLEAR_CONTINUATION_DESCRIPTOR_FOR_DELIVERY_SQL)
+            .bind(org_id)
+            .bind(delivery_id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     transaction.commit().await?;
     Ok(acknowledged)
 }
@@ -609,15 +658,26 @@ pub async fn load_active_continuation_descriptor(
     validate_acknowledgement_input(delivery_id, lease_token)?;
     validate_nonempty_bounded(approval_id, "approval_id", 128)?;
     let token_hash = hash_lease_token(lease_token);
-    sqlx::query_scalar(LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL)
+    let row: Option<(String, String)> = sqlx::query_as(LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL)
         .bind(org_id)
         .bind(worker_id)
         .bind(token_hash)
         .bind(delivery_id)
         .bind(approval_id)
         .fetch_optional(pool)
-        .await
-        .map_err(Into::into)
+        .await?;
+    let Some((ciphertext, descriptor_user_id)) = row else {
+        return Ok(None);
+    };
+    let plaintext = DescriptorCipher::from_env()?.decrypt(
+        approval_id,
+        org_id,
+        &descriptor_user_id,
+        &ciphertext,
+    )?;
+    let descriptor = serde_json::from_str(&plaintext)
+        .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
+    Ok(Some(descriptor))
 }
 
 /// Record exactly one immutable start receipt for an active lease. A duplicate
@@ -768,6 +828,7 @@ pub async fn record_continuation_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     #[test]
     fn retry_policy_is_bounded_and_monotonic_for_poison_protection() {
@@ -783,6 +844,7 @@ mod tests {
         for required in [
             "d.org_id = $1",
             "a.status = 'granted'",
+            "a.expires_at IS NULL OR a.expires_at > now()",
             "a.run_id = d.run_id",
             "a.org_id = d.org_id",
             "a.user_id = d.user_id",
@@ -803,7 +865,9 @@ mod tests {
             "d.delivery_id = $4",
             "d.approval_id = $5",
             "d.lease_expires_at > now()",
-            "a.metadata ? 'continuation_descriptor'",
+            "a.expires_at IS NULL OR a.expires_at > now()",
+            "SELECT cd.ciphertext",
+            "JOIN approval_continuation_descriptors AS cd",
         ] {
             assert!(
                 LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL.contains(required),
@@ -840,8 +904,10 @@ mod tests {
             "d.lease_token_hash = $3",
             "d.delivery_id = $4",
             "d.approval_id = $5",
-            "a.metadata -> 'continuation_descriptor' ->> 'action_fingerprint'",
-            "a.metadata -> 'continuation_descriptor' ->> 'run_id' = d.run_id",
+            "cd.action_fingerprint",
+            "cd.descriptor_version",
+            "JOIN approval_continuation_descriptors AS cd",
+            "a.expires_at IS NULL OR a.expires_at > now()",
             "ON CONFLICT (delivery_id) DO NOTHING",
         ] {
             assert!(
@@ -996,5 +1062,184 @@ mod tests {
         assert!(migration.contains("ADD COLUMN IF NOT EXISTS settled_at"));
         assert!(!migration.contains("customer_delivered"));
         assert!(!migration.contains("provider_response"));
+    }
+
+    #[test]
+    fn expired_or_terminal_approvals_drop_retained_descriptors() {
+        for required in [
+            "DELETE FROM approval_continuation_descriptors",
+            "expires_at IS NOT NULL",
+            "expires_at <= now()",
+            "USING approvals AS a",
+        ] {
+            assert!(
+                CLEAR_EXPIRED_CONTINUATION_DESCRIPTORS_SQL.contains(required),
+                "expired descriptor cleanup must require {required}"
+            );
+        }
+        for required in [
+            "DELETE FROM approval_continuation_descriptors",
+            "d.state IN ('terminal', 'settled')",
+            "d.delivery_id = $2",
+        ] {
+            assert!(
+                CLEAR_CONTINUATION_DESCRIPTOR_FOR_DELIVERY_SQL.contains(required),
+                "terminal descriptor cleanup must require {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_at_rest_encryption_is_required_and_fail_closed() {
+        let migration =
+            include_str!("../migrations/0022_encrypted_approval_continuation_descriptors.sql");
+        assert!(migration.contains("approval_continuation_descriptors"));
+        assert!(migration.contains("ciphertext TEXT NOT NULL"));
+        assert!(!LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL.contains("a.metadata"));
+        assert!(LOAD_ACTIVE_CONTINUATION_DESCRIPTOR_SQL.contains("cd.ciphertext"));
+        assert!(INSERT_CONTINUATION_START_RECEIPT_SQL.contains("cd.action_fingerprint"));
+    }
+
+    /// A worker crash after recording the immutable start receipt must be
+    /// recoverable without executing the approved action a second time. This
+    /// is intentionally a real-Postgres test: the lease CAS, encrypted
+    /// descriptor lookup, unique receipt, and reaper all need to participate.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn expired_worker_lease_reclaims_without_duplicate_start_receipt() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect postgres");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-approval-recovery-{suffix}");
+        let user_id = format!("user-{suffix}");
+        let thread_id = format!("thread-{suffix}");
+        let run_id = format!("run-{suffix}");
+        let approval_id = format!("appr-{suffix}");
+        let descriptor = serde_json::json!({
+            "version": 1,
+            "run_id": run_id,
+            "org_id": org_id,
+            "user_id": user_id,
+            "action_kind": "tool_call",
+            "action_fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "tool_name": "execute_provider_action",
+            "input": {"connection_id": "conn-1", "operation": "message.send", "params": {}, "body": {}}
+        });
+        let key = base64::engine::general_purpose::STANDARD.encode([9_u8; 32]);
+        std::env::set_var("SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY", key);
+
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, status, org_id, user_id) VALUES ($1, $2, 'approval recovery', 'running', $3, $4)",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+
+        crate::orchestration_store::request_approval(
+            &pool,
+            &approval_id,
+            &run_id,
+            None,
+            "tool_call",
+            &user_id,
+            &org_id,
+            &user_id,
+            "",
+            &serde_json::json!({}),
+            Some(&descriptor),
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+        )
+        .await
+        .expect("request approval")
+        .expect("approval inserted");
+        let decision = crate::orchestration_store::decide_approval(
+            &pool,
+            &approval_id,
+            &org_id,
+            Some(&user_id),
+            "granted",
+            &user_id,
+            "approved for recovery test",
+        )
+        .await
+        .expect("grant approval");
+        let delivery_id = decision.delivery_id.expect("delivery");
+
+        let first = claim_due_deliveries(&pool, &org_id, "worker-1", 1)
+            .await
+            .expect("first claim");
+        let first = first.into_iter().next().expect("first delivery");
+        let started = record_continuation_started(
+            &pool,
+            &org_id,
+            "worker-1",
+            &delivery_id,
+            &approval_id,
+            &first.lease_token,
+        )
+        .await
+        .expect("record first start")
+        .expect("first receipt");
+        assert!(!started.already_started);
+
+        sqlx::query(
+            "UPDATE approval_delivery_outbox SET lease_expires_at = now() - interval '1 second' WHERE delivery_id = $1",
+        )
+        .bind(&delivery_id)
+        .execute(&pool)
+        .await
+        .expect("expire worker lease");
+        let second = claim_due_deliveries(&pool, &org_id, "worker-2", 1)
+            .await
+            .expect("recovery claim");
+        let second = second.into_iter().next().expect("recovered delivery");
+        let replay = record_continuation_started(
+            &pool,
+            &org_id,
+            "worker-2",
+            &delivery_id,
+            &approval_id,
+            &second.lease_token,
+        )
+        .await
+        .expect("record recovered start")
+        .expect("recovered receipt");
+        assert!(replay.already_started);
+        assert_eq!(replay.receipt_id, started.receipt_id);
+
+        sqlx::query("DELETE FROM approvals WHERE id = $1")
+            .bind(&approval_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup approval");
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup run");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup thread");
+        std::env::remove_var("SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY");
     }
 }
