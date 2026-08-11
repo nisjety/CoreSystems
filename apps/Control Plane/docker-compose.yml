@@ -190,6 +190,10 @@ services:
             QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD: '"${QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD:?QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD is required}"'
             COST_CORE_GDPR_NATS_PASSWORD: '"${COST_CORE_GDPR_NATS_PASSWORD:?COST_CORE_GDPR_NATS_PASSWORD is required}"'
             EMBEDDING_ENGINE_GDPR_NATS_PASSWORD: '"${EMBEDDING_ENGINE_GDPR_NATS_PASSWORD:?EMBEDDING_ENGINE_GDPR_NATS_PASSWORD is required}"'
+            # Frontend Plane's verevon-gateway-rs erasure consumer. The BFF keeps
+            # its own chat-history copy in Dragonfly, so org/admin erasure has to
+            # reach it; this is its only identity on the Control shared broker.
+            VEREVON_GATEWAY_GDPR_NATS_PASSWORD: '"${VEREVON_GATEWAY_GDPR_NATS_PASSWORD:?VEREVON_GATEWAY_GDPR_NATS_PASSWORD is required}"'
         ports:
             - "127.0.0.1:${CONTROL_SHARED_NATS_HOST_PORT:-4224}:4222"
             - "127.0.0.1:${CONTROL_SHARED_NATS_MONITOR_HOST_PORT:-8224}:8222"

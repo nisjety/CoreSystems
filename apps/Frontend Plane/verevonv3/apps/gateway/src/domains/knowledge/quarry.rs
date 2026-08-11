@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::{
     cache,
     config::AppState,
-    domains::knowledge::{enhanced_fetch, shared},
+    domains::knowledge::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
     public_url::normalize_public_http_url,
@@ -19,6 +19,11 @@ use crate::{
 };
 
 const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
+
+/// Default freshness window for a cached scrape preview, used when the caller
+/// sends no `max_age_s`. Matches `cache::FRESH_SECS`, which this replaced for
+/// this route so the caller's policy can override it.
+const PREVIEW_FRESH_SECS: u64 = 4 * 60 * 60;
 
 pub(super) async fn scrape(
     State(state): State<AppState>,
@@ -86,15 +91,32 @@ pub(super) async fn scrape_preview(
     };
     body["url"] = Value::String(target.clone());
 
-    // Cache scrape previews 4h by URL so re-adding a link skips quarry's slow
-    // browser render, and a stale copy can be served if quarry is unavailable.
+    // Cache admission MIRRORS quarry-edge's (`routes.rs` `should_read` /
+    // `should_write` / `effective_ttl`) rather than inventing a second policy.
+    // It previously invented one, and the gap was a ZDR hole: a `zdr: true`
+    // scrape is forwarded verbatim to Quarry, Quarry correctly refuses to cache
+    // it — and the BFF then wrote the same rendered page content into
+    // Frontend-Plane Redis for 24 hours anyway, breaking the guarantee at the
+    // one boundary the ownership matrix says must not hold this. The caller's
+    // `cache` policy was ignored the same way: `{mode: "bypass"}` was honoured
+    // upstream and silently overridden here.
+    let admission = CacheAdmission::resolve(&state, &user, &headers, &body).await;
     let key = cache::cache_key("scrape-preview", &[&target]);
     let mut stale: Option<Value> = None;
-    if let Some(hit) = state.cache.lookup(&key).await {
-        if hit.fresh {
-            return (StatusCode::OK, Json(ok(hit.data))).into_response();
+    if admission.may_read {
+        if let Some(hit) = state
+            .cache
+            .lookup_within(&key, admission.max_age_secs)
+            .await
+        {
+            return (StatusCode::OK, Json(ok(hit))).into_response();
         }
-        stale = Some(hit.data);
+        // Outside the freshness window a copy is still worth keeping as an
+        // outage fallback, exactly as before — but only within the store window
+        // the caller's policy allows.
+        if let Some(hit) = state.cache.lookup(&key).await {
+            stale = Some(hit.data);
+        }
     }
 
     let cookie = shared::cookie_header(&headers);
@@ -147,18 +169,18 @@ pub(super) async fn scrape_preview(
             tracing::warn!(target = %target, "quarry scrape failed; serving stale cached preview");
             return (StatusCode::OK, Json(ok(data))).into_response();
         }
-        // Escalate bot-walled / stalled renders to the configured stealth proxy
-        // tier (Scrapfly free → Bright Data best) before giving up. With no
-        // provider configured this is a no-op and we fall through to a clear error.
-        if enhanced_fetch::enhanced_enabled(&state) {
-            if let Some(page) = enhanced_fetch::enhanced_fetch(&state, &target).await {
-                tracing::info!(target = %target, "scrape preview served via enhanced proxy tier");
-                let preview = enhanced_fetch::build_enhanced_preview(&target, &page);
-                state.cache.store(&key, &preview).await;
-                return (StatusCode::OK, Json(ok(preview))).into_response();
-            }
-            tracing::warn!(target = %target, "enhanced proxy tier returned no content");
-        }
+        // A Quarry refusal is final. This is where a commercial stealth-proxy
+        // tier (Scrapfly / Bright Data Web Unlocker) used to run in-process,
+        // reached precisely BECAUSE quarry-edge had returned 403/429 — so the
+        // one signal that meant "policy said no" was the trigger for going
+        // around it. It shipped the org's target URL and the page's full
+        // content to a third-party processor with no `zdr` bit, no org
+        // scoping, no robots check, no usage record and no step receipt, then
+        // relabelled the result with a `quarry` key so nothing downstream could
+        // tell first-party evidence from a stealth scrape. Removed: Quarry owns
+        // web fetch, and a stealth tier — if ever needed — belongs behind
+        // `quarry-edge` as another `DriverKind` in its own waterfall.
+        //
         // Always return a clear, typed error promptly — never let a slow or
         // bot-walled upstream collapse into an empty response at the client.
         let (code, message) = classify_scrape_failure(status, browser_elapsed);
@@ -174,8 +196,89 @@ pub(super) async fn scrape_preview(
     };
 
     let preview = build_scrape_preview(&target, &scrape_body, extract_markdown.as_deref());
-    state.cache.store(&key, &preview).await;
+    if admission.may_write {
+        state.cache.store(&key, &preview).await;
+    }
     (StatusCode::OK, Json(ok(preview))).into_response()
+}
+
+/// Whether the BFF may read and write its own copy of a page preview, and for
+/// how long a cached copy counts as fresh.
+///
+/// Deliberately shaped like quarry-edge's three admission helpers so the two
+/// layers cannot drift: `may_read`/`may_write` correspond to `should_read` /
+/// `should_write` (both additionally gated on `!zdr.is_active()`), and
+/// `max_age_secs` to `effective_ttl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheAdmission {
+    may_read: bool,
+    may_write: bool,
+    max_age_secs: u64,
+}
+
+impl CacheAdmission {
+    /// Nothing in, nothing out. Used for a ZDR-posture caller: page content
+    /// fetched under ZDR must not touch Frontend-Plane storage in either
+    /// direction — not written, and not served from an entry some earlier
+    /// non-ZDR request happened to leave behind.
+    const DENIED: Self = Self {
+        may_read: false,
+        may_write: false,
+        max_age_secs: 0,
+    };
+
+    /// Resolve admission for this request.
+    ///
+    /// The ZDR posture is derived SERVER-side ([`crate::zdr`]): the `x-zdr`
+    /// header, a `zdr: true` body field, or the organisation's standing posture
+    /// in org-core. The org check is what makes this hold for a client that
+    /// never sets either — and it is skipped when the request already declares
+    /// ZDR, since the answer cannot change.
+    async fn resolve(
+        state: &AppState,
+        user: &AuthenticatedUser,
+        headers: &HeaderMap,
+        body: &Value,
+    ) -> Self {
+        if crate::zdr::request_zdr(headers, Some(body)) {
+            return Self::DENIED;
+        }
+        if crate::zdr::org_zdr_enabled(state, user).await {
+            return Self::DENIED;
+        }
+        Self::from_policy(body.get("cache"))
+    }
+
+    /// Read the caller's `CachePolicy` (quarry-core's `{mode, max_age_s, …}`) out
+    /// of the same body the BFF forwards to quarry-edge. An absent or
+    /// unrecognised policy keeps the previous defaults, so a client that sends
+    /// no policy behaves exactly as before.
+    fn from_policy(policy: Option<&Value>) -> Self {
+        let mode = policy
+            .and_then(|policy| policy.get("mode"))
+            .and_then(Value::as_str)
+            .map(str::trim);
+        let (may_read, may_write) = match mode {
+            None => (true, true),
+            Some("read_write") => (true, true),
+            Some("read_only") => (true, false),
+            Some("write_only") => (false, true),
+            Some("bypass") => (false, false),
+            // An unknown mode is not a licence to cache: quarry-edge would
+            // reject the body outright, so the safe local reading is "no".
+            Some(_) => (false, false),
+        };
+        let max_age_secs = policy
+            .and_then(|policy| policy.get("max_age_s"))
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .unwrap_or(PREVIEW_FRESH_SECS);
+        Self {
+            may_read,
+            may_write,
+            max_age_secs,
+        }
+    }
 }
 
 /// Map a failed upstream scrape into a clear, user-facing (code, message). A long
@@ -666,6 +769,147 @@ fn crawl_job_status(value: &Value) -> Option<&str> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    fn preview_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn state_with_org_zdr(zdr: bool) -> (AppState, wiremock::MockServer) {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": zdr } }
+            })))
+            .mount(&org_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        (state, org_core)
+    }
+
+    /// The BI-2 defect verbatim: a `zdr: true` scrape is forwarded to Quarry,
+    /// Quarry refuses to cache it — and the BFF wrote the rendered page content
+    /// into Frontend-Plane Redis for 24h regardless. Admission must be denied in
+    /// BOTH directions, so a ZDR request also cannot be answered from an entry
+    /// an earlier non-ZDR request left behind. An explicit `read_write` policy
+    /// must not re-open it: the posture is resolved before the policy is read.
+    #[tokio::test]
+    async fn a_zdr_request_neither_reads_nor_writes_the_local_preview_cache() {
+        let (state, _org_core) = state_with_org_zdr(false).await;
+        let body = json!({
+            "url": "https://example.invalid/",
+            "zdr": true,
+            "cache": { "mode": "read_write", "max_age_s": 3600 }
+        });
+        let admission =
+            CacheAdmission::resolve(&state, &preview_user(), &HeaderMap::new(), &body).await;
+        assert_eq!(admission, CacheAdmission::DENIED);
+
+        // The `x-zdr` header alone does it too, with no `zdr` in the body.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", axum::http::HeaderValue::from_static("true"));
+        let admission = CacheAdmission::resolve(
+            &state,
+            &preview_user(),
+            &headers,
+            &json!({ "url": "https://example.invalid/" }),
+        )
+        .await;
+        assert_eq!(admission, CacheAdmission::DENIED);
+    }
+
+    /// Org-wide ZDR is invisible to the request body — a client under a ZDR
+    /// workspace sends an ordinary scrape. The posture has to be derived
+    /// server-side or the page content lands in Frontend-Plane Redis anyway.
+    #[tokio::test]
+    async fn an_org_under_zdr_caches_no_page_content_at_all() {
+        let (state, _org_core) = state_with_org_zdr(true).await;
+        let admission = CacheAdmission::resolve(
+            &state,
+            &preview_user(),
+            &HeaderMap::new(),
+            &json!({ "url": "https://example.invalid/" }),
+        )
+        .await;
+        assert_eq!(admission, CacheAdmission::DENIED);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_request_in_a_non_zdr_org_still_caches() {
+        let (state, _org_core) = state_with_org_zdr(false).await;
+        let admission = CacheAdmission::resolve(
+            &state,
+            &preview_user(),
+            &HeaderMap::new(),
+            &json!({ "url": "https://example.invalid/" }),
+        )
+        .await;
+        assert!(admission.may_read && admission.may_write);
+        assert_eq!(admission.max_age_secs, PREVIEW_FRESH_SECS);
+    }
+
+    /// quarry-edge honours `{mode: "bypass"}`; this layer silently ignored it,
+    /// so a caller who asked for a live fetch got a preview up to 4h old.
+    #[test]
+    fn the_callers_cache_mode_is_honoured_the_way_quarry_edge_honours_it() {
+        let admission = |mode: &str| CacheAdmission::from_policy(Some(&json!({ "mode": mode })));
+
+        let bypass = admission("bypass");
+        assert!(!bypass.may_read && !bypass.may_write);
+
+        let read_only = admission("read_only");
+        assert!(read_only.may_read && !read_only.may_write);
+
+        let write_only = admission("write_only");
+        assert!(!write_only.may_read && write_only.may_write);
+
+        let read_write = admission("read_write");
+        assert!(read_write.may_read && read_write.may_write);
+
+        // An unknown mode must not read as permission. quarry-edge rejects the
+        // body outright; the safe local reading is "cache nothing".
+        let unknown = admission("write_through");
+        assert!(!unknown.may_read && !unknown.may_write);
+    }
+
+    #[test]
+    fn no_policy_keeps_the_previous_defaults() {
+        let default = CacheAdmission::from_policy(None);
+        assert!(default.may_read && default.may_write);
+        assert_eq!(default.max_age_secs, PREVIEW_FRESH_SECS);
+        // An empty policy object is the same as none.
+        let empty = CacheAdmission::from_policy(Some(&json!({})));
+        assert!(empty.may_read && empty.may_write);
+        assert_eq!(empty.max_age_secs, PREVIEW_FRESH_SECS);
+    }
+
+    /// `max_age_s` is the caller's freshness window, matching quarry-edge's
+    /// `effective_ttl`. A zero/absent value falls back to the default rather
+    /// than meaning "instantly stale".
+    #[test]
+    fn max_age_s_narrows_the_freshness_window() {
+        let tight = CacheAdmission::from_policy(Some(&json!({ "max_age_s": 60 })));
+        assert_eq!(tight.max_age_secs, 60);
+        let zero = CacheAdmission::from_policy(Some(&json!({ "max_age_s": 0 })));
+        assert_eq!(zero.max_age_secs, PREVIEW_FRESH_SECS);
+    }
 
     #[test]
     fn build_scrape_preview_uses_extract_markdown_for_artifact_output() {

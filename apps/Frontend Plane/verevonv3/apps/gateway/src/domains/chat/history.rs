@@ -22,6 +22,11 @@ use crate::{
 use super::shared;
 
 const CHAT_HISTORY_TTL_SECS: u64 = 90 * 24 * 60 * 60;
+/// A "this thread ran a ZDR turn" marker must outlive anything it guards, so it
+/// gets the same window as the transcript store itself. A marker that expired
+/// first would silently re-open persistence for the very thread it was written
+/// to protect.
+const CHAT_ZDR_MARKER_TTL_SECS: u64 = CHAT_HISTORY_TTL_SECS;
 const MAX_THREADS: usize = 80;
 const MAX_TRANSCRIPT_TURNS: usize = 160;
 const MAX_TRANSCRIPT_STEPS: usize = 320;
@@ -101,12 +106,35 @@ pub(super) struct SaveThreadRequest {
     turns: Option<Vec<Value>>,
     #[serde(default)]
     task_steps: Option<Vec<Value>>,
+    /// A client may RAISE the retention posture for this snapshot. It can never
+    /// lower it: [`retention_posture`] ORs this with the `x-zdr` header, the
+    /// thread's own ZDR marker, and the organisation's standing posture.
+    #[serde(default)]
+    zdr: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadsResponse {
     sessions: Vec<ChatThreadSummary>,
+    /// The server's retention verdict for this caller.
+    ///
+    /// The SPA also keeps a `localStorage` copy of conversations for instant
+    /// paint on reload. That copy had the same defect this endpoint did — its
+    /// only gate was the browser's in-memory temporary-chat `Set` — and being
+    /// on the user's own device, it is the one copy no erasure fan-out can
+    /// reach. Rather than have the SPA decide, the server states the posture
+    /// here and the client obeys: no local content writes while `zdr` is true,
+    /// and an existing local copy is dropped the moment it turns true.
+    retention: RetentionPosture,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetentionPosture {
+    /// True when conversation content must not be retained anywhere —
+    /// including the client's own storage.
+    zdr: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,6 +143,14 @@ struct ThreadResponse {
     session: ChatThreadSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     transcript: Option<ChatThreadTranscript>,
+    /// Whether this snapshot was actually retained.
+    ///
+    /// A ZDR save is answered `200 { retained: false }` rather than an error on
+    /// purpose. The SPA saves a snapshot on EVERY turn, and org-wide ZDR is a
+    /// normal configuration, not an anomaly — erroring there would paint a
+    /// correctly-behaving workspace red on every message. `false` is the honest,
+    /// machine-readable answer: the request was understood, and nothing was kept.
+    retained: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -158,10 +194,44 @@ pub(super) async fn list_threads(
         Ok(scope) => scope,
         Err(response) => return response,
     };
-    let cached = read_index(&state, &scope).await;
+    // An org can turn ZDR ON while a previous window's history is already
+    // stored here. Refusing new writes alone would leave that residue readable
+    // for the rest of its 90-day TTL, so the first listing under the new posture
+    // clears the Frontend Plane's copy. After that this is a no-op — the index
+    // is empty, and a ZDR turn never creates a thread in session-core to index.
+    //
+    // The purge drops OUR copy; it does not hide the owning plane's. Threads
+    // session-core still holds (created before the posture changed) keep listing
+    // through `read_durable_threads` below, which is read-through, not
+    // retention. Suppressing them here would be this layer overriding a decision
+    // that is not its to make — and would look like data loss to the user while
+    // the data still exists one plane over.
+    let zdr = crate::zdr::org_zdr_enabled(&state, &user).await;
+    let cached = if zdr {
+        let removed = purge_user_history(
+            &state,
+            &scope.org_id,
+            &scope.user_id,
+            PurgeScope::ContentOnly,
+        )
+        .await;
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                "purged retained chat history: organization is under Zero Data Retention"
+            );
+        }
+        Vec::new()
+    } else {
+        read_index(&state, &scope).await
+    };
     let durable = read_durable_threads(&state, &user, &scope, &headers).await;
     let sessions = merge_thread_indexes(cached, durable);
-    Json(ok(ThreadsResponse { sessions })).into_response()
+    Json(ok(ThreadsResponse {
+        sessions,
+        retention: RetentionPosture { zdr },
+    }))
+    .into_response()
 }
 
 pub(super) async fn get_thread_transcript(
@@ -177,6 +247,16 @@ pub(super) async fn get_thread_transcript(
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
+    // Same converge-to-empty rule as the listing: a thread that acquired the ZDR
+    // posture after it was stored must not still be readable here. Serving it
+    // and purging later would mean the transcript endpoint is the one place the
+    // guarantee does not hold.
+    if thread_is_zdr(&state, &scope, &thread_id).await
+        || crate::zdr::org_zdr_enabled(&state, &user).await
+    {
+        forget_thread(&state, &scope, &thread_id).await;
+        return Json(ok(TranscriptResponse { transcript: None })).into_response();
+    }
     let transcript = read_transcript(&state, &scope, &thread_id).await;
     Json(ok(TranscriptResponse { transcript })).into_response()
 }
@@ -185,6 +265,7 @@ pub(super) async fn save_thread(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(thread_id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<SaveThreadRequest>,
 ) -> Response {
     let scope = match scope_for(&state, &user).await {
@@ -194,6 +275,44 @@ pub(super) async fn save_thread(
     let thread_id = normalize_id(&thread_id);
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
+    }
+
+    // THE ZDR GATE. Everything below this point writes conversation content —
+    // the transcript obviously, but the index too: `preview` is the last turn's
+    // text and `title` is often the model's own summary of the conversation.
+    //
+    // The Model Plane guarantees a ZDR turn leaves zero durable trace:
+    // `zdr_direct_stream` creates no thread, no run, and appends no message,
+    // and `claims.effective_zdr(req.zdr)` ORs the token posture over the request
+    // body so a client cannot downgrade it. This endpoint used to undo that
+    // guarantee wholesale — it accepted a fully client-supplied transcript and
+    // kept it in Frontend-Plane Dragonfly for 90 days with no server-side check
+    // at all, while the Model Plane's telemetry correctly reported that nothing
+    // had been retained. The only gate was an in-memory `Set` in the browser,
+    // and a gate that lives in the SPA is not a gate: a reloaded tab, a replayed
+    // request, a non-SPA client, or one regression is enough to defeat it.
+    if retention_posture(&state, &user, &scope, &thread_id, &headers, &body).await {
+        // A save under ZDR is treated as a PURGE, not merely a no-op. A thread
+        // can acquire the posture partway through its life (an org enables ZDR,
+        // or a branch carries a temporary thread's content into a new id), and
+        // leaving the earlier copy behind would retain exactly the content the
+        // posture forbids.
+        forget_thread(&state, &scope, &thread_id).await;
+        tracing::info!(
+            thread_id = %thread_id,
+            "chat snapshot not retained: Zero Data Retention posture"
+        );
+        // The echoed summary is built from the thread id and placeholders, NOT
+        // from the submitted title/preview. Echoing the caller's own text back
+        // would disclose nothing new, but it would make this response look like
+        // a read of something stored, and the next reader should not have to
+        // work out which.
+        return Json(ok(ThreadResponse {
+            session: ephemeral_summary(&thread_id),
+            transcript: None,
+            retained: false,
+        }))
+        .into_response();
     }
 
     let now = now_iso();
@@ -241,6 +360,12 @@ pub(super) async fn save_thread(
             .unwrap_or_else(|| existing.as_ref().is_some_and(|item| item.pinned)),
     };
 
+    // Enrol in the org roster on the way in. This is the ONLY moment an
+    // organisation erasure can learn that this user has history to purge —
+    // hashed cache keys make the set the sole enumeration — so it must happen
+    // on the same path that creates the thing being enumerated.
+    remember_user_in_org(&state, &scope).await;
+
     let mut sessions = read_index(&state, &scope).await;
     sessions.retain(|item| item.thread_id != thread_id);
     sessions.push(session.clone());
@@ -274,8 +399,74 @@ pub(super) async fn save_thread(
     Json(ok(ThreadResponse {
         session,
         transcript,
+        retained: true,
     }))
     .into_response()
+}
+
+/// The server-derived Zero Data Retention posture for one snapshot write.
+///
+/// Four independent sources, OR-ed — any one of them alone means "retain
+/// nothing", and nothing a client sends can clear another's vote. This mirrors
+/// `claims.effective_zdr(req.zdr)` in model-gateway, which likewise ORs a
+/// posture the caller does not control over the one it does.
+///
+/// Ordered cheapest-first so the common non-ZDR save costs at most one org-core
+/// lookup (itself cached for a minute), and a request that already declares ZDR
+/// costs nothing at all.
+async fn retention_posture(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    scope: &ChatHistoryScope,
+    thread_id: &str,
+    headers: &HeaderMap,
+    body: &SaveThreadRequest,
+) -> bool {
+    // 1 + 2. This request says so: the `x-zdr` header, or an explicit
+    //        `zdr: true` in the body.
+    if shared::zdr_flag(headers) || body.zdr.unwrap_or(false) {
+        return true;
+    }
+    // 3. This THREAD has already run a ZDR turn. Written server-side by the
+    //    stream/invoke path (see `mark_thread_zdr`) from the same normalized
+    //    posture that is forwarded to the Model Plane, so it survives a page
+    //    reload, a replayed save, and a client that never heard of ZDR — the
+    //    exact failures the browser's in-memory Set cannot survive.
+    if thread_is_zdr(state, scope, thread_id).await {
+        return true;
+    }
+    // 4. The ORGANISATION is ZDR. No client input reaches this at all, and it
+    //    fails closed if org-core cannot be reached.
+    crate::zdr::org_zdr_enabled(state, user).await
+}
+
+/// A response-only summary for a thread that was deliberately not retained.
+fn ephemeral_summary(thread_id: &str) -> ChatThreadSummary {
+    ChatThreadSummary {
+        thread_id: thread_id.to_owned(),
+        title: "Verevon Chat".to_owned(),
+        preview: String::new(),
+        updated_at: now_iso(),
+        pinned: false,
+    }
+}
+
+/// Remove every retained trace of one thread: its transcript, and its entry in
+/// the sidebar index. Used by the ZDR gate and by erasure — never by an ordinary
+/// save.
+async fn forget_thread(state: &AppState, scope: &ChatHistoryScope, thread_id: &str) {
+    delete_value(state, &transcript_key(scope, thread_id)).await;
+    let mut sessions = read_index(state, scope).await;
+    let before = sessions.len();
+    sessions.retain(|item| item.thread_id != thread_id);
+    if sessions.len() != before {
+        write_value(
+            state,
+            &index_key(scope),
+            serde_json::to_value(&sessions).unwrap_or(Value::Null),
+        )
+        .await;
+    }
 }
 
 pub(super) async fn delete_thread(
@@ -300,7 +491,14 @@ pub(super) async fn delete_thread(
     )
     .await;
     delete_value(&state, &transcript_key(&scope, &thread_id)).await;
-    Json(ok(ThreadsResponse { sessions })).into_response()
+    // A deletion response reports the posture too, so a client that only ever
+    // deletes still learns it must not be keeping a local copy.
+    let zdr = crate::zdr::org_zdr_enabled(&state, &user).await;
+    Json(ok(ThreadsResponse {
+        sessions,
+        retention: RetentionPosture { zdr },
+    }))
+    .into_response()
 }
 
 pub(super) async fn clear_threads(
@@ -321,7 +519,12 @@ pub(super) async fn clear_threads(
         serde_json::to_value(Vec::<ChatThreadSummary>::new()).unwrap_or(Value::Null),
     )
     .await;
-    Json(ok(ThreadsResponse { sessions: vec![] })).into_response()
+    let zdr = crate::zdr::org_zdr_enabled(&state, &user).await;
+    Json(ok(ThreadsResponse {
+        sessions: vec![],
+        retention: RetentionPosture { zdr },
+    }))
+    .into_response()
 }
 
 async fn scope_for(
@@ -522,11 +725,170 @@ fn index_key(scope: &ChatHistoryScope) -> String {
     format!("chat-history:index:{}:{}", scope.org_id, scope.user_id)
 }
 
+/// Redis key for an organisation's chat-history user ROSTER.
+///
+/// # Why a roster has to exist at all
+///
+/// `cache_key` HASHES its parts (`verevon:gw:chat-history:<hash>`), so there is
+/// no `SCAN chat-history:index:{org}:*` — the literal key never reaches Redis.
+/// Every other purge here walks the per-user index, but an ORGANISATION erasure
+/// arrives naming only the org: without a roster there is no way to discover
+/// which users under it have stored history, and the org-wide fan-out would have
+/// nothing to iterate. This set is that enumeration, and nothing else reads it.
+///
+/// It holds user ids only — no conversation content, no titles, no previews.
+/// Not hashed through `cache_key`, because the erasure consumer must be able to
+/// build this key from an org id alone, with no prior read.
+fn org_roster_key(org_id: &str) -> String {
+    format!("verevon:gw:chat-history:roster:{org_id}")
+}
+
+/// Record that this (org, user) has stored chat history, so an organisation
+/// erasure can find them. Idempotent (`SADD`), and re-arms the roster TTL.
+async fn remember_user_in_org(state: &AppState, scope: &ChatHistoryScope) {
+    state
+        .cache
+        .set_add(
+            &org_roster_key(&scope.org_id),
+            &scope.user_id,
+            CHAT_HISTORY_TTL_SECS,
+        )
+        .await;
+}
+
 fn transcript_key(scope: &ChatHistoryScope, thread_id: &str) -> String {
     format!(
         "chat-history:transcript:{}:{}:{}",
         scope.org_id, scope.user_id, thread_id
     )
+}
+
+/// Key for the "this thread has run a ZDR turn" marker.
+///
+/// Scoped identically to the transcript it guards, so the marker and the thing
+/// it protects can never be looked up under different identities.
+fn zdr_marker_key(scope: &ChatHistoryScope, thread_id: &str) -> String {
+    format!(
+        "chat-history:zdr:{}:{}:{}",
+        scope.org_id, scope.user_id, thread_id
+    )
+}
+
+/// Record, server-side, that this thread has run a Zero Data Retention turn.
+///
+/// Called from the chat stream/invoke paths with the SAME normalized posture
+/// that is forwarded to the Model Plane, so the BFF's notion of "temporary" is
+/// derived from the request the model actually served rather than from the
+/// browser's memory. The marking is one-way and sticky for the thread's whole
+/// life, matching the SPA's own rule ("temporary chat locks in at the first
+/// send") — but durably, where a reload cannot lose it.
+///
+/// Best-effort by construction: a marker that fails to write leaves the org
+/// posture and the per-request flags still guarding the save path.
+pub(crate) async fn mark_thread_zdr(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+) {
+    let thread_id = normalize_id(thread_id);
+    if org_id.trim().is_empty() || user_id.trim().is_empty() || thread_id.is_empty() {
+        return;
+    }
+    let scope = ChatHistoryScope {
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+    };
+    let key = cache_key("chat-history", &[&zdr_marker_key(&scope, &thread_id)]);
+    state
+        .cache
+        .store_for_secs(&key, &Value::Bool(true), CHAT_ZDR_MARKER_TTL_SECS)
+        .await;
+    // Mirror into the process-local store so a single-instance deployment with
+    // no Dragonfly configured is still protected. `read_value`'s Redis-first /
+    // memory-fallback shape means either tier alone is enough to deny a save.
+    state
+        .chat_history_store
+        .set(zdr_marker_key(&scope, &thread_id), Value::Bool(true))
+        .await;
+}
+
+/// Whether this thread carries a ZDR marker.
+async fn thread_is_zdr(state: &AppState, scope: &ChatHistoryScope, thread_id: &str) -> bool {
+    read_value(state, &zdr_marker_key(scope, thread_id))
+        .await
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// What a purge is allowed to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PurgeScope {
+    /// Drop retained content, but KEEP the ZDR markers. Used when the posture
+    /// itself triggered the purge: forgetting why a thread was protected would
+    /// let the very next save re-create what was just removed.
+    ContentOnly,
+    /// Erasure. Drop the markers too — the subject is gone, and a marker is
+    /// itself a record that this person held a conversation under this id.
+    Everything,
+}
+
+/// Delete this (org, user)'s retained chat history.
+///
+/// Returns the number of threads whose transcripts were removed.
+///
+/// The Redis keys are HASHED by `cache_key`, so there is no wildcard/SCAN path
+/// to a user's transcripts — the index IS the enumeration, which is why it is
+/// read first and cleared last. A transcript whose index entry was already lost
+/// is unreachable by any code path and expires with its TTL.
+pub(crate) async fn purge_user_history(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    purge: PurgeScope,
+) -> usize {
+    if org_id.trim().is_empty() || user_id.trim().is_empty() {
+        return 0;
+    }
+    let scope = ChatHistoryScope {
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+    };
+    let sessions = read_index(state, &scope).await;
+    let removed = sessions.len();
+    for item in &sessions {
+        delete_value(state, &transcript_key(&scope, &item.thread_id)).await;
+        if purge == PurgeScope::Everything {
+            delete_value(state, &zdr_marker_key(&scope, &item.thread_id)).await;
+        }
+    }
+    delete_value(state, &index_key(&scope)).await;
+    removed
+}
+
+/// Delete every user's retained chat history for one organisation.
+///
+/// Returns `(users, threads)` actually purged.
+///
+/// Driven by the cross-plane GDPR erasure fan-out for
+/// `subject_type: "organization"`. The org roster is the enumeration (see
+/// [`org_roster_key`]); the roster itself is deleted last, so a redelivery that
+/// crashes midway still finds the remaining users on the next attempt. Fully
+/// idempotent — a second delivery finds an empty roster and purges nothing,
+/// which is what NATS at-least-once requires.
+pub(crate) async fn purge_org_history(state: &AppState, org_id: &str) -> (usize, usize) {
+    let org_id = org_id.trim();
+    if org_id.is_empty() {
+        return (0, 0);
+    }
+    let roster_key = org_roster_key(org_id);
+    let members = state.cache.set_members(&roster_key).await;
+    let mut threads = 0;
+    for user_id in &members {
+        threads += purge_user_history(state, org_id, user_id, PurgeScope::Everything).await;
+    }
+    state.cache.delete(&roster_key).await;
+    (members.len(), threads)
 }
 
 /// Makes Support-derived threads durably read-only at the same-origin trust
@@ -636,11 +998,12 @@ fn bad_request(message: &'static str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        enforce_support_thread_policy, merge_thread_indexes, sort_pinned_first,
-        strip_support_thread_capabilities, ChatThreadSummary, MAX_THREADS,
+    use super::*;
+    use serde_json::json;
+    use wiremock::{
+        matchers::{method as wm_method, path as wm_path},
+        Mock, MockServer, ResponseTemplate,
     };
-    use serde_json::{json, Value};
 
     fn summary(thread_id: &str, title: &str, preview: &str, updated_at: &str) -> ChatThreadSummary {
         ChatThreadSummary {
@@ -819,5 +1182,406 @@ mod tests {
             "support_read_only": true
         });
         assert!(enforce_support_thread_policy(&mut invalid_initial).is_err());
+    }
+
+    // ── Zero Data Retention gate ────────────────────────────────────────────
+
+    fn test_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    fn test_scope() -> ChatHistoryScope {
+        ChatHistoryScope {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+        }
+    }
+
+    /// An org-core that answers with a given standing ZDR posture.
+    async fn org_core_with_zdr(zdr: bool) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": zdr } }
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn state_for(org_core: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = org_core.uri();
+        state
+    }
+
+    fn headers_with_zdr() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-zdr", axum::http::HeaderValue::from_static("true"));
+        headers
+    }
+
+    fn save_body() -> SaveThreadRequest {
+        SaveThreadRequest {
+            title: Some("Kvartalstall".to_owned()),
+            pinned: None,
+            preview: Some("Omsetningen endte på 4,2 mrd".to_owned()),
+            updated_at: None,
+            turns: Some(vec![json!({ "role": "user", "content": "hemmelig" })]),
+            task_steps: None,
+            zdr: None,
+        }
+    }
+
+    /// The SRS-1 defect, exactly: the browser's in-memory temporary-chat `Set`
+    /// is gone (reloaded tab / replayed request / non-SPA client), so the save
+    /// arrives looking completely ordinary. The thread's own server-side marker
+    /// — written when the ZDR turn was dispatched — must still refuse it.
+    #[tokio::test]
+    async fn a_thread_that_ran_a_zdr_turn_stays_unpersistable_after_the_client_forgets() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        let user = test_user();
+
+        // The ZDR turn goes out; the gateway records it, not the browser.
+        mark_thread_zdr(&state, "org-1", "user-1", "thread-1").await;
+
+        // A later save carries no ZDR signal whatsoever.
+        assert!(
+            retention_posture(
+                &state,
+                &user,
+                &test_scope(),
+                "thread-1",
+                &HeaderMap::new(),
+                &save_body(),
+            )
+            .await,
+            "a thread marked ZDR server-side must stay unpersistable"
+        );
+        // A different thread in the same scope is unaffected.
+        assert!(
+            !retention_posture(
+                &state,
+                &user,
+                &test_scope(),
+                "thread-2",
+                &HeaderMap::new(),
+                &save_body(),
+            )
+            .await
+        );
+    }
+
+    /// Each source alone is sufficient, and no client input can clear another's
+    /// vote — the same one-way OR `claims.effective_zdr` applies upstream.
+    #[tokio::test]
+    async fn any_single_source_alone_establishes_the_posture() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        let user = test_user();
+
+        // Header alone.
+        assert!(
+            retention_posture(
+                &state,
+                &user,
+                &test_scope(),
+                "t",
+                &headers_with_zdr(),
+                &save_body()
+            )
+            .await
+        );
+        // Body alone.
+        let declared = SaveThreadRequest {
+            zdr: Some(true),
+            ..save_body()
+        };
+        assert!(
+            retention_posture(
+                &state,
+                &user,
+                &test_scope(),
+                "t",
+                &HeaderMap::new(),
+                &declared
+            )
+            .await
+        );
+        // And a body that says `false` cannot cancel the header.
+        let denied = SaveThreadRequest {
+            zdr: Some(false),
+            ..save_body()
+        };
+        assert!(
+            retention_posture(
+                &state,
+                &user,
+                &test_scope(),
+                "t",
+                &headers_with_zdr(),
+                &denied
+            )
+            .await
+        );
+    }
+
+    /// Org-wide ZDR is the case the SPA cannot express at all: it only knows
+    /// per-thread "temporary chat". The posture has to come from org-core.
+    #[tokio::test]
+    async fn an_org_under_zdr_retains_nothing_even_when_the_request_says_nothing() {
+        let org_core = org_core_with_zdr(true).await;
+        let state = state_for(&org_core).await;
+        assert!(
+            retention_posture(
+                &state,
+                &test_user(),
+                &test_scope(),
+                "t",
+                &HeaderMap::new(),
+                &save_body(),
+            )
+            .await
+        );
+    }
+
+    /// An org-core outage must not be a licence to retain. The two failure modes
+    /// are not symmetric: guessing "not ZDR" durably stores content the org may
+    /// have forbidden, guessing "ZDR" only skips a cache write.
+    #[tokio::test]
+    async fn an_unreachable_org_core_fails_closed() {
+        let org_core = MockServer::start().await; // no mocks: every GET 404s
+        let state = state_for(&org_core).await;
+        assert!(
+            retention_posture(
+                &state,
+                &test_user(),
+                &test_scope(),
+                "t",
+                &HeaderMap::new(),
+                &save_body(),
+            )
+            .await,
+            "an unresolvable posture must be treated as Zero Data Retention"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_save_in_a_non_zdr_org_is_still_retained() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        assert!(
+            !retention_posture(
+                &state,
+                &test_user(),
+                &test_scope(),
+                "t",
+                &HeaderMap::new(),
+                &save_body(),
+            )
+            .await
+        );
+    }
+
+    /// A save under ZDR is a PURGE, not a no-op: a thread can acquire the
+    /// posture after content was already stored (an org enables ZDR, or a branch
+    /// carries a temporary thread's turns into a new id).
+    #[tokio::test]
+    async fn a_zdr_save_removes_content_that_was_already_stored() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        let scope = test_scope();
+
+        // Pre-existing retained copy, from before the posture applied.
+        write_value(
+            &state,
+            &transcript_key(&scope, "thread-1"),
+            json!({ "threadId": "thread-1", "turns": [{"content": "hemmelig"}], "updatedAt": "2026-08-01T00:00:00Z" }),
+        )
+        .await;
+        write_value(
+            &state,
+            &index_key(&scope),
+            json!([{ "threadId": "thread-1", "title": "T", "preview": "hemmelig", "updatedAt": "2026-08-01T00:00:00Z" }]),
+        )
+        .await;
+        assert!(read_transcript(&state, &scope, "thread-1").await.is_some());
+
+        let response = save_thread(
+            State(state.clone()),
+            Extension(test_user()),
+            Path("thread-1".to_owned()),
+            headers_with_zdr(),
+            Json(save_body()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            read_transcript(&state, &scope, "thread-1").await.is_none(),
+            "the earlier transcript must be gone, not merely left unupdated"
+        );
+        assert!(
+            read_index(&state, &scope).await.is_empty(),
+            "the index entry carries the last turn's text and must go too"
+        );
+    }
+
+    /// Turning ZDR on must not leave the previous window's history readable for
+    /// the rest of its 90-day TTL. The first listing under the new posture
+    /// clears the Frontend Plane's copy.
+    #[tokio::test]
+    async fn enabling_org_zdr_clears_history_stored_before_the_posture_changed() {
+        let org_core = org_core_with_zdr(true).await;
+        let state = state_for(&org_core).await;
+        let scope = test_scope();
+
+        write_value(
+            &state,
+            &transcript_key(&scope, "t1"),
+            json!({ "threadId": "t1", "turns": [{"content": "fra før"}], "updatedAt": "2026-08-01T00:00:00Z" }),
+        )
+        .await;
+        write_value(
+            &state,
+            &index_key(&scope),
+            json!([{ "threadId": "t1", "title": "T1", "preview": "fra før", "updatedAt": "2026-08-01T00:00:00Z" }]),
+        )
+        .await;
+
+        let response = list_threads(
+            State(state.clone()),
+            Extension(test_user()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(read_index(&state, &scope).await.is_empty());
+        assert!(read_transcript(&state, &scope, "t1").await.is_none());
+    }
+
+    /// SRS-3: after erasure the owning plane deletes the conversation and
+    /// reports success — a complete copy must not keep living here.
+    #[tokio::test]
+    async fn purging_a_subject_removes_the_index_and_every_transcript() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        let scope = test_scope();
+
+        for thread in ["t1", "t2"] {
+            write_value(
+                &state,
+                &transcript_key(&scope, thread),
+                json!({ "threadId": thread, "turns": [{"content": "x"}], "updatedAt": "2026-08-01T00:00:00Z" }),
+            )
+            .await;
+        }
+        write_value(
+            &state,
+            &index_key(&scope),
+            json!([
+                { "threadId": "t1", "title": "T1", "preview": "p", "updatedAt": "2026-08-01T00:00:00Z" },
+                { "threadId": "t2", "title": "T2", "preview": "p", "updatedAt": "2026-08-02T00:00:00Z" }
+            ]),
+        )
+        .await;
+        mark_thread_zdr(&state, "org-1", "user-1", "t1").await;
+
+        let removed = purge_user_history(&state, "org-1", "user-1", PurgeScope::Everything).await;
+
+        assert_eq!(removed, 2);
+        assert!(read_index(&state, &scope).await.is_empty());
+        assert!(read_transcript(&state, &scope, "t1").await.is_none());
+        assert!(read_transcript(&state, &scope, "t2").await.is_none());
+        // Erasure clears the marker too: it is itself a record that this person
+        // held a conversation under that id, and there is no subject left.
+        assert!(!thread_is_zdr(&state, &scope, "t1").await);
+    }
+
+    /// The roster is the ONLY enumeration an organisation erasure has: hashed
+    /// cache keys mean there is no `SCAN chat-history:index:{org}:*`. It must
+    /// therefore be populated by the same path that creates the history, and
+    /// must hold user ids only — never conversation content.
+    #[test]
+    fn the_org_roster_key_is_derivable_from_an_org_id_alone() {
+        // The erasure consumer receives an org id and nothing else, so this key
+        // must not depend on a prior read or on `cache_key`'s hashing.
+        assert_eq!(
+            org_roster_key("org-1"),
+            "verevon:gw:chat-history:roster:org-1"
+        );
+        assert_ne!(org_roster_key("org-1"), org_roster_key("org-2"));
+    }
+
+    /// A posture-driven purge must NOT forget why the thread was protected —
+    /// otherwise the very next save re-creates what was just removed.
+    #[tokio::test]
+    async fn a_content_only_purge_keeps_the_zdr_markers() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        let scope = test_scope();
+
+        write_value(
+            &state,
+            &transcript_key(&scope, "t1"),
+            json!({ "threadId": "t1", "turns": [], "updatedAt": "2026-08-01T00:00:00Z" }),
+        )
+        .await;
+        write_value(
+            &state,
+            &index_key(&scope),
+            json!([{ "threadId": "t1", "title": "T1", "preview": "p", "updatedAt": "2026-08-01T00:00:00Z" }]),
+        )
+        .await;
+        mark_thread_zdr(&state, "org-1", "user-1", "t1").await;
+
+        purge_user_history(&state, "org-1", "user-1", PurgeScope::ContentOnly).await;
+
+        assert!(read_transcript(&state, &scope, "t1").await.is_none());
+        assert!(
+            thread_is_zdr(&state, &scope, "t1").await,
+            "the marker must survive so a later save is still refused"
+        );
+    }
+
+    /// The marker is written from the NORMALIZED body — the posture actually
+    /// forwarded to the Model Plane — and only when there is a thread to mark.
+    #[tokio::test]
+    async fn only_a_zdr_turn_with_a_thread_id_is_marked() {
+        let org_core = org_core_with_zdr(false).await;
+        let state = state_for(&org_core).await;
+        let user = test_user();
+        let scope = test_scope();
+
+        shared::record_zdr_thread(&state, &user, "org-1", &json!({ "thread_id": "plain" })).await;
+        assert!(!thread_is_zdr(&state, &scope, "plain").await);
+
+        shared::record_zdr_thread(
+            &state,
+            &user,
+            "org-1",
+            &json!({ "thread_id": "temp", "zdr": true }),
+        )
+        .await;
+        assert!(thread_is_zdr(&state, &scope, "temp").await);
+
+        // No thread id: nothing to key a marker on, and nothing blows up.
+        shared::record_zdr_thread(&state, &user, "org-1", &json!({ "zdr": true })).await;
     }
 }

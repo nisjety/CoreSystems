@@ -4486,10 +4486,6 @@ mod tests {
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers: true,
             allow_dev_auth_bypass: true,
-            enhanced_scrape_provider: String::new(),
-            enhanced_scrape_api_key: String::new(),
-            enhanced_scrape_zone: String::new(),
-            enhanced_scrape_country: String::new(),
         }
     }
 

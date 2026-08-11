@@ -18,6 +18,7 @@ mod config;
 mod contracts;
 mod domains;
 mod envelope;
+mod gdpr_nats;
 mod middleware;
 mod observability;
 mod onboarding;
@@ -25,6 +26,7 @@ mod public_url;
 mod rate_limit;
 mod upstream;
 mod utils;
+mod zdr;
 
 use config::{build_cors_layer, build_state};
 use middleware::strip_inbound_identity_headers;
@@ -43,6 +45,14 @@ async fn main() -> Result<()> {
     let prometheus_handle = observability::install_recorder()?;
 
     let state = build_state().await?;
+
+    // Cross-plane GDPR erasure. Spawned before serving and never awaited: the
+    // gateway holds its own copy of conversation content, so an org- or
+    // admin-scoped erasure has to reach this process, but a shared-broker
+    // outage must not stop it serving traffic. Returns false (and warns) when
+    // unconfigured, which is the normal local-dev state.
+    gdpr_nats::spawn(state.clone());
+
     let app = build_router(state)
         .route(
             "/metrics",
@@ -341,10 +351,6 @@ mod tests {
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers,
             allow_dev_auth_bypass: allow_dev_actor_headers,
-            enhanced_scrape_provider: String::new(),
-            enhanced_scrape_api_key: String::new(),
-            enhanced_scrape_zone: String::new(),
-            enhanced_scrape_country: String::new(),
         }
     }
 

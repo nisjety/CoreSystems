@@ -128,6 +128,44 @@ impl ResultCache {
         let _: Result<(), redis::RedisError> = conn.del(key).await;
     }
 
+    /// Add `member` to the Redis SET at `key` and (re)arm its TTL.
+    ///
+    /// A real `SADD` rather than a read-modify-write of a JSON array, because
+    /// the only caller is a membership ROSTER used by GDPR erasure: two users
+    /// in one org writing concurrently would lose an update under
+    /// read-modify-write, and a lost roster entry is a subject whose data the
+    /// erasure fan-out then silently fails to reach. `SADD` is atomic and
+    /// idempotent, so concurrent writers and redelivery are both non-events.
+    ///
+    /// The TTL is refreshed on every add so an active roster never expires out
+    /// from under the data it indexes.
+    pub(crate) async fn set_add(&self, key: &str, member: &str, ttl_secs: u64) {
+        let Some(mut conn) = self.conn.clone() else {
+            return;
+        };
+        let added: Result<i64, redis::RedisError> = conn.sadd(key, member).await;
+        if let Err(error) = added {
+            tracing::debug!(%error, "roster sadd failed");
+            return;
+        }
+        let _: Result<bool, redis::RedisError> = conn.expire(key, ttl_secs as i64).await;
+    }
+
+    /// Read every member of the Redis SET at `key`. An empty vector on a miss,
+    /// a disabled cache, or any error — callers must treat "empty" as "nothing
+    /// known here", never as proof of absence.
+    pub(crate) async fn set_members(&self, key: &str) -> Vec<String> {
+        let Some(mut conn) = self.conn.clone() else {
+            return Vec::new();
+        };
+        conn.smembers::<_, Vec<String>>(key)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "roster smembers failed");
+                Vec::new()
+            })
+    }
+
     /// Hand out a clone of the underlying connection manager, if the cache is
     /// connected. `ConnectionManager` is cheaply clonable (it shares one
     /// multiplexed connection), so other subsystems — e.g. the distributed

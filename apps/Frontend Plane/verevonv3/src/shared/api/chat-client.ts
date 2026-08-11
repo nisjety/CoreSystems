@@ -2,6 +2,11 @@ import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
+import {
+  applyServerRetention,
+  forgetThreadLocally,
+  reconcileLocalThreads,
+} from '@/features/chat/lib/chat-retention'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
 // The gateway forwards the chat body verbatim to model-gateway `/v1/invoke/*`,
@@ -563,9 +568,35 @@ export async function getThreadMessages(threadId: string): Promise<ChatMessage[]
   return normalizeThreadMessages(raw)
 }
 
+/**
+ * Apply the server's retention verdict carried on a threads response.
+ *
+ * Deliberately applied HERE rather than at each call site. `listChatThreads`
+ * has three independent callers (the sidebar, the dashboard composer, the chat
+ * controller); a policy any one of them can forget to apply is the same class
+ * of defect as the client-side ZDR gate this replaces. This is the single point
+ * every server answer passes through.
+ */
+function applyRetentionFrom(raw: unknown): void {
+  const record = objectValue(raw)
+  const data = objectValue(record?.data) ?? record
+  const retention = objectValue(data?.retention)
+  const zdr = retention?.zdr
+  applyServerRetention(typeof zdr === 'boolean' ? zdr : undefined)
+}
+
 export async function listChatThreads(): Promise<ChatThreadSession[]> {
   const raw = await requestJson<unknown>('/api/v1/chat/threads')
-  return normalizeChatThreadSessions(raw)
+  applyRetentionFrom(raw)
+  const sessions = normalizeChatThreadSessions(raw)
+  // Reached only on a SUCCESSFUL listing — `requestJson` throws otherwise — so
+  // an empty array here really means "the server has no threads for you", not
+  // "the request failed". That distinction is what makes this safe to act on:
+  // a thread the server no longer lists has been erased upstream, and its local
+  // copy must go with it. This is the only way a GDPR erasure reaches the
+  // device at all.
+  reconcileLocalThreads(sessions.map((session) => session.threadId))
+  return sessions
 }
 
 export async function saveChatThreadSnapshot(
@@ -580,6 +611,15 @@ export async function saveChatThreadSnapshot(
     },
   )
   const record = objectValue(raw)
+  const data = objectValue(record?.data) ?? record
+  // `retained: false` means the server understood the request and deliberately
+  // kept nothing — a ZDR posture it derived server-side (org policy, the
+  // thread's own ZDR marker, or this request's own flag). If the server kept
+  // nothing, neither may the device.
+  if (data?.retained === false) {
+    forgetThreadLocally(threadId)
+    return null
+  }
   return normalizeChatThreadSession(record?.session)
 }
 
@@ -596,6 +636,7 @@ export async function deleteChatThread(threadId: string): Promise<ChatThreadSess
     `/api/v1/chat/threads/${encodeURIComponent(threadId)}`,
     { method: 'DELETE' },
   )
+  applyRetentionFrom(raw)
   return normalizeChatThreadSessions(raw)
 }
 

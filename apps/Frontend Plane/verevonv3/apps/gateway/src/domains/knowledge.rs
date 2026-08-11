@@ -1,6 +1,5 @@
 mod diagnostics;
 mod documents;
-mod enhanced_fetch;
 mod imports;
 mod operating_map;
 mod products;
