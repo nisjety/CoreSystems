@@ -177,6 +177,30 @@ export type BrowserReplay = {
   events: BrowserReplayEvent[]
 }
 
+/** Compact owner audit data from Quarry. This excludes observation bodies,
+ * screenshots, raw DevTools payloads, credentials, and browser storage. */
+export type BrowserOwnerTimelineItem = {
+  id: string
+  occurredAt: string
+  kind: 'action' | 'control' | 'tab' | 'devtools' | 'lifecycle'
+  action?: BrowserAction['type'] | string
+  outcome?: 'completed' | 'failed' | 'skipped'
+  errorCode?: string | null
+  mode?: BrowserControlMode
+  initiatedBy?: 'human' | 'agent' | 'system'
+  operation?: 'opened' | 'selected' | 'closed'
+  tabId?: string | null
+  activeTabId?: string | null
+  eventCount?: number
+  lastSequence?: number
+  state?: 'started' | 'closed'
+}
+
+export type BrowserOwnerTimelineResponse = {
+  items: BrowserOwnerTimelineItem[]
+  nextCursor?: string | null
+}
+
 export type BrowserTab = {
   active: boolean
   tabId: string
@@ -206,6 +230,13 @@ export type BrowserSession = {
   status: BrowserSessionStatus
   tabs?: BrowserTab[]
   tabsUrl?: string | null
+  /** Client-hydrated compact activity from the actor-scoped Quarry timeline.
+   * This is intentionally not supplied by the browser-session projection,
+   * because it is a separately paginated owner resource. */
+  ownerTimeline?: BrowserOwnerTimelineItem[]
+  /** Client-visible failure state for the separately fetched owner timeline.
+   * This prevents a failed canonical read from being rendered as empty history. */
+  ownerTimelineError?: string | null
   timeline?: BrowserTimelineEntry[]
   replay?: BrowserReplay | null
   title: string
@@ -321,6 +352,28 @@ export async function setBrowserControlMode(
     headers: orgHeaders(orgId),
     signal,
   })
+}
+
+/** Read the actor-scoped, append-only browser timeline from its Quarry owner.
+ * `nextCursor` is passed back unchanged to continue a stable page. */
+export async function getBrowserOwnerTimeline(
+  orgId: string,
+  sessionId: string,
+  options?: { cursor?: string; limit?: number },
+  signal?: AbortSignal,
+): Promise<BrowserOwnerTimelineResponse> {
+  const params = new URLSearchParams()
+  if (options?.cursor) params.set('cursor', options.cursor)
+  if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  const query = params.toString()
+  return requestJson<BrowserOwnerTimelineResponse>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/timeline${query ? `?${query}` : ''}`,
+    {
+      method: 'GET',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
 }
 
 export async function listBrowserTabs(

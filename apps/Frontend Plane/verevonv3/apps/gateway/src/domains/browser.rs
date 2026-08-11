@@ -22,6 +22,7 @@
 //! model-gateway: `browser_action_approval_required` /
 //! `browser_action_decided`.
 
+#[cfg(test)]
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex as StdMutex},
@@ -84,6 +85,15 @@ impl BrowserProfileScope {
             Self::UserPrivate => "user_private",
             Self::OrgShared => "org_shared",
             Self::RunScoped => "run_scoped",
+        }
+    }
+
+    fn from_owner_value(value: Option<&str>) -> Self {
+        match value {
+            Some("user_private") => Self::UserPrivate,
+            Some("org_shared") => Self::OrgShared,
+            Some("run_scoped") => Self::RunScoped,
+            _ => Self::Ephemeral,
         }
     }
 }
@@ -175,6 +185,7 @@ fn reject_zdr_persistent_profile(
     }
 }
 
+#[cfg(test)]
 pub(crate) type BrowserRunStore = Arc<StdMutex<HashMap<String, BrowserRunMetadata>>>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -183,6 +194,7 @@ struct BrowserRunOwner {
     org_id: String,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub(crate) struct BrowserRunMetadata {
     owner: BrowserRunOwner,
@@ -203,6 +215,24 @@ pub(crate) struct BrowserRunMetadata {
     zdr: bool,
 }
 
+/// The narrow, non-durable state a BFF request needs from Quarry's owner
+/// projection. It is reconstructed per request and deliberately has no owner,
+/// replay, tab, or devtools cache fields.
+#[derive(Debug, Clone)]
+struct BrowserOwnerSessionState {
+    profile_id: Option<String>,
+    profile_scope: BrowserProfileScope,
+    last_observation: Option<Value>,
+    viewport: Viewport,
+    zdr: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BrowserArtifactRunAccess {
+    zdr: bool,
+}
+
+#[cfg(test)]
 pub(crate) fn new_browser_run_store() -> BrowserRunStore {
     Arc::new(StdMutex::new(HashMap::new()))
 }
@@ -228,15 +258,6 @@ enum BrowserActionActor {
     Human,
 }
 
-impl BrowserActionActor {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Human => "human",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BrowserControlMode {
@@ -249,6 +270,13 @@ impl BrowserControlMode {
         match self {
             Self::AgentControl => "agent_control",
             Self::HumanTakeover => "human_takeover",
+        }
+    }
+
+    fn from_owner_value(value: Option<&str>) -> Self {
+        match value {
+            Some("human_takeover") => Self::HumanTakeover,
+            _ => Self::AgentControl,
         }
     }
 }
@@ -321,11 +349,17 @@ const DEFAULT_VIEWPORT: Viewport = Viewport {
 const MAX_BROWSER_ARTIFACT_BYTES: u64 = 24 * 1024 * 1024;
 const MAX_MODEL_SCREENSHOT_BYTES: u64 = 6 * 1024 * 1024;
 const MAX_MODEL_VISUAL_JSON_BYTES: u64 = 1024 * 1024;
+#[cfg(test)]
 const MAX_BROWSER_TIMELINE_ENTRIES: usize = 32;
+#[cfg(test)]
 const MAX_BROWSER_REPLAY_EVENTS: usize = 96;
+#[cfg(test)]
 const MAX_BROWSER_DEVTOOLS_EVENTS: usize = 512;
+#[cfg(test)]
 const MAX_TIMELINE_CONSOLE_ENTRIES: usize = 20;
+#[cfg(test)]
 const MAX_TIMELINE_NETWORK_ENTRIES: usize = 30;
+#[cfg(test)]
 const MAX_TIMELINE_POLICY_DENIALS: usize = 10;
 
 fn default_include_screenshot() -> bool {
@@ -335,6 +369,11 @@ fn default_include_screenshot() -> bool {
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/browser/sessions", post(create_session))
+        .route("/api/v1/browser/sessions/:session_id", get(get_session))
+        .route(
+            "/api/v1/browser/sessions/:session_id/timeline",
+            get(get_owner_timeline),
+        )
         .route(
             "/api/v1/browser/sessions/:session_id/actions",
             post(run_action),
@@ -412,10 +451,6 @@ async fn create_session(
     headers: HeaderMap,
     Json(body): Json<CreateSessionBody>,
 ) -> Response {
-    let owner = match resolve_browser_run_owner(&state, &user).await {
-        Ok(owner) => owner,
-        Err(response) => return response,
-    };
     let target = match normalize_public_http_url(&body.url) {
         Ok(value) => value,
         Err(message) => {
@@ -454,6 +489,7 @@ async fn create_session(
         },
         "zdr": zdr
     });
+    start_body["profile_scope"] = Value::String(profile_scope.as_str().to_owned());
     if let Some(profile_id) = profile_id {
         start_body["profile_id"] = Value::String(profile_id.to_owned());
     }
@@ -485,9 +521,6 @@ async fn create_session(
         )
             .into_response();
     };
-    let lease_id = str_field(&start_data, "lease_id");
-    let returned_profile_id =
-        str_field(&start_data, "profile_id").or_else(|| profile_id.map(str::to_owned));
     let initial_action = json!({
         "type": "navigate",
         "url": target
@@ -519,37 +552,109 @@ async fn create_session(
     }
 
     let observation = unwrap_data(&step_body);
-    let tabs = match fetch_browser_tabs(&state, &user, token.as_deref(), &run_id).await {
-        Ok(tabs) => tabs,
-        Err(response) => return response,
-    };
-    let metadata = BrowserRunMetadata {
-        owner,
-        lease_id,
-        profile_id: returned_profile_id,
-        profile_scope,
-        last_observation: Some(observation.clone()),
-        observation_history: vec![observation.clone()],
-        devtools_events: Vec::new(),
-        replay_events: vec![observation_replay_event(
-            &run_id,
-            &observation,
-            "system",
-            Some(&initial_action),
-            BrowserControlMode::AgentControl,
-            zdr,
-        )],
-        tabs,
-        viewport,
-        control_mode: BrowserControlMode::AgentControl,
-        zdr,
-    };
-    if let Err(store_error) = store_browser_run_metadata(&state, &run_id, metadata.clone()) {
-        return store_error.into_response();
+    let projection =
+        match owner_browser_session_projection(&state, &user, token.as_deref(), &run_id).await {
+            Ok(projection) => projection,
+            Err(response) => return response,
+        };
+    let response = browser_response_from_owner_projection(&projection, Some(observation));
+    (StatusCode::OK, Json(ok(response))).into_response()
+}
+
+/// Reads Quarry's browser-session projection. This is deliberately not a
+/// `BrowserRunStore` lookup: the BFF must not recreate an absent owner record
+/// with defaults or merge its transient replay metadata into the response.
+async fn get_session(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
     }
 
-    let response = browser_response(&run_id, &metadata, Some(observation));
-    (StatusCode::OK, Json(ok(response))).into_response()
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    match owner_browser_session_projection(&state, &user, token.as_deref(), &session_id).await {
+        Ok(projection) => (StatusCode::OK, Json(ok(projection))).into_response(),
+        Err(response) => response,
+    }
+}
+
+/// Read the sole owner projection for a direct Quarry browser run. All callers
+/// use this after an owner-authorized mutation instead of rebuilding session
+/// state from BFF-local observations, tabs, or control flags.
+async fn owner_browser_session_projection(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    token: Option<&str>,
+    session_id: &str,
+) -> Result<Value, Response> {
+    let (status, body) = quarry_call(
+        state,
+        Method::GET,
+        &format!(
+            "/v1/agent/runs/{}/browser-session",
+            urlencoding::encode(session_id)
+        ),
+        None,
+        token,
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(forward_quarry_failure(status, body));
+    }
+    Ok(unwrap_data(&body))
+}
+
+/// Quarry owns browser audit history. The gateway only forwards the verified
+/// session identity; it never reconstructs a timeline from process-local
+/// observations or replay events.
+async fn get_owner_timeline(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
+        &state,
+        Method::GET,
+        &format!(
+            "/v1/agent/runs/{}/browser-session/timeline{}",
+            urlencoding::encode(&session_id),
+            query_suffix(&uri),
+        ),
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    (StatusCode::OK, Json(ok(unwrap_data(&body)))).into_response()
 }
 
 async fn run_action(
@@ -566,13 +671,35 @@ async fn run_action(
         }
     };
     let actor = body.actor;
-    let current_metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let current_projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
         Err(response) => return response,
     };
-    if actor == BrowserActionActor::Agent
-        && current_metadata.control_mode == BrowserControlMode::HumanTakeover
-    {
+    let current_mode = BrowserControlMode::from_owner_value(
+        current_projection
+            .get("controlMode")
+            .and_then(Value::as_str),
+    );
+    if actor == BrowserActionActor::Agent && current_mode == BrowserControlMode::HumanTakeover {
         return (
             StatusCode::CONFLICT,
             Json(error(
@@ -582,27 +709,23 @@ async fn run_action(
         )
             .into_response();
     }
-    if actor == BrowserActionActor::Human
-        && current_metadata.control_mode != BrowserControlMode::HumanTakeover
-    {
-        if let Some(metadata) =
-            update_browser_control_mode(&state, &session_id, BrowserControlMode::HumanTakeover)
-        {
-            let _ = append_replay_event(
-                &state,
-                &session_id,
-                control_replay_event(
-                    &session_id,
-                    BrowserControlMode::HumanTakeover,
-                    actor.as_str(),
-                    metadata.zdr,
-                ),
-            );
+    if actor == BrowserActionActor::Human && current_mode != BrowserControlMode::HumanTakeover {
+        let (status, body) = quarry_call(
+            &state,
+            Method::POST,
+            &format!(
+                "/v1/agent/runs/{}/browser-session/control",
+                urlencoding::encode(&session_id),
+            ),
+            Some(json!({ "mode": "human_takeover" })),
+            token.as_deref(),
+            &user.user_id,
+        )
+        .await;
+        if !status.is_success() {
+            return forward_quarry_failure(status, body);
         }
     }
-    let action_for_replay = action.clone();
-    let cookie = cookie_header(&headers);
-    let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
         &state,
         Method::POST,
@@ -617,67 +740,59 @@ async fn run_action(
     }
 
     let observation = unwrap_data(&body);
-    let Some(mut metadata) = update_browser_observation(&state, &session_id, observation.clone())
-    else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(error(
-                "browser_session_not_found",
-                "The browser session is not active.",
-            )),
-        )
-            .into_response();
-    };
-    if let Some(next_metadata) = append_replay_event(
+    let projection = match owner_browser_session_projection(
         &state,
+        &user,
+        token.as_deref(),
         &session_id,
-        observation_replay_event(
-            &session_id,
-            &observation,
-            actor.as_str(),
-            Some(&action_for_replay),
-            metadata.control_mode,
-            metadata.zdr,
-        ),
-    ) {
-        metadata = next_metadata;
-    }
-    if let Ok(tabs) = fetch_browser_tabs(&state, &user, token.as_deref(), &session_id).await {
-        if let Some(next_metadata) = update_browser_tabs(&state, &session_id, tabs) {
-            metadata = next_metadata;
-        }
-    }
-    let response = browser_response(&session_id, &metadata, Some(observation));
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    let response = browser_response_from_owner_projection(&projection, Some(observation));
     (StatusCode::OK, Json(ok(response))).into_response()
 }
 
 async fn set_control_mode(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(body): Json<ControlBody>,
 ) -> Response {
-    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
-        return response;
-    }
-    let Some(metadata) = update_browser_control_mode(&state, &session_id, body.mode) else {
+    if !is_valid_path_segment(&session_id) {
         return (
-            StatusCode::NOT_FOUND,
+            StatusCode::BAD_REQUEST,
             Json(error(
-                "browser_session_not_found",
-                "Browser session is not active.",
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
             )),
         )
             .into_response();
-    };
-    let metadata = append_replay_event(
+    }
+    // Control authority lives in Quarry. A BFF cache must neither authorize a
+    // hand-off nor decide whether an owner session exists after a restart.
+    let mode = body.mode;
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let (status, body) = quarry_call(
         &state,
-        &session_id,
-        control_replay_event(&session_id, body.mode, "human", metadata.zdr),
+        Method::POST,
+        &format!(
+            "/v1/agent/runs/{}/browser-session/control",
+            urlencoding::encode(&session_id),
+        ),
+        Some(json!({ "mode": mode.as_str() })),
+        token.as_deref(),
+        &user.user_id,
     )
-    .unwrap_or(metadata);
-    let observation = metadata.last_observation.clone();
-    let response = browser_response(&session_id, &metadata, observation);
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, body);
+    }
+    let response = browser_response_from_owner_projection(&unwrap_data(&body), None);
     (StatusCode::OK, Json(ok(response))).into_response()
 }
 
@@ -697,19 +812,24 @@ async fn get_tabs(
         )
             .into_response();
     }
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
-        Err(response) => return response,
-    };
-
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let tabs = match fetch_browser_tabs(&state, &user, token.as_deref(), &session_id).await {
         Ok(tabs) => tabs,
         Err(response) => return response,
     };
-    let metadata = update_browser_tabs(&state, &session_id, tabs.clone()).unwrap_or(metadata);
-    let response = browser_response(&session_id, &metadata, metadata.last_observation.clone());
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    let response = browser_response_from_owner_projection(&projection, None);
     (
         StatusCode::OK,
         Json(ok(json!({ "tabs": tabs, "session": response["session"] }))),
@@ -734,10 +854,6 @@ async fn new_tab(
         )
             .into_response();
     }
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
-        Err(response) => return response,
-    };
     let url = match normalize_optional_public_url(body.url.as_deref()) {
         Ok(url) => url,
         Err(message) => {
@@ -761,27 +877,18 @@ async fn new_tab(
     }
     let data = unwrap_data(&body);
     let tabs = tabs_from_data(&data);
-    let metadata = update_browser_tabs(&state, &session_id, tabs.clone()).unwrap_or(metadata);
-    let tab_id = data
-        .get("tab")
-        .and_then(|tab| tab.get("tabId"))
-        .and_then(Value::as_str)
-        .or_else(|| active_tab_id(&tabs))
-        .unwrap_or("tab");
-    let metadata = append_replay_event(
+    let projection = match owner_browser_session_projection(
         &state,
+        &user,
+        token.as_deref(),
         &session_id,
-        tab_replay_event(
-            &session_id,
-            "new",
-            tab_id,
-            active_tab(&tabs),
-            metadata.control_mode,
-            metadata.zdr,
-        ),
     )
-    .unwrap_or(metadata);
-    let response = browser_response(&session_id, &metadata, metadata.last_observation.clone());
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    let response = browser_response_from_owner_projection(&projection, None);
     (
         StatusCode::OK,
         Json(ok(json!({
@@ -875,11 +982,6 @@ async fn tab_mutation(
         )
             .into_response();
     }
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
-        Err(response) => return response,
-    };
-
     let suffix = if operation == "select" { "/select" } else { "" };
     let path = format!(
         "/v1/agent/runs/{}/tabs/{}{}",
@@ -896,21 +998,18 @@ async fn tab_mutation(
     }
     let data = unwrap_data(&body);
     let tabs = tabs_from_data(&data);
-    let metadata = update_browser_tabs(&state, &session_id, tabs.clone()).unwrap_or(metadata);
-    let metadata = append_replay_event(
+    let projection = match owner_browser_session_projection(
         &state,
+        &user,
+        token.as_deref(),
         &session_id,
-        tab_replay_event(
-            &session_id,
-            operation,
-            &tab_id,
-            active_tab(&tabs),
-            metadata.control_mode,
-            metadata.zdr,
-        ),
     )
-    .unwrap_or(metadata);
-    let response = browser_response(&session_id, &metadata, metadata.last_observation.clone());
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    let response = browser_response_from_owner_projection(&projection, None);
     (
         StatusCode::OK,
         Json(ok(json!({ "tabs": tabs, "session": response["session"] }))),
@@ -924,8 +1023,15 @@ async fn close_session(
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
-        return response;
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
     }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
@@ -940,9 +1046,6 @@ async fn close_session(
     .await;
     if !status.is_success() && status != StatusCode::NOT_FOUND {
         return forward_quarry_failure(status, body);
-    }
-    if let Ok(mut runs) = state.browser_run_store.lock() {
-        runs.remove(&session_id);
     }
     (StatusCode::OK, Json(ok(json!({ "closed": true })))).into_response()
 }
@@ -965,10 +1068,20 @@ async fn suggest_action(
             .into_response();
     }
 
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
+    let cookie = cookie_header(&headers);
+    let quarry_bearer = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        quarry_bearer.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
         Err(response) => return response,
     };
+    let metadata = owner_session_state_from_projection(&projection);
     let Some(observation) = metadata.last_observation.clone() else {
         return (
             StatusCode::CONFLICT,
@@ -1041,6 +1154,41 @@ async fn suggest_action(
     (StatusCode::OK, Json(ok(response_body))).into_response()
 }
 
+trait BrowserSessionRunState {
+    fn profile_id(&self) -> Option<&str>;
+    fn profile_scope(&self) -> BrowserProfileScope;
+    fn zdr(&self) -> bool;
+}
+
+impl BrowserSessionRunState for BrowserOwnerSessionState {
+    fn profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
+    }
+
+    fn profile_scope(&self) -> BrowserProfileScope {
+        self.profile_scope
+    }
+
+    fn zdr(&self) -> bool {
+        self.zdr
+    }
+}
+
+#[cfg(test)]
+impl BrowserSessionRunState for BrowserRunMetadata {
+    fn profile_id(&self) -> Option<&str> {
+        self.profile_id.as_deref()
+    }
+
+    fn profile_scope(&self) -> BrowserProfileScope {
+        self.profile_scope
+    }
+
+    fn zdr(&self) -> bool {
+        self.zdr
+    }
+}
+
 /// Builds the JSON body forwarded to model-gateway's `POST /v1/browser/runs`.
 ///
 /// `require_approval` is deliberately **never** taken from the caller. That
@@ -1058,10 +1206,10 @@ async fn suggest_action(
 /// (`orchestration.rs`'s `/api/v1/orchestration/runs/:run_id/approvals` +
 /// `.../approvals/:id/decide`) — nothing here needs to opt in, and nothing
 /// here should ever arm the broken legacy switch on a caller's behalf.
-fn build_ai_run_request(
+fn build_ai_run_request<S: BrowserSessionRunState>(
     goal: &str,
     session_id: &str,
-    metadata: &BrowserRunMetadata,
+    metadata: &S,
     body: &StartAiRunBody,
     start_url: Option<&str>,
 ) -> Value {
@@ -1076,8 +1224,8 @@ fn build_ai_run_request(
     // saved profile's cookies. Only forward it when this session's own
     // resolved scope (`effective_profile_scope`, computed once at
     // `create_session` time) says the attachment is genuinely persistent.
-    let persistent_profile_id = (metadata.profile_scope != BrowserProfileScope::Ephemeral)
-        .then(|| metadata.profile_id.clone())
+    let persistent_profile_id = (metadata.profile_scope() != BrowserProfileScope::Ephemeral)
+        .then(|| metadata.profile_id().map(str::to_owned))
         .flatten();
     json!({
         "goal": goal,
@@ -1092,7 +1240,7 @@ fn build_ai_run_request(
         "max_cost_usd": body.max_cost_usd,
         // Server-derived only — mirrors `create_session`'s own zdr handling;
         // never sourced from the request body.
-        "zdr": metadata.zdr,
+        "zdr": metadata.zdr(),
     })
 }
 
@@ -1138,20 +1286,29 @@ async fn start_ai_run(
             .into_response();
     }
 
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
+    let cookie = cookie_header(&headers);
+    let quarry_bearer = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        quarry_bearer.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
         Err(response) => return response,
     };
+    let metadata = owner_session_state_from_projection(&projection);
 
     // Server-derived only, from the session's own last observation: a freshly
     // `start_run`'d Quarry lease the AI run acquires has no page loaded, so
     // the loop's first action needs an explicit destination — the URL of the
     // tab the user is already looking at (never a client-supplied value).
-    let start_url = metadata
-        .last_observation
-        .as_ref()
-        .and_then(|observation| observation.get("url"))
+    let start_url = projection
+        .get("currentUrl")
         .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
     let request_body =
@@ -1206,7 +1363,7 @@ async fn start_ai_run(
     }
 
     let response_data = unwrap_data(&response_body);
-    let Some(run_id) =
+    let Some(_run_id) =
         str_field(&response_data, "run_id").or_else(|| str_field(&response_data, "runId"))
     else {
         return (
@@ -1218,10 +1375,6 @@ async fn start_ai_run(
         )
             .into_response();
     };
-    if let Err(store_error) = store_browser_run_metadata(&state, &run_id, metadata) {
-        return store_error.into_response();
-    }
-
     (StatusCode::OK, Json(ok(response_body))).into_response()
 }
 
@@ -1247,7 +1400,11 @@ async fn control_ai_run(
         )
             .into_response();
     }
-    if let Err(response) = owned_browser_run_metadata(&state, &user, &run_id).await {
+    let owner = match resolve_browser_run_owner(&state, &user).await {
+        Ok(owner) => owner,
+        Err(response) => return response,
+    };
+    if let Err(response) = owned_orchestration_run(&state, &user, &headers, &owner, &run_id).await {
         return response;
     }
 
@@ -1455,10 +1612,20 @@ async fn get_live_frame(
             .into_response();
     }
 
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
         Err(response) => return response,
     };
+    let metadata = owner_session_state_from_projection(&projection);
 
     let format = match query
         .format
@@ -1498,8 +1665,6 @@ async fn get_live_frame(
         max_height
     );
 
-    let cookie = cookie_header(&headers);
-    let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
         &state,
         Method::GET,
@@ -1577,13 +1742,19 @@ async fn stream_live_frames(
             .into_response();
     }
 
-    let metadata = match owned_browser_run_metadata(&state, &user, &session_id).await {
-        Ok(metadata) => metadata,
-        Err(response) => return response,
-    };
-
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
     let url = format!(
         "{}/v1/agent/runs/{}/frames/stream{}",
         state.quarry_edge_url,
@@ -1599,7 +1770,10 @@ async fn stream_live_frames(
         token.as_deref(),
         headers.get("last-event-id").and_then(|v| v.to_str().ok()),
         None,
-        metadata.zdr,
+        projection
+            .get("zdr")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     )
     .await
 }
@@ -1622,12 +1796,19 @@ async fn get_devtools_events(
             .into_response();
     }
 
-    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
-        return response;
-    }
-
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
     let (status, body) = quarry_call(
         &state,
         Method::GET,
@@ -1651,10 +1832,7 @@ async fn get_devtools_events(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let metadata = update_browser_devtools_events(&state, &session_id, events.clone())
-        .unwrap_or_else(|| browser_run_metadata(&state, &session_id));
-    let observation = metadata.last_observation.clone();
-    let response = browser_response(&session_id, &metadata, observation);
+    let response = browser_response_from_owner_projection(&projection, None);
 
     (
         StatusCode::OK,
@@ -1664,7 +1842,12 @@ async fn get_devtools_events(
             "zdr": data
                 .get("zdr")
                 .and_then(Value::as_bool)
-                .unwrap_or(metadata.zdr)
+                .unwrap_or_else(|| {
+                    projection
+                        .get("zdr")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
         }))),
     )
         .into_response()
@@ -1689,12 +1872,13 @@ async fn proxy_live_frames_ws(
             .into_response();
     }
 
-    if let Err(response) = owned_browser_run_metadata(&state, &user, &session_id).await {
-        return response;
-    }
-
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    if let Err(response) =
+        owner_browser_session_projection(&state, &user, token.as_deref(), &session_id).await
+    {
+        return response;
+    }
     let upstream_url = match upstream_ws_url(
         &state.quarry_edge_url,
         &format!(
@@ -1724,8 +1908,8 @@ async fn proxy_live_frames_ws(
 
 async fn browser_ws_proxy_loop(
     mut client_socket: WebSocket,
-    state: AppState,
-    session_id: String,
+    _state: AppState,
+    _session_id: String,
     upstream_url: String,
     bearer_token: Option<String>,
 ) {
@@ -1770,46 +1954,15 @@ async fn browser_ws_proxy_loop(
 
     let (mut client_tx, mut client_rx) = client_socket.split();
     let (mut upstream_tx, mut upstream_rx) = upstream.split();
-    let mut pending_action: Option<Value> = None;
-    let mut pending_actor = "human".to_owned();
-
     loop {
         tokio::select! {
             client_msg = client_rx.next() => {
                 match client_msg {
                     Some(Ok(message)) => {
                         let close = matches!(message, AxumWsMessage::Close(_));
-                        let prepared_message = match prepare_client_ws_message(
-                            message,
-                            &state,
-                            &session_id,
-                            &mut pending_action,
-                            &mut pending_actor,
-                        ) {
-                            Ok(message) => message,
-                            Err(err) => {
-                                let _ = client_tx
-                                    .send(AxumWsMessage::Text(json!({
-                                        "type": "error",
-                                        "code": err.code,
-                                        "message": err.message
-                                    }).to_string()))
-                                    .await;
-                                continue;
-                            }
-                        };
-                        match prepared_message {
-                            PreparedClientWsMessage::Client(message) => {
-                                if client_tx.send(message).await.is_err() {
-                                    break;
-                                }
-                            }
-                            PreparedClientWsMessage::Upstream(message) => {
-                                if let Some(upstream_message) = axum_to_tungstenite_message(message) {
-                                    if upstream_tx.send(upstream_message).await.is_err() {
-                                        break;
-                                    }
-                                }
+                        if let Some(upstream_message) = axum_to_tungstenite_message(message) {
+                            if upstream_tx.send(upstream_message).await.is_err() {
+                                break;
                             }
                         }
                         if close {
@@ -1827,13 +1980,7 @@ async fn browser_ws_proxy_loop(
                 match upstream_msg {
                     Some(Ok(message)) => {
                         let close = matches!(message, TungsteniteMessage::Close(_));
-                        let client_message = process_upstream_ws_message(
-                            message,
-                            &state,
-                            &session_id,
-                            &mut pending_action,
-                            &mut pending_actor,
-                        );
+                        let client_message = tungstenite_to_axum_message(message);
                         if let Some(client_message) = client_message {
                             if client_tx.send(client_message).await.is_err() {
                                 break;
@@ -1867,18 +2014,21 @@ async fn send_client_ws_error(socket: &mut WebSocket, message: String) -> Result
         .await
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 enum PreparedClientWsMessage {
     Client(AxumWsMessage),
     Upstream(AxumWsMessage),
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct ClientWsPrepareError {
     code: &'static str,
     message: String,
 }
 
+#[cfg(test)]
 fn prepare_client_ws_message(
     message: AxumWsMessage,
     state: &AppState,
@@ -1947,6 +2097,7 @@ fn prepare_client_ws_message(
     )))
 }
 
+#[cfg(test)]
 fn prepare_client_control_ws_message(
     value: Value,
     state: &AppState,
@@ -1993,6 +2144,7 @@ fn prepare_client_control_ws_message(
     ))
 }
 
+#[cfg(test)]
 fn process_upstream_ws_message(
     message: TungsteniteMessage,
     state: &AppState,
@@ -2041,6 +2193,7 @@ fn process_upstream_ws_message(
     Some(AxumWsMessage::Text(value.to_string()))
 }
 
+#[cfg(test)]
 fn process_upstream_frame_ws_message(
     mut value: Value,
     state: &AppState,
@@ -2062,6 +2215,7 @@ fn process_upstream_frame_ws_message(
     Some(AxumWsMessage::Text(value.to_string()))
 }
 
+#[cfg(test)]
 fn process_upstream_devtools_ws_message(
     mut value: Value,
     state: &AppState,
@@ -2330,6 +2484,7 @@ async fn delete_profile(
     (StatusCode::OK, Json(ok(json!({ "deleted": true })))).into_response()
 }
 
+#[cfg(test)]
 fn browser_response(
     run_id: &str,
     metadata: &BrowserRunMetadata,
@@ -2415,6 +2570,170 @@ fn browser_response(
     })
 }
 
+/// Adapt Quarry's owner projection to the established browser-client shape.
+/// The adapter is intentionally pure: no process-local browser run is read or
+/// written here. Quarry remains the source for lease, profile, tab, control,
+/// ZDR, lifecycle and URL state; the BFF only contributes same-origin route
+/// URLs and safe presentation defaults.
+fn browser_response_from_owner_projection(projection: &Value, observation: Option<Value>) -> Value {
+    let observation = observation.or_else(|| {
+        projection
+            .get("lastObservation")
+            .filter(|value| value.is_object())
+            .cloned()
+    });
+    let run_id = projection
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let current_url = projection
+        .get("currentUrl")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let observed_url = observation
+        .as_ref()
+        .and_then(|value| value.get("url"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(current_url);
+    let title = observation
+        .as_ref()
+        .and_then(|value| value.get("title"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            projection
+                .get("tabs")
+                .and_then(Value::as_array)
+                .and_then(|tabs| {
+                    tabs.iter()
+                        .find(|tab| tab.get("active").and_then(Value::as_bool).unwrap_or(false))
+                })
+                .and_then(|tab| tab.get("title"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .or_else(|| hostname(observed_url))
+        .unwrap_or_else(|| "Browser session".to_owned());
+    let frame = observation
+        .as_ref()
+        .and_then(|value| value.get("screenshot_artifact_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|artifact_id| is_valid_artifact_id(artifact_id))
+        .map(|artifact_id| artifact_frame(run_id, artifact_id, "screenshot", "image/png"));
+    let visual = observation
+        .as_ref()
+        .and_then(|value| value.get("visual_observation_artifact_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|artifact_id| is_valid_artifact_id(artifact_id))
+        .map(|artifact_id| {
+            json!({
+                "observationArtifactId": artifact_id,
+                "observationUrl": artifact_url(run_id, artifact_id)
+            })
+        });
+    let viewport = projection
+        .get("viewport")
+        .filter(|value| value.is_object())
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "width": DEFAULT_VIEWPORT.width,
+                "height": DEFAULT_VIEWPORT.height
+            })
+        });
+    let live = projection
+        .get("live")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let closed = matches!(
+        projection.get("status").and_then(Value::as_str),
+        Some("closed")
+    );
+
+    json!({
+        "session": {
+            "id": run_id,
+            "leaseId": projection.get("leaseId").cloned().unwrap_or(Value::Null),
+            "status": if live { "live" } else if closed { "closed" } else { "degraded" },
+            "renderMode": "chromium",
+            "title": title,
+            "url": observed_url,
+            "viewport": viewport,
+            "profile": {
+                "id": projection.get("profileId").cloned().unwrap_or(Value::Null),
+                "scope": projection.get("profileScope").cloned().unwrap_or_else(|| Value::String("ephemeral".to_owned())),
+                "storage": if projection.get("profileStorage").and_then(Value::as_str) == Some("persistent") { "persistent" } else { "isolated" }
+            },
+            "control": {
+                "mode": projection.get("controlMode").cloned().unwrap_or_else(|| Value::String("agent_control".to_owned()))
+            },
+            "frame": frame,
+            "liveFrameUrl": live.then(|| live_frame_url(run_id)),
+            "liveFrameStreamUrl": live.then(|| live_frame_stream_url(run_id)),
+            // The owner projection is HTTP/SSE-safe. The legacy WebSocket
+            // compositor is intentionally not advertised to new sessions.
+            "liveFrameWsUrl": Value::Null,
+            "tabsUrl": browser_tabs_url(run_id),
+            "tabs": projection.get("tabs").cloned().unwrap_or_else(|| json!([])),
+            "devtoolsUrl": live.then(|| browser_devtools_url(run_id)),
+            "devtools": { "events": [], "eventCount": 0, "lastSequence": Value::Null },
+            "visual": visual,
+            "timeline": [],
+            "replay": { "events": [], "eventCount": 0 },
+            "zdr": projection.get("zdr").and_then(Value::as_bool).unwrap_or(false),
+            "capabilities": ["navigate", "back", "forward", "click", "click_point", "type", "press", "scroll", "mouse_wheel", "wait_for", "select", "inspect_dom", "control_state", "human_takeover", "agent_control", "tabs", "live_frame", "live_frame_stream", "devtools_events", "screenshot_artifact", "visual_observation", "visual_change", "annotate", "persistent_profile"]
+        },
+        "observation": observation
+    })
+}
+
+/// Temporary typed view for BFF request normalization. It is reconstructed
+/// exclusively from a Quarry projection and is never inserted into the
+/// process-local `BrowserRunStore`.
+fn owner_session_state_from_projection(projection: &Value) -> BrowserOwnerSessionState {
+    let viewport = projection
+        .get("viewport")
+        .and_then(Value::as_object)
+        .map(|viewport| Viewport {
+            width: viewport
+                .get("width")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(DEFAULT_VIEWPORT.width),
+            height: viewport
+                .get("height")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(DEFAULT_VIEWPORT.height),
+        })
+        .unwrap_or(DEFAULT_VIEWPORT);
+    BrowserOwnerSessionState {
+        profile_id: projection
+            .get("profileId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        profile_scope: BrowserProfileScope::from_owner_value(
+            projection.get("profileScope").and_then(Value::as_str),
+        ),
+        last_observation: projection
+            .get("lastObservation")
+            .filter(|value| value.is_object())
+            .cloned(),
+        viewport,
+        zdr: projection
+            .get("zdr")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+#[cfg(test)]
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2422,6 +2741,7 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn action_type(action: Option<&Value>) -> Option<String> {
     action
         .and_then(|value| value.get("type"))
@@ -2429,6 +2749,7 @@ fn action_type(action: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+#[cfg(test)]
 fn observation_replay_event(
     run_id: &str,
     observation: &Value,
@@ -2492,6 +2813,7 @@ fn observation_replay_event(
     })
 }
 
+#[cfg(test)]
 fn control_replay_event(
     session_id: &str,
     mode: BrowserControlMode,
@@ -2509,6 +2831,7 @@ fn control_replay_event(
     })
 }
 
+#[cfg(test)]
 fn devtools_replay_event(
     session_id: &str,
     events: &[Value],
@@ -2534,6 +2857,7 @@ fn devtools_replay_event(
     })
 }
 
+#[cfg(test)]
 fn live_frame_replay_event(
     session_id: &str,
     frame: &Value,
@@ -2573,6 +2897,7 @@ fn live_frame_replay_event(
     })
 }
 
+#[cfg(test)]
 fn should_record_frame_replay(replay_events: &[Value], sequence: u64) -> bool {
     sequence == 1
         || sequence % 10 == 1
@@ -2585,6 +2910,7 @@ fn should_record_frame_replay(replay_events: &[Value], sequence: u64) -> bool {
             .is_none()
 }
 
+#[cfg(test)]
 fn devtools_categories(events: &[Value]) -> Vec<String> {
     let mut categories = events
         .iter()
@@ -2596,28 +2922,7 @@ fn devtools_categories(events: &[Value]) -> Vec<String> {
     categories
 }
 
-fn tab_replay_event(
-    session_id: &str,
-    operation: &str,
-    tab_id: &str,
-    active_tab: Option<&Value>,
-    control_mode: BrowserControlMode,
-    zdr: bool,
-) -> Value {
-    let timestamp_ms = now_ms();
-    json!({
-        "id": format!("{}:tab:{}:{}:{}", session_id, operation, tab_id, timestamp_ms),
-        "kind": "tab",
-        "timestampMs": timestamp_ms,
-        "operation": operation,
-        "tabId": tab_id,
-        "activeTab": active_tab.cloned().unwrap_or(Value::Null),
-        "actor": "human",
-        "controlMode": control_mode.as_str(),
-        "zdr": zdr
-    })
-}
-
+#[cfg(test)]
 fn browser_timeline(run_id: &str, observations: &[Value]) -> Vec<Value> {
     observations
         .iter()
@@ -2665,6 +2970,7 @@ fn browser_timeline(run_id: &str, observations: &[Value]) -> Vec<Value> {
 
 /// A bounded copy of an observation's array field, so timeline payloads stay
 /// small even for chatty pages. Entries are passed through verbatim.
+#[cfg(test)]
 fn capped_observation_array(observation: &Value, key: &str, cap: usize) -> Value {
     Value::Array(
         observation
@@ -2706,6 +3012,7 @@ fn live_frame_stream_url(run_id: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn live_frame_ws_url(run_id: &str) -> String {
     format!(
         "/api/v1/browser/sessions/{}/frames/ws?format=jpeg&quality=65&intervalMs=250",
@@ -2727,10 +3034,12 @@ fn browser_devtools_url(run_id: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn devtools_sequence(event: &Value) -> Option<u64> {
     event.get("sequence").and_then(Value::as_u64)
 }
 
+#[cfg(test)]
 fn last_devtools_sequence(events: &[Value]) -> Option<u64> {
     events.iter().filter_map(devtools_sequence).max()
 }
@@ -2760,6 +3069,7 @@ fn upstream_ws_url(base_url: &str, path_and_query: &str) -> Result<String, Strin
     Ok(url.to_string())
 }
 
+#[cfg(test)]
 fn update_browser_observation(
     state: &AppState,
     session_id: &str,
@@ -2777,21 +3087,7 @@ fn update_browser_observation(
     Some(metadata)
 }
 
-fn update_browser_tabs(
-    state: &AppState,
-    session_id: &str,
-    tabs: Vec<Value>,
-) -> Option<BrowserRunMetadata> {
-    let mut runs = state.browser_run_store.lock().ok()?;
-    let metadata = runs.get(session_id)?;
-    let next_metadata = BrowserRunMetadata {
-        tabs,
-        ..metadata.clone()
-    };
-    runs.insert(session_id.to_owned(), next_metadata.clone());
-    Some(next_metadata)
-}
-
+#[cfg(test)]
 fn update_browser_devtools_events(
     state: &AppState,
     session_id: &str,
@@ -2822,6 +3118,7 @@ fn update_browser_devtools_events(
     Some(next_metadata)
 }
 
+#[cfg(test)]
 fn append_replay_event(
     state: &AppState,
     session_id: &str,
@@ -2843,6 +3140,7 @@ fn append_replay_event(
     Some(next_metadata)
 }
 
+#[cfg(test)]
 fn update_browser_control_mode(
     state: &AppState,
     session_id: &str,
@@ -2858,6 +3156,7 @@ fn update_browser_control_mode(
     Some(next_metadata)
 }
 
+#[cfg(test)]
 fn browser_run_owner_matches(
     owner_user_id: &str,
     owner_org_id: &str,
@@ -2918,6 +3217,7 @@ fn browser_session_not_found() -> Response {
 /// poisoned lock is an infrastructure failure that must fail closed. Collapsing
 /// them, as a plain `Option` does, is what forces every unregistered-but-owned
 /// run to 404.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserRunMiss {
     /// An entry exists under a DIFFERENT owner. A decided denial: it must never
@@ -2929,6 +3229,7 @@ enum BrowserRunMiss {
     Unavailable,
 }
 
+#[cfg(test)]
 impl BrowserRunMiss {
     /// The response for a miss that ends the request. `Absent` is deliberately
     /// answered exactly like `Foreign` so the route never confirms the existence
@@ -2951,6 +3252,7 @@ impl BrowserRunMiss {
 /// Read the in-process store under an already-resolved owner, reporting *why* a
 /// lookup missed so callers can tell a decided denial from an id this store
 /// simply does not know about.
+#[cfg(test)]
 fn browser_run_lookup(
     state: &AppState,
     owner: &BrowserRunOwner,
@@ -2976,6 +3278,7 @@ fn browser_run_lookup(
     }
 }
 
+#[cfg(test)]
 async fn owned_browser_run_metadata(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -3115,37 +3418,37 @@ async fn owned_browser_artifact_run(
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     run_id: &str,
-) -> Result<BrowserRunMetadata, Response> {
+) -> Result<BrowserArtifactRunAccess, Response> {
     let owner = resolve_browser_run_owner(state, user).await?;
-    match browser_run_lookup(state, &owner, run_id) {
-        Ok(metadata) => Ok(metadata),
-        // A registered id owned by someone else, and a store we cannot read, are
-        // both decided here. Only a genuinely unknown id gets the second path.
-        Err(miss @ (BrowserRunMiss::Foreign | BrowserRunMiss::Unavailable)) => {
-            Err(miss.into_response())
-        }
-        Err(BrowserRunMiss::Absent) => {
+    let cookie = cookie_header(headers);
+    let quarry_bearer = quarry_token(state, user, &cookie).await;
+    match owner_browser_session_projection(state, user, quarry_bearer.as_deref(), run_id).await {
+        Ok(projection) => Ok(BrowserArtifactRunAccess {
+            zdr: projection
+                .get("zdr")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }),
+        // A browser-session read deliberately hides both an unknown id and a
+        // foreign id. The only legitimate second authority is a Model Plane
+        // orchestration run, which independently rechecks the same actor and
+        // tenant before granting its evidence path.
+        Err(response) if response.status() == StatusCode::NOT_FOUND => {
             owned_orchestration_run(state, user, headers, &owner, run_id).await?;
-            // The orchestration run is the caller's, but this gateway holds no
-            // Quarry lease, profile or observation history for it — that state
-            // lives in execution-core. Deliberately NOT written into
-            // `browser_run_store`: an entry there would make every other
-            // `/browser/sessions/:session_id/*` route accept this run id, which
-            // is exactly the broadening this change must not do.
-            Ok(BrowserRunMetadata {
-                owner,
-                ..browser_run_metadata(state, run_id)
-            })
+            Ok(BrowserArtifactRunAccess { zdr: false })
         }
+        Err(response) => Err(response),
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BrowserRunStoreError {
     Unavailable,
     Conflict,
 }
 
+#[cfg(test)]
 impl BrowserRunStoreError {
     fn into_response(self) -> Response {
         match self {
@@ -3169,6 +3472,7 @@ impl BrowserRunStoreError {
     }
 }
 
+#[cfg(test)]
 fn store_browser_run_metadata(
     state: &AppState,
     run_id: &str,
@@ -3185,6 +3489,7 @@ fn store_browser_run_metadata(
     Ok(())
 }
 
+#[cfg(test)]
 fn browser_run_metadata(state: &AppState, session_id: &str) -> BrowserRunMetadata {
     state
         .browser_run_store
@@ -3302,20 +3607,6 @@ fn tabs_from_data(data: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .map(|tabs| tabs.to_vec())
         .unwrap_or_default()
-}
-
-fn active_tab(tabs: &[Value]) -> Option<&Value> {
-    tabs.iter().find(|tab| {
-        tab.get("active")
-            .and_then(Value::as_bool)
-            .unwrap_or_default()
-    })
-}
-
-fn active_tab_id(tabs: &[Value]) -> Option<&str> {
-    active_tab(tabs)
-        .and_then(|tab| tab.get("tabId"))
-        .and_then(Value::as_str)
 }
 
 async fn fetch_quarry_artifact_bytes(
@@ -3689,6 +3980,124 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn browser_session_read_proxies_the_quarry_owner_projection_without_cache_fallback() {
+        use axum::body::to_bytes;
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-owner/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "runId": "run-owner",
+                    "status": "active",
+                    "live": true,
+                    "tabs": []
+                }
+            })))
+            .mount(&quarry)
+            .await;
+
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        let mut stale = browser_run_metadata(&state, "missing");
+        stale.owner = owner_of("user-owner", "org-owner");
+        stale.last_observation = Some(json!({ "url": "https://stale.example.test" }));
+        store_browser_run_metadata(&state, "run-owner", stale)
+            .expect("the stale compatibility cache can exist");
+
+        let response = get_session(
+            State(state),
+            Extension(test_user("user-owner", "org-owner")),
+            HeaderMap::new(),
+            Path("run-owner".to_owned()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(body["data"]["runId"], "run-owner");
+        assert_eq!(body["data"]["status"], "active");
+        assert!(body["data"].get("observation").is_none());
+        assert!(body["data"].get("replay").is_none());
+        assert_eq!(
+            quarry
+                .received_requests()
+                .await
+                .expect("recorded Quarry request")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_timeline_read_proxies_quarry_without_legacy_replay_merge() {
+        use axum::body::to_bytes;
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-owner/browser-session/timeline"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "items": [{
+                        "id": "bevt_owner_01",
+                        "occurredAt": "2026-08-11T10:00:00Z",
+                        "kind": "control",
+                        "mode": "human_takeover",
+                        "initiatedBy": "human"
+                    }],
+                    "nextCursor": null
+                }
+            })))
+            .mount(&quarry)
+            .await;
+
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
+        let mut stale = browser_run_metadata(&state, "missing");
+        stale.owner = owner_of("user-owner", "org-owner");
+        stale.replay_events =
+            vec![json!({ "kind": "observation", "url": "https://stale.example.test" })];
+        store_browser_run_metadata(&state, "run-owner", stale)
+            .expect("the stale compatibility cache can exist");
+
+        let response = get_owner_timeline(
+            State(state),
+            Extension(test_user("user-owner", "org-owner")),
+            HeaderMap::new(),
+            Path("run-owner".to_owned()),
+            Uri::from_static("/timeline?limit=25"),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body");
+        let body: Value = serde_json::from_slice(&body).expect("JSON response");
+        assert_eq!(body["data"]["items"][0]["id"], "bevt_owner_01");
+        assert!(body["data"].get("replay").is_none());
+        assert_eq!(
+            quarry
+                .received_requests()
+                .await
+                .expect("recorded Quarry request")
+                .len(),
+            1
+        );
+    }
+
     fn test_user(user_id: &str, org_id: &str) -> AuthenticatedUser {
         AuthenticatedUser {
             user_id: user_id.to_owned(),
@@ -3974,54 +4383,63 @@ mod tests {
         ));
     }
 
-    /// A session id this gateway DID register is answered by its recorded owner
-    /// and nothing else. It must not get a second chance at the orchestration
-    /// probe, which would turn one denied lookup into two authorization attempts.
+    /// A stale test fixture must never authorize a browser run. Quarry's scoped
+    /// projection is the only authority, even when the legacy fixture claims
+    /// that the caller owns the same id.
     #[tokio::test]
-    async fn a_registered_session_owned_by_another_user_never_reaches_the_run_probe() {
-        use wiremock::{matchers::method as wm_method, Mock, MockServer, ResponseTemplate};
+    async fn quarry_owner_denial_wins_over_a_stale_browser_fixture() {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
-        let permissive = MockServer::start().await;
+        let quarry = MockServer::start().await;
         Mock::given(wm_method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "run": { "run_id": "run-owned" }
+            .and(wm_path("/v1/agent/runs/run-owned/browser-session"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": { "code": "not_found", "message": "run is not visible" }
             })))
-            .mount(&permissive)
+            .mount(&quarry)
             .await;
         let mut state = test_app_state();
-        state.model_gateway_url = permissive.uri();
+        state.quarry_edge_url = quarry.uri();
 
         let mut metadata = browser_run_metadata(&state, "missing");
         metadata.owner = owner_of("user-owner", "org-owner");
         store_browser_run_metadata(&state, "run-owned", metadata).expect("store owned session");
 
-        let denied = owned_browser_artifact_run(
+        let denied = owner_browser_session_projection(
             &state,
-            &test_user("user-attacker", "org-attacker"),
-            &HeaderMap::new(),
+            &test_user("user-owner", "org-owner"),
+            None,
             "run-owned",
         )
         .await
-        .expect_err("a foreign owner on a registered session must be denied outright");
+        .expect_err("Quarry's scoped denial must override stale local state");
         assert_eq!(denied.status(), StatusCode::NOT_FOUND);
-        assert!(
-            permissive
+        assert_eq!(
+            quarry
                 .received_requests()
                 .await
                 .expect("recorded requests")
-                .is_empty(),
-            "a decided store denial must not fall through to the run probe"
+                .len(),
+            1,
+            "the gateway performs exactly the owner-scoped Quarry read"
         );
     }
 
-    /// An unregistered id falls through to the run probe, and on success the
-    /// caller's own validated identity — never the upstream's answer — is what
-    /// the returned metadata is owned by.
+    /// An id Quarry does not own can fall through to the Model Plane's
+    /// independently actor-scoped orchestration proof without creating a BFF
+    /// browser-session record.
     #[tokio::test]
-    async fn an_unregistered_orchestration_run_resolves_to_the_callers_own_owner() {
+    async fn an_unregistered_orchestration_run_keeps_browser_cache_empty() {
+        use wiremock::MockServer;
+
         let upstream = model_plane_run_read_model().await;
         let auth = plane_token_issuer().await;
-        let state = state_for(&auth, &upstream);
+        let quarry = MockServer::start().await;
+        let mut state = state_for(&auth, &upstream);
+        state.quarry_edge_url = quarry.uri();
 
         let metadata = owned_browser_artifact_run(
             &state,
@@ -4031,7 +4449,7 @@ mod tests {
         )
         .await
         .expect("the run's owner may read its evidence");
-        assert_eq!(metadata.owner, owner_of("user-owner", "org-owner"));
+        assert!(!metadata.zdr);
         assert!(
             !state
                 .browser_run_store
@@ -4061,11 +4479,40 @@ mod tests {
         .expect("JSON error envelope")
     }
 
-    fn register_session(state: &AppState, session_id: &str, zdr: bool) {
-        let mut metadata = browser_run_metadata(state, "missing");
-        metadata.owner = owner_of("user-owner", "org-owner");
-        metadata.zdr = zdr;
-        store_browser_run_metadata(state, session_id, metadata).expect("store session");
+    async fn mount_browser_owner_projection(
+        quarry: &wiremock::MockServer,
+        session_id: &str,
+        zdr: bool,
+    ) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!(
+                "/v1/agent/runs/{session_id}/browser-session"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "runId": session_id,
+                    "leaseId": "lease_owner_01",
+                    "profileId": "prof_owner_01",
+                    "profileStorage": "ephemeral",
+                    "profileScope": "ephemeral",
+                    "viewport": { "width": 1280, "height": 800 },
+                    "currentUrl": "https://example.test/",
+                    "step": 1,
+                    "status": "active",
+                    "live": true,
+                    "zdr": zdr,
+                    "controlMode": "agent_control",
+                    "tabs": [],
+                    "lastObservation": null
+                }
+            })))
+            .mount(quarry)
+            .await;
     }
 
     /// PNG magic bytes — enough for `safe_browser_artifact_content_type` to keep
@@ -4087,7 +4534,7 @@ mod tests {
             .await;
         let mut state = test_app_state();
         state.quarry_edge_url = quarry.uri();
-        register_session(&state, "run-owned", false);
+        mount_browser_owner_projection(&quarry, "run-owned", false).await;
 
         let response = get_artifact(
             State(state),
@@ -4117,7 +4564,7 @@ mod tests {
         let quarry = MockServer::start().await;
         let mut state = test_app_state();
         state.quarry_edge_url = quarry.uri();
-        register_session(&state, "run-zdr01", true);
+        mount_browser_owner_projection(&quarry, "run-zdr01", true).await;
 
         let response = get_artifact(
             State(state),
@@ -4137,8 +4584,9 @@ mod tests {
                 .received_requests()
                 .await
                 .expect("recorded requests")
-                .is_empty(),
-            "a ZDR run has no capture to fetch, so nothing may be requested"
+                .iter()
+                .all(|request| request.url.path() != "/v1/artifacts/art_shot1"),
+            "a ZDR run may read its owner projection but must never fetch a capture"
         );
     }
 
@@ -4147,10 +4595,14 @@ mod tests {
     /// code, not Quarry's envelope and not a 5xx.
     #[tokio::test]
     async fn an_absent_capture_is_normalized_into_one_stable_no_artifact_code() {
-        use wiremock::{matchers::method as wm_method, Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
 
         let quarry = MockServer::start().await;
         Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/artifacts/art_shot1"))
             .respond_with(ResponseTemplate::new(404).set_body_json(json!({
                 "error": { "code": "not_found", "message": "artifact art_shot1 not found" }
             })))
@@ -4158,7 +4610,7 @@ mod tests {
             .await;
         let mut state = test_app_state();
         state.quarry_edge_url = quarry.uri();
-        register_session(&state, "run-owned", false);
+        mount_browser_owner_projection(&quarry, "run-owned", false).await;
 
         let response = get_artifact(
             State(state),
@@ -4285,8 +4737,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_http_operations_reject_wrong_owner_before_upstream_use() {
-        let state = test_app_state();
+    async fn browser_http_operations_use_quarry_owner_denials_not_bff_cache() {
+        use wiremock::MockServer;
+
+        let quarry = MockServer::start().await;
+        let mut state = test_app_state();
+        state.quarry_edge_url = quarry.uri();
         let mut metadata = browser_run_metadata(&state, "missing");
         metadata.owner = BrowserRunOwner {
             user_id: "user-owner".to_owned(),
@@ -4312,6 +4768,7 @@ mod tests {
             set_control_mode(
                 State(state.clone()),
                 Extension(attacker.clone()),
+                headers.clone(),
                 Path("run-owned".to_owned()),
                 Json(ControlBody {
                     mode: BrowserControlMode::HumanTakeover,
@@ -4425,9 +4882,21 @@ mod tests {
         ];
 
         assert_eq!(responses.len(), 13);
-        assert!(responses
-            .iter()
-            .all(|response| response.status() == StatusCode::NOT_FOUND));
+        for (index, response) in responses.iter().enumerate() {
+            let expected = if index == 5 {
+                // Session close is deliberately idempotent: Quarry hiding an
+                // absent/foreign run as 404 still produces a safe close.
+                StatusCode::OK
+            } else if matches!(index, 8 | 9) {
+                // Durable Model Plane runs independently require delegated
+                // Model/Session credentials. The isolated test deliberately
+                // has no issuer, so it fails closed before probing that plane.
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            assert_eq!(response.status(), expected, "response index {index}");
+        }
     }
 
     fn test_app_state() -> AppState {
@@ -4482,7 +4951,6 @@ mod tests {
             browser_run_store: new_browser_run_store(),
             cache: cache.clone(),
             rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
-            chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers: true,
             allow_dev_auth_bypass: true,

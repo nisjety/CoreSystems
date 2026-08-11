@@ -2,6 +2,8 @@ import type {
   BrowserControlMode,
   BrowserDevtoolsEvent,
   BrowserObservation,
+  BrowserOwnerTimelineItem,
+  BrowserOwnerTimelineResponse,
   BrowserReplayEvent,
   BrowserSession,
   BrowserTab,
@@ -71,6 +73,10 @@ export type BrowserSessionViewModel = {
   networkEntries: BrowserNetworkEntry[]
   nodeCount?: number | null
   observation?: BrowserObservation | null
+  /** Compact, actor-scoped audit activity hydrated from Quarry. It never
+   * contains browser evidence, page bodies, or replay payloads. */
+  ownerTimeline?: BrowserOwnerTimelineItem[]
+  ownerTimelineError?: string | null
   policyDenials: string[]
   profileId: string | null
   profileLabel: string
@@ -146,6 +152,8 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     networkEntries: observation?.network_summary ?? [],
     nodeCount: observation?.dom_summary?.node_count ?? null,
     observation,
+    ownerTimeline: session?.ownerTimeline ?? [],
+    ownerTimelineError: session?.ownerTimelineError ?? null,
     policyDenials: observation?.policy_denials ?? [],
     profileId: session?.profile.id ?? null,
     profileLabel: profileLabel(session),
@@ -211,6 +219,8 @@ export function attachBrowserSession(
       storage: session.profile.id ? session.profile.storage : previous?.profile.storage ?? session.profile.storage,
     },
     visual: session.visual ?? previous?.visual ?? null,
+    ownerTimeline: session.ownerTimeline ?? previous?.ownerTimeline ?? [],
+    ownerTimelineError: session.ownerTimelineError ?? previous?.ownerTimelineError ?? null,
     timeline: session.timeline?.length
       ? session.timeline
       : previous?.timeline ?? [],
@@ -231,6 +241,57 @@ export function attachBrowserSession(
     browserSessionError: null,
     title: browserSession.observation?.title || mergedSession.title || preview.title,
     url: browserSession.observation?.url || mergedSession.url || preview.url,
+  }
+}
+
+/**
+ * Replaces the short-lived display activity with Quarry's actor-scoped,
+ * append-only owner timeline. The compact audit records stay distinct from
+ * replay/evidence: neither screenshots nor observed page data are inferred
+ * from them.
+ */
+export function attachBrowserOwnerTimeline(
+  preview: ScrapePreview,
+  timeline: BrowserOwnerTimelineResponse,
+): ScrapePreview {
+  const previous = preview.browserSession
+  if (!previous) return preview
+
+  return {
+    ...preview,
+    browserSession: {
+      ...previous,
+      session: {
+        ...previous.session,
+        ownerTimeline: [...timeline.items],
+        ownerTimelineError: null,
+        // Replay was only a short-lived UI convenience. Once the owner
+        // timeline is available, do not keep presenting that local activity
+        // as durable history after reload.
+        replay: { events: [], eventCount: 0 },
+      },
+    },
+  }
+}
+
+/** Records an unavailable canonical owner read explicitly instead of letting
+ * the browser panel represent unavailable activity as an empty history. */
+export function withBrowserOwnerTimelineError(
+  preview: ScrapePreview,
+  message: string,
+): ScrapePreview {
+  const previous = preview.browserSession
+  if (!previous) return preview
+
+  return {
+    ...preview,
+    browserSession: {
+      ...previous,
+      session: {
+        ...previous.session,
+        ownerTimelineError: message,
+      },
+    },
   }
 }
 

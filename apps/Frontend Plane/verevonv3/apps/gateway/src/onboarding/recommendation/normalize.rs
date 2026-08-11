@@ -12,21 +12,6 @@ pub(crate) fn plan_id(value: &str) -> &'static str {
     }
 }
 
-pub(super) fn human_plan_name(value: &str, locale: &str) -> &'static str {
-    match (locale, value) {
-        ("nb", "hobby") => "Essential",
-        ("nb", "standard") => "Advanced",
-        ("nb", "pro") => "Expert",
-        ("nb", "enterprise") => "Enterprise",
-        ("nb", _) => "Gratis prøve",
-        ("en", "hobby") => "Essential",
-        ("en", "standard") => "Advanced",
-        ("en", "pro") => "Expert",
-        ("en", "enterprise") => "Enterprise",
-        _ => "Trial",
-    }
-}
-
 pub(super) fn string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
@@ -63,19 +48,6 @@ pub(super) fn connector_source_count(context: &RecommendContext) -> u32 {
                 .sum()
         })
         .unwrap_or(0)
-}
-
-pub(super) fn total_source_count(context: &RecommendContext) -> u32 {
-    let derived_count = connector_source_count(context)
-        + context
-            .websites
-            .as_ref()
-            .map(|items| items.len())
-            .unwrap_or(0) as u32;
-    context
-        .source_count
-        .filter(|source_count| *source_count >= derived_count)
-        .unwrap_or(derived_count)
 }
 
 pub(super) fn align_source_proof_points(

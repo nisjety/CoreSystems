@@ -1,6 +1,7 @@
 # verevonv3 Gateway Integration Plan
 
-**Architecture decision (FIXED):** verevonv3 (SolidJS SPA, no BFF, no server tier) talks ONLY to
+**Architecture decision (FIXED):** verevonv3 is a SolidJS SPA with no separate application
+server. It talks only to the same-origin
 `verevon-gateway-rs` (Frontend Plane, `apps/Frontend Plane/verevonv3/apps/gateway/`, HTTP :3185).
 The gateway authenticates every request against the Control Plane session, enforces org scoping,
 and proxies/fans out to plane boundary services. No other origin is ever called from the browser,
@@ -8,6 +9,148 @@ with one structural exception: the integration OAuth redirect (`GET /oauth/callb
 which the provider drives, not our JS.
 
 Companion document: `endpoint-map.md` (full upstream catalog + per-surface consumption view).
+
+## Ownership hardening update — 2026-08-11
+
+The gateway remains a session-aware browser boundary. It may validate a small
+allowlist, mint a scoped audience token, attach the active organization derived
+from the Control Plane session, and adapt an owner service's wire format. It
+must not manufacture data, make a durable business decision, or become a
+second repository for another plane.
+
+The following first-pass corrections are implemented and covered by focused
+tests:
+
+| Surface | Durable authority | Gateway responsibility now |
+|---|---|---|
+| Insights | `insight-core` | Proxies its raw connector/overview contract after resolving the active org; `organization_required` is explicit instead of a fabricated empty overview. |
+| Knowledge | Data Plane v2 plus Quarry/integration owners | Preserves scoped reads and returns `organization_required` rather than a synthetic workspace. The current workspace composite is explicitly a temporary, stateless adapter until an owner-plane read-model contract exists. |
+| Ingestion | Data Plane v2, Integration Core, and Quarry-v2 | Preserves lifecycle and evidence contracts. The source inventory requires an active org rather than returning an unscoped partial list; its current source-card composite is temporary, stateless response shaping. |
+| Navbar | `user-core` / `notification-core` | Reads and writes User Core appearance state and submits support requests to User Core; it does not acknowledge a change that the owner did not save. |
+| Billing gate | `billing-core` | Leads Core enforces the `leads` entitlement at its own build/export boundary; the gateway paywall is only early UX feedback. `GET /billing/account` now forwards Billing Core failures instead of returning a fabricated local account. |
+| Support AI / recurrence | `conversation-core` with `org-core` policy | Conversation Core fails closed on ZDR, AI mode, and recurrence capability decisions. Gateway checks are early feedback, not the sole authority. |
+| Onboarding plan recommendation | Model Plane | The gateway relays the Model Plane recommendation or returns `recommendation_unavailable`; Billing Core remains the owner of plans, entitlements, and checkout, not model-generated recommendation. |
+
+Two response-shaping projections remain temporarily in the Frontend Plane: the
+Knowledge workspace card view and the Ingestion source-card view. They combine
+already-authoritative, scoped reads and own no records, quotas, policy
+decisions, or durable state. They are not yet a complete deduplication result:
+both need an explicit owner-plane read-model contract before the gateway can
+be reduced to thin normalization.
+
+### Reconciliation result — 2026-08-11
+
+The product/ownership documents were re-read against the current source. When
+older research or a historical plan differs, the master ownership matrix and
+the roadmap execution ledger take precedence.
+
+| Area | Current source evidence | Reconciled state |
+|---|---|---|
+| Insights, Navbar, billing entitlement, and support policy | Gateway handlers proxy owner APIs; `leads-core` checks Billing Core itself; `conversation-core` checks Org Core policy before retaining AI proposals or returning recurrence candidates. | Aligned with the authority rules. |
+| Billing account | The previous debug/development fallback returned a made-up successful account on a Billing Core server error. | Corrected here: owner errors now pass through unchanged. |
+| Onboarding recommendation | `onboarding/lookup/plan.rs` requests `model_recommend_url`; Billing Core has no plan-recommendation endpoint. | Model Plane owns recommendation; Billing Core owns the selected plan and entitlement decision. |
+| Knowledge and Ingestion composites | `knowledge/workspace.rs` and `ingestions/sources.rs` fan out to scoped Data Plane, Integration, and Quarry reads and calculate SPA cards in-process. | No duplicated durable data, but too much read-model composition remains in the BFF. Define a projection contract under the correct owner before treating this work as complete. |
+| Chat history | `chat/history.rs` now lists the Session Core thread projection and relays title, preview, pin, single archive, and archive-all to Model Gateway. It cleans a legacy index only after the owner acknowledges the archive. | Partially aligned: presentation and visibility state have moved to the owner, with ZDR-aware writes and an audit event. The bounded rich-transcript/task-step cache remains temporary until canonical messages, orchestration todos, and run/artifact evidence are projected in one owner-backed read model. |
+| Browser run metadata | Quarry owns the actor-bound browser-session projection, step receipts, current live observation, profile scope, and compact append-only timeline events. The projection, timeline, and control hand-off all require the verified `org_id` **and** signed initiating actor; legacy evidence without an actor fails closed. | Aligned at runtime. The BFF forwards owner reads and mutations, then applies a pure same-origin presentation adapter. `BrowserRunStore`/replay metadata remains available only to legacy unit fixtures and is not part of the gateway binary. |
+| Studio | Existing Studio work is intentionally deferred by the roadmap sequence. | Do not migrate until the preceding owner contracts are complete. |
+
+### Browser-run owner migration — next implementation pass
+
+Quarry is the browser-execution authority. Its current agent-run lane already
+owns live Chromium sessions, verified tenant claims, action execution,
+artifact-backed observations, and immutable action receipts. Its procedure
+replay endpoint compares a proposed procedure with receipt evidence; it is not
+yet the browser-session projection consumed by the Verevon UI.
+
+#### Owner-contract migration — 2026-08-11
+
+The first safe migration increment is implemented:
+
+- Quarry's existing checkpoint is extended with the signed initiating
+  `actor_id` and the historical `lease_id`. Both fields default on decode, so
+  old JSON checkpoint rows remain readable by the store but cannot authorize a
+  user-scoped browser-session projection.
+- `GET /v1/agent/runs/{run_id}/browser-session` returns a live, tab-aware
+  projection when Chromium is present, or a durable non-ZDR checkpoint
+  projection after restart. It includes owner-held profile scope and the latest
+  live observation when one exists. It derives both tenant and actor only from
+  verified claims and returns `404` for a foreign/legacy record.
+- Quarry's live step, frame, tab, DevTools, receipt, and close paths now use
+  that same tenant-and-actor check. A different member of the same organization
+  cannot control a guessed active run identifier.
+- Forward-only migrations `0008_step_receipt_actor_scope.sql` and
+  `0009_browser_timeline_events.sql` bind all new step receipts to their
+  initiating actor and create Quarry's append-only browser owner-event stream.
+  No legacy receipt is backfilled or guessed: actor-scoped receipt and
+  procedure reads filter it out.
+- `POST /v1/agent/runs/{run_id}/browser-session/control` persists a compact
+  control hand-off; start, tabs, DevTools summaries, and close append compact
+  owner events. The cursor-paginated
+  `GET /v1/agent/runs/{run_id}/browser-session/timeline` merges these events
+  with actor-bound action outcomes. It returns no page body, frame data, raw
+  DevTools payload, credential, or browser-storage value.
+- `zdr=true` now skips durable action receipts and timeline events as well as
+  checkpoints and persistent profiles. It may still expose transient live
+  browser state while the run remains active.
+- Display URLs are stripped of user info, query, and fragment before leaving
+  Quarry. Live frames remain transient and are not included.
+- `GET /api/v1/browser/sessions/{session_id}` and the new
+  `GET /api/v1/browser/sessions/{session_id}/timeline` forward only Quarry
+  owner resources. `POST /api/v1/browser/sessions/{session_id}/control`
+  forwards the control transfer before returning the owner projection.
+
+The runtime migration is complete: browser creation, actions, control, tabs,
+suggestions, AI-run launch, artifacts, frames, SSE, DevTools, and WebSocket
+authorization read Quarry's owner projection or the separately owner-scoped
+Model Plane orchestration record. The gateway retains no browser run cache in
+the production binary. Its response adapter is pure and only supplies
+same-origin route URLs and safe client defaults; it neither stores nor
+authorizes browser state.
+
+| Quarry owner resource | Required behavior | BFF behavior after migration |
+|---|---|---|
+| `GET /v1/agent/runs/{run_id}/browser-session` | Return the current run projection: run and lease identifiers, verified tenant and actor scope, profile scope, viewport, status, ZDR, control mode, and current tab summary. Never return raw credentials or frame payloads. | Proxy `{ data }`; no local reconstruction or default values. |
+| `POST /v1/agent/runs/{run_id}/browser-session/control` | Validate an explicit human/agent control-mode transition against the run owner; append an immutable receipt/event with actor and timestamp. | Forward the requested transition and use the owner response. |
+| `GET /v1/agent/runs/{run_id}/browser-session/timeline?cursor=` | Return ordered, immutable browser UI events backed by run receipts/observations: action result, control transition, tab change, compact DevTools summary, and safe artifact reference. Frames remain live/transient and are never persisted as image payloads. | Proxy cursor/meta unchanged; do not create a replay timeline in memory. |
+| Start, step, tab, DevTools, and close operations | Each changes the same owner projection and records a sequence-stable event or receipt. A completed browser call is still only an observed browser result, not proof of a business effect. | Forward to Quarry, then render the returned owner projection/timeline. |
+
+The owner record must bind both dimensions available in Quarry's verified
+claims: `org_id` **and** `actor_id`/`user_id` for a user-started run. A
+service principal may act only through an explicit delegated/automation rule
+and must retain its signed service actor in the receipt. The existing
+org-only live-run check is insufficient for user-scoped history. No route may
+accept a caller-supplied organization or owner field.
+
+Persistence and privacy requirements:
+
+- Quarry may retain only its own execution evidence through its owner-store
+  contract; no other plane reads or writes that store directly.
+- The timeline contains compact metadata and artifact references, not raw CDP,
+  cookies, credentials, or frame/image content. `zdr=true` forbids durable
+  observation/timeline payloads and durable browser profile use; it may expose
+  an ephemeral live status while the session exists.
+- The receipt stream remains append-only. Closing or restarting a live
+  session must not turn a missing in-memory entry into authorization success;
+  the durable owner record decides whether a scoped read is allowed.
+- Model Plane can propose actions and receives evidence through its contracts;
+  Quarry alone executes, records, or rejects browser work.
+
+Implementation order and exit criteria:
+
+1. Add Docker-backed integration coverage for cross-org, cross-user, service
+   delegation, ZDR, close/restart, migration application, and timeline
+   ordering.
+2. **Completed 2026-08-11:** the browser dashboard hydrates the paginated
+   actor-scoped Quarry timeline after session creation, restore, and each
+   mutation. It displays compact activity separately from evidence and clears
+   the old local replay list once the canonical read succeeds; an unavailable
+   canonical read is surfaced explicitly rather than shown as empty history.
+3. Remove the now test-only `BrowserRunStore` fixture harness after its
+   browser-domain tests are rewritten around mock Quarry projections.
+
+The owner contract and its dashboard consumption are now implemented. Remaining
+work is Docker-backed integration coverage and test-fixture cleanup, not a
+second browser runtime in the gateway.
 
 Response convention for every gateway route (normalizing the differing upstream envelopes —
 integration-api `{success,data|error}`, finspo `{success,data,error}`, raw plane JSON):
@@ -85,6 +228,9 @@ verify `discover-source`/`cleanup-source` upstream paths against integration-api
 | `POST /api/v1/chat/invoke` | `POST /v1/invoke` |
 | `GET /api/v1/chat/stream/resume/:request_id` (SSE) | `GET /v1/invoke/resume/:request_id` (forward `Last-Event-ID`) |
 | `POST /api/v1/chat/invocations/:request_id/cancel` | `POST /v1/invoke/:request_id/cancel` |
+| `GET\|DELETE /api/v1/chat/threads` | Model Gateway `GET\|DELETE /v1/threads`; Session Core owns the visible-thread projection and archive-all receipt. |
+| `PUT\|DELETE /api/v1/chat/threads/:thread_id` | Model Gateway `POST /v1/threads/:thread_id/presentation` and `DELETE /v1/threads/:thread_id`; Session Core owns title, preview, pin, and archive receipts. The BFF cache is not an authority. |
+| `GET /api/v1/chat/threads/:thread_id/transcript` | Read-through adapter over Model Gateway `/v1/threads/:thread_id/messages` (Session Core canonical conversation); task-step/run evidence is intentionally a separate owner-backed projection. |
 | `GET /api/v1/chat/threads/:thread_id/messages` | `GET /v1/threads/:thread_id/messages` |
 | `GET /api/v1/models` | `GET /v1/models` |
 | `POST /api/v1/chat/documents` | `POST /v1/chat/documents` (multipart passthrough, ZDR header propagated) |

@@ -63,6 +63,62 @@ fn bool_field(obj: &Value, key: &str) -> bool {
     obj.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn canonical_theme(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "light" => Some("light"),
+        "dark" => Some("dark"),
+        "auto" | "system" => Some("auto"),
+        _ => None,
+    }
+}
+
+fn canonical_color_scheme(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if matches!(value, "blue" | "green" | "purple" | "orange") {
+        return Some(value);
+    }
+    let is_hex = matches!(value.len(), 4 | 5 | 7 | 9)
+        && value.starts_with('#')
+        && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit());
+    is_hex.then_some(value)
+}
+
+fn appearance_payload(settings: &Value, configured: bool) -> Value {
+    let stored_theme = first_str(settings, &["theme"])
+        .and_then(canonical_theme)
+        .unwrap_or("auto");
+    let theme = match stored_theme {
+        "light" => "light",
+        "dark" => "dark",
+        _ => "system",
+    };
+    let color_scheme = first_str(settings, &["colorScheme", "color_scheme"])
+        .and_then(canonical_color_scheme)
+        .map(str::to_owned);
+    json!({
+        "theme": theme,
+        "colorScheme": color_scheme,
+        "configured": configured,
+    })
+}
+
+async fn appearance_for(state: &AppState, actor: &ActionActor) -> Value {
+    let (status, Json(body)) = proxy_json(
+        state,
+        Method::GET,
+        &format!("{}/api/v1/settings/appearance", state.user_core_url),
+        None,
+        None,
+        Some(actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return appearance_payload(&json!({}), false);
+    }
+    appearance_payload(&crate::envelope::unwrap_data(&body), true)
+}
+
 async fn navbar(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -181,9 +237,9 @@ async fn navbar(
             "notifications": notifications,
             "unreadCount": unread_count,
         },
-        // Theme is applied client-side and acknowledged here; persistence flows
-        // through PUT /api/v1/navbar/theme.
-        "theme": { "theme": "system", "colorScheme": null, "configured": false },
+        // Appearance is personal state owned by User Core. The gateway only
+        // adapts User Core's `auto` spelling to the SPA's `system` spelling.
+        "theme": appearance_for(&state, &actor).await,
         // Personal calendar state is owned and persisted by user-core. Keep a
         // degraded navbar render usable if that optional projection is down;
         // the dedicated calendar endpoint reports the upstream error instead
@@ -272,23 +328,99 @@ async fn navbar_search(
 }
 
 async fn save_theme(
-    State(_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    // Theme is a client-side preference applied immediately by the SPA. There is
-    // no dedicated preference store in the current plane set, so acknowledge the
-    // chosen theme (real echo) rather than 404. When user-core exposes a settings
-    // endpoint this becomes a proxy_json to it.
-    let theme = body
+    let requested_theme = body
         .get("theme")
         .and_then(Value::as_str)
-        .unwrap_or("system")
-        .to_owned();
-    let color_scheme = body.get("colorScheme").cloned().unwrap_or(Value::Null);
-    Json(ok(
-        json!({ "theme": theme, "colorScheme": color_scheme, "configured": true }),
-    ))
+        .and_then(canonical_theme);
+    let Some(theme) = requested_theme else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_theme",
+                "theme must be light, dark, or system.",
+            )),
+        )
+            .into_response();
+    };
+    let requested_color_scheme = match body.get("colorScheme") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => match canonical_color_scheme(value) {
+            Some(color_scheme) => Some(color_scheme.to_owned()),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(error(
+                        "invalid_color_scheme",
+                        "colorScheme must be a named theme color or a hexadecimal color.",
+                    )),
+                )
+                    .into_response()
+            }
+        },
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "invalid_color_scheme",
+                    "colorScheme must be a named theme color or a hexadecimal color.",
+                )),
+            )
+                .into_response()
+        }
+    };
+
+    let actor = actor_for(&user);
+    let (current_status, Json(current_body)) = proxy_json(
+        &state,
+        Method::GET,
+        &format!("{}/api/v1/settings/appearance", state.user_core_url),
+        None,
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !current_status.is_success() {
+        return (current_status, Json(current_body)).into_response();
+    }
+    let current = crate::envelope::unwrap_data(&current_body);
+    let color_scheme = requested_color_scheme.or_else(|| {
+        first_str(&current, &["colorScheme", "color_scheme"])
+            .and_then(canonical_color_scheme)
+            .map(str::to_owned)
+    });
+    let font_size = first_str(&current, &["fontSize", "font_size"])
+        .filter(|value| matches!(*value, "small" | "medium" | "large"))
+        .unwrap_or("medium");
+    let appearance = json!({
+        "theme": theme,
+        "colorScheme": color_scheme.unwrap_or_else(|| "blue".to_owned()),
+        "fontSize": font_size,
+        "compactMode": bool_field(&current, "compactMode"),
+    });
+    let (status, Json(saved_body)) = proxy_json(
+        &state,
+        Method::PUT,
+        &format!("{}/api/v1/settings/appearance", state.user_core_url),
+        Some(appearance),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return (status, Json(saved_body)).into_response();
+    }
+
+    Json(ok(appearance_payload(
+        &crate::envelope::unwrap_data(&saved_body),
+        true,
+    )))
+    .into_response()
 }
 
 async fn mark_notification_read(
@@ -388,16 +520,46 @@ async fn create_calendar_entry(
 }
 
 async fn submit_support(
-    State(_state): State<AppState>,
-    Extension(_user): Extension<AuthenticatedUser>,
-    Json(_body): Json<Value>,
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(error(
-            "support_intake_unavailable",
-            "Support intake is disabled until an authoritative support identity mapping is configured",
-        )),
+    let actor = actor_for(&user);
+    let (status, Json(response)) = proxy_json(
+        &state,
+        Method::POST,
+        &format!("{}/api/v1/support/requests", state.user_core_url),
+        Some(body),
+        None,
+        Some(&actor),
+        None,
     )
-        .into_response()
+    .await;
+
+    (status, Json(response)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{appearance_payload, canonical_color_scheme, canonical_theme};
+
+    #[test]
+    fn appearance_payload_maps_user_core_auto_to_the_spa_system_theme() {
+        assert_eq!(
+            appearance_payload(&json!({ "theme": "auto", "colorScheme": "#111111" }), true,),
+            json!({ "theme": "system", "colorScheme": "#111111", "configured": true })
+        );
+    }
+
+    #[test]
+    fn appearance_inputs_allow_known_tokens_and_safe_hex_only() {
+        assert_eq!(canonical_theme("system"), Some("auto"));
+        assert_eq!(canonical_theme("dark"), Some("dark"));
+        assert_eq!(canonical_theme("sepia"), None);
+        assert_eq!(canonical_color_scheme("#2F6BFF"), Some("#2F6BFF"));
+        assert_eq!(canonical_color_scheme("purple"), Some("purple"));
+        assert_eq!(canonical_color_scheme("red; color: white"), None);
+    }
 }

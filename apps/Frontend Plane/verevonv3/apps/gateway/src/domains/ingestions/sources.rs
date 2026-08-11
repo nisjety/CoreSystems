@@ -56,15 +56,19 @@ pub(super) async fn list_sources(
     let actor = actor_for(&user);
     let org = authorized_org_id(&state, &user).await;
 
-    // Without an authoritative org, the cross-plane (org-scoped) lookups are
-    // meaningless — return quarry web sources only.
+    // A source inventory is tenant-owned. Returning a partial, unscoped set
+    // would make an unaffiliated session look like a real empty workspace.
+    // Require the Control Plane-selected organization before asking either
+    // Quarry or the Data Plane for evidence.
     if org.trim().is_empty() {
-        let quarry_sources = load_quarry_sources(&state, token.as_deref(), &user.user_id).await;
-        return okay(json!({
-            "graph": empty_graph(),
-            "integrations": Vec::<Value>::new(),
-            "quarrySources": quarry_sources,
-        }));
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_required",
+                "An active organization is required to load ingestion sources.",
+            )),
+        )
+            .into_response();
     }
 
     let Some(dp_token) = data_plane_token(&state, &user, &cookie).await else {

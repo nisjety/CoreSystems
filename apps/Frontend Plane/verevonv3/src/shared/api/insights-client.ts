@@ -1,9 +1,8 @@
 import { requestJson } from './http'
 
-// The gateway returns `kind` and `status` as free-form strings sourced from the
-// connector registry ("social", "inbox", "agents", "native", "planned",
-// "external_analytics", "google_analytics_4", ...). They are NOT a fixed union,
-// so the SPA must treat them as opaque strings and never assume a closed set.
+// Insight Core's connector values are open-ended ("social", "inbox", "agents",
+// "native", "planned", "external_analytics", ...). The SPA treats them as
+// opaque strings and never assumes a closed set.
 export type InsightConnectorKind = string
 export type InsightConnectorStatus = string
 
@@ -28,14 +27,35 @@ export type InsightConnector = {
   status: InsightConnectorStatus
 }
 
-// Gateway-facing only. The browser must not call Application Plane insight-core
-// directly, attach internal service keys, or send any org header: the gateway
-// resolves the org from the session and serves the connector registry through
-// `GET /api/v1/insights/connectors` as a `{ data: InsightConnector[] }` envelope.
-// `requestJson` already unwraps the top-level `data`, so this resolves to the
-// connector array directly.
-export function listInsightConnectors(): Promise<InsightConnector[]> {
-  return requestJson<InsightConnector[]>('/api/v1/insights/connectors')
+type InsightConnectorWire = {
+  display_name?: unknown
+  id?: unknown
+  kind?: unknown
+  label?: unknown
+  status?: unknown
+  surface?: unknown
+  type?: unknown
+}
+
+// The gateway preserves Insight Core's owner contract. This adapter belongs in
+// the SPA because it only translates field names for presentation; it does not
+// calculate status, availability, or any metric.
+export function normalizeInsightConnector(value: unknown): InsightConnector {
+  const wire = (value && typeof value === 'object' ? value : {}) as InsightConnectorWire
+  return {
+    id: asString(wire.type ?? wire.id),
+    kind: asString(wire.surface ?? wire.kind),
+    label: asString(wire.display_name ?? wire.label),
+    status: asString(wire.status),
+  }
+}
+
+// Gateway-facing only. The browser must not call Application Plane Insight Core
+// directly, attach internal service keys, or send any org header. The gateway
+// resolves the org from the session and relays the owner response unchanged.
+export async function listInsightConnectors(): Promise<InsightConnector[]> {
+  const connectors = await requestJson<unknown>('/api/v1/insights/connectors')
+  return Array.isArray(connectors) ? connectors.map(normalizeInsightConnector) : []
 }
 
 // One real, recorded metric the org's measurement layer produced. Every field
@@ -64,10 +84,8 @@ export type InsightOverviewQuery = {
   to?: string
 }
 
-// The compact per-org metric overview the gateway assembles from insight-core.
-// `sourceCount` is the number of REAL scorecards (produced rows); the SPA uses
-// it to decide a `live` vs honest-`empty` state — `live` never attaches to an
-// unproduced value.
+// The per-org metric overview Insight Core produced. `sourceCount` is derived
+// only from actual scorecards when the upstream has not included its count.
 export type InsightOverview = {
   generatedAt: string
   scorecards: InsightScorecard[]

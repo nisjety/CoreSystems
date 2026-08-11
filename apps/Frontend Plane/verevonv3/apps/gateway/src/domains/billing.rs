@@ -64,7 +64,7 @@ async fn billing_account(
         "{}/api/v1/billing/orgs/{}/account",
         state.billing_core_url, org_id
     );
-    let response = proxy_json(
+    proxy_json(
         &state,
         Method::GET,
         &url,
@@ -73,19 +73,7 @@ async fn billing_account(
         Some(&actor_for(&user)),
         None,
     )
-    .await;
-
-    if response.0.is_server_error()
-        && billing_account_fallback_enabled(&state)
-        && !org_id.is_empty()
-    {
-        return (
-            StatusCode::OK,
-            Json(default_billing_account(&org_id, "billing_core_unavailable")),
-        );
-    }
-
-    response
+    .await
 }
 
 async fn billing_entitlement(
@@ -277,37 +265,6 @@ fn no_active_org_response() -> (StatusCode, Json<Value>) {
             "An active organization is required for billing.",
         )),
     )
-}
-
-fn billing_account_fallback_enabled(state: &AppState) -> bool {
-    cfg!(debug_assertions) || state.allow_dev_actor_headers || state.allow_dev_auth_bypass
-}
-
-fn default_billing_account(org_id: &str, reason: &str) -> Value {
-    json!({
-        "org_id": org_id,
-        "plan": "free",
-        "subscription_state": "active",
-        "credits": 0,
-        "products": {},
-        "feature_flags": {},
-        "entitlements": {
-            "feature.chat": true,
-            "feature.api_keys": true,
-            "feature.audit_logs": true,
-            "feature.integrations": false,
-            "feature.sso": false
-        },
-        "quota_limits": {
-            "api_calls": 1000,
-            "users": 5,
-            "storage_mb": 1000
-        },
-        "provider_customer_id": {},
-        "metadata": {
-            "fallback": reason
-        }
-    })
 }
 
 #[cfg(test)]

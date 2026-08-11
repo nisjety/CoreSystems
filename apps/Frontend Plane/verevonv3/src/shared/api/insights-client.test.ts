@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getInsightsOverview,
   listInsightConnectors,
+  normalizeInsightConnector,
   normalizeInsightOverview,
-  type InsightConnector,
 } from '@/shared/api/insights-client'
 
 afterEach(() => {
@@ -29,18 +29,23 @@ describe('insights-client', () => {
     expect(init?.credentials).toBe('include')
   })
 
-  it('parses the gateway { data: [...] } envelope into connectors', async () => {
-    const connectors: InsightConnector[] = [
+  it('adapts Insight Core connector slots at the SPA boundary', async () => {
+    const slots = [
+      { type: 'social-core', surface: 'social', display_name: 'Verevon Social', status: 'native' },
+      { type: 'conversation-core', surface: 'inbox', display_name: 'Verevon Inbox', status: 'native' },
+      { type: 'model-plane-agents', surface: 'agents', display_name: 'Verevon Agents', status: 'planned' },
+      { type: 'google_analytics_4', surface: 'external_analytics', display_name: 'Google Analytics 4', status: 'not_connected' },
+    ]
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(slots)))
+
+    const result = await listInsightConnectors()
+
+    expect(result).toEqual([
       { id: 'social-core', kind: 'social', label: 'Verevon Social', status: 'native' },
       { id: 'conversation-core', kind: 'inbox', label: 'Verevon Inbox', status: 'native' },
       { id: 'model-plane-agents', kind: 'agents', label: 'Verevon Agents', status: 'planned' },
       { id: 'google_analytics_4', kind: 'external_analytics', label: 'Google Analytics 4', status: 'not_connected' },
-    ]
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(connectors)))
-
-    const result = await listInsightConnectors()
-
-    expect(result).toEqual(connectors)
+    ])
     expect(result).toHaveLength(4)
     expect(result[0]).toMatchObject({ id: 'social-core', kind: 'social', status: 'native' })
     expect(result[3]).toMatchObject({ id: 'google_analytics_4', kind: 'external_analytics', status: 'not_connected' })
@@ -111,6 +116,23 @@ describe('insights-client', () => {
     })
     // Unattributed scorecard keeps an empty source — never fabricated.
     expect(overview.scorecards[1]!.source).toBe('')
+  })
+})
+
+describe('normalizeInsightConnector', () => {
+  it('accepts the owner contract and the legacy presentation shape during the rollout', () => {
+    expect(normalizeInsightConnector({
+      type: 'conversation-core',
+      surface: 'inbox',
+      display_name: 'Verevon Inbox',
+      status: 'native',
+    })).toEqual({ id: 'conversation-core', kind: 'inbox', label: 'Verevon Inbox', status: 'native' })
+    expect(normalizeInsightConnector({
+      id: 'legacy',
+      kind: 'knowledge',
+      label: 'Legacy connector',
+      status: 'planned',
+    })).toEqual({ id: 'legacy', kind: 'knowledge', label: 'Legacy connector', status: 'planned' })
   })
 })
 

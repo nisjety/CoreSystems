@@ -1,8 +1,6 @@
-mod local;
 mod normalize;
 mod remote;
 
-pub(crate) use local::build_local_recommendation;
 pub(crate) use remote::fetch_remote_recommendation;
 
 pub(crate) fn plan_id(value: &str) -> &'static str {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { BrowserSessionResponse } from '@/shared/api/browser-client'
+import type { BrowserOwnerTimelineResponse, BrowserSessionResponse } from '@/shared/api/browser-client'
 import {
+  attachBrowserOwnerTimeline,
   artifactsForTimelineEntry,
   attachBrowserObservation,
   attachBrowserSession,
@@ -15,6 +16,7 @@ import {
   timelineDetail,
   toggleBrowserChromePanel,
   toggleBrowserChromePopover,
+  withBrowserOwnerTimelineError,
   withBrowserApprovalDecided,
   withBrowserApprovalRequested,
   withStepRationale,
@@ -321,6 +323,56 @@ describe('browser session view model', () => {
     expect(model.replayEvents.at(-1)?.kind).toBe('observation')
     expect(model.replayEvents.at(-1)?.controlMode).toBe('human_takeover')
     expect(model.replayEvents.at(-1)?.screenshotUrl).toContain('/api/v1/browser/sessions/run-1/artifacts/art_socket_shot')
+  })
+
+  it('hydrates Quarry owner activity without inventing replay evidence', () => {
+    const current = attachBrowserSession(preview(), {
+      session: {
+        capabilities: ['navigate'],
+        id: 'run-1',
+        profile: { scope: 'ephemeral', storage: 'isolated' },
+        renderMode: 'chromium',
+        replay: {
+          eventCount: 1,
+          events: [{ id: 'legacy-local-event', kind: 'observation' }],
+        },
+        status: 'live',
+        title: 'Live title',
+        url: 'https://triodelab.no/',
+        viewport: { width: 1280, height: 800 },
+      },
+      observation: null,
+    })
+    const timeline: BrowserOwnerTimelineResponse = {
+      items: [
+        {
+          action: 'navigate',
+          id: 'rcpt_01',
+          kind: 'action',
+          occurredAt: '2026-08-11T09:00:00Z',
+          outcome: 'completed',
+        },
+        {
+          id: 'bevt_02',
+          initiatedBy: 'human',
+          kind: 'control',
+          mode: 'human_takeover',
+          occurredAt: '2026-08-11T09:00:01Z',
+        },
+      ],
+    }
+
+    const model = browserSessionFromPreview(attachBrowserOwnerTimeline(current, timeline))
+
+    expect(model.ownerTimeline).toEqual(timeline.items)
+    expect(model.ownerTimelineError).toBeNull()
+    expect(model.timeline).toEqual([])
+    expect(model.replayEvents).toEqual([])
+
+    const unavailable = browserSessionFromPreview(
+      withBrowserOwnerTimelineError(current, 'Canonical owner timeline is unavailable.'),
+    )
+    expect(unavailable.ownerTimelineError).toBe('Canonical owner timeline is unavailable.')
   })
 
   it('surfaces the gateway ZDR marker and per-step evidence on timeline entries', () => {

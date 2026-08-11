@@ -51,6 +51,7 @@ import type {
   BrowserActionSuggestionResponse,
   BrowserDevtoolsEvent,
   BrowserObservation,
+  BrowserOwnerTimelineItem,
   BrowserProfileRestoreProbe,
   BrowserProfileSummary,
   BrowserSession,
@@ -256,6 +257,33 @@ function replayEventMeta(event: BrowserReplayViewEvent): string {
     event.url ? compactBrowserUrl(event.url) : null,
   ].filter(Boolean)
   return parts.length > 0 ? parts.join(' · ') : 'Ingen detalj'
+}
+
+/** The durable Quarry activity log is deliberately compact. It is an audit
+ * record, not a replay: no page body, screenshot, or DevTools payload is
+ * inferred from it. */
+function ownerTimelineEventLabel(event: BrowserOwnerTimelineItem): string {
+  if (event.kind === 'action') return event.action?.replaceAll('_', ' ') || 'Nettleserhandling'
+  if (event.kind === 'control') return event.mode === 'human_takeover' ? 'Menneske tok over' : 'Agentkontroll aktiv'
+  if (event.kind === 'tab') {
+    if (event.operation === 'opened') return 'Ny fane'
+    if (event.operation === 'selected') return 'Fane valgt'
+    if (event.operation === 'closed') return 'Fane lukket'
+    return 'Fanehendelse'
+  }
+  if (event.kind === 'devtools') return 'DevTools-sammendrag'
+  return event.state === 'closed' ? 'Økt lukket' : 'Økt startet'
+}
+
+function ownerTimelineEventMeta(event: BrowserOwnerTimelineItem): string {
+  const parts = [
+    event.outcome,
+    event.errorCode ?? null,
+    event.initiatedBy ?? null,
+    event.tabId ?? event.activeTabId ?? null,
+    event.eventCount !== undefined ? `${event.eventCount} hendelser` : null,
+  ].filter(Boolean)
+  return parts.length > 0 ? parts.join(' · ') : new Date(event.occurredAt).toLocaleString('nb-NO')
 }
 
 /** DOM-nodeliste delt mellom sidevisningens fallback og DevTools-panelet. */
@@ -479,6 +507,7 @@ export function BrowserChrome(props: {
       }]
   const timelineTabs = () => session().timeline.filter((entry) => entry.step > 0).slice(-8)
   const replayEvents = () => session().replayEvents.slice(-12)
+  const ownerTimeline = () => session().ownerTimeline?.slice(-24) ?? []
   const selectedTimelineEntry = () => {
     const selected = selectedTimelineStep()
     if (selected === null) return null
@@ -1985,7 +2014,7 @@ export function BrowserChrome(props: {
           <header class="knowledge-browser-evidence__head">
             <History class="size-3.5" aria-hidden="true" />
             <span>Tidslinje</span>
-            <strong>{session().timeline.length} steg · {session().replayEvents.length} hendelser</strong>
+            <strong>{session().timeline.length} steg · {ownerTimeline().length} eierhendelser</strong>
             <button
               type="button"
               aria-label="Lukk tidslinjen"
@@ -2014,10 +2043,36 @@ export function BrowserChrome(props: {
               </div>
             </div>
           </Show>
+          <Show when={session().ownerTimelineError}>
+            {(message) => (
+              <p class="knowledge-browser-evidence__hint" role="alert">
+                Varig aktivitet kunne ikke lastes: {message()}
+              </p>
+            )}
+          </Show>
           <Show
-            when={session().timeline.length > 0}
-            fallback={<p class="knowledge-browser-evidence__hint">Ingen steg registrert ennå — naviger eller kjør en handling for å bygge tidslinjen.</p>}
+            when={session().timeline.length > 0 || ownerTimeline().length > 0}
+            fallback={<p class="knowledge-browser-evidence__hint">Ingen varig nettleseraktivitet er registrert ennå.</p>}
           >
+            <Show when={ownerTimeline().length > 0}>
+              <div class="knowledge-browser-replay" aria-label="Varig nettleseraktivitet">
+                <header>
+                  <span>Aktivitet</span>
+                  <strong>{ownerTimeline().length}</strong>
+                </header>
+                <For each={ownerTimeline()}>
+                  {(event) => (
+                    <div class={`knowledge-browser-replay__event knowledge-browser-replay__event--${event.kind}`}>
+                      <span class="knowledge-browser-replay__kind">{event.kind}</span>
+                      <div>
+                        <strong>{ownerTimelineEventLabel(event)}</strong>
+                        <p>{ownerTimelineEventMeta(event)}</p>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </div>
+            </Show>
             <Show when={session().replayEvents.length > 0}>
               <div class="knowledge-browser-replay" aria-label="Agent replay">
                 <header>

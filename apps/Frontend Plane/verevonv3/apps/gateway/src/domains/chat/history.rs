@@ -1,5 +1,3 @@
-use std::{collections::HashMap, sync::Arc};
-
 use axum::{
     extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
@@ -7,12 +5,11 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
+use reqwest::Method;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tokio::sync::RwLock;
+use serde_json::{json, Value};
 
 use crate::{
-    cache::cache_key,
     config::AppState,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
@@ -21,35 +18,7 @@ use crate::{
 
 use super::shared;
 
-const CHAT_HISTORY_TTL_SECS: u64 = 90 * 24 * 60 * 60;
 const MAX_THREADS: usize = 80;
-const MAX_TRANSCRIPT_TURNS: usize = 160;
-const MAX_TRANSCRIPT_STEPS: usize = 320;
-const MAX_TITLE_LEN: usize = 96;
-const MAX_PREVIEW_LEN: usize = 180;
-
-#[derive(Clone, Default)]
-pub(crate) struct ChatHistoryStore {
-    memory: Arc<RwLock<HashMap<String, Value>>>,
-}
-
-impl ChatHistoryStore {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    async fn get(&self, key: &str) -> Option<Value> {
-        self.memory.read().await.get(key).cloned()
-    }
-
-    async fn set(&self, key: String, value: Value) {
-        self.memory.write().await.insert(key, value);
-    }
-
-    async fn delete(&self, key: &str) {
-        self.memory.write().await.remove(key);
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,16 +27,8 @@ struct ChatThreadSummary {
     title: String,
     preview: String,
     updated_at: String,
-    /// Whether the user pinned this thread to the top of the sidebar.
-    ///
-    /// Lives in THIS index rather than in session-core. That is not a shortcut:
-    /// this index is already the cross-device home for presentation state — it
-    /// is Dragonfly write-through, keyed per (org, user), with a 90-day TTL, and
-    /// it already owns the AI-generated title that session-core does not know
-    /// about. A pin is presentation, so it belongs beside the title.
-    ///
-    /// `#[serde(default)]` so an index written before pins existed decodes as
-    /// unpinned instead of failing the whole listing.
+    /// Session Core owns pin state and returns this field with the durable
+    /// thread summary. The gateway only relays that authority to the SPA.
     #[serde(default)]
     pinned: bool,
 }
@@ -95,12 +56,6 @@ pub(super) struct SaveThreadRequest {
     pinned: Option<bool>,
     #[serde(default)]
     preview: Option<String>,
-    #[serde(default)]
-    updated_at: Option<String>,
-    #[serde(default)]
-    turns: Option<Vec<Value>>,
-    #[serde(default)]
-    task_steps: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,12 +96,8 @@ struct DurableThreadSummary {
     updated_at: String,
     #[serde(default, alias = "createdAt")]
     created_at: String,
-}
-
-#[derive(Debug, Clone)]
-struct ChatHistoryScope {
-    org_id: String,
-    user_id: String,
+    #[serde(default)]
+    pinned: bool,
 }
 
 pub(super) async fn list_threads(
@@ -154,126 +105,94 @@ pub(super) async fn list_threads(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
 ) -> Response {
-    let scope = match scope_for(&state, &user).await {
-        Ok(scope) => scope,
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
+    let sessions = match read_durable_threads(&state, &user, &headers).await {
+        Ok(sessions) => sessions,
         Err(response) => return response,
     };
-    let cached = read_index(&state, &scope).await;
-    let durable = read_durable_threads(&state, &user, &scope, &headers).await;
-    let sessions = merge_thread_indexes(cached, durable);
     Json(ok(ThreadsResponse { sessions })).into_response()
 }
 
 pub(super) async fn get_thread_transcript(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Response {
-    let scope = match scope_for(&state, &user).await {
-        Ok(scope) => scope,
-        Err(response) => return response,
-    };
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
     let thread_id = normalize_id(&thread_id);
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
-    let transcript = read_transcript(&state, &scope, &thread_id).await;
+    let threads = match read_durable_threads(&state, &user, &headers).await {
+        Ok(threads) => threads,
+        Err(response) => return response,
+    };
+    let Some(session) = threads.iter().find(|thread| thread.thread_id == thread_id) else {
+        return thread_not_found();
+    };
+    let transcript = match read_canonical_transcript(&state, &user, &headers, &thread_id).await {
+        Ok(transcript) => transcript.map(|mut transcript| {
+            transcript.updated_at = session.updated_at.clone();
+            transcript
+        }),
+        Err(response) => return response,
+    };
     Json(ok(TranscriptResponse { transcript })).into_response()
 }
 
 pub(super) async fn save_thread(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(thread_id): Path<String>,
     Json(body): Json<SaveThreadRequest>,
 ) -> Response {
-    let scope = match scope_for(&state, &user).await {
-        Ok(scope) => scope,
-        Err(response) => return response,
-    };
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
     let thread_id = normalize_id(&thread_id);
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
 
-    let now = now_iso();
-    let existing = read_index(&state, &scope)
-        .await
-        .into_iter()
-        .find(|item| item.thread_id == thread_id);
-    // A pin is metadata, not activity. Without this, toggling a pin sent no
-    // `updated_at` and fell through to `now`, so pinning a month-old thread
-    // relabelled it as touched today — misreporting the conversation's last
-    // activity in the sidebar and in every recency sort downstream. When the
-    // request changes nothing a reader would call content, keep the stored
-    // timestamp.
-    let metadata_only = body.title.is_none()
-        && body.preview.is_none()
-        && body.turns.is_none()
-        && body.task_steps.is_none()
-        && body.updated_at.is_none();
-    let updated_at = if metadata_only {
-        existing
-            .as_ref()
-            .map_or_else(|| now.clone(), |item| item.updated_at.clone())
-    } else {
-        normalize_timestamp(body.updated_at.as_deref(), &now)
-    };
-    let session = ChatThreadSummary {
-        thread_id: thread_id.clone(),
-        title: normalize_display_text(
-            body.title
-                .as_deref()
-                .or(existing.as_ref().map(|item| item.title.as_str())),
-            "Verevon Chat",
-            MAX_TITLE_LEN,
-        ),
-        preview: normalize_display_text(
-            body.preview
-                .as_deref()
-                .or(existing.as_ref().map(|item| item.preview.as_str())),
-            "Open live session",
-            MAX_PREVIEW_LEN,
-        ),
-        updated_at: updated_at.clone(),
-        pinned: body
-            .pinned
-            .unwrap_or_else(|| existing.as_ref().is_some_and(|item| item.pinned)),
-    };
-
-    let mut sessions = read_index(&state, &scope).await;
-    sessions.retain(|item| item.thread_id != thread_id);
-    sessions.push(session.clone());
-    sort_pinned_first(&mut sessions);
-    sessions.truncate(MAX_THREADS);
-    write_value(
-        &state,
-        &index_key(&scope),
-        serde_json::to_value(&sessions).unwrap_or(Value::Null),
-    )
-    .await;
-
-    let transcript = body.turns.map(|turns| ChatThreadTranscript {
-        thread_id: thread_id.clone(),
-        turns: tail_values(turns, MAX_TRANSCRIPT_TURNS),
-        task_steps: body
-            .task_steps
-            .map(|steps| tail_values(steps, MAX_TRANSCRIPT_STEPS))
-            .filter(|steps| !steps.is_empty()),
-        updated_at,
-    });
-    if let Some(transcript) = &transcript {
-        write_value(
+    if body.title.is_some() || body.preview.is_some() || body.pinned.is_some() {
+        if let Err(response) = update_durable_presentation(
             &state,
-            &transcript_key(&scope, &thread_id),
-            serde_json::to_value(transcript).unwrap_or(Value::Null),
+            &user,
+            &headers,
+            &thread_id,
+            body.title.as_deref(),
+            body.preview.as_deref(),
+            body.pinned,
         )
-        .await;
+        .await
+        {
+            return response;
+        }
     }
+    let sessions = match read_durable_threads(&state, &user, &headers).await {
+        Ok(sessions) => sessions,
+        Err(response) => return response,
+    };
+    let Some(session) = sessions
+        .iter()
+        .find(|item| item.thread_id == thread_id)
+        .cloned()
+    else {
+        return thread_not_found();
+    };
 
     Json(ok(ThreadResponse {
         session,
-        transcript,
+        // Turns and task steps are intentionally not accepted as durable BFF
+        // state. Session Core / Model Gateway is the sole conversation owner;
+        // the browser may keep its own rendering cache for offline UX.
+        transcript: None,
     }))
     .into_response()
 }
@@ -281,53 +200,41 @@ pub(super) async fn save_thread(
 pub(super) async fn delete_thread(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Response {
-    let scope = match scope_for(&state, &user).await {
-        Ok(scope) => scope,
-        Err(response) => return response,
-    };
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
     let thread_id = normalize_id(&thread_id);
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
-    let mut sessions = read_index(&state, &scope).await;
-    sessions.retain(|item| item.thread_id != thread_id);
-    write_value(
-        &state,
-        &index_key(&scope),
-        serde_json::to_value(&sessions).unwrap_or(Value::Null),
-    )
-    .await;
-    delete_value(&state, &transcript_key(&scope, &thread_id)).await;
+    if let Err(response) = delete_durable_thread(&state, &user, &headers, &thread_id).await {
+        return response;
+    }
+    let sessions = match read_durable_threads(&state, &user, &headers).await {
+        Ok(sessions) => sessions,
+        Err(response) => return response,
+    };
     Json(ok(ThreadsResponse { sessions })).into_response()
 }
 
 pub(super) async fn clear_threads(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> Response {
-    let scope = match scope_for(&state, &user).await {
-        Ok(scope) => scope,
-        Err(response) => return response,
-    };
-    let sessions = read_index(&state, &scope).await;
-    for item in sessions {
-        delete_value(&state, &transcript_key(&scope, &item.thread_id)).await;
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
     }
-    write_value(
-        &state,
-        &index_key(&scope),
-        serde_json::to_value(Vec::<ChatThreadSummary>::new()).unwrap_or(Value::Null),
-    )
-    .await;
+    if let Err(response) = delete_durable_threads(&state, &user, &headers).await {
+        return response;
+    }
     Json(ok(ThreadsResponse { sessions: vec![] })).into_response()
 }
 
-async fn scope_for(
-    state: &AppState,
-    user: &AuthenticatedUser,
-) -> Result<ChatHistoryScope, Response> {
+async fn scope_for(state: &AppState, user: &AuthenticatedUser) -> Result<(), Response> {
     let org_id = authorized_org_id(state, user).await;
     if org_id.trim().is_empty() {
         return Err((
@@ -339,60 +246,49 @@ async fn scope_for(
         )
             .into_response());
     }
-    Ok(ChatHistoryScope {
-        org_id,
-        user_id: user.user_id.clone(),
-    })
-}
-
-async fn read_index(state: &AppState, scope: &ChatHistoryScope) -> Vec<ChatThreadSummary> {
-    read_value(state, &index_key(scope))
-        .await
-        .and_then(|value| serde_json::from_value::<Vec<ChatThreadSummary>>(value).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|item| !item.thread_id.trim().is_empty())
-        .take(MAX_THREADS)
-        .collect()
+    Ok(())
 }
 
 async fn read_durable_threads(
     state: &AppState,
     user: &AuthenticatedUser,
-    scope: &ChatHistoryScope,
     headers: &HeaderMap,
-) -> Vec<ChatThreadSummary> {
-    let Some(token) = shared::model_token(state, user, headers).await else {
-        return Vec::new();
-    };
-    let Some(session_token) = shared::session_token(state, user, headers).await else {
-        return Vec::new();
+) -> Result<Vec<ChatThreadSummary>, Response> {
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return Err(shared::delegated_auth_unavailable(error).into_response()),
     };
     let url = format!("{}/v1/threads?limit={MAX_THREADS}", state.model_gateway_url);
-    let response = state
-        .client
-        .get(url)
-        .bearer_auth(token)
-        .header("x-session-authorization", format!("Bearer {session_token}"))
-        .header("x-user-id", &scope.user_id)
-        .header("x-org-id", &scope.org_id)
-        .send()
-        .await;
-    let Ok(response) = response else {
-        return Vec::new();
-    };
-    if !response.status().is_success() {
-        return Vec::new();
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err((status, Json(payload)).into_response());
     }
-    let Ok(payload) = response.json::<DurableThreadsResponse>().await else {
-        return Vec::new();
-    };
+    let payload = serde_json::from_value::<DurableThreadsResponse>(payload).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "invalid_model_gateway_response",
+                "Model Gateway returned an invalid thread listing.",
+            )),
+        )
+            .into_response()
+    })?;
     let now = now_iso();
-    payload
+    Ok(payload
         .threads
         .into_iter()
         .filter_map(|item| durable_to_summary(item, &now))
-        .collect()
+        .collect())
 }
 
 fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThreadSummary> {
@@ -407,126 +303,219 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
     };
     Some(ChatThreadSummary {
         thread_id,
-        title: normalize_display_text(Some(&item.title), "Verevon Chat", MAX_TITLE_LEN),
-        preview: normalize_display_text(Some(&item.preview), "", MAX_PREVIEW_LEN),
+        // Presentation text is validated and normalized by Session Core. The
+        // BFF intentionally does not trim, truncate, or replace it here.
+        title: item.title,
+        preview: item.preview,
         updated_at,
-        // session-core has no pin concept, so a durable entry is always
-        // unpinned. `merge_thread_indexes` must therefore never let a durable
-        // entry overwrite a cached pin — see the OR there.
-        pinned: false,
+        pinned: item.pinned,
     })
 }
 
-/// Order the index for the sidebar: pinned threads first, then by recency.
-///
-/// This must run BEFORE any `truncate(MAX_THREADS)`. Sorting by `updated_at`
-/// alone and then cutting at the cap destroyed pins: an old pinned thread sorted
-/// to the bottom, fell outside the cap, and the truncated list was written
-/// straight back to the index — losing both the pin and the thread. The same bug
-/// existed client-side in `chat-thread-history.ts` and is fixed there too.
-fn sort_pinned_first(sessions: &mut [ChatThreadSummary]) {
-    sessions.sort_by(|left, right| {
-        right
-            .pinned
-            .cmp(&left.pinned)
-            .then_with(|| right.updated_at.cmp(&left.updated_at))
-    });
-}
-
-fn merge_thread_indexes(
-    cached: Vec<ChatThreadSummary>,
-    durable: Vec<ChatThreadSummary>,
-) -> Vec<ChatThreadSummary> {
-    let mut sessions: Vec<ChatThreadSummary> = Vec::new();
-    // CACHED first: the SPA's saved snapshot owns presentation (its title may
-    // be the AI-generated thread summary), while session-core's durable
-    // summary auto-titles threads with the raw first message. Durable entries
-    // still contribute threads the SPA never snapshotted, fill empty fields,
-    // and advance `updated_at`. With durable first, every listing clobbered a
-    // generated title back to the echoed question.
-    for item in cached.into_iter().chain(durable) {
-        if item.thread_id.trim().is_empty() {
-            continue;
-        }
-        if let Some(existing) = sessions
-            .iter_mut()
-            .find(|existing| existing.thread_id == item.thread_id)
-        {
-            if existing.title.trim().is_empty() || existing.title == "Verevon Chat" {
-                existing.title = item.title;
-            }
-            if existing.preview.trim().is_empty() {
-                existing.preview = item.preview;
-            }
-            // OR, never assign: `durable_to_summary` always reports `false`,
-            // so assigning would unpin every thread on each listing that
-            // reaches session-core.
-            existing.pinned = existing.pinned || item.pinned;
-            if item.updated_at > existing.updated_at {
-                existing.updated_at = item.updated_at;
-            }
-        } else {
-            sessions.push(item);
-        }
-    }
-    sort_pinned_first(&mut sessions);
-    sessions.truncate(MAX_THREADS);
-    sessions
-}
-
-async fn read_transcript(
+async fn update_durable_presentation(
     state: &AppState,
-    scope: &ChatHistoryScope,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
     thread_id: &str,
-) -> Option<ChatThreadTranscript> {
-    read_value(state, &transcript_key(scope, thread_id))
+    title: Option<&str>,
+    preview: Option<&str>,
+    pinned: Option<bool>,
+) -> Result<(), Response> {
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = shared::required_session_token(state, user, headers)
         .await
-        .and_then(|value| serde_json::from_value::<ChatThreadTranscript>(value).ok())
-}
-
-async fn read_value(state: &AppState, logical_key: &str) -> Option<Value> {
-    let redis_key = cache_key("chat-history", &[logical_key]);
-    if let Some(value) = state
-        .cache
-        .lookup_within(&redis_key, CHAT_HISTORY_TTL_SECS)
-        .await
-    {
-        state
-            .chat_history_store
-            .set(logical_key.to_owned(), value.clone())
-            .await;
-        return Some(value);
-    }
-    state.chat_history_store.get(logical_key).await
-}
-
-async fn write_value(state: &AppState, logical_key: &str, value: Value) {
-    state
-        .chat_history_store
-        .set(logical_key.to_owned(), value.clone())
-        .await;
-    let redis_key = cache_key("chat-history", &[logical_key]);
-    state
-        .cache
-        .store_for_secs(&redis_key, &value, CHAT_HISTORY_TTL_SECS)
-        .await;
-}
-
-async fn delete_value(state: &AppState, logical_key: &str) {
-    state.chat_history_store.delete(logical_key).await;
-    let redis_key = cache_key("chat-history", &[logical_key]);
-    state.cache.delete(&redis_key).await;
-}
-
-fn index_key(scope: &ChatHistoryScope) -> String {
-    format!("chat-history:index:{}:{}", scope.org_id, scope.user_id)
-}
-
-fn transcript_key(scope: &ChatHistoryScope, thread_id: &str) -> String {
-    format!(
-        "chat-history:transcript:{}:{}:{}",
-        scope.org_id, scope.user_id, thread_id
+        .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
+    let url = format!(
+        "{}/v1/threads/{}/presentation",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "title": title,
+            "preview": preview,
+            "pinned": pinned,
+        })),
+        token.as_deref(),
+        Some(&session_token),
+        user,
     )
+    .await;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err((status, Json(payload)).into_response())
+    }
+}
+
+/// Permanently erase one thread via Model Gateway `DELETE /v1/threads/{id}`,
+/// which is owner-bound and backed by Session Core's `DeleteThread`.
+///
+/// NOT the archive route. `POST /v1/threads/{id}/archive` also exists and is
+/// non-destructive; this one removes the thread, its messages, run
+/// descendants, events/audit evidence, plans, tasks, approvals and
+/// continuation records, and does not come back.
+async fn delete_durable_thread(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+) -> Result<(), Response> {
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = shared::required_session_token(state, user, headers)
+        .await
+        .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
+    let url = format!(
+        "{}/v1/threads/{}",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::DELETE,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err((status, Json(payload)).into_response())
+    }
+}
+
+/// Permanently erase every thread the caller owns via Model Gateway
+/// `DELETE /v1/threads`. See [`delete_durable_thread`] — this is the
+/// destructive operation, not `POST /v1/threads/archive`.
+async fn delete_durable_threads(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<(), Response> {
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = shared::required_session_token(state, user, headers)
+        .await
+        .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
+    let url = format!("{}/v1/threads", state.model_gateway_url);
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::DELETE,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err((status, Json(payload)).into_response())
+    }
+}
+
+fn thread_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "thread_not_found",
+            "The chat thread no longer exists.",
+        )),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct CanonicalMessagesResponse {
+    #[serde(default)]
+    messages: Vec<CanonicalMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CanonicalMessage {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    content: String,
+}
+
+async fn read_canonical_transcript(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+) -> Result<Option<ChatThreadTranscript>, Response> {
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = shared::required_session_token(state, user, headers)
+        .await
+        .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
+    let url = format!(
+        "{}/v1/threads/{}/messages",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if status == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err((status, Json(payload)).into_response());
+    }
+    let payload = serde_json::from_value::<CanonicalMessagesResponse>(payload).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "invalid_model_gateway_response",
+                "Model Gateway returned an invalid conversation.",
+            )),
+        )
+            .into_response()
+    })?;
+    Ok(canonical_messages_to_transcript(
+        thread_id,
+        payload.messages,
+    ))
+}
+
+fn canonical_messages_to_transcript(
+    thread_id: &str,
+    messages: Vec<CanonicalMessage>,
+) -> Option<ChatThreadTranscript> {
+    if messages.is_empty() {
+        return None;
+    }
+    let turns = messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            json!({
+                "id": format!("canonical-{}", index + 1),
+                "role": message.role,
+                "content": message.content,
+            })
+        })
+        .collect();
+    Some(ChatThreadTranscript {
+        thread_id: thread_id.to_owned(),
+        turns,
+        task_steps: None,
+        updated_at: String::new(),
+    })
 }
 
 /// Makes Support-derived threads durably read-only at the same-origin trust
@@ -591,35 +580,11 @@ fn normalize_id(value: &str) -> String {
     value.trim().to_owned()
 }
 
-fn normalize_display_text(value: Option<&str>, fallback: &str, max_len: usize) -> String {
-    let text = value
-        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| fallback.to_owned());
-    if text.chars().count() <= max_len {
-        return text;
-    }
-    let mut truncated = text
-        .chars()
-        .take(max_len.saturating_sub(3))
-        .collect::<String>();
-    truncated = truncated.trim_end().to_owned();
-    format!("{truncated}...")
-}
-
 fn normalize_timestamp(value: Option<&str>, fallback: &str) -> String {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
         .map(|value| value.with_timezone(&Utc).to_rfc3339())
         .unwrap_or_else(|| fallback.to_owned())
-}
-
-fn tail_values(mut values: Vec<Value>, max_len: usize) -> Vec<Value> {
-    if values.len() <= max_len {
-        return values;
-    }
-    values.drain(0..values.len() - max_len);
-    values
 }
 
 fn now_iso() -> String {
@@ -637,146 +602,29 @@ fn bad_request(message: &'static str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_support_thread_policy, merge_thread_indexes, sort_pinned_first,
-        strip_support_thread_capabilities, ChatThreadSummary, MAX_THREADS,
+        canonical_messages_to_transcript, durable_to_summary, enforce_support_thread_policy,
+        strip_support_thread_capabilities, CanonicalMessage, DurableThreadSummary,
     };
     use serde_json::{json, Value};
 
-    fn summary(thread_id: &str, title: &str, preview: &str, updated_at: &str) -> ChatThreadSummary {
-        ChatThreadSummary {
-            thread_id: thread_id.to_owned(),
-            title: title.to_owned(),
-            preview: preview.to_owned(),
-            updated_at: updated_at.to_owned(),
-            pinned: false,
-        }
-    }
-
-    fn pinned(thread_id: &str, updated_at: &str) -> ChatThreadSummary {
-        ChatThreadSummary {
-            pinned: true,
-            ..summary(thread_id, "pinned thread", "", updated_at)
-        }
-    }
-
-    /// The data-loss bug this ordering exists to prevent: an OLD pinned thread
-    /// sorted to the bottom by recency, cut by the cap, and the truncated list
-    /// written back — losing the pin and the thread together.
     #[test]
-    fn an_old_pinned_thread_survives_the_cap() {
-        let mut sessions: Vec<ChatThreadSummary> = (0..MAX_THREADS)
-            .map(|index| {
-                summary(
-                    &format!("t{index}"),
-                    "recent",
-                    "",
-                    &format!("2026-08-01T10:{index:02}:00Z"),
-                )
-            })
-            .collect();
-        sessions.push(pinned("old-but-pinned", "2020-01-01T00:00:00Z"));
+    fn durable_thread_presentation_is_returned_without_a_gateway_override() {
+        let summary = durable_to_summary(
+            DurableThreadSummary {
+                thread_id: "thread_1".to_owned(),
+                title: "Customer shipping follow-up".to_owned(),
+                preview: "Waiting on the carrier receipt".to_owned(),
+                updated_at: "2026-08-11T10:00:00Z".to_owned(),
+                created_at: "2026-08-10T10:00:00Z".to_owned(),
+                pinned: true,
+            },
+            "2026-08-11T12:00:00Z",
+        )
+        .expect("valid Session Core record");
 
-        sort_pinned_first(&mut sessions);
-        sessions.truncate(MAX_THREADS);
-
-        assert_eq!(
-            sessions[0].thread_id, "old-but-pinned",
-            "pinned must sort first"
-        );
-        assert!(
-            sessions
-                .iter()
-                .any(|item| item.thread_id == "old-but-pinned"),
-            "a pinned thread must never be truncated away"
-        );
-        assert_eq!(sessions.len(), MAX_THREADS);
-    }
-
-    /// Within each group, recency still decides.
-    #[test]
-    fn recency_orders_within_the_pinned_and_unpinned_groups() {
-        let mut sessions = vec![
-            summary("older", "a", "", "2026-01-01T00:00:00Z"),
-            pinned("pin-older", "2020-01-01T00:00:00Z"),
-            summary("newer", "b", "", "2026-08-01T00:00:00Z"),
-            pinned("pin-newer", "2026-07-01T00:00:00Z"),
-        ];
-        sort_pinned_first(&mut sessions);
-        let order: Vec<&str> = sessions
-            .iter()
-            .map(|item| item.thread_id.as_str())
-            .collect();
-        assert_eq!(order, ["pin-newer", "pin-older", "newer", "older"]);
-    }
-
-    /// session-core has no pin concept, so every durable entry reports
-    /// `pinned: false`. Merging must never let that unpin a cached pin.
-    #[test]
-    fn a_durable_listing_cannot_unpin_a_pinned_thread() {
-        let cached = vec![pinned("t1", "2026-08-01T00:00:00Z")];
-        let durable = vec![summary(
-            "t1",
-            "raw first message",
-            "preview",
-            "2026-08-02T00:00:00Z",
-        )];
-
-        let merged = merge_thread_indexes(cached, durable);
-
-        assert_eq!(merged.len(), 1);
-        assert!(merged[0].pinned, "a durable refresh must not clear the pin");
-        // And the durable entry still advances recency, as it did before.
-        assert_eq!(merged[0].updated_at, "2026-08-02T00:00:00Z");
-    }
-
-    #[test]
-    fn cached_snapshot_title_wins_over_durable_auto_title() {
-        let cached = vec![summary(
-            "t1",
-            "Oslo: Norges kulturelle hovedstad",
-            "answer preview",
-            "2026-07-29T21:40:53+00:00",
-        )];
-        let durable = vec![summary(
-            "t1",
-            "Hva er hovedstaden i Norge, og hva er byen mest kjent for?",
-            "answer preview",
-            "2026-07-29T21:41:19+00:00",
-        )];
-        let merged = merge_thread_indexes(cached, durable);
-        assert_eq!(merged.len(), 1);
-        // The SPA snapshot's (possibly AI-generated) title survives listing…
-        assert_eq!(merged[0].title, "Oslo: Norges kulturelle hovedstad");
-        // …while durable activity still advances the timestamp.
-        assert_eq!(merged[0].updated_at, "2026-07-29T21:41:19+00:00");
-    }
-
-    #[test]
-    fn durable_threads_still_appear_and_fill_placeholder_fields() {
-        let cached = vec![summary(
-            "t1",
-            "Verevon Chat",
-            "",
-            "2026-07-29T10:00:00+00:00",
-        )];
-        let durable = vec![
-            summary(
-                "t1",
-                "Real question",
-                "real preview",
-                "2026-07-29T09:00:00+00:00",
-            ),
-            summary("t2", "Durable only", "p", "2026-07-29T11:00:00+00:00"),
-        ];
-        let merged = merge_thread_indexes(cached, durable);
-        assert_eq!(merged.len(), 2);
-        // Sorted by activity: t2 (11:00) ahead of t1 (10:00).
-        assert_eq!(merged[0].thread_id, "t2");
-        assert_eq!(merged[0].title, "Durable only");
-        // Placeholder cached fields are filled from the durable summary.
-        assert_eq!(merged[1].title, "Real question");
-        assert_eq!(merged[1].preview, "real preview");
-        assert_eq!(merged[1].updated_at, "2026-07-29T10:00:00+00:00");
+        assert_eq!(summary.title, "Customer shipping follow-up");
+        assert_eq!(summary.preview, "Waiting on the carrier receipt");
+        assert!(summary.pinned);
     }
 
     #[test]
@@ -819,5 +667,29 @@ mod tests {
             "support_read_only": true
         });
         assert!(enforce_support_thread_policy(&mut invalid_initial).is_err());
+    }
+
+    #[test]
+    fn canonical_messages_are_adapted_without_task_steps_or_bff_metadata() {
+        let transcript = canonical_messages_to_transcript(
+            "thread-1",
+            vec![
+                CanonicalMessage {
+                    role: "user".into(),
+                    content: "Question".into(),
+                },
+                CanonicalMessage {
+                    role: "assistant".into(),
+                    content: "Answer".into(),
+                },
+            ],
+        )
+        .expect("canonical conversation should render");
+
+        assert_eq!(transcript.thread_id, "thread-1");
+        assert_eq!(transcript.turns[0]["role"], "user");
+        assert_eq!(transcript.turns[1]["content"], "Answer");
+        assert!(transcript.task_steps.is_none());
+        assert!(canonical_messages_to_transcript("thread-1", Vec::new()).is_none());
     }
 }

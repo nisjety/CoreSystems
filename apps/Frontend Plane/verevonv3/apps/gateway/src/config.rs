@@ -67,13 +67,15 @@ pub(crate) struct AppState {
     pub(crate) zammad_api_url: String,
     pub(crate) zammad_api_token: String,
     pub(crate) audience_token_cache: AudienceTokenCache,
+    /// Retained only for legacy browser-domain unit fixtures. Runtime browser
+    /// authority and presentation state live in Quarry-v2.
+    #[cfg(test)]
     pub(crate) browser_run_store: crate::domains::browser::BrowserRunStore,
     pub(crate) cache: crate::cache::ResultCache,
     /// Fleet-wide inbound rate limiter. Backed by the same Dragonfly connection
     /// as `cache` (distributed token buckets), degrading to an in-process bucket
     /// when the cache is disabled. Wired as an `Extension` layer in `main.rs`.
     pub(crate) rate_limiter: crate::rate_limit::RateLimiter,
-    pub(crate) chat_history_store: crate::domains::chat::history::ChatHistoryStore,
     pub(crate) studio_store: crate::domains::studio::StudioStore,
     pub(crate) allow_dev_actor_headers: bool,
     pub(crate) allow_dev_auth_bypass: bool,
@@ -205,13 +207,13 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .trim()
             .to_owned(),
         audience_token_cache: new_audience_token_cache(),
+        #[cfg(test)]
         browser_run_store: crate::domains::browser::new_browser_run_store(),
         // Reuse the cache's Dragonfly connection for fleet-wide rate limiting.
         // Built before `cache` is moved into the struct below (literal fields
         // evaluate top-to-bottom, so this borrow happens first).
         rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
         cache,
-        chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
         studio_store: crate::domains::studio::StudioStore::new(),
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),

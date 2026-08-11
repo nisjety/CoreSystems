@@ -183,12 +183,16 @@ describe('artifactLanguage', () => {
 
 describe('parseDataUri', () => {
   it('extracts the mime type and byte size of a base64 payload', () => {
-    // "Hei Verevon" is 10 bytes; its base64 is 16 chars with padding.
+    // "Hei Verevon" is 11 bytes; its base64 is 16 chars with padding.
+    // (The expectation said 10 until this line was corrected: the payload was
+    // "Hei Velion" — exactly 10 bytes — and the Velion→Verevon rename grew it
+    // by one without updating the count, so the implementation was right and
+    // the test was wrong.)
     const uri = `data:text/plain;base64,${base64('Hei Verevon')}`
     const parsed = parseDataUri(uri)
     expect(parsed?.mime).toBe('text/plain')
     expect(parsed?.isBase64).toBe(true)
-    expect(parsed?.bytes).toBe(10)
+    expect(parsed?.bytes).toBe(11)
   })
 
   it('extracts an office mime type with dots and dashes intact', () => {

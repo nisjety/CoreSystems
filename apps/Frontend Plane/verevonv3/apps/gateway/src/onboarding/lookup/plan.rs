@@ -10,7 +10,7 @@ use crate::{
     domains::chat::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
-    onboarding::recommendation::{build_local_recommendation, fetch_remote_recommendation},
+    onboarding::recommendation::fetch_remote_recommendation,
 };
 
 pub(crate) async fn recommend_plan(
@@ -19,14 +19,20 @@ pub(crate) async fn recommend_plan(
     headers: HeaderMap,
     Json(input): Json<RecommendPlanRequest>,
 ) -> impl IntoResponse {
-    // The onboarding router is behind `require_session`, so the caller's
-    // identity + cookie are available here — pass them to the remote call so it
-    // can mint a model-plane token and reach the AI recommender (the previous
-    // signature had no auth, so the model call 401'd and always fell back to
-    // the local heuristic).
-    let local = build_local_recommendation(&input.context);
-    let remote = fetch_remote_recommendation(&state, &user, &headers, &input.context).await;
-    let recommendation = select_recommendation(local, remote);
+    // Plan recommendation is a Model Plane decision. The gateway may carry the
+    // validated user/session context to that service but must not substitute a
+    // local pricing heuristic when the owner is unavailable.
+    let Some(recommendation) =
+        fetch_remote_recommendation(&state, &user, &headers, &input.context).await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "recommendation_unavailable",
+                "Plan recommendation is temporarily unavailable. Choose a plan manually and retry later.",
+            )),
+        );
+    };
     (
         StatusCode::OK,
         Json(ok(json!({ "recommendation": recommendation }))),
@@ -129,27 +135,6 @@ pub(crate) async fn translate_recommendation(
     )
 }
 
-fn select_recommendation(
-    local: crate::contracts::PlanRecommendation,
-    remote: Option<crate::contracts::PlanRecommendation>,
-) -> crate::contracts::PlanRecommendation {
-    match remote {
-        Some(remote) if plan_rank(remote.plan_id) >= plan_rank(local.plan_id) => remote,
-        _ => local,
-    }
-}
-
-fn plan_rank(plan_id: &str) -> u8 {
-    match plan_id {
-        "trial" => 0,
-        "hobby" => 1,
-        "standard" => 2,
-        "pro" => 3,
-        "enterprise" => 4,
-        _ => 0,
-    }
-}
-
 fn normalize_locale(value: &str) -> Option<&'static str> {
     match value.trim().to_ascii_lowercase().as_str() {
         "en" | "en-us" | "en-gb" => Some("en"),
@@ -249,12 +234,9 @@ fn translated_list(
 mod tests {
     use serde_json::json;
 
-    use crate::contracts::{PlanRecommendation, RecommendationText};
+    use crate::contracts::RecommendationText;
 
-    use super::{
-        apply_translation, select_recommendation, translation_failure, translation_items,
-        translation_map,
-    };
+    use super::{apply_translation, translation_failure, translation_items, translation_map};
 
     #[test]
     fn translation_operational_failures_are_bounded() {
@@ -269,28 +251,6 @@ mod tests {
             "The translation service is unavailable."
         );
         assert!(!unavailable.to_string().contains("http://"));
-    }
-
-    #[test]
-    fn deterministic_plan_is_a_floor_for_model_recommendations() {
-        let selected = select_recommendation(
-            recommendation("pro", "local"),
-            Some(recommendation("standard", "model")),
-        );
-
-        assert_eq!(selected.plan_id, "pro");
-        assert_eq!(selected.source, "local");
-    }
-
-    #[test]
-    fn model_can_choose_same_or_higher_plan_than_the_floor() {
-        let selected = select_recommendation(
-            recommendation("standard", "local"),
-            Some(recommendation("pro", "model")),
-        );
-
-        assert_eq!(selected.plan_id, "pro");
-        assert_eq!(selected.source, "model");
     }
 
     #[test]
@@ -343,18 +303,5 @@ mod tests {
         assert_eq!(translated.summary, "translated summary");
         assert_eq!(translated.proof_points, vec!["translated proof"]);
         assert_eq!(translated.scope_signals, vec!["original scope"]);
-    }
-
-    fn recommendation(plan_id: &'static str, source: &'static str) -> PlanRecommendation {
-        PlanRecommendation {
-            plan_id,
-            reason: "reason".to_owned(),
-            summary: "summary".to_owned(),
-            proof_points: vec![],
-            scope_signals: vec![],
-            opportunities: vec![],
-            generated_at: "2026-07-05T00:00:00Z".to_owned(),
-            source,
-        }
     }
 }

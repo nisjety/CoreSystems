@@ -337,7 +337,6 @@ mod tests {
             rate_limiter: crate::rate_limit::RateLimiter::from_cache(
                 &crate::cache::ResultCache::disabled(),
             ),
-            chat_history_store: crate::domains::chat::history::ChatHistoryStore::new(),
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers,
             allow_dev_auth_bypass: allow_dev_actor_headers,

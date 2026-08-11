@@ -25,6 +25,7 @@ import {
   createBrowserSession,
   createBrowserProfile,
   deleteBrowserProfile,
+  getBrowserOwnerTimeline,
   listBrowserProfiles,
   probeBrowserProfile,
   renameBrowserProfile,
@@ -74,8 +75,10 @@ import { PROFILE_SCOPE_LABELS, type BrowserProfileManagerProps } from './Browser
 import { createBrowserLoopController, type BrowserLoopState } from './browser-loop'
 import {
   attachBrowserObservation,
+  attachBrowserOwnerTimeline,
   attachBrowserSession,
   attachBrowserTabs,
+  withBrowserOwnerTimelineError,
   withBrowserApprovalDecided,
   withBrowserApprovalRequested,
   withStepRationale,
@@ -438,6 +441,8 @@ export function KnowledgeComposer(props: {
     setUrl(restored.preview.url)
     setPreview(restored.preview)
     setBrowserRationales(restored.browserRationales)
+    const sessionId = restored.preview.browserSession?.session.id
+    if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
   })
 
   createEffect(() => {
@@ -763,10 +768,13 @@ export function KnowledgeComposer(props: {
         },
       })
       const browserSession = await browserSessionPromise
-      setPreview({
+      const nextPreview = {
         ...attachBrowserSession(toScrapePreview(target, result), browserSession.session),
         browserSessionError: browserSession.error,
-      })
+      }
+      setPreview(nextPreview)
+      const sessionId = browserSession.session?.session.id
+      if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
       void browserSessionPromise?.then((attempt) => {
         closeBrowserSessionById(attempt.session?.session.id)
@@ -824,6 +832,29 @@ export function KnowledgeComposer(props: {
     closeBrowserSessionById(current?.browserSession?.session.id)
   }
 
+  /** Hydrates compact history from Quarry after a browser session is created,
+   * restored, or mutated. The reducer checks the id again so a slow response
+   * can never overwrite a newer session's activity. */
+  const refreshBrowserOwnerTimeline = async (sessionId: string) => {
+    const id = orgId()
+    if (!id || !sessionId) return
+    try {
+      const timeline = await getBrowserOwnerTimeline(id, sessionId, { limit: 100 })
+      setPreview((current) => {
+        if (current?.browserSession?.session.id !== sessionId) return current
+        return attachBrowserOwnerTimeline(current, timeline)
+      })
+    } catch (reason) {
+      const message = reason instanceof Error
+        ? reason.message
+        : i18n.tr('Den varige nettleseraktiviteten kunne ikke lastes.', 'The durable browser activity could not be loaded.')
+      setPreview((current) => {
+        if (current?.browserSession?.session.id !== sessionId) return current
+        return withBrowserOwnerTimelineError(current, message)
+      })
+    }
+  }
+
   const clearStoredBrowserPreview = () => {
     const key = browserPreviewStorageKey()
     if (key) removeClientValue(key)
@@ -850,6 +881,7 @@ export function KnowledgeComposer(props: {
     try {
       const nextSession = await runBrowserAction(id, sessionId, action, { actor: 'human' })
       setPreview(attachBrowserSession(current, nextSession))
+      void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : i18n.tr('Nettleserhandlingen kunne ikke fullføres.', 'The browser action could not be completed.'))
     } finally {
@@ -868,6 +900,7 @@ export function KnowledgeComposer(props: {
     try {
       const nextSession = await setBrowserControlMode(id, sessionId, mode)
       setPreview(attachBrowserSession(current, nextSession))
+      void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke endre nettleserkontroll.', 'Could not change browser control.'))
     } finally {
@@ -885,6 +918,7 @@ export function KnowledgeComposer(props: {
     try {
       const nextTabs = await createBrowserTab(id, sessionId)
       setPreview(attachBrowserTabs(current, nextTabs))
+      void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke opprette ny nettleserfane.', 'Could not create a new browser tab.'))
     } finally {
@@ -902,6 +936,7 @@ export function KnowledgeComposer(props: {
     try {
       const nextTabs = await selectBrowserTab(id, sessionId, tabId)
       setPreview(attachBrowserTabs(current, nextTabs))
+      void refreshBrowserOwnerTimeline(sessionId)
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke bytte nettleserfane.', 'Could not switch browser tab.'))
     } finally {
@@ -956,6 +991,7 @@ export function KnowledgeComposer(props: {
         const nextSession = await runBrowserAction(id, sessionId, action, { actor: 'agent' })
         recordBrowserRationale(goal, suggestion, nextSession)
         setPreview(attachBrowserSession(current, nextSession))
+        void refreshBrowserOwnerTimeline(sessionId)
       }
       return suggestion
     } catch (reason) {

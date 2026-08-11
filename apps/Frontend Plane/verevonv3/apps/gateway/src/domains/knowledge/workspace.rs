@@ -62,12 +62,22 @@ pub(super) async fn load_workspace(
     let actor = shared::actor_for(&user);
     let cookie = shared::cookie_header(&headers);
     let org_opt = (!org_id.trim().is_empty()).then(|| org_id.clone());
+    let Some(org) = org_opt else {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_required",
+                "An active organization is required to load the Knowledge workspace.",
+            )),
+        )
+            .into_response();
+    };
     // Data Plane audience token — attached as Bearer on every interactive
     // documents/retrieval/graph leg. Never fall back to the shared internal key:
     // strict deployments reject it and permissive deployments could broaden a
     // user's private-document visibility into a service-principal read.
     let dp_token = shared::data_plane_token(&state, &user, &cookie).await;
-    if org_opt.is_some() && dp_token.is_none() {
+    if dp_token.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(error(
@@ -79,57 +89,18 @@ pub(super) async fn load_workspace(
     }
     let dp = dp_token.as_deref();
 
-    // Stage 1 — documents + integration summary load regardless of org scope.
+    // Stage 1 — documents + integration summary. The gateway only adapts the
+    // authenticated plane responses; it never invents an empty workspace for
+    // a user whose Control Plane session has no active organization.
     let (document_load, integration) = tokio::join!(
-        load_documents(&state, org_opt.as_deref(), &actor, dp),
-        load_integration_summary(&state, org_opt.as_deref(), &actor),
+        load_documents(&state, Some(&org), &actor, dp),
+        load_integration_summary(&state, Some(&org), &actor),
     );
     let documents = document_load.documents;
     let document_count = document_load.total.unwrap_or(documents.len());
     let documents_truncated = document_load.truncated;
     let indexed_count = count_indexed(&documents);
     let generated_at = chrono::Utc::now().to_rfc3339();
-
-    if org_opt.is_none() {
-        let diagnostics = diagnostics::load_diagnostics(
-            &state,
-            &actor,
-            diagnostics::DiagInput {
-                document_count: document_count as i64,
-                graph_available: false,
-                graph_node_count: 0,
-                graph_edge_count: 0,
-                indexed_count,
-            },
-        )
-        .await;
-
-        let payload = json!({
-            "generatedAt": generated_at,
-            "orgId": Value::Null,
-            "collections": build_collections(&documents, &[]),
-            "dataPlane": {
-                "available": false,
-                "documentCount": document_count,
-                "loadedDocumentCount": documents.len(),
-                "indexedCount": indexed_count,
-                "documentsTruncated": documents_truncated,
-            },
-            "graph": empty_graph(),
-            "metrics": integration.metrics_json(),
-            "metricCards": build_metric_cards(document_count as i64, indexed_count, 0, &GraphMetrics { available: false, node_count: 0, edge_count: 0 }, 0, 0, &integration),
-            "folders": build_folder_cards(&[], &documents),
-            "integrations": build_integration_cards(&integration.connections, &documents, 0),
-            "files": build_files(&documents),
-            "sources": Value::Array(vec![]),
-            "webSources": Value::Array(vec![]),
-            "diagnostics": diagnostics,
-            "finspo": empty_finspo(),
-        });
-        return Json(payload).into_response();
-    }
-
-    let org = org_opt.clone().unwrap();
 
     // Stage 2 — graph snapshot, finspo analytics, quarry web sources (org-scoped).
     let (graph_snapshot, finspo, quarry_sources) = tokio::join!(
@@ -1733,18 +1704,6 @@ fn empty_graph() -> Value {
         "nodes": [],
         "links": [],
         "truncated": false,
-    })
-}
-
-fn empty_finspo() -> Value {
-    json!({
-        "available": false,
-        "duplicateGroups": 0,
-        "inactiveCount": 0,
-        "largestCount": 0,
-        "recommendationCount": 0,
-        "reclaimableBytes": 0,
-        "sourceCount": 0,
     })
 }
 
