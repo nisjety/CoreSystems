@@ -1052,7 +1052,7 @@ comment overstates what the function does.
 is-queryable, small-result-stays-inline); the pre-existing truncation test kept
 its assertions and only gained the new arguments.
 
-### TEST-1 [high] hanging tests block the entire model-gateway suite
+### TEST-1 [RESOLVED 2026-08-11] hanging tests blocked the entire model-gateway suite
 
 `tool_loop::tests::every_advertised_builtin_tool_has_a_dispatch_arm`
 (tool_loop.rs:3891) loops `builtin_tool_defs()` and calls `dispatch_tool` for
@@ -1175,3 +1175,66 @@ So the crate has three distinct problems, in increasing subtlety:
 None are caused by this session's changes: for (2) and (3) the removed cache
 lookup/store were already no-ops under test, since `langcache::GLOBAL` is a
 `OnceLock` no test ever initialises.
+
+---
+
+## TEST-1 RESOLVED — root cause found, all three hangs fixed
+
+`cargo test -p model-gateway --lib` now runs to completion: **810 passed,
+0 failed, 1 ignored, ~9s, exit 0.** It previously never terminated at all, so
+every finding above that says "nobody runs this suite" now has a suite to run.
+
+### Root cause: a HALF-OPEN dependency, not a slow one
+
+Docker Desktop was left mid-shutdown (the machine is being migrated). Its
+proxy still held `127.0.0.1:9091` in LISTEN with no container behind it. So:
+
+  * TCP connect SUCCEEDED — no fast `ECONNREFUSED` to fail on
+  * nothing ever completed the HTTP/2 handshake
+  * `AppState` built every downstream channel with `connect_lazy()` and **no
+    `connect_timeout`**, and tonic imposes no default
+
+An unreachable dependency is harmless; a half-open one is not. This is also
+why the hangs looked environment-dependent and un-diagnosable from the code:
+with services UP the calls answered, and with Docker fully DOWN they would
+have been refused instantly. Only the in-between state wedges.
+
+Diagnosis that worked, after reading the code got nowhere: `sample <pid>` on
+the hung process showed the runtime parked in `kevent` with no I/O pending,
+then a scratch test with per-stage `tokio::time::timeout` isolated it to
+`service.invoke` rather than the harness.
+
+### The three fixes
+
+**1. Production — bound connection establishment** (`state.rs`).
+`CONNECT_TIMEOUT` (5s) now applies to `lazy_channel` and all 13 static
+endpoints. This is a real production defect, not test-only: `fetch_memory_context`
+is written to degrade gracefully — it catches an error and continues without
+context — but it can never catch a call that DOES NOT RETURN. Unbounded, one
+unresponsive dependency blocks every non-ZDR `invoke` forever instead of
+costing it some context. Deliberately a CONNECT bound only; a per-request
+`timeout` would truncate legitimate streaming RPCs.
+
+**2. Tests — stop reaching out of the process** (`grpc.rs`).
+`test_service_with_lifecycle` mocked inference, session and managed-run but
+left `memory_client` pointed at the real `localhost:9091` default, so every
+non-ZDR invoke test made a live call. Added `MockMemoryService`. This is why
+only the non-ZDR tests hung — ZDR skips the memory fetch, which is exactly the
+signal that located the bug.
+
+**3. Two tests that were simply wrong about time.**
+  * `sleep_caps_at_max` really slept the full 60s cap. Now
+    `#[tokio::test(start_paused = true)]` — same assertion, virtual clock.
+  * `every_advertised_builtin_tool_has_a_dispatch_arm` dispatched ~33 tools
+    sequentially, several of which call downstreams, so it cost one connect
+    timeout each. Now bounded per tool and run concurrently: 2s, was minutes.
+    Its question is STATIC — does the name reach an arm, is it refused inline —
+    and both failure modes return immediately, so a tool still running when
+    the bound expires has already answered it.
+
+### Carry forward
+
+`connect_lazy()` with no `connect_timeout` is the reusable lesson, and it is
+unlikely to be unique to this service. Any plane whose tests touch a
+`localhost` default has the same exposure the next time Docker is left
+half-running — which, on a machine being migrated, is the normal state.

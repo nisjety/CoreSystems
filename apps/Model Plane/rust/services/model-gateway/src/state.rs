@@ -21,6 +21,7 @@ use mp_contracts::model_plane::v1::{
 use mp_events::envelope::Envelope;
 use mp_events::publisher::{EventPublisher, InMemoryPublisher, PublishError};
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::finetune_azure::AzureFinetuneClient;
@@ -267,29 +268,53 @@ pub struct AppState {
     pub tasks: crate::runtime_registries::TaskStore,
 }
 
+/// Cap on establishing a downstream gRPC connection, including the HTTP/2
+/// handshake.
+///
+/// Without this a HALF-OPEN dependency wedges the caller forever: the TCP
+/// connect succeeds so there is no fast `ECONNREFUSED`, but nothing ever
+/// completes the handshake, and neither `connect_lazy` nor tonic imposes a
+/// default bound. That defeats the point of the degrade-gracefully call sites
+/// — `fetch_memory_context` catches an error and continues without context,
+/// but it can never catch a call that does not return, so a single
+/// unresponsive dependency blocks every non-ZDR invoke instead of costing it
+/// some context.
+///
+/// Deliberately only a CONNECT bound, not a per-request `timeout`: a request
+/// cap would also truncate legitimately long streaming RPCs.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `Endpoint::from_static` + [`CONNECT_TIMEOUT`], for the fixed localhost
+/// defaults. Panics on a malformed literal, which `from_static` does anyway.
+fn lazy_static_channel(uri: &'static str) -> Channel {
+    Endpoint::from_static(uri)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .connect_lazy()
+}
+
 impl AppState {
     /// Create a new `AppState` with an in-memory publisher.
     #[must_use]
     pub fn new() -> Self {
-        let inference_channel = Endpoint::from_static("http://localhost:9092").connect_lazy();
-        let session_channel = Endpoint::from_static("http://localhost:9091").connect_lazy();
+        let inference_channel = lazy_static_channel("http://localhost:9092");
+        let session_channel = lazy_static_channel("http://localhost:9091");
         // FinetuneJobs + RunService are hosted by session-core on the same gRPC
         // server, so they reuse the session channel. Cheap clone — Channel is
         // Arc<Inner>.
         let finetune_channel = session_channel.clone();
         let run_channel = session_channel.clone();
         let managed_run_channel = session_channel.clone();
-        let orchestration_channel = Endpoint::from_static("http://localhost:9080").connect_lazy();
-        let execution_channel = Endpoint::from_static("http://localhost:9093").connect_lazy();
-        let sandbox_channel = Endpoint::from_static("http://localhost:9094").connect_lazy();
-        let browser_channel = Endpoint::from_static("http://localhost:9095").connect_lazy();
-        let memory_channel = Endpoint::from_static("http://localhost:9091").connect_lazy();
-        let capability_channel = Endpoint::from_static("http://localhost:9097").connect_lazy();
-        let dp_retrieval_channel = Endpoint::from_static("http://localhost:50052").connect_lazy();
-        let dp_documents_channel = Endpoint::from_static("http://localhost:50052").connect_lazy();
-        let dp_knowledge_channel = Endpoint::from_static("http://localhost:50052").connect_lazy();
-        let dp_graph_channel = Endpoint::from_static("http://localhost:50053").connect_lazy();
-        let dp_wiki_channel = Endpoint::from_static("http://localhost:50054").connect_lazy();
+        let orchestration_channel = lazy_static_channel("http://localhost:9080");
+        let execution_channel = lazy_static_channel("http://localhost:9093");
+        let sandbox_channel = lazy_static_channel("http://localhost:9094");
+        let browser_channel = lazy_static_channel("http://localhost:9095");
+        let memory_channel = lazy_static_channel("http://localhost:9091");
+        let capability_channel = lazy_static_channel("http://localhost:9097");
+        let dp_retrieval_channel = lazy_static_channel("http://localhost:50052");
+        let dp_documents_channel = lazy_static_channel("http://localhost:50052");
+        let dp_knowledge_channel = lazy_static_channel("http://localhost:50052");
+        let dp_graph_channel = lazy_static_channel("http://localhost:50053");
+        let dp_wiki_channel = lazy_static_channel("http://localhost:50054");
         Self {
             publisher: Arc::new(DynPublisher::InMemory(InMemoryPublisher::new())),
             rate_limiter: RateLimiter::from_env(),
@@ -407,7 +432,7 @@ impl AppState {
 
         Endpoint::from_shared(normalized)
             .context("invalid downstream endpoint")
-            .map(|endpoint| endpoint.connect_lazy())
+            .map(|endpoint| endpoint.connect_timeout(CONNECT_TIMEOUT).connect_lazy())
     }
 
     /// Create state from environment configuration.

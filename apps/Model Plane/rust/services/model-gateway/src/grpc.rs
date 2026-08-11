@@ -3231,6 +3231,84 @@ mod tests {
         }
     }
 
+    /// The harness previously left `memory_client` pointing at the real
+    /// `localhost:9091` default while mocking everything else, so every
+    /// non-ZDR `invoke` test reached out of the process for memory context.
+    /// That is what hung the suite on a machine where Docker's proxy still
+    /// held the port with no container behind it: the TCP connect succeeded,
+    /// so there was no fast refusal, and the handshake never completed.
+    struct MockMemoryService;
+
+    #[tonic::async_trait]
+    impl mp_contracts::model_plane::v1::memory_service_server::MemoryService for MockMemoryService {
+        async fn search_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::SearchMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::SearchMemoryResponse>, Status> {
+            Ok(Response::new(
+                mp_contracts::model_plane::v1::SearchMemoryResponse::default(),
+            ))
+        }
+
+        async fn index_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::IndexMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::IndexMemoryResponse>, Status> {
+            Err(Status::unimplemented("index_memory not needed in test"))
+        }
+
+        async fn list_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ListMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListMemoryResponse>, Status> {
+            Err(Status::unimplemented("list_memory not needed in test"))
+        }
+
+        async fn delete_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::DeleteMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::DeleteMemoryResponse>, Status> {
+            Err(Status::unimplemented("delete_memory not needed in test"))
+        }
+
+        async fn health(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::MemoryHealthRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::MemoryHealthResponse>, Status> {
+            Ok(Response::new(
+                mp_contracts::model_plane::v1::MemoryHealthResponse {
+                    status: "ok".to_owned(),
+                    ..Default::default()
+                },
+            ))
+        }
+    }
+
+    async fn spawn_memory_client(
+    ) -> mp_contracts::model_plane::v1::memory_service_client::MemoryServiceClient<
+        tonic::transport::Channel,
+    > {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind memory");
+        let addr = listener.local_addr().expect("memory addr");
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(
+                    mp_contracts::model_plane::v1::memory_service_server::MemoryServiceServer::new(
+                        MockMemoryService,
+                    ),
+                )
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("memory endpoint")
+            .connect()
+            .await
+            .expect("connect memory");
+        mp_contracts::model_plane::v1::memory_service_client::MemoryServiceClient::new(channel)
+    }
+
     struct MockSessionCore;
 
     #[tonic::async_trait]
@@ -3711,6 +3789,7 @@ mod tests {
         state.publisher = publisher.clone();
         state.inference_client = spawn_inference_client(inference_service).await;
         state.session_client = spawn_session_client(MockSessionCore).await;
+        state.memory_client = spawn_memory_client().await;
         let handles = ManagedLifecycleHandles::default();
         state.managed_run_client = spawn_managed_lifecycle_client(MockManagedRunLifecycle {
             handles: handles.clone(),

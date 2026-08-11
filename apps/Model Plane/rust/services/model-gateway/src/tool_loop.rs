@@ -3934,39 +3934,59 @@ mod tests {
     #[tokio::test]
     async fn every_advertised_builtin_tool_has_a_dispatch_arm() {
         let state = crate::state::AppState::new();
-        for def in builtin_tool_defs() {
-            let call = tool_call(&def.name, "{}");
-            let outcome = dispatch_tool(
-                &state,
-                "run_test",
-                // A non-empty verified org, so org-scoped reads get past their
-                // org check and prove the ARM exists rather than bailing early.
-                "org_test",
-                "user_test",
-                "thread_test",
-                None,
-                None,
-                "",
-                "",
-                true,
-                &call,
-                None,
-            )
-            .await;
 
-            let error = outcome.error.unwrap_or_default();
+        // Each dispatch is BOUNDED and they run CONCURRENTLY. Several
+        // advertised tools really do call a downstream, so dispatching all of
+        // them in sequence against endpoints that are not up costs one
+        // connect timeout each and used to run for minutes — which is why
+        // this test hung the whole crate's suite and nobody ran it.
+        //
+        // A timeout is not a failure here. This test asks a STATIC question:
+        // does the name reach a dispatch arm, and does the inline gate let it
+        // through? Both failures it checks for return IMMEDIATELY — an
+        // unrouted name never touches the network. So a tool still running
+        // when the bound expires has already answered the question.
+        let checks = builtin_tool_defs().into_iter().map(|def| {
+            let state = &state;
+            async move {
+                let call = tool_call(&def.name, "{}");
+                let dispatch = dispatch_tool(
+                    state,
+                    "run_test",
+                    // A non-empty verified org, so org-scoped reads get past
+                    // their org check and prove the ARM exists rather than
+                    // bailing early.
+                    "org_test",
+                    "user_test",
+                    "thread_test",
+                    None,
+                    None,
+                    "",
+                    "",
+                    true,
+                    &call,
+                    None,
+                );
+                let error =
+                    match tokio::time::timeout(std::time::Duration::from_secs(2), dispatch).await {
+                        Ok(outcome) => outcome.error.unwrap_or_default(),
+                        Err(_) => String::new(),
+                    };
+                (def.name, error)
+            }
+        });
+
+        for (name, error) in futures::future::join_all(checks).await {
             assert!(
                 !error.contains("unknown tool"),
-                "advertised tool '{}' has no dispatch arm in dispatch_tool — it would fail on \
+                "advertised tool '{name}' has no dispatch arm in dispatch_tool — it would fail on \
                  every call with \"unknown tool\". Add an arm (see verevon_read_outcome for the \
-                 read-tool pattern). Got: {error}",
-                def.name
+                 read-tool pattern). Got: {error}"
             );
             assert!(
                 !error.contains("side-effecting tools require governed agentic execution"),
-                "advertised tool '{}' is blocked by inline_tool_allowed — a tool must never be \
-                 advertised inline and then refused inline",
-                def.name
+                "advertised tool '{name}' is blocked by inline_tool_allowed — a tool must never \
+                 be advertised inline and then refused inline"
             );
         }
     }

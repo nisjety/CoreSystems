@@ -687,7 +687,11 @@ mod tests {
         assert!(is_egress_safe("2606:4700:4700::1111".parse().unwrap()));
     }
 
-    #[tokio::test]
+    // `handle_sleep` really sleeps, so at the 60s cap this burned a full
+    // minute of wall clock per run. `start_paused` puts the test on tokio's
+    // virtual clock: the timer is still awaited and the cap still asserted,
+    // but the runtime advances time instantly instead of waiting.
+    #[tokio::test(start_paused = true)]
     async fn sleep_caps_at_max() {
         let r = handle_sleep(SleepRequest {
             request_id: "t".into(),
