@@ -178,6 +178,45 @@ func (s *Service) GetEntitlements(ctx context.Context, id string) ([]Entitlement
 	return ents, nil
 }
 
+// GetQuotas returns an organization's configured quotas.
+//
+// Not cached: quotas gate spend, and serving a stale cap after an operator
+// lowers one would let an org keep spending past the new ceiling for the cache
+// TTL. Entitlements can tolerate that; a limit cannot.
+func (s *Service) GetQuotas(ctx context.Context, id string) ([]Quota, error) {
+	if id == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	return s.repo.GetQuotas(ctx, id)
+}
+
+// SetQuotaLimit sets one quota's ceiling for an organization.
+//
+// `resetPeriod` may be empty to leave an existing period untouched. A negative
+// limit is rejected rather than clamped: it almost certainly means the caller
+// computed it wrong, and silently turning it into 0 would block the org
+// entirely.
+func (s *Service) SetQuotaLimit(
+	ctx context.Context, id, key string, limit int64, resetPeriod string,
+) (Quota, error) {
+	if id == "" {
+		return Quota{}, fmt.Errorf("organization id is required")
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return Quota{}, fmt.Errorf("quota key is required")
+	}
+	if limit < 0 {
+		return Quota{}, fmt.Errorf("quota limit must not be negative")
+	}
+	switch strings.TrimSpace(resetPeriod) {
+	case "", "none", "daily", "monthly":
+	default:
+		return Quota{}, fmt.Errorf("reset_period must be one of: none, daily, monthly")
+	}
+	return s.repo.SetQuotaLimit(ctx, id, key, limit, strings.TrimSpace(resetPeriod))
+}
+
 // ListOrganizations returns a page of non-deleted organizations, ordered by
 // creation time descending. Repository.ListOrganizations clamps limit to
 // [1, 500]; callers wanting the full set should page with offset until a

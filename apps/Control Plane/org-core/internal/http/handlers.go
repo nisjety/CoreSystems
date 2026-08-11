@@ -67,6 +67,28 @@ func (s *Server) getOrganization(c *gin.Context) {
 	c.JSON(http.StatusOK, orgData)
 }
 
+// getOrganizationInternal is the exact, machine-to-machine counterpart to the
+// user-facing organization read. It exists for plane services that already hold
+// the explicit `org:read:any` capability; callers never supply an acting user
+// or turn this into a membership grant.
+func (s *Server) getOrganizationInternal(c *gin.Context) {
+	orgID := strings.TrimSpace(c.Param("orgId"))
+	if orgID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "organization id is required"})
+		return
+	}
+	orgData, err := s.orgService.GetOrganization(c.Request.Context(), orgID)
+	if err != nil {
+		if err == org.ErrNotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get organization"})
+		return
+	}
+	c.JSON(http.StatusOK, orgData)
+}
+
 func (s *Server) getUserOrganizations(c *gin.Context) {
 	// Extract user ID from x-user-id header (set by auth proxy/frontend)
 	userID := c.GetHeader("x-user-id")
@@ -367,6 +389,61 @@ func (s *Server) getEntitlements(c *gin.Context) {
 		"organization_id": orgID,
 		"entitlements":    entitlements,
 	})
+}
+
+// getQuotas returns an organization's configured quotas (spend/token ceilings).
+// GET /organizations/:id/quotas
+//
+// These are Control Plane's per CLAUDE.md ("Control Plane owns ... quotas").
+// The Model Plane gateway reads them and hands the ceiling to cost-core's
+// budget check; it does not store caps of its own.
+func (s *Server) getQuotas(c *gin.Context) {
+	orgID := c.Param("id")
+	quotas, err := s.orgService.GetQuotas(c.Request.Context(), orgID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get quotas"})
+		return
+	}
+	if quotas == nil {
+		quotas = []org.Quota{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"organization_id": orgID,
+		"quotas":          quotas,
+	})
+}
+
+// putQuota sets one quota's limit. PUT /organizations/:id/quotas/:key
+//
+// Only the LIMIT is settable here — accumulated usage (`quota_value`) is owned
+// by whatever meters it, so changing a ceiling never grants a fresh allowance.
+func (s *Server) putQuota(c *gin.Context) {
+	orgID := c.Param("id")
+	key := c.Param("key")
+
+	var body struct {
+		Limit       *int64 `json:"limit"`
+		ResetPeriod string `json:"reset_period"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	// A pointer, so an omitted limit is distinguishable from an explicit 0 —
+	// 0 is a legitimate ceiling ("no allowance"), omission is a malformed call.
+	if body.Limit == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit is required"})
+		return
+	}
+
+	quota, err := s.orgService.SetQuotaLimit(
+		c.Request.Context(), orgID, key, *body.Limit, body.ResetPeriod,
+	)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"organization_id": orgID, "quota": quota})
 }
 
 // listMembers returns all active members of an organization.

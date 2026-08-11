@@ -158,6 +158,11 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/api/v1/organizations", want: []string{"org:provision:self"}},
 		{method: http.MethodGet, path: "/api/v1/organizations/org-1", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodGet, path: "/api/v1/organizations/org-1/entitlements", want: []string{"org:read:self", "org:read:any"}},
+		// Quotas are Control Plane's spend/token ceilings. A read that resolved
+		// to no scope would be unauthenticated; a write that resolved to a read
+		// scope would let any member raise their own cap.
+		{method: http.MethodGet, path: "/api/v1/organizations/org-1/quotas", want: []string{"org:read:self", "org:read:any"}},
+		{method: http.MethodPut, path: "/api/v1/organizations/org-1/quotas/max_cost_per_run_usd_micros", want: []string{"org:settings:write:self"}},
 		{method: http.MethodGet, path: "/api/v1/organizations/org-1/members/search", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodPost, path: "/api/v1/organizations/org-1/plan", want: []string{"org:settings:write:self"}},
 		{method: http.MethodPatch, path: "/api/v1/organizations/org-1/settings", want: []string{"org:settings:write:self"}},
@@ -167,6 +172,8 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/orgs", want: []string{"org:provision:self"}},
 		{method: http.MethodGet, path: "/orgs/me", want: []string{"org:read:self"}},
 		{method: http.MethodGet, path: "/orgs/org-1/entitlements", want: []string{"org:read:self", "org:read:any"}},
+		{method: http.MethodGet, path: "/orgs/org-1/quotas", want: []string{"org:read:self", "org:read:any"}},
+		{method: http.MethodPut, path: "/orgs/org-1/quotas/max_cost_per_run_usd_micros", want: []string{"org:settings:write:self"}},
 		{method: http.MethodGet, path: "/orgs/org-1/members", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodGet, path: "/orgs/org-1/roles", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodGet, path: "/orgs/org-1/members/search", want: []string{"org:read:self", "org:read:any"}},
@@ -179,6 +186,7 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodGet, path: "/api/v1/brreg/search", want: []string{"org:brreg:read"}},
 		{method: http.MethodGet, path: "/api/v1/brreg/123456789", want: []string{"org:brreg:read"}},
 		{method: http.MethodGet, path: "/internal/orgs", want: []string{"org:read:any"}},
+		{method: http.MethodGet, path: "/internal/orgs/org-1", want: []string{"org:read:any"}},
 		{method: http.MethodGet, path: "/internal/orgs/by-tenant", want: []string{"org:tenant:read:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/ensure-from-tenant", want: []string{"org:tenant:write:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/org-1/onboarding/state", want: []string{"org:onboarding:write:self", "org:onboarding:write:any"}},

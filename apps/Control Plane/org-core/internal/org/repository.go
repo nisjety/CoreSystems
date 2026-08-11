@@ -839,6 +839,77 @@ ORDER BY entitlement_key`
 	return items, nil
 }
 
+// GetQuotas returns every quota row for an organization.
+//
+// Unlike GetEntitlements this does NOT treat "none configured" as ErrNotFound:
+// an org with no quotas is a normal, common state (no caps set), not a missing
+// record. Returning an error there would force every caller to special-case it.
+func (r *Repository) GetQuotas(ctx context.Context, orgID string) ([]Quota, error) {
+	const q = `
+SELECT org_id, quota_key, quota_value, quota_limit,
+       COALESCE(reset_period, ''), last_reset_at, updated_at
+FROM org_quotas
+WHERE org_id = $1
+ORDER BY quota_key`
+
+	var items []Quota
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, orgID)
+		if err != nil {
+			return fmt.Errorf("query quotas: %w", err)
+		}
+		defer rows.Close()
+
+		items = make([]Quota, 0, 8)
+		for rows.Next() {
+			var quota Quota
+			if err := rows.Scan(&quota.OrgID, &quota.Key, &quota.Value, &quota.Limit,
+				&quota.ResetPeriod, &quota.LastResetAt, &quota.UpdatedAt); err != nil {
+				return fmt.Errorf("scan quotas: %w", err)
+			}
+			items = append(items, quota)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// SetQuotaLimit upserts the LIMIT for one quota key, preserving accumulated
+// usage.
+//
+// `quota_value` is deliberately left alone on conflict. Raising or lowering a
+// cap must not reset how much the org has already consumed this period —
+// otherwise lowering a limit would hand the org a fresh allowance, which is the
+// opposite of what an operator tightening a cap intends.
+func (r *Repository) SetQuotaLimit(
+	ctx context.Context, orgID, key string, limit int64, resetPeriod string,
+) (Quota, error) {
+	const q = `
+INSERT INTO org_quotas (org_id, quota_key, quota_value, quota_limit, reset_period, updated_at)
+VALUES ($1, $2, 0, $3, NULLIF($4, ''), NOW())
+ON CONFLICT (org_id, quota_key) DO UPDATE
+SET quota_limit  = EXCLUDED.quota_limit,
+    reset_period = COALESCE(NULLIF($4, ''), org_quotas.reset_period),
+    updated_at   = NOW()
+RETURNING org_id, quota_key, quota_value, quota_limit,
+          COALESCE(reset_period, ''), last_reset_at, updated_at`
+
+	var quota Quota
+	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, orgID, key, limit, resetPeriod).Scan(
+			&quota.OrgID, &quota.Key, &quota.Value, &quota.Limit,
+			&quota.ResetPeriod, &quota.LastResetAt, &quota.UpdatedAt,
+		)
+	})
+	if err != nil {
+		return Quota{}, fmt.Errorf("upsert quota: %w", err)
+	}
+	return quota, nil
+}
+
 // ListOrganizations returns a paginated list of all organizations.
 // limit=0 defaults to 100; max is capped at 500 to prevent accidental full-table loads.
 func (r *Repository) ListOrganizations(ctx context.Context, limit, offset int) ([]Organization, error) {

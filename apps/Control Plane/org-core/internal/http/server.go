@@ -87,6 +87,8 @@ func (s *Server) setupRoutes() {
 	v1.GET("/organizations", s.getUserOrganizations)
 	v1.GET("/organizations/:id", s.getOrganization)
 	v1.GET("/organizations/:id/entitlements", s.getEntitlements)
+	v1.GET("/organizations/:id/quotas", s.getQuotas)
+	v1.PUT("/organizations/:id/quotas/:key", guard, s.putQuota)
 	v1.GET("/organizations/:id/members/search", s.searchMembers)
 	// createOrganization is intentionally NOT guarded: there is no :id to check
 	// membership against yet (the org is being created and the caller becomes
@@ -103,6 +105,8 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/orgs", s.getUserOrganizations)
 	s.router.GET("/orgs/:id", s.getOrganization)
 	s.router.GET("/orgs/:id/entitlements", s.getEntitlements)
+	s.router.GET("/orgs/:id/quotas", s.getQuotas)
+	s.router.PUT("/orgs/:id/quotas/:key", guard, s.putQuota)
 	s.router.POST("/orgs", s.createOrganization)
 	s.router.POST("/orgs/:id/plan", guard, s.updatePlan)
 	s.router.PATCH("/orgs/:id/capabilities", guard, s.updateCapabilities)
@@ -150,6 +154,7 @@ func (s *Server) setupRoutes() {
 	// background services that must service every tenant (no per-request
 	// acting user to scope a normal /orgs read to). See listOrganizationsInternal.
 	internal.GET("/orgs", s.listOrganizationsInternal)
+	internal.GET("/orgs/:orgId", s.getOrganizationInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)

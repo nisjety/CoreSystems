@@ -278,8 +278,10 @@ func organizationAPIScopes(method string, rest []string) []string {
 		return []string{"org:provision:self"}
 	case len(rest) == 1 && method == http.MethodGet:
 		return []string{"org:read:self", "org:read:any"}
-	case len(rest) == 2 && method == http.MethodGet && rest[1] == "entitlements":
+	case len(rest) == 2 && method == http.MethodGet && (rest[1] == "entitlements" || rest[1] == "quotas"):
 		return []string{"org:read:self", "org:read:any"}
+	case len(rest) == 3 && method == http.MethodPut && rest[1] == "quotas":
+		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "members" && rest[2] == "search":
 		return []string{"org:read:self", "org:read:any"}
 	case len(rest) == 2 && method == http.MethodPost && rest[1] == "plan":
@@ -303,8 +305,10 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:read:self"}
 	case len(rest) == 1 && method == http.MethodGet:
 		return []string{"org:read:self", "org:read:any"}
-	case len(rest) == 2 && method == http.MethodGet && (rest[1] == "entitlements" || rest[1] == "members" || rest[1] == "roles"):
+	case len(rest) == 2 && method == http.MethodGet && (rest[1] == "entitlements" || rest[1] == "members" || rest[1] == "roles" || rest[1] == "quotas"):
 		return []string{"org:read:self", "org:read:any"}
+	case len(rest) == 3 && method == http.MethodPut && rest[1] == "quotas":
+		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "members" && rest[2] == "search":
 		return []string{"org:read:self", "org:read:any"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "roles" && rest[2] == "catalog":
@@ -338,6 +342,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "by-tenant" && method == http.MethodGet:
 		return []string{"org:tenant:read:any"}
+	case len(rest) == 1 && method == http.MethodGet:
+		return []string{"org:read:any"}
 	case len(rest) == 1 && rest[0] == "ensure-from-tenant" && method == http.MethodPost:
 		return []string{"org:tenant:write:any"}
 	case len(rest) == 3 && rest[1] == "onboarding" && rest[2] == "state" && method == http.MethodPost:
