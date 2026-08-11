@@ -287,6 +287,7 @@ func authContextMiddleware() gin.HandlerFunc {
 	if authServiceURL == "" {
 		authServiceURL = "http://auth-service:3011"
 	}
+	nonces := newSessionDelegationNonceCache(100_000)
 
 	return func(c *gin.Context) {
 		if c.Request.URL.Path == "/health" || c.Request.Method == http.MethodOptions {
@@ -308,7 +309,7 @@ func authContextMiddleware() gin.HandlerFunc {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "service scope denied"})
 				return
 			}
-			delegation, ok := verifySessionServiceDelegation(c.Request, credential, time.Now())
+			delegation, ok := verifySessionServiceDelegation(c.Request, credential, nonces, time.Now())
 			if !ok {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "signed service delegation required"})
 				return

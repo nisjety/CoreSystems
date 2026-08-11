@@ -227,7 +227,7 @@ func TestSessionDelegationMatchesGatewayFixedVector(t *testing.T) {
 	request.Header.Set("X-Delegation-Timestamp", "2026-07-11T02:00:00+00:00")
 	request.Header.Set("X-Delegation-Nonce", "nonce-fixed-vector-000000001")
 	request.Header.Set("X-Delegation-Body-SHA256", "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU")
-	request.Header.Set("X-Delegation-Signature", "sG_AhFjLnFXYkEfnku8KLV_PqkbYFC2XTOHUdxx0BF0")
+	request.Header.Set("X-Delegation-Signature", "JMYH35hoU13_zzSt39WJPqRIH3neTFfrsPI1HwqIZ2U")
 	now := time.Date(2026, 7, 11, 2, 0, 1, 0, time.UTC)
 
 	claims, ok := verifySessionServiceDelegation(request, credential, newSessionDelegationNonceCache(10), now)
