@@ -1238,3 +1238,19 @@ signal that located the bug.
 unlikely to be unique to this service. Any plane whose tests touch a
 `localhost` default has the same exposure the next time Docker is left
 half-running — which, on a machine being migrated, is the normal state.
+
+### Whole-workspace verification
+
+`cargo test --workspace --lib` — **13 crates, 1484 passed, 0 failed, exit 0.**
+
+Running the workspace rather than the single crate turned up one more break
+that `-p model-gateway` could never have shown: `execution-core`'s
+`MockSession` implements `SessionCore`, and the durable thread-delete RPCs
+added to the session-core proto left it two methods short, so the workspace
+did not COMPILE. A proto addition builds fine for its own service and breaks
+whoever else implements the trait — worth running the workspace after any
+proto change, not just the owning crate's tests.
+
+No other crate hangs. The connect-timeout exposure is real elsewhere in
+principle, but nothing else in this workspace currently reaches a localhost
+default from a test.
