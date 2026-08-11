@@ -191,8 +191,10 @@ service (host `/healthz` is 200).
    `SuppressAllForZdr`; the handler branches *before* the idempotency registry,
    budget/session clients, and event publisher, forwarding to inference-core
    with `zdr: true` and returning — so no request/response content becomes
-   durable. Optional PII redaction (`moderation::redact_pii`) applies when the
-   `pii_filter` feature is set.
+   durable. PII redaction is decided before provider dispatch from the
+   authenticated org's capability-core safety policy; client features can only
+   request additional redaction. A missing/invalid policy read redacts
+   fail-closed.
 3. Non-ZDR durable path: idempotency claim (dedup/regenerate, 409 on in-flight)
    → `budget::check_budget` (cost-core) → `session_flow::prepare_run`
    (session-core) → publish `INGRESS_ACCEPTED` → `inference_client.infer`
