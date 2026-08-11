@@ -2328,6 +2328,27 @@ mod tests {
             Ok(Response::new(pb::ListThreadsResponse { threads: vec![] }))
         }
 
+        async fn update_thread_presentation(
+            &self,
+            _: Request<pb::UpdateThreadPresentationRequest>,
+        ) -> Result<Response<pb::UpdateThreadPresentationResponse>, Status> {
+            Err(Status::unimplemented("update_thread_presentation not used"))
+        }
+
+        async fn archive_thread(
+            &self,
+            _: Request<pb::ArchiveThreadRequest>,
+        ) -> Result<Response<pb::ArchiveThreadResponse>, Status> {
+            Err(Status::unimplemented("archive_thread not used"))
+        }
+
+        async fn archive_threads(
+            &self,
+            _: Request<pb::ArchiveThreadsRequest>,
+        ) -> Result<Response<pb::ArchiveThreadsResponse>, Status> {
+            Err(Status::unimplemented("archive_threads not used"))
+        }
+
         async fn set_run_mode(
             &self,
             _: Request<pb::SetRunModeRequest>,

@@ -59,6 +59,7 @@ ulid = "1"
 
 # Hashing
 blake3 = "1"
+ring = "0.17"
 
 # Telemetry
 tracing = "0.1"

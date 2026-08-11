@@ -823,6 +823,16 @@ func TestEvaluatePolicy(t *testing.T) {
 		if resp.BudgetContext == "" {
 			t.Errorf("expected non-empty budget context")
 		}
+		if resp.DecisionId == "" || resp.CapabilityVersion == "" {
+			t.Fatalf("expected decision binding metadata, got %+v", resp)
+		}
+		again, err := s.EvaluatePolicy(ctx, baseReq("cap.memory.search"))
+		if err != nil {
+			t.Fatalf("repeat policy evaluation: %v", err)
+		}
+		if resp.DecisionId != again.DecisionId {
+			t.Fatalf("decision id is not stable for the same snapshot: %q != %q", resp.DecisionId, again.DecisionId)
+		}
 	})
 
 	t.Run("medium-risk -> allow with constrained budget", func(t *testing.T) {

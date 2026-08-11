@@ -79,10 +79,10 @@ func HandleRunCompleted(
 // each RUN_COMPLETED. Best-effort and self-contained: per-message errors are
 // logged, never fatal; it returns when ctx is cancelled.
 //
-// FLAGGED unverified: the live subscribe + the injected gRPC clients need the
-// running stack (NATS + session-core + inference-core + an LLM) to exercise
-// end-to-end. The decode→review→persist logic ([HandleRunCompleted]) is
-// unit-tested with fakes, so only this thin subscribe glue is stack-gated.
+// The subscription path is exercised against a real NATS server by
+// scripts/tests/learning-nats-trigger-test.sh. The injected gRPC clients still
+// need a deployed session-core/inference-core/LLM for a full customer proof;
+// the decode→review→persist logic is unit-tested with fakes here.
 func RunConsumer(
 	ctx context.Context,
 	nc *nats.Conn,

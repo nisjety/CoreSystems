@@ -488,7 +488,9 @@ mod tests {
         assert_eq!(
             classify(
                 &policy(),
-                &[user("Kan du sjekke i Visma hva vi har tomt på lager akkurat nå?")],
+                &[user(
+                    "Kan du sjekke i Visma hva vi har tomt på lager akkurat nå?"
+                )],
                 &[tool("mcp__srv__execute_query")],
                 "auto"
             ),
@@ -521,7 +523,12 @@ mod tests {
         // Back to the old arithmetic: tool_use_score 2 clears moderate (1) but
         // not complex (3).
         assert_eq!(
-            classify(&p, &[user("hi")], &[tool("mcp__srv__execute_query")], "auto"),
+            classify(
+                &p,
+                &[user("hi")],
+                &[tool("mcp__srv__execute_query")],
+                "auto"
+            ),
             Complexity::Moderate
         );
     }
@@ -531,8 +538,8 @@ mod tests {
         // Serde default: a row persisted by an older build has no
         // `tool_use_floors_complex` key, and must not silently reinstate the
         // mis-tiering.
-        let weights: crate::provider::routing_policy::ComplexityWeights =
-            serde_json::from_str(&serde_json::to_string(&serde_json::json!({
+        let weights: crate::provider::routing_policy::ComplexityWeights = serde_json::from_str(
+            &serde_json::to_string(&serde_json::json!({
                 "large_total_chars": 4000, "large_total_chars_score": 2,
                 "medium_total_chars": 1200, "medium_total_chars_score": 1,
                 "long_user_turn_chars": 800, "long_user_turn_score": 1,
@@ -540,8 +547,9 @@ mod tests {
                 "deep_conversation_turns": 12, "deep_conversation_score": 1,
                 "moderate_threshold": 1, "complex_threshold": 3, "keywords": []
             }))
-            .expect("weights json"))
-            .expect("weights without the new key must deserialize");
+            .expect("weights json"),
+        )
+        .expect("weights without the new key must deserialize");
         assert!(weights.tool_use_floors_complex);
     }
 
@@ -710,7 +718,11 @@ mod tests {
     #[test]
     fn exhausted_budget_forces_cheap_fallback() {
         let p = policy();
-        for mode in [VerevonMode::Budget, VerevonMode::Balance, VerevonMode::Genius] {
+        for mode in [
+            VerevonMode::Budget,
+            VerevonMode::Balance,
+            VerevonMode::Genius,
+        ] {
             for cx in [
                 Complexity::Simple,
                 Complexity::Moderate,
@@ -887,9 +899,7 @@ mod tests {
             .await;
 
         let client = BudgetClient::new(&server.uri()).expect("client");
-        let posture = client
-            .posture("org1", "u1", "caller-jwt", 50.0, 0.8)
-            .await;
+        let posture = client.posture("org1", "u1", "caller-jwt", 50.0, 0.8).await;
         assert_eq!(posture, BudgetPosture::Healthy);
         // Mock::expect(1) is verified on MockServer drop: a request without the
         // exact Authorization header would not have matched.

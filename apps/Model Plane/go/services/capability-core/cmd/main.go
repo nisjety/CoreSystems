@@ -300,6 +300,12 @@ func main() {
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}
+	if signer, signerErr := capserver.NewDecisionProofSignerFromEnv(); signerErr != nil {
+		slog.Warn("capability decision evidence signer unavailable; execution allow responses will lack per-call proof", "error", signerErr)
+	} else {
+		capSrv.WithDecisionProofSigner(signer)
+		slog.Info("capability decision evidence signer enabled")
+	}
 	capserver.Register(grpcServer, capSrv)
 
 	go func() {

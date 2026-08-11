@@ -1903,12 +1903,16 @@ type CreateApprovalRequest struct {
 	// duplicate durable approval. Empty = no idempotency guard (D-1).
 	IdempotencyKey string `protobuf:"bytes,10,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
 	// Optional canonical JSON descriptor for the exact suspended action. It is
-	// validated, scope-bound, and written once with the approval record; it
-	// contains no bearer, refresh token, or provider credential. Empty means
-	// this approval is proposal-only and can never be resumed by a worker.
+	// validated, scope-bound, and encrypted into the dedicated continuation
+	// descriptor table; it contains no bearer, refresh token, or provider
+	// credential. The session-core deployment key is required whenever this
+	// field is non-empty. Empty means this approval is proposal-only and can
+	// never be resumed by a worker.
 	//
-	// ZDR callers must leave this empty: retained continuation descriptors are
-	// intentionally incompatible with zero-data-retention execution.
+	// Descriptors are removed when the approval expires/denies or its delivery
+	// reaches terminal/settled state. ZDR callers must leave this empty:
+	// retained continuation descriptors are intentionally incompatible with
+	// zero-data-retention execution.
 	ContinuationDescriptorJson string `protobuf:"bytes,11,opt,name=continuation_descriptor_json,json=continuationDescriptorJson,proto3" json:"continuation_descriptor_json,omitempty"`
 	unknownFields              protoimpl.UnknownFields
 	sizeCache                  protoimpl.SizeCache
@@ -2786,7 +2790,9 @@ type GetApprovalContinuationResponse struct {
 	// False for a stale/mismatched lease and for a descriptor-free approval.
 	// These cases remain indistinguishable to avoid leaking durable state.
 	Available bool `protobuf:"varint,1,opt,name=available,proto3" json:"available,omitempty"`
-	// Canonical descriptor JSON. Set only when available is true.
+	// Canonical descriptor JSON. Set only when available is true. This is
+	// sensitive action data; transport callers must use authenticated TLS. The
+	// backing descriptor is encrypted at rest and removed on terminal cleanup.
 	ContinuationDescriptorJson string `protobuf:"bytes,2,opt,name=continuation_descriptor_json,json=continuationDescriptorJson,proto3" json:"continuation_descriptor_json,omitempty"`
 	unknownFields              protoimpl.UnknownFields
 	sizeCache                  protoimpl.SizeCache

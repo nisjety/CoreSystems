@@ -143,7 +143,10 @@ mod tests {
             "sample must actually contain multi-byte characters",
         );
         // The real count must not simply track byte length.
-        assert_ne!(count(norwegian), u32::try_from(norwegian.len()).unwrap() / 4);
+        assert_ne!(
+            count(norwegian),
+            u32::try_from(norwegian.len()).unwrap() / 4
+        );
     }
 
     /// English prose was over-charged by ~60 %, quietly trimming grounding that

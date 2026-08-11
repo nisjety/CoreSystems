@@ -6608,16 +6608,33 @@ func (x *ExecuteCommandResponse) GetErrorMessage() string {
 
 // Hook — pre/post lifecycle handler for tool calls. Hooks are run by
 // execution-core's middleware; the gateway holds the registry.
+// A hook is a POLICY RULE evaluated by execution-core before (or after) a tool
+// runs — not a webhook. The gateway registers them and forwards the matching
+// rules as `ExecuteStepRequest.hook_context`, which execution-core's hook
+// engine evaluates alongside capability policy and the permission gate.
 type Hook struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	HookId string                 `protobuf:"bytes,1,opt,name=hook_id,json=hookId,proto3" json:"hook_id,omitempty"`
-	// "pre_tool" | "post_tool" | "on_error" | "on_complete".
+	// "pre_tool" | "post_tool" | "on_error" | "on_complete". Only pre_tool and
+	// post_tool reach execution-core; it evaluates no other events, so the other
+	// two are recorded and never enforced.
 	Event string `protobuf:"bytes,2,opt,name=event,proto3" json:"event,omitempty"`
-	// Tool name to scope to, or empty for all tools.
+	// Tool matcher: empty or "*" for any tool, a "prefix*" glob, or an exact
+	// tool name. Matches execution-core's own matcher semantics.
 	ToolScope string `protobuf:"bytes,3,opt,name=tool_scope,json=toolScope,proto3" json:"tool_scope,omitempty"`
-	// URL the bridge POSTs to with the hook payload.
-	CallbackUrl   string `protobuf:"bytes,4,opt,name=callback_url,json=callbackUrl,proto3" json:"callback_url,omitempty"`
-	Enabled       bool   `protobuf:"varint,5,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// DEPRECATED — hooks are policy rules, not webhooks; nothing has ever POSTed
+	// to this. Retained so existing callers keep parsing. Use `decision`.
+	//
+	// Deprecated: Marked as deprecated in model_plane/v1/gateway.proto.
+	CallbackUrl string `protobuf:"bytes,4,opt,name=callback_url,json=callbackUrl,proto3" json:"callback_url,omitempty"`
+	Enabled     bool   `protobuf:"varint,5,opt,name=enabled,proto3" json:"enabled,omitempty"`
+	// What this rule does when it matches: "deny" blocks the call outright,
+	// "ask" escalates it to human approval, "allow" (or anything unrecognised)
+	// permits it. Empty means allow — a rule with no decision must not silently
+	// become a block.
+	Decision string `protobuf:"bytes,6,opt,name=decision,proto3" json:"decision,omitempty"`
+	// Human-readable reason surfaced to the user on deny/ask.
+	Reason        string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -6673,6 +6690,7 @@ func (x *Hook) GetToolScope() string {
 	return ""
 }
 
+// Deprecated: Marked as deprecated in model_plane/v1/gateway.proto.
 func (x *Hook) GetCallbackUrl() string {
 	if x != nil {
 		return x.CallbackUrl
@@ -6685,6 +6703,20 @@ func (x *Hook) GetEnabled() bool {
 		return x.Enabled
 	}
 	return false
+}
+
+func (x *Hook) GetDecision() string {
+	if x != nil {
+		return x.Decision
+	}
+	return ""
+}
+
+func (x *Hook) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
 }
 
 type RegisterHookRequest struct {
@@ -9230,14 +9262,16 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\voutput_json\x18\x02 \x01(\tR\n" +
 	"outputJson\x12#\n" +
-	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\x91\x01\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xc9\x01\n" +
 	"\x04Hook\x12\x17\n" +
 	"\ahook_id\x18\x01 \x01(\tR\x06hookId\x12\x14\n" +
 	"\x05event\x18\x02 \x01(\tR\x05event\x12\x1d\n" +
 	"\n" +
-	"tool_scope\x18\x03 \x01(\tR\ttoolScope\x12!\n" +
-	"\fcallback_url\x18\x04 \x01(\tR\vcallbackUrl\x12\x18\n" +
-	"\aenabled\x18\x05 \x01(\bR\aenabled\"u\n" +
+	"tool_scope\x18\x03 \x01(\tR\ttoolScope\x12%\n" +
+	"\fcallback_url\x18\x04 \x01(\tB\x02\x18\x01R\vcallbackUrl\x12\x18\n" +
+	"\aenabled\x18\x05 \x01(\bR\aenabled\x12\x1a\n" +
+	"\bdecision\x18\x06 \x01(\tR\bdecision\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\"u\n" +
 	"\x13RegisterHookRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +

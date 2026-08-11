@@ -497,6 +497,15 @@ pub struct EvaluatePolicyResponse {
     /// Budget context (remaining tokens, cost, etc.).
     #[prost(string, tag="3")]
     pub budget_context: ::prost::alloc::string::String,
+    /// Stable correlation identifier for this evaluated request and capability
+    /// snapshot. This identifies the decision in audit/event records; it is not
+    /// itself an authorization token or proof that execution occurred.
+    #[prost(string, tag="4")]
+    pub decision_id: ::prost::alloc::string::String,
+    /// Exact capability version evaluated by the policy engine. Callers must
+    /// bind execution to this version instead of re-resolving a mutable name.
+    #[prost(string, tag="5")]
+    pub capability_version: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ValidateSkillBundleRequest {
@@ -4515,6 +4524,261 @@ impl VerificationStatus {
         }
     }
 }
+/// Verevon Proof Bundle (verevon-vision.md §2 moat #3 / §2.1, roadmap P1 item
+/// 2) — the portable record of "what was known, decided, authorized, executed,
+/// observed, verified, retained, and charged" for one run.
+///
+/// This is v1 and it is deliberately PARTIAL. Only the dimensions Model Plane's
+/// session-core owns authoritatively are populated: authority (approvals),
+/// execution (continuation receipts), observation (continuation outcomes), and
+/// verification (the shared VerificationResult contract). The dimensions owned
+/// by other planes — what was KNOWN (Data Plane retrieval/citations), what was
+/// CHARGED (cost-core), what RETENTION applied (Control Plane org policy) —
+/// are NOT fabricated here. They are named explicitly in `unavailable` with a
+/// reason, so a reader can tell "not proven yet" apart from "nothing happened".
+/// That distinction is the entire point of the bundle; an evidence artifact
+/// that quietly omits its own gaps is worse than no artifact at all, and it is
+/// the same honesty discipline the Trust Center already applies to the
+/// sovereignty claim.
+///
+/// Assembling this cross-plane (adding the known/charged/retained sections) is
+/// separately scoped work; no shared database exists between planes, so each
+/// section must arrive through its owner's own contract.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunProofBundle {
+    /// Always 1 for this shape. A reader that does not recognize the version
+    /// must refuse to interpret the bundle rather than guess.
+    #[prost(int32, tag="1")]
+    pub bundle_version: i32,
+    #[prost(string, tag="2")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub org_id: ::prost::alloc::string::String,
+    /// When this bundle was assembled — NOT when the work happened. Every
+    /// evidence timestamp below is the real one.
+    #[prost(message, optional, tag="4")]
+    pub generated_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="5")]
+    pub run: ::core::option::Option<RunProvenance>,
+    /// One entry per approval on this run, each carrying its own evidence chain
+    /// as far as that chain actually got. Empty when the run had no approvals —
+    /// which is a fact about the run, not a missing section.
+    #[prost(message, repeated, tag="6")]
+    pub approvals: ::prost::alloc::vec::Vec<ApprovalProof>,
+    /// Evidence dimensions this bundle does not claim. Always populated for the
+    /// cross-plane sections v1 cannot reach.
+    #[prost(message, repeated, tag="7")]
+    pub unavailable: ::prost::alloc::vec::Vec<UnavailableSection>,
+}
+/// What work this bundle is about.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunProvenance {
+    #[prost(string, tag="1")]
+    pub goal: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub agent_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="4")]
+    pub created_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+/// One approval's evidence chain: AUTHORIZED (always) → EXECUTED → OBSERVED →
+/// VERIFIED. Each later stage is absent until it genuinely occurred; absence is
+/// never rendered as failure, and never as success.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ApprovalProof {
+    /// --- AUTHORIZED: durable human authority, always present. ---
+    #[prost(string, tag="1")]
+    pub approval_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub kind: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub status: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub requested_by: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub decided_by: ::prost::alloc::string::String,
+    #[prost(string, tag="6")]
+    pub decision_reason: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="7")]
+    pub requested_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="8")]
+    pub decided_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// --- EXECUTED: absent until a dispatcher proved it started the exact
+    /// approved work. An approval alone is authority, never evidence of work.
+    #[prost(message, optional, tag="9")]
+    pub execution: ::core::option::Option<ContinuationExecution>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContinuationExecution {
+    #[prost(string, tag="1")]
+    pub receipt_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub delivery_id: ::prost::alloc::string::String,
+    /// Binds this execution to the exact approved action; a mismatch means the
+    /// work that ran was not the work that was approved.
+    #[prost(string, tag="3")]
+    pub action_fingerprint: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub execution_service_id: ::prost::alloc::string::String,
+    #[prost(int32, tag="5")]
+    pub descriptor_version: i32,
+    #[prost(message, optional, tag="6")]
+    pub started_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// --- OBSERVED: absent while the continuation is still in flight. ---
+    #[prost(message, optional, tag="7")]
+    pub outcome: ::core::option::Option<ContinuationOutcome>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ContinuationOutcome {
+    /// completed | failed | cancelled — the dispatcher's workflow state, which is
+    /// NOT by itself a claim that the real-world effect happened.
+    #[prost(string, tag="1")]
+    pub outcome: ::prost::alloc::string::String,
+    /// Authoritative id from the provider boundary, when one exists.
+    #[prost(string, tag="2")]
+    pub provider_receipt_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub failure_code: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="4")]
+    pub finalized_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// --- VERIFIED: the independent judgment, using the shared contract. Absent
+    /// when the producing worker recorded none — never defaulted to a status.
+    #[prost(message, optional, tag="5")]
+    pub verification: ::core::option::Option<VerificationResult>,
+}
+/// A dimension of the vision's evidence model that this bundle deliberately
+/// does not assert.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UnavailableSection {
+    /// Stable identifier: "known" | "charged" | "retained".
+    #[prost(string, tag="1")]
+    pub section: ::prost::alloc::string::String,
+    /// Plain-language reason, shown to the reader. Never blank.
+    #[prost(string, tag="2")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRunProofBundleRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Required. The bundle is assembled only for the caller's own verified
+    /// organization; a run belonging to another org resolves to not-found rather
+    /// than a partial or empty bundle.
+    #[prost(string, tag="2")]
+    pub org_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRunProofBundleResponse {
+    #[prost(message, optional, tag="1")]
+    pub bundle: ::core::option::Option<RunProofBundle>,
+}
+/// Aggregate Verified Outcome Foundation metrics for one organization
+/// (verevon-vision.md §2.1 / §7, roadmap P1 item 5). Where the Proof Bundle
+/// answers "what happened on this one run," this answers "is the Verified
+/// Outcome layer actually catching anything, across every run."
+///
+/// Every count below is computed straight from `approval_continuation_receipts`
+/// / `approval_continuation_outcomes` / `approvals` — the same tables the Proof
+/// Bundle reads, so this is provably consistent with it rather than a second,
+/// divergent notion of the same facts. As with the bundle, dimensions this
+/// plane cannot prove (cost, whether an approval was truly *necessary*,
+/// rollback) are named in `unavailable` rather than estimated.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct VerificationMetrics {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Window start. Unset (zero value) means all-time.
+    #[prost(message, optional, tag="2")]
+    pub since: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag="3")]
+    pub generated_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// --- Structural outcomes: what the dispatcher recorded, before any
+    /// independent check. Denominator for every rate below. ---
+    #[prost(int64, tag="4")]
+    pub total_completed: i64,
+    #[prost(int64, tag="5")]
+    pub total_failed: i64,
+    #[prost(int64, tag="6")]
+    pub total_cancelled: i64,
+    /// --- Verified completion: of the structurally completed continuations,
+    /// how many does the system of record independently confirm. ---
+    #[prost(int64, tag="7")]
+    pub verified_success_count: i64,
+    /// --- False success: the headline metric this whole layer exists to
+    /// produce. A continuation the dispatcher recorded as `completed`, but
+    /// whose own postcondition check came back `verified_failure` - the
+    /// boundary said yes, the system of record said no. Zero here is a real
+    /// claim ("none caught yet"), not "nothing to catch": read it alongside
+    /// postcondition_method_count, since a false success can only be caught
+    /// where a verifier actually ran. ---
+    #[prost(int64, tag="8")]
+    pub false_success_count: i64,
+    #[prost(int64, tag="9")]
+    pub partially_verified_count: i64,
+    /// Structurally completed or failed, but with no verification_status
+    /// recorded at all (the column is NULL, not `unknown`). Every dispatch that
+    /// passes through the current worker persists a status - even Inconclusive
+    /// resolves to a structural `unknown`, never NULL - so this bucket means
+    /// "predates this instrumentation," i.e. a row from before the Verified
+    /// Outcome Foundation was wired into the dispatcher, or from a worker build
+    /// that never attached a verification result. It is not "no verifier
+    /// applies to this operation" - that case is `unknown_verification_count`
+    /// (see below), which the dispatcher itself always fills in.
+    #[prost(int64, tag="10")]
+    pub unverified_count: i64,
+    /// Verification recorded, but the judgment came back `unknown` - the
+    /// dispatcher's own default when no postcondition verifier exists for the
+    /// operation, or none was reached (FailedRetryable, an unresolved
+    /// UnreceiptedWrite). Distinct from `unverified_count`: this row WAS
+    /// processed by the current instrumentation, it just has nothing stronger
+    /// than the structural claim to show.
+    #[prost(int64, tag="11")]
+    pub unknown_verification_count: i64,
+    /// --- Coverage: how much of the traffic this layer actually reaches. ---
+    #[prost(int64, tag="12")]
+    pub structural_method_count: i64,
+    #[prost(int64, tag="13")]
+    pub postcondition_method_count: i64,
+    /// --- Human approval effort. Requested is the full funnel denominator;
+    /// granted+denied+expired need not sum to it (still-pending approvals are
+    /// requested but not yet decided). ---
+    #[prost(int64, tag="14")]
+    pub approvals_requested: i64,
+    #[prost(int64, tag="15")]
+    pub approvals_granted: i64,
+    #[prost(int64, tag="16")]
+    pub approvals_denied: i64,
+    /// Median wall-clock seconds from a receipt's `started_at` to its outcome's
+    /// `finalized_at`, over continuations that reached a terminal outcome.
+    /// Median, not mean, so one slow outlier cannot dominate the figure. Zero
+    /// when no continuation in the window has finalized.
+    #[prost(int64, tag="17")]
+    pub median_seconds_receipt_to_outcome: i64,
+    /// Median wall-clock seconds from `requested_at` to `decided_at`, over
+    /// approvals that received a decision. Zero when none have.
+    #[prost(int64, tag="18")]
+    pub median_seconds_approval_decision: i64,
+    /// Dimensions this metric set deliberately does not claim, same discipline
+    /// as RunProofBundle.unavailable.
+    #[prost(message, repeated, tag="19")]
+    pub unavailable: ::prost::alloc::vec::Vec<UnavailableSection>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetVerificationMetricsRequest {
+    /// Required. Metrics are computed only for the caller's own verified
+    /// organization.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    /// Window start. Unset means all-time.
+    #[prost(message, optional, tag="2")]
+    pub since: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetVerificationMetricsResponse {
+    #[prost(message, optional, tag="1")]
+    pub metrics: ::core::option::Option<VerificationMetrics>,
+}
 // --- Records ---
 
 /// An individual step inside a plan.
@@ -4838,12 +5102,16 @@ pub struct CreateApprovalRequest {
     #[prost(string, tag="10")]
     pub idempotency_key: ::prost::alloc::string::String,
     /// Optional canonical JSON descriptor for the exact suspended action. It is
-    /// validated, scope-bound, and written once with the approval record; it
-    /// contains no bearer, refresh token, or provider credential. Empty means
+    /// validated, scope-bound, and written with the approval record; it contains
+    /// no bearer, refresh token, or provider credential. The application does not
+    /// provide field-level encryption for this value: deployments must enforce
+    /// encrypted database-at-rest storage or leave this field empty. Empty means
     /// this approval is proposal-only and can never be resumed by a worker.
     ///
-    /// ZDR callers must leave this empty: retained continuation descriptors are
-    /// intentionally incompatible with zero-data-retention execution.
+    /// Descriptors are removed when the approval expires/denies or its delivery
+    /// reaches terminal/settled state. ZDR callers must leave this empty:
+    /// retained continuation descriptors are intentionally incompatible with
+    /// zero-data-retention execution.
     #[prost(string, tag="11")]
     pub continuation_descriptor_json: ::prost::alloc::string::String,
 }
@@ -5008,7 +5276,9 @@ pub struct GetApprovalContinuationResponse {
     /// These cases remain indistinguishable to avoid leaking durable state.
     #[prost(bool, tag="1")]
     pub available: bool,
-    /// Canonical descriptor JSON. Set only when available is true.
+    /// Canonical descriptor JSON. Set only when available is true. This is
+    /// sensitive action data; transport callers must use authenticated TLS and
+    /// deployments must protect the backing approval metadata at rest.
     #[prost(string, tag="2")]
     pub continuation_descriptor_json: ::prost::alloc::string::String,
 }
@@ -6561,11 +6831,64 @@ pub struct ThreadSummary {
     pub created_at: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, optional, tag="6")]
     pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+    /// Whether the user has pinned this thread in the cross-device chat list.
+    #[prost(bool, tag="7")]
+    pub pinned: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListThreadsResponse {
     #[prost(message, repeated, tag="1")]
     pub threads: ::prost::alloc::vec::Vec<ThreadSummary>,
+}
+// --- Thread presentation and archive lifecycle ---
+
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateThreadPresentationRequest {
+    /// Server-authoritative tenant scope from verified gateway claims.
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub thread_id: ::prost::alloc::string::String,
+    /// Presence is meaningful: an omitted field is unchanged; an empty supplied
+    /// string clears the override and restores the canonical message-derived
+    /// title/preview.
+    #[prost(string, optional, tag="3")]
+    pub title: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag="4")]
+    pub preview: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bool, optional, tag="5")]
+    pub pinned: ::core::option::Option<bool>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateThreadPresentationResponse {
+    #[prost(string, tag="1")]
+    pub thread_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ArchiveThreadRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub thread_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ArchiveThreadResponse {
+    #[prost(string, tag="1")]
+    pub thread_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub archived_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ArchiveThreadsRequest {
+    #[prost(string, tag="1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub user_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ArchiveThreadsResponse {
+    #[prost(uint32, tag="1")]
+    pub archived_count: u32,
 }
 // --- SetRunMode (ROADMAP P3 run modes) ---
 

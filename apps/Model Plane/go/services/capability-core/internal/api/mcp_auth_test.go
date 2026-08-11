@@ -124,6 +124,32 @@ func (row stringRow) Scan(dest ...any) error {
 	return nil
 }
 
+type mcpConfigRow struct {
+	config   any
+	scope    string
+	authKind string
+}
+
+func (row mcpConfigRow) Scan(dest ...any) error {
+	if len(dest) != 3 {
+		return errors.New("mcpConfigRow: want three scan destinations")
+	}
+	config, ok := dest[0].(*any)
+	if !ok {
+		return errors.New("mcpConfigRow: config destination is not *any")
+	}
+	scope, ok := dest[1].(*string)
+	if !ok {
+		return errors.New("mcpConfigRow: scope destination is not *string")
+	}
+	authKind, ok := dest[2].(*string)
+	if !ok {
+		return errors.New("mcpConfigRow: auth kind destination is not *string")
+	}
+	*config, *scope, *authKind = row.config, row.scope, row.authKind
+	return nil
+}
+
 type emptyRows struct{}
 
 func (emptyRows) Close()                                       {}
@@ -419,8 +445,35 @@ func TestMCPHandlerAuthenticationAndTenantContainment(t *testing.T) {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		call := database.execs[len(database.execs)-1]
-		if !strings.Contains(call.query, "org_id=$5") || len(call.args) != 5 || call.args[4] != "org-a" {
+		if !strings.Contains(call.query, "org_id=$6") || len(call.args) != 6 || call.args[5] != "org-a" {
 			t.Fatalf("unscoped patch query: %q args=%v", call.query, call.args)
+		}
+	})
+
+	t.Run("patch shared users preserves durable MCP config", func(t *testing.T) {
+		database.nextRows = append(database.nextRows, mcpConfigRow{
+			config: map[string]any{
+				"tool_allowlist": []string{"records.search"},
+				"owner_user_id":  "user-a",
+				"shared_with":    []string{},
+			},
+			scope:    "user",
+			authKind: "none",
+		})
+		request := httptest.NewRequest(http.MethodPatch, "/api/v1/mcp/mcp-1", strings.NewReader(`{"shared_with":["user-b"]}`))
+		request.Header.Set("Authorization", "Bearer "+writeToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s, want 200", response.Code, response.Body.String())
+		}
+		call := database.execs[len(database.execs)-1]
+		if len(call.args) != 6 || call.args[5] != "org-a" {
+			t.Fatalf("share patch was not tenant scoped: args=%v", call.args)
+		}
+		config, ok := call.args[2].([]byte)
+		if !ok || !strings.Contains(string(config), `"shared_with":["user-b"]`) {
+			t.Fatalf("share patch did not persist shared_with: %#v", call.args[2])
 		}
 	})
 

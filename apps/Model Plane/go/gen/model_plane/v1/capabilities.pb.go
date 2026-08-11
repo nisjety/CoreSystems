@@ -471,8 +471,19 @@ type EvaluatePolicyResponse struct {
 	Reason string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
 	// Budget context (remaining tokens, cost, etc.).
 	BudgetContext string `protobuf:"bytes,3,opt,name=budget_context,json=budgetContext,proto3" json:"budget_context,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Stable correlation identifier for this evaluated request and capability
+	// snapshot. This identifies the decision in audit/event records; it is not
+	// itself an authorization token or proof that execution occurred.
+	DecisionId string `protobuf:"bytes,4,opt,name=decision_id,json=decisionId,proto3" json:"decision_id,omitempty"`
+	// Exact capability version evaluated by the policy engine. Callers must
+	// bind execution to this version instead of re-resolving a mutable name.
+	CapabilityVersion string `protobuf:"bytes,5,opt,name=capability_version,json=capabilityVersion,proto3" json:"capability_version,omitempty"`
+	// Short-lived Ed25519-signed, per-call authorization evidence. The proof
+	// binds capability id/version, tenant, run, agent, scope, decision, reason,
+	// and budget context; execution runtimes must verify it before dispatch.
+	DecisionEvidence string `protobuf:"bytes,6,opt,name=decision_evidence,json=decisionEvidence,proto3" json:"decision_evidence,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EvaluatePolicyResponse) Reset() {
@@ -522,6 +533,27 @@ func (x *EvaluatePolicyResponse) GetReason() string {
 func (x *EvaluatePolicyResponse) GetBudgetContext() string {
 	if x != nil {
 		return x.BudgetContext
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyResponse) GetDecisionId() string {
+	if x != nil {
+		return x.DecisionId
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyResponse) GetCapabilityVersion() string {
+	if x != nil {
+		return x.CapabilityVersion
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyResponse) GetDecisionEvidence() string {
+	if x != nil {
+		return x.DecisionEvidence
 	}
 	return ""
 }
@@ -921,11 +953,15 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +
 	"\bagent_id\x18\x03 \x01(\tR\aagentId\x12\x15\n" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x14\n" +
-	"\x05scope\x18\x05 \x01(\tR\x05scope\"s\n" +
+	"\x05scope\x18\x05 \x01(\tR\x05scope\"\xf0\x01\n" +
 	"\x16EvaluatePolicyResponse\x12\x1a\n" +
 	"\bdecision\x18\x01 \x01(\tR\bdecision\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12%\n" +
-	"\x0ebudget_context\x18\x03 \x01(\tR\rbudgetContext\"7\n" +
+	"\x0ebudget_context\x18\x03 \x01(\tR\rbudgetContext\x12\x1f\n" +
+	"\vdecision_id\x18\x04 \x01(\tR\n" +
+	"decisionId\x12-\n" +
+	"\x12capability_version\x18\x05 \x01(\tR\x11capabilityVersion\x12+\n" +
+	"\x11decision_evidence\x18\x06 \x01(\tR\x10decisionEvidence\"7\n" +
 	"\x1aValidateSkillBundleRequest\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\"\x8d\x01\n" +
 	"\x1bValidateSkillBundleResponse\x12\x14\n" +

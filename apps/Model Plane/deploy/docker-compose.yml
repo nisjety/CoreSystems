@@ -65,6 +65,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # Deployment-owned JetStream topology. Runtime services intentionally cannot
+  # create or mutate streams/consumers; this one-shot service establishes and
+  # verifies the fixed contracts before session-core starts.
+  nats-provisioner:
+    build:
+      context: ../go
+      dockerfile: services/nats-provisioner/Dockerfile
+      args: *build-metadata
+    restart: "no"
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: observability-provisioner-model
+      NATS_PASSWORD: ${MODEL_NATS_PROVISIONER_PASSWORD:?MODEL_NATS_PROVISIONER_PASSWORD is required}
+    depends_on:
+      nats:
+        condition: service_healthy
+    networks:
+      - default
+
   minio:
     <<: *runtime-defaults
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
@@ -385,6 +404,21 @@ services:
       # sending a request that can only 401.
       INSIGHT_CORE_URL: ${INSIGHT_CORE_URL:-http://insight-core:3163}
       SOCIAL_CORE_URL: ${SOCIAL_CORE_URL:-http://social-core:3162}
+      # Control Plane owns per-org quotas (`org_quotas`); the gateway reads the
+      # spend/token ceiling and hands it to cost-core's budget check. Resolved by
+      # COMPOSE SERVICE NAME on inter-plane-bus (org-core has no alias there),
+      # and 8080 is the in-container HTTP port — 18080 is only the host mapping.
+      # A wrong value here fails OPEN and only logs, so the caps would silently
+      # stop enforcing rather than erroring.
+      ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
+      # Secret half of the org-core service credential; the id half is
+      # MODEL_GATEWAY_SERVICE_ID, already set above. Register this pair in
+      # Control Plane's ORG_CORE_SERVICE_CREDENTIALS with scope org:read:any (to
+      # read any tenant's ceiling) plus the settings-write scope (so SetPolicy
+      # can record one) — the same registration shape execution-core uses.
+      # UNSET is a supported state: no org ceiling is applied and SetPolicy
+      # refuses the cap fields rather than pretending to store them.
+      MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN: ${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:-}
       APPLICATION_CORE_INTERNAL_KEY: ${APPLICATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
       # Verevon's own public origin, as seen by a user's browser through the
       # verevonv3 gateway. Used only to build the OAuth redirect_uri for MCP
@@ -451,6 +485,9 @@ services:
       # extraction loop presents; Auth Core scopes the two audiences separately.
       SESSION_CORE_SERVICE_ID: ${SESSION_CORE_SERVICE_ID:-session-core}
       SESSION_CORE_SERVICE_API_KEY: ${SESSION_CORE_SERVICE_API_KEY:-}
+      # AES-256-GCM key for encrypted approval continuation descriptors. The
+      # service fails closed when a descriptor is requested without this key.
+      SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -479,6 +516,8 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      nats-provisioner:
+        condition: service_completed_successfully
     networks:
       default: {}
       inter-plane-bus: {}
@@ -691,6 +730,12 @@ services:
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:-execution-core}
       EXECUTION_CORE_SERVICE_ID: ${EXECUTION_CORE_SERVICE_ID:-execution-core}
       EXECUTION_CORE_SERVICE_API_KEY: ${EXECUTION_CORE_SERVICE_API_KEY:?EXECUTION_CORE_SERVICE_API_KEY is required}
+      # Per-call capability decisions are signed by capability-core and
+      # verified immediately before execution. Development may leave these
+      # unset (allow decisions then carry no evidence); production overlays
+      # make both sides mandatory so an allow cannot cross the dispatch gate
+      # without an Ed25519 proof.
+      EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY: ${EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY:-}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
@@ -883,6 +928,8 @@ services:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       CAPABILITY_CORE_AUTH_AUDIENCE: ${CAPABILITY_CORE_AUTH_AUDIENCE:-capability-core}
+      CAPABILITY_CORE_DECISION_SIGNING_KEY: ${CAPABILITY_CORE_DECISION_SIGNING_KEY:-}
+      CAPABILITY_CORE_DECISION_SIGNING_KID: ${CAPABILITY_CORE_DECISION_SIGNING_KID:-capability-decision-v1}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
       # inference-core (review it). The two JWKS/ISSUER vars above verify

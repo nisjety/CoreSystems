@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -33,6 +36,7 @@ type Server struct {
 	policy   *policy.Engine
 	store    capabilityStore // optional: enables score-ranked List
 	toolRank toolDefinitionSearcher
+	decisionProofSigner *DecisionProofSigner
 }
 
 type toolDefinitionSearcher interface {
@@ -102,6 +106,14 @@ func (s *Server) WithStore(store *registry.CapabilitiesStore) *Server {
 // EvaluatePolicy or execution dispatch.
 func (s *Server) WithLettaToolSearcher(searcher toolDefinitionSearcher) *Server {
 	s.toolRank = searcher
+	return s
+}
+
+// WithDecisionProofSigner enables short-lived per-call Ed25519 evidence on
+// EvaluatePolicy responses. Keeping this explicit prevents tests and local
+// read-only deployments from silently inventing a signing key.
+func (s *Server) WithDecisionProofSigner(signer *DecisionProofSigner) *Server {
+	s.decisionProofSigner = signer
 	return s
 }
 
@@ -442,17 +454,56 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 		}
 	}
 	if reason := capabilityPolicyBlockReason(capability, rolloutState); reason != "" {
-		return &mpv1.EvaluatePolicyResponse{Decision: policy.DecisionDeny, Reason: reason}, nil
+		return s.policyResponse(req, orgID, capability, policy.DecisionDeny, reason, ""), nil
 	}
 	result, err := s.policy.EvaluateCapability(ctx, capability, req.RunId, req.AgentId, orgID, req.Scope)
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	return &mpv1.EvaluatePolicyResponse{
-		Decision:      result.Decision,
-		Reason:        result.Reason,
-		BudgetContext: result.BudgetContext,
-	}, nil
+	return s.policyResponse(req, orgID, capability, result.Decision, result.Reason, result.BudgetContext), nil
+}
+
+// policyResponse binds the caller-visible decision to the exact capability
+// snapshot and authenticated tenant used during evaluation. The decision ID
+// is an audit correlation value; decision evidence is the separately signed
+// execution authorization artifact.
+func (s *Server) policyResponse(req *mpv1.EvaluatePolicyRequest, orgID string, capability *models.Capability, decision, reason, budget string) *mpv1.EvaluatePolicyResponse {
+	version := ""
+	capabilityID := ""
+	if capability != nil {
+		version = capability.Version
+		capabilityID = capability.ID
+	}
+	hash := sha256.Sum256([]byte(fmt.Sprintf("policy-v1\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s", capabilityID, version, orgID, req.GetRunId(), req.GetAgentId(), req.GetScope(), decision, reason, budget)))
+	response := &mpv1.EvaluatePolicyResponse{
+		Decision:          decision,
+		Reason:            reason,
+		BudgetContext:     budget,
+		DecisionId:        "pdec_" + hex.EncodeToString(hash[:16]),
+		CapabilityVersion: version,
+	}
+	if s.decisionProofSigner != nil {
+		proof, err := s.decisionProofSigner.Sign(decisionProofClaimsFor(
+			decisionProofRequest{
+				capabilityID: capabilityID,
+				runID:        req.GetRunId(),
+				agentID:      req.GetAgentId(),
+				orgID:        orgID,
+				scope:        req.GetScope(),
+			},
+			&decisionProofResponse{
+				decision:          decision,
+				reason:            reason,
+				budgetContext:     budget,
+				decisionID:        response.DecisionId,
+				capabilityVersion: version,
+			},
+		))
+		if err == nil {
+			response.DecisionEvidence = proof
+		}
+	}
+	return response
 }
 
 func capabilityPolicyBlockReason(capability *models.Capability, rolloutState string) string {

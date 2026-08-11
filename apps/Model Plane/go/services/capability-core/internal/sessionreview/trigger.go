@@ -4,7 +4,7 @@
 // (internal/skillsink), and the control flow (learning.RunReview) are built and
 // tested; this package decides WHEN they run and assembles the call.
 //
-// # Design (best-judgment; the NATS/client plumbing is flagged unverified)
+// # Design
 //
 // Event-driven via NATS, NOT Temporal: capability-core has no Temporal
 // dependency by design, and the platform is already event-sourced
@@ -13,13 +13,10 @@
 // session. ([ParseRunCompleted] + [OnRunCompleted] are the decision/orchestration
 // brain and are fully unit-tested here over injected interfaces.)
 //
-// What remains cross-service plumbing (build when wired to the running stack):
-//   - the live NATS subscriber that feeds [ParseRunCompleted] (capability-core
-//     has no subscriber today),
-//   - the concrete [TranscriptSource] backed by session-core (ReplayThread for
-//     the transcript + agent_skills for the existing-skill list),
-//   - constructing the real reviewer/sink (inference-core + session-core gRPC
-//     clients) at the call site.
+// The live NATS subscriber and concrete reviewer/sink are wired by
+// capability-core/cmd/main.go. This package keeps the control flow behind
+// interfaces so the retention gate and provenance policy remain independently
+// testable; the NATS delivery half has a real-server harness.
 //
 // This package itself has NO unverified code: every dependency is an interface,
 // so it compiles and is unit-tested with zero stack. It defines the exact
@@ -52,8 +49,9 @@ type SessionRef struct {
 // ("run/<id>" per the envelope convention; "run:<id>" is also tolerated); the
 // org from `org_id`; the thread id best-effort from `payload.thread_id`.
 //
-// NOTE (unverified): confirm the exact RUN_COMPLETED `resource_ref`/`payload`
-// shape against a live event — this decode is intentionally tolerant.
+// The producer contract is intentionally tolerant of the historical `run/` and
+// `run:` resource-reference forms; the live trigger test pins the canonical
+// `run/<id>` form and subject routing.
 func ParseRunCompleted(env *envelope.Envelope) (SessionRef, bool) {
 	if env == nil || env.EventType != RunCompletedEventType || env.OrgID == "" {
 		return SessionRef{}, false

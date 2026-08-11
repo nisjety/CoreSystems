@@ -19,22 +19,25 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionCore_CreateThread_FullMethodName         = "/model_plane.v1.SessionCore/CreateThread"
-	SessionCore_AppendMessage_FullMethodName        = "/model_plane.v1.SessionCore/AppendMessage"
-	SessionCore_StartRun_FullMethodName             = "/model_plane.v1.SessionCore/StartRun"
-	SessionCore_CompleteStep_FullMethodName         = "/model_plane.v1.SessionCore/CompleteStep"
-	SessionCore_ReserveToolAction_FullMethodName    = "/model_plane.v1.SessionCore/ReserveToolAction"
-	SessionCore_FinalizeToolAction_FullMethodName   = "/model_plane.v1.SessionCore/FinalizeToolAction"
-	SessionCore_SaveCheckpoint_FullMethodName       = "/model_plane.v1.SessionCore/SaveCheckpoint"
-	SessionCore_ReplayThread_FullMethodName         = "/model_plane.v1.SessionCore/ReplayThread"
-	SessionCore_GetContextAssembly_FullMethodName   = "/model_plane.v1.SessionCore/GetContextAssembly"
-	SessionCore_CompactNow_FullMethodName           = "/model_plane.v1.SessionCore/CompactNow"
-	SessionCore_UpsertAgentSkill_FullMethodName     = "/model_plane.v1.SessionCore/UpsertAgentSkill"
-	SessionCore_ListAgentSkills_FullMethodName      = "/model_plane.v1.SessionCore/ListAgentSkills"
-	SessionCore_SetAgentSkillEnabled_FullMethodName = "/model_plane.v1.SessionCore/SetAgentSkillEnabled"
-	SessionCore_ListConversation_FullMethodName     = "/model_plane.v1.SessionCore/ListConversation"
-	SessionCore_ListThreads_FullMethodName          = "/model_plane.v1.SessionCore/ListThreads"
-	SessionCore_SetRunMode_FullMethodName           = "/model_plane.v1.SessionCore/SetRunMode"
+	SessionCore_CreateThread_FullMethodName             = "/model_plane.v1.SessionCore/CreateThread"
+	SessionCore_AppendMessage_FullMethodName            = "/model_plane.v1.SessionCore/AppendMessage"
+	SessionCore_StartRun_FullMethodName                 = "/model_plane.v1.SessionCore/StartRun"
+	SessionCore_CompleteStep_FullMethodName             = "/model_plane.v1.SessionCore/CompleteStep"
+	SessionCore_ReserveToolAction_FullMethodName        = "/model_plane.v1.SessionCore/ReserveToolAction"
+	SessionCore_FinalizeToolAction_FullMethodName       = "/model_plane.v1.SessionCore/FinalizeToolAction"
+	SessionCore_SaveCheckpoint_FullMethodName           = "/model_plane.v1.SessionCore/SaveCheckpoint"
+	SessionCore_ReplayThread_FullMethodName             = "/model_plane.v1.SessionCore/ReplayThread"
+	SessionCore_GetContextAssembly_FullMethodName       = "/model_plane.v1.SessionCore/GetContextAssembly"
+	SessionCore_CompactNow_FullMethodName               = "/model_plane.v1.SessionCore/CompactNow"
+	SessionCore_UpsertAgentSkill_FullMethodName         = "/model_plane.v1.SessionCore/UpsertAgentSkill"
+	SessionCore_ListAgentSkills_FullMethodName          = "/model_plane.v1.SessionCore/ListAgentSkills"
+	SessionCore_SetAgentSkillEnabled_FullMethodName     = "/model_plane.v1.SessionCore/SetAgentSkillEnabled"
+	SessionCore_ListConversation_FullMethodName         = "/model_plane.v1.SessionCore/ListConversation"
+	SessionCore_ListThreads_FullMethodName              = "/model_plane.v1.SessionCore/ListThreads"
+	SessionCore_UpdateThreadPresentation_FullMethodName = "/model_plane.v1.SessionCore/UpdateThreadPresentation"
+	SessionCore_ArchiveThread_FullMethodName            = "/model_plane.v1.SessionCore/ArchiveThread"
+	SessionCore_ArchiveThreads_FullMethodName           = "/model_plane.v1.SessionCore/ArchiveThreads"
+	SessionCore_SetRunMode_FullMethodName               = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
 // SessionCoreClient is the client API for SessionCore service.
@@ -98,6 +101,17 @@ type SessionCoreClient interface {
 	// List an authenticated user's durable conversation threads for cross-device
 	// chat history. Timestamps are based on creation/message writes, never reads.
 	ListThreads(ctx context.Context, in *ListThreadsRequest, opts ...grpc.CallOption) (*ListThreadsResponse, error)
+	// Set user-facing presentation attributes for a thread. Session Core remains
+	// the single writer; edge gateways may normalize the request but must not
+	// keep a competing history index or presentation cache.
+	UpdateThreadPresentation(ctx context.Context, in *UpdateThreadPresentationRequest, opts ...grpc.CallOption) (*UpdateThreadPresentationResponse, error)
+	// Hide one thread from the user's ordinary history without erasing its
+	// append-only model/audit evidence. Data-subject erasure is a separate,
+	// explicitly authorized Control-Plane workflow.
+	ArchiveThread(ctx context.Context, in *ArchiveThreadRequest, opts ...grpc.CallOption) (*ArchiveThreadResponse, error)
+	// Archive every currently visible thread for one authenticated user. This is
+	// the durable equivalent of "clear chat history" in a client sidebar.
+	ArchiveThreads(ctx context.Context, in *ArchiveThreadsRequest, opts ...grpc.CallOption) (*ArchiveThreadsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -272,6 +286,36 @@ func (c *sessionCoreClient) ListThreads(ctx context.Context, in *ListThreadsRequ
 	return out, nil
 }
 
+func (c *sessionCoreClient) UpdateThreadPresentation(ctx context.Context, in *UpdateThreadPresentationRequest, opts ...grpc.CallOption) (*UpdateThreadPresentationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateThreadPresentationResponse)
+	err := c.cc.Invoke(ctx, SessionCore_UpdateThreadPresentation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ArchiveThread(ctx context.Context, in *ArchiveThreadRequest, opts ...grpc.CallOption) (*ArchiveThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ArchiveThreadResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ArchiveThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ArchiveThreads(ctx context.Context, in *ArchiveThreadsRequest, opts ...grpc.CallOption) (*ArchiveThreadsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ArchiveThreadsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ArchiveThreads_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionCoreClient) SetRunMode(ctx context.Context, in *SetRunModeRequest, opts ...grpc.CallOption) (*SetRunModeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetRunModeResponse)
@@ -343,6 +387,17 @@ type SessionCoreServer interface {
 	// List an authenticated user's durable conversation threads for cross-device
 	// chat history. Timestamps are based on creation/message writes, never reads.
 	ListThreads(context.Context, *ListThreadsRequest) (*ListThreadsResponse, error)
+	// Set user-facing presentation attributes for a thread. Session Core remains
+	// the single writer; edge gateways may normalize the request but must not
+	// keep a competing history index or presentation cache.
+	UpdateThreadPresentation(context.Context, *UpdateThreadPresentationRequest) (*UpdateThreadPresentationResponse, error)
+	// Hide one thread from the user's ordinary history without erasing its
+	// append-only model/audit evidence. Data-subject erasure is a separate,
+	// explicitly authorized Control-Plane workflow.
+	ArchiveThread(context.Context, *ArchiveThreadRequest) (*ArchiveThreadResponse, error)
+	// Archive every currently visible thread for one authenticated user. This is
+	// the durable equivalent of "clear chat history" in a client sidebar.
+	ArchiveThreads(context.Context, *ArchiveThreadsRequest) (*ArchiveThreadsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -402,6 +457,15 @@ func (UnimplementedSessionCoreServer) ListConversation(context.Context, *ListCon
 }
 func (UnimplementedSessionCoreServer) ListThreads(context.Context, *ListThreadsRequest) (*ListThreadsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListThreads not implemented")
+}
+func (UnimplementedSessionCoreServer) UpdateThreadPresentation(context.Context, *UpdateThreadPresentationRequest) (*UpdateThreadPresentationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateThreadPresentation not implemented")
+}
+func (UnimplementedSessionCoreServer) ArchiveThread(context.Context, *ArchiveThreadRequest) (*ArchiveThreadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ArchiveThread not implemented")
+}
+func (UnimplementedSessionCoreServer) ArchiveThreads(context.Context, *ArchiveThreadsRequest) (*ArchiveThreadsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ArchiveThreads not implemented")
 }
 func (UnimplementedSessionCoreServer) SetRunMode(context.Context, *SetRunModeRequest) (*SetRunModeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetRunMode not implemented")
@@ -690,6 +754,60 @@ func _SessionCore_ListThreads_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_UpdateThreadPresentation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateThreadPresentationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).UpdateThreadPresentation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_UpdateThreadPresentation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).UpdateThreadPresentation(ctx, req.(*UpdateThreadPresentationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ArchiveThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ArchiveThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ArchiveThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ArchiveThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ArchiveThread(ctx, req.(*ArchiveThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ArchiveThreads_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ArchiveThreadsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ArchiveThreads(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ArchiveThreads_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ArchiveThreads(ctx, req.(*ArchiveThreadsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionCore_SetRunMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetRunModeRequest)
 	if err := dec(in); err != nil {
@@ -770,6 +888,18 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListThreads",
 			Handler:    _SessionCore_ListThreads_Handler,
+		},
+		{
+			MethodName: "UpdateThreadPresentation",
+			Handler:    _SessionCore_UpdateThreadPresentation_Handler,
+		},
+		{
+			MethodName: "ArchiveThread",
+			Handler:    _SessionCore_ArchiveThread_Handler,
+		},
+		{
+			MethodName: "ArchiveThreads",
+			Handler:    _SessionCore_ArchiveThreads_Handler,
 		},
 		{
 			MethodName: "SetRunMode",

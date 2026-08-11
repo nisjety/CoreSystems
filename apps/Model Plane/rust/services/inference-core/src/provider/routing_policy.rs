@@ -313,7 +313,10 @@ mod tests {
             last_claude < first_openai,
             "every Claude deployment must be tried before leaving the family: {ladder:?}"
         );
-        assert_eq!(ladder.first().map(String::as_str), Some("claude-sonnet-4-6"));
+        assert_eq!(
+            ladder.first().map(String::as_str),
+            Some("claude-sonnet-4-6")
+        );
         assert_eq!(ladder.last().map(String::as_str), Some(CHEAP_FALLBACK));
     }
 
@@ -401,7 +404,11 @@ mod tests {
     #[test]
     fn default_matches_old_choose_for_all_cells() {
         let policy = RoutingPolicy::default();
-        for mode in [VerevonMode::Budget, VerevonMode::Balance, VerevonMode::Genius] {
+        for mode in [
+            VerevonMode::Budget,
+            VerevonMode::Balance,
+            VerevonMode::Genius,
+        ] {
             for cx in [
                 Complexity::Simple,
                 Complexity::Moderate,

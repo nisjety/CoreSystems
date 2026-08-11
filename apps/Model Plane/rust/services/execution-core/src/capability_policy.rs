@@ -8,9 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use mp_contracts::model_plane::v1::{
-    capability_core_client::CapabilityCoreClient, EvaluatePolicyRequest,
+    capability_core_client::CapabilityCoreClient, EvaluatePolicyRequest, EvaluatePolicyResponse,
 };
+use serde::Deserialize;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
 
@@ -24,6 +27,29 @@ pub enum CapabilityDecision {
     Ask,
 }
 
+#[derive(Debug, Clone)]
+pub struct CapabilityEvaluation {
+    pub decision: CapabilityDecision,
+    pub decision_id: String,
+    pub capability_version: String,
+    pub evidence_verified: bool,
+}
+
+impl CapabilityEvaluation {
+    fn unverified(decision: CapabilityDecision) -> Self {
+        // Test/local policy implementations predate the wire proof. The
+        // production gRPC implementation below always verifies evidence;
+        // preserving this default keeps pure runtime-loop tests focused on
+        // dispatch semantics without inventing a fake wire token.
+        Self {
+            decision,
+            decision_id: String::new(),
+            capability_version: String::new(),
+            evidence_verified: true,
+        }
+    }
+}
+
 #[tonic::async_trait]
 pub trait CapabilityPolicy: Send + Sync {
     async fn evaluate(
@@ -32,12 +58,24 @@ pub trait CapabilityPolicy: Send + Sync {
         run_id: &str,
         org_id: &str,
     ) -> Result<CapabilityDecision, Status>;
+
+    async fn evaluate_with_evidence(
+        &self,
+        tool_name: &str,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<CapabilityEvaluation, Status> {
+        self.evaluate(tool_name, run_id, org_id)
+            .await
+            .map(CapabilityEvaluation::unverified)
+    }
 }
 
 #[derive(Clone)]
 pub struct GrpcCapabilityPolicy {
     channel: Channel,
     tokens: TokenSource,
+    decision_verifier: DecisionEvidenceVerifier,
 }
 
 impl std::fmt::Debug for GrpcCapabilityPolicy {
@@ -62,6 +100,7 @@ impl GrpcCapabilityPolicy {
         Ok(Self {
             channel,
             tokens: TokenSource::Service(Arc::new(ServiceTokenProvider::from_env()?)),
+            decision_verifier: DecisionEvidenceVerifier::from_env()?,
         })
     }
 
@@ -71,6 +110,7 @@ impl GrpcCapabilityPolicy {
         Self {
             channel,
             tokens: TokenSource::Static(Arc::from(bearer)),
+            decision_verifier: DecisionEvidenceVerifier::disabled_for_test(),
         }
     }
 }
@@ -83,6 +123,46 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         run_id: &str,
         org_id: &str,
     ) -> Result<CapabilityDecision, Status> {
+        let response = self.evaluate_response(tool_name, run_id, org_id).await?;
+        map_capability_response(&response).map(|evaluation| evaluation.decision)
+    }
+
+    async fn evaluate_with_evidence(
+        &self,
+        tool_name: &str,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<CapabilityEvaluation, Status> {
+        let response = self.evaluate_response(tool_name, run_id, org_id).await?;
+        let evaluation = map_capability_response(&response)?;
+        if evaluation.decision == CapabilityDecision::Allow
+            && !self.decision_verifier.verify(
+                &response.decision_evidence,
+                &response,
+                tool_name,
+                run_id,
+                org_id,
+            )
+        {
+            return Err(Status::permission_denied(
+                "capability policy returned invalid decision evidence",
+            ));
+        }
+        Ok(CapabilityEvaluation {
+            evidence_verified: evaluation.decision != CapabilityDecision::Allow
+                || self.decision_verifier.is_configured(),
+            ..evaluation
+        })
+    }
+}
+
+impl GrpcCapabilityPolicy {
+    async fn evaluate_response(
+        &self,
+        tool_name: &str,
+        run_id: &str,
+        org_id: &str,
+    ) -> Result<EvaluatePolicyResponse, Status> {
         if run_id.trim().is_empty() || org_id.trim().is_empty() {
             return Err(Status::invalid_argument(
                 "run and tenant are required for capability policy",
@@ -107,26 +187,158 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
                 Status::internal("verified capability credential is not forwardable")
             })?,
         );
-        let response = tokio::time::timeout(
+        let nested = tokio::time::timeout(
             Duration::from_secs(3),
             CapabilityCoreClient::new(self.channel.clone()).evaluate_policy(request),
         )
         .await
-        .map_err(|_| Status::unavailable("capability policy timed out"))?
-        .map_err(|error| {
+        .map_err(|_| Status::unavailable("capability policy timed out"))?;
+        let response = nested.map_err(|error| {
             tracing::warn!(code = ?error.code(), "capability policy unavailable");
             Status::unavailable("capability policy unavailable")
-        })?
-        .into_inner();
-        match response.decision.as_str() {
-            "allow" => Ok(CapabilityDecision::Allow),
-            "ask" => Ok(CapabilityDecision::Ask),
-            "deny" | "fallback" => Ok(CapabilityDecision::Deny),
-            _ => Err(Status::permission_denied(
-                "capability policy returned an invalid decision",
-            )),
-        }
+        })?;
+        Ok(response.into_inner())
     }
+}
+
+fn map_capability_response(
+    response: &EvaluatePolicyResponse,
+) -> Result<CapabilityEvaluation, Status> {
+    let decision = match response.decision.as_str() {
+        "allow" => CapabilityDecision::Allow,
+        "ask" => CapabilityDecision::Ask,
+        "deny" | "fallback" => CapabilityDecision::Deny,
+        _ => {
+            return Err(Status::permission_denied(
+                "capability policy returned an invalid decision",
+            ))
+        }
+    };
+    Ok(CapabilityEvaluation {
+        decision,
+        decision_id: response.decision_id.clone(),
+        capability_version: response.capability_version.clone(),
+        evidence_verified: false,
+    })
+}
+
+#[derive(Clone)]
+struct DecisionEvidenceVerifier {
+    key: Option<VerifyingKey>,
+}
+
+impl DecisionEvidenceVerifier {
+    fn from_env() -> anyhow::Result<Self> {
+        let raw = std::env::var("EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY").map_err(|_| {
+            anyhow::anyhow!("EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY is required")
+        })?;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(raw.trim())
+            .map_err(|_| anyhow::anyhow!("capability decision public key is not valid base64"))?;
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("capability decision public key must be 32 bytes"))?;
+        Ok(Self {
+            key: Some(
+                VerifyingKey::from_bytes(&bytes)
+                    .map_err(|_| anyhow::anyhow!("capability decision public key is invalid"))?,
+            ),
+        })
+    }
+
+    #[cfg(test)]
+    fn disabled_for_test() -> Self {
+        Self { key: None }
+    }
+
+    fn is_configured(&self) -> bool {
+        self.key.is_some()
+    }
+
+    fn verify(
+        &self,
+        evidence: &str,
+        response: &EvaluatePolicyResponse,
+        tool_name: &str,
+        run_id: &str,
+        org_id: &str,
+    ) -> bool {
+        let Some(key) = &self.key else {
+            return false;
+        };
+        let parts: Vec<&str> = evidence.split('.').collect();
+        if parts.len() != 3 {
+            return false;
+        }
+        let decode = |part: &str| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(part)
+                .ok()
+        };
+        let (Some(header), Some(payload), Some(signature)) =
+            (decode(parts[0]), decode(parts[1]), decode(parts[2]))
+        else {
+            return false;
+        };
+        #[derive(Deserialize)]
+        struct Header {
+            alg: String,
+            typ: String,
+        }
+        #[derive(Deserialize)]
+        struct Claims {
+            v: String,
+            iat: i64,
+            exp: i64,
+            decision_id: String,
+            capability_id: String,
+            capability_version: String,
+            org_id: String,
+            run_id: String,
+            agent_id: String,
+            scope: String,
+            decision: String,
+            reason: String,
+            budget_context: String,
+        }
+        let Ok(header) = serde_json::from_slice::<Header>(&header) else {
+            return false;
+        };
+        let Ok(claims) = serde_json::from_slice::<Claims>(&payload) else {
+            return false;
+        };
+        if header.alg != "EdDSA"
+            || header.typ != "model-plane.capability-decision+jws"
+            || claims.v != "1"
+            || claims.decision_id != response.decision_id
+            || claims.capability_version != response.capability_version
+            || claims.capability_id != trusted_capability_id(tool_name).unwrap_or_default()
+            || claims.org_id != org_id
+            || claims.run_id != run_id
+            || claims.agent_id != "execution-core"
+            || claims.scope != "global"
+            || claims.decision != response.decision
+            || claims.reason != response.reason
+            || claims.budget_context != response.budget_context
+            || claims.iat > now_unix() + 5
+            || claims.exp < now_unix()
+            || claims.exp - claims.iat > 90
+        {
+            return false;
+        }
+        let Ok(signature) = Signature::from_slice(&signature) else {
+            return false;
+        };
+        key.verify(format!("{}.{}", parts[0], parts[1]).as_bytes(), &signature)
+            .is_ok()
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -356,8 +568,87 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn signed_evidence(
+        key: &SigningKey,
+        response: &EvaluatePolicyResponse,
+        iat: i64,
+        exp: i64,
+    ) -> String {
+        let header = serde_json::json!({
+            "alg": "EdDSA",
+            "kid": "capability-decision-v1",
+            "typ": "model-plane.capability-decision+jws"
+        });
+        let claims = serde_json::json!({
+            "v": "1",
+            "iat": iat,
+            "exp": exp,
+            "decision_id": response.decision_id,
+            "capability_id": "cap.command.shell",
+            "capability_version": response.capability_version,
+            "org_id": "org-a",
+            "run_id": "run-a",
+            "agent_id": "execution-core",
+            "scope": "global",
+            "decision": response.decision,
+            "reason": response.reason,
+            "budget_context": response.budget_context
+        });
+        let encoder = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let encoded_header = encoder.encode(serde_json::to_vec(&header).expect("header JSON"));
+        let encoded_claims = encoder.encode(serde_json::to_vec(&claims).expect("claims JSON"));
+        let signing_input = format!("{encoded_header}.{encoded_claims}");
+        let signature = key.sign(signing_input.as_bytes());
+        format!("{signing_input}.{}", encoder.encode(signature.to_bytes()))
+    }
+
+    fn allow_response() -> EvaluatePolicyResponse {
+        EvaluatePolicyResponse {
+            decision: "allow".to_owned(),
+            reason: "policy-approved".to_owned(),
+            budget_context: "budget-1".to_owned(),
+            decision_id: "decision-1".to_owned(),
+            capability_version: "cap-v3".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn decision_evidence_verifies_and_binds_the_dispatch_tuple() {
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let verifier = DecisionEvidenceVerifier {
+            key: Some(signing_key.verifying_key()),
+        };
+        let response = allow_response();
+        let now = now_unix();
+        let evidence = signed_evidence(&signing_key, &response, now - 1, now + 30);
+
+        assert!(verifier.verify(&evidence, &response, "shell", "run-a", "org-a"));
+        assert!(!verifier.verify(&evidence, &response, "shell", "run-other", "org-a"));
+    }
+
+    #[test]
+    fn decision_evidence_rejects_tampering_and_expiry() {
+        let signing_key = SigningKey::from_bytes(&[9; 32]);
+        let verifier = DecisionEvidenceVerifier {
+            key: Some(signing_key.verifying_key()),
+        };
+        let response = allow_response();
+        let now = now_unix();
+        let valid = signed_evidence(&signing_key, &response, now - 1, now + 30);
+        let mut tampered = valid.clone();
+        let last = tampered.pop().expect("signature is non-empty");
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+        assert!(verifier.verify(&valid, &response, "shell", "run-a", "org-a"));
+        assert!(!verifier.verify(&tampered, &response, "shell", "run-a", "org-a"));
+
+        let expired = signed_evidence(&signing_key, &response, now - 120, now - 60);
+        assert!(!verifier.verify(&expired, &response, "shell", "run-a", "org-a"));
+    }
 
     #[test]
     fn bindings_are_exact_and_unknown_or_dynamic_tools_fail_closed() {

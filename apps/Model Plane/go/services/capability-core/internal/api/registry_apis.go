@@ -1208,8 +1208,9 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	var update struct {
-		Enabled      *bool  `json:"enabled"`
-		RolloutState string `json:"rollout_state"`
+		Enabled      *bool     `json:"enabled"`
+		RolloutState string    `json:"rollout_state"`
+		SharedWith   *[]string `json:"shared_with"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxMCPRegistrationBodyBytes)
 	decoder := json.NewDecoder(r.Body)
@@ -1218,7 +1219,7 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		jsonErr(w, "invalid MCP update", http.StatusBadRequest)
 		return
 	}
-	if update.Enabled == nil && update.RolloutState == "" {
+	if update.Enabled == nil && update.RolloutState == "" && update.SharedWith == nil {
 		jsonErr(w, "invalid MCP update", http.StatusUnprocessableEntity)
 		return
 	}
@@ -1232,6 +1233,47 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		jsonErr(w, "invalid MCP update", http.StatusUnprocessableEntity)
 		return
 	}
+	var configJSON any
+	if update.SharedWith != nil {
+		var stored any
+		var scope, authKind string
+		if err := h.pool.QueryRow(r.Context(), `
+			SELECT config_json, scope, auth_kind
+			FROM mcp_servers WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL
+		`, id, orgID).Scan(&stored, &scope, &authKind); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				jsonErr(w, "MCP server not found", http.StatusNotFound)
+			} else {
+				slog.Error("read MCP sharing config failed", "error", err)
+				jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			}
+			return
+		}
+		config, err := decodeStoredMCPConfig(stored)
+		if err != nil {
+			jsonErr(w, "MCP server configuration is invalid", http.StatusUnprocessableEntity)
+			return
+		}
+		// A user-owned resource may only be shared by its durable owner. The
+		// gateway performs the same check, but capability-core must enforce it
+		// independently because it is the system of record.
+		principal, hasPrincipal := authctx.PrincipalFromContext(r.Context())
+		if config.OwnerUserID != "" && (!hasPrincipal || principal.ActorID != config.OwnerUserID) {
+			jsonErr(w, "only the MCP owner may change sharing", http.StatusForbidden)
+			return
+		}
+		config.SharedWith = append([]string(nil), (*update.SharedWith)...)
+		config, err = normalizeMCPConfig(config, authKind, scope)
+		if err != nil {
+			jsonErr(w, "invalid MCP sharing configuration", http.StatusUnprocessableEntity)
+			return
+		}
+		configJSON, err = json.Marshal(config)
+		if err != nil {
+			jsonErr(w, "invalid MCP sharing configuration", http.StatusUnprocessableEntity)
+			return
+		}
+	}
 	now := time.Now().UTC()
 	var enabled any
 	if update.Enabled != nil {
@@ -1239,9 +1281,10 @@ func (h *MCPHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	result, err := h.pool.Exec(r.Context(), `
 		UPDATE mcp_servers
-		SET enabled=COALESCE($1, enabled), rollout_state=COALESCE(NULLIF($2, ''), rollout_state), updated_at=$3
-		WHERE id=$4 AND org_id=$5 AND deleted_at IS NULL
-	`, enabled, update.RolloutState, now, id, orgID)
+		SET enabled=COALESCE($1, enabled), rollout_state=COALESCE(NULLIF($2, ''), rollout_state),
+		    config_json=COALESCE($3, config_json), updated_at=$4
+		WHERE id=$5 AND org_id=$6 AND deleted_at IS NULL
+	`, enabled, update.RolloutState, configJSON, now, id, orgID)
 	if !writeSingleScopedMutation(w, "MCP server", result, err) {
 		return
 	}

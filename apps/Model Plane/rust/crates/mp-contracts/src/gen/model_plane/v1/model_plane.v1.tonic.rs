@@ -11058,6 +11058,64 @@ pub mod orchestration_core_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_run_proof_bundle(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetRunProofBundleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRunProofBundleResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/GetRunProofBundle",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "GetRunProofBundle",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_verification_metrics(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetVerificationMetricsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetVerificationMetricsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.OrchestrationCoreService/GetVerificationMetrics",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.OrchestrationCoreService",
+                        "GetVerificationMetrics",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn stream_run_events(
             &mut self,
             request: impl tonic::IntoRequest<super::StreamRunEventsRequest>,
@@ -11249,6 +11307,20 @@ pub mod orchestration_core_service_server {
             request: tonic::Request<super::AttachSubagentRequest>,
         ) -> std::result::Result<
             tonic::Response<super::AttachSubagentResponse>,
+            tonic::Status,
+        >;
+        async fn get_run_proof_bundle(
+            &self,
+            request: tonic::Request<super::GetRunProofBundleRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetRunProofBundleResponse>,
+            tonic::Status,
+        >;
+        async fn get_verification_metrics(
+            &self,
+            request: tonic::Request<super::GetVerificationMetricsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetVerificationMetricsResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the StreamRunEvents method.
@@ -12235,6 +12307,106 @@ pub mod orchestration_core_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = AttachSubagentSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.OrchestrationCoreService/GetRunProofBundle" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetRunProofBundleSvc<T: OrchestrationCoreService>(pub Arc<T>);
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<super::GetRunProofBundleRequest>
+                    for GetRunProofBundleSvc<T> {
+                        type Response = super::GetRunProofBundleResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetRunProofBundleRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::get_run_proof_bundle(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetRunProofBundleSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.OrchestrationCoreService/GetVerificationMetrics" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetVerificationMetricsSvc<T: OrchestrationCoreService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: OrchestrationCoreService,
+                    > tonic::server::UnaryService<super::GetVerificationMetricsRequest>
+                    for GetVerificationMetricsSvc<T> {
+                        type Response = super::GetVerificationMetricsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetVerificationMetricsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as OrchestrationCoreService>::get_verification_metrics(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetVerificationMetricsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -14079,6 +14251,83 @@ pub mod session_core_client {
                 .insert(GrpcMethod::new("model_plane.v1.SessionCore", "ListThreads"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn update_thread_presentation(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateThreadPresentationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateThreadPresentationResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.SessionCore/UpdateThreadPresentation",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "model_plane.v1.SessionCore",
+                        "UpdateThreadPresentation",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn archive_thread(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ArchiveThreadRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ArchiveThreadResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.SessionCore/ArchiveThread",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.SessionCore", "ArchiveThread"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn archive_threads(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ArchiveThreadsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ArchiveThreadsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/model_plane.v1.SessionCore/ArchiveThreads",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("model_plane.v1.SessionCore", "ArchiveThreads"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn set_run_mode(
             &mut self,
             request: impl tonic::IntoRequest<super::SetRunModeRequest>,
@@ -14227,6 +14476,27 @@ pub mod session_core_server {
             request: tonic::Request<super::ListThreadsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListThreadsResponse>,
+            tonic::Status,
+        >;
+        async fn update_thread_presentation(
+            &self,
+            request: tonic::Request<super::UpdateThreadPresentationRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateThreadPresentationResponse>,
+            tonic::Status,
+        >;
+        async fn archive_thread(
+            &self,
+            request: tonic::Request<super::ArchiveThreadRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ArchiveThreadResponse>,
+            tonic::Status,
+        >;
+        async fn archive_threads(
+            &self,
+            request: tonic::Request<super::ArchiveThreadsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ArchiveThreadsResponse>,
             tonic::Status,
         >;
         async fn set_run_mode(
@@ -14979,6 +15249,147 @@ pub mod session_core_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ListThreadsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.SessionCore/UpdateThreadPresentation" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateThreadPresentationSvc<T: SessionCore>(pub Arc<T>);
+                    impl<
+                        T: SessionCore,
+                    > tonic::server::UnaryService<super::UpdateThreadPresentationRequest>
+                    for UpdateThreadPresentationSvc<T> {
+                        type Response = super::UpdateThreadPresentationResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::UpdateThreadPresentationRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SessionCore>::update_thread_presentation(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateThreadPresentationSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.SessionCore/ArchiveThread" => {
+                    #[allow(non_camel_case_types)]
+                    struct ArchiveThreadSvc<T: SessionCore>(pub Arc<T>);
+                    impl<
+                        T: SessionCore,
+                    > tonic::server::UnaryService<super::ArchiveThreadRequest>
+                    for ArchiveThreadSvc<T> {
+                        type Response = super::ArchiveThreadResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ArchiveThreadRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SessionCore>::archive_thread(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ArchiveThreadSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/model_plane.v1.SessionCore/ArchiveThreads" => {
+                    #[allow(non_camel_case_types)]
+                    struct ArchiveThreadsSvc<T: SessionCore>(pub Arc<T>);
+                    impl<
+                        T: SessionCore,
+                    > tonic::server::UnaryService<super::ArchiveThreadsRequest>
+                    for ArchiveThreadsSvc<T> {
+                        type Response = super::ArchiveThreadsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ArchiveThreadsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as SessionCore>::archive_threads(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ArchiveThreadsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

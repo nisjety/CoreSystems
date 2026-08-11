@@ -735,8 +735,10 @@ mod tests {
         }
         .into();
         if let Some(ProtoEvent::ApprovalContinuationVerified(ref mut e)) = pb.event {
-            e.verification.as_mut().expect("verification present").status =
-                ProtoVerificationStatus::Unspecified as i32;
+            e.verification
+                .as_mut()
+                .expect("verification present")
+                .status = ProtoVerificationStatus::Unspecified as i32;
         } else {
             panic!("expected ApprovalContinuationVerified");
         }

@@ -370,12 +370,29 @@ async fn execute_step_inner(
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
 ) -> StepOutcome {
-    match capability_policy.evaluate(tool_name, run_id, org_id).await {
-        Ok(crate::capability_policy::CapabilityDecision::Allow) => {}
-        Ok(crate::capability_policy::CapabilityDecision::Ask) => {
+    match capability_policy
+        .evaluate_with_evidence(tool_name, run_id, org_id)
+        .await
+    {
+        Ok(evaluation)
+            if evaluation.decision == crate::capability_policy::CapabilityDecision::Allow
+                && evaluation.evidence_verified => {}
+        Ok(evaluation)
+            if evaluation.decision == crate::capability_policy::CapabilityDecision::Allow =>
+        {
+            tracing::warn!(
+                decision_id = %evaluation.decision_id,
+                capability_version = %evaluation.capability_version,
+                "capability policy allow lacked verified per-call evidence"
+            );
+            return StepOutcome::permission_denied();
+        }
+        Ok(evaluation)
+            if evaluation.decision == crate::capability_policy::CapabilityDecision::Ask =>
+        {
             return StepOutcome::awaiting_approval();
         }
-        Ok(crate::capability_policy::CapabilityDecision::Deny) => {
+        Ok(_evaluation) => {
             return StepOutcome::permission_denied();
         }
         Err(error) => {
