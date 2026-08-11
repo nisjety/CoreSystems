@@ -117,7 +117,8 @@ pub fn router(state: AppState) -> Router {
         // per-tenant JWT; the originating org travels in the request body
         // (stamped by the orchestrator from the schedule memo, verified at
         // schedule-creation). The handler enforces the token itself.
-        .route("/v1/internal/run_page", post(internal_run_page));
+        .route("/v1/internal/run_page", post(internal_run_page))
+        .merge(crate::queue_routes::internal_router());
 
     // Protected surface — every /v1/* route. The auth middleware
     // verifies an `Authorization: Bearer <jwt>` against the Control
@@ -285,8 +286,22 @@ pub fn router(state: AppState) -> Router {
 async fn health() -> &'static str {
     "ok"
 }
-async fn ready() -> &'static str {
-    "ready"
+async fn ready(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    if state.readiness.durable {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "ready", "durable": true})),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "durable": false,
+                "reason": state.readiness.reason,
+            })),
+        )
+    }
 }
 
 /// Reports what is actually running in this container: the git revision and
@@ -716,7 +731,7 @@ fn read_runtime_token_from_env() -> String {
 /// Verify the shared runtime service token the orchestrator presents on the
 /// internal execution route. Fail-closed: an unset token refuses the call.
 /// Service credential (NOT a per-tenant JWT); constant-time compared.
-fn verify_runtime_token(headers: &HeaderMap) -> Result<(), QuarryError> {
+pub(crate) fn verify_runtime_token(headers: &HeaderMap) -> Result<(), QuarryError> {
     let expected = runtime_token();
     if expected.is_empty() {
         return Err(QuarryError::new(
@@ -1159,6 +1174,13 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         AppState {
+            readiness: crate::state::ReadinessState {
+                durable: true,
+                reason: None,
+            },
+            receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
+            grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
+            require_browser_grants: false,
             driver: static_driver,
             drivers,
             http3,
@@ -1186,6 +1208,8 @@ mod tests {
             visual_processor: None,
             #[cfg(feature = "postgres-queue")]
             event_history: None,
+            #[cfg(feature = "postgres-queue")]
+            queue_pool: None,
             #[cfg(feature = "postgres-queue")]
             baseline_store: None,
             #[cfg(feature = "browser-agent")]

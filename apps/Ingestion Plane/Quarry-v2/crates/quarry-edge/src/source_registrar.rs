@@ -21,7 +21,13 @@ pub struct EdgeSourceRegistrar {
 
 #[async_trait]
 impl SourceRegistrar for EdgeSourceRegistrar {
-    async fn register_source(&self, org_id: &str, name: &str, url: &str, kind: &str) -> QuarryResult<()> {
+    async fn register_source(
+        &self,
+        org_id: &str,
+        name: &str,
+        url: &str,
+        kind: &str,
+    ) -> QuarryResult<()> {
         upsert_source_internal(&self.state, org_id, name, url, kind).await
     }
 }

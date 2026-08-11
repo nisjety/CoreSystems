@@ -6,14 +6,16 @@ use chrono::Utc;
 use quarry_browser::actions::{Action, ScrollTarget};
 use quarry_browser::{BrowserDevtoolsEvent, BrowserDriver};
 use quarry_core::contracts::{
-    AgentAction, AgentActionRequest, BrowserObservation, ConsoleLine, DomSummary,
-    InteractiveElement, NetworkEntry,
+    ActionOutcome, AgentAction, AgentActionRequest, BrowserObservation, ChallengeKind,
+    ChallengeSignal, ConsoleLine, DomSummary, ElementFingerprint, ExtractionFieldResult,
+    ExtractionProfile, ExtractionResult, ExtractionSource, InteractiveElement, NetworkEntry,
+    ObservationDelta, ProofBundle,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::EventType;
 use quarry_core::ids::kinds::ArtifactKind;
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::artifact_store::ArtifactStore;
 use crate::events::EventSink;
@@ -35,10 +37,113 @@ pub struct ObservationContext {
     pub step: u32,
     pub current_url: String,
     pub page_hash: String,
+    /// Fingerprint from the last completed observation. This is separate from
+    /// `page_hash`, which is used while an action is executing for artifact
+    /// attribution.
+    pub previous_page_hash: Option<String>,
     pub previous_screenshot: Option<Vec<u8>>,
+    pub previous_url: Option<String>,
+    pub previous_title: Option<String>,
+    pub previous_dom_node_count: Option<u32>,
 }
 
 impl ObservationRunner {
+    /// Classify access/challenge pages without attempting to bypass them. The
+    /// signal is deliberately conservative and evidence-bearing so Model
+    /// Plane can decide whether to ask for a user handoff or use another
+    /// source. It is not a success/failure verdict for the business action.
+    pub fn classify_challenge(
+        url: &str,
+        title: Option<&str>,
+        text: Option<&str>,
+    ) -> Option<ChallengeSignal> {
+        let haystack = format!(
+            "{} {} {}",
+            url,
+            title.unwrap_or_default(),
+            text.unwrap_or_default()
+        )
+        .to_ascii_lowercase();
+        let (kind, evidence) = if ["captcha", "recaptcha", "hcaptcha", "verify you are human"]
+            .iter()
+            .any(|needle| haystack.contains(needle))
+        {
+            (ChallengeKind::Captcha, vec!["captcha_marker".to_owned()])
+        } else if [
+            "access denied",
+            "forbidden",
+            "blocked by",
+            "status code 403",
+        ]
+        .iter()
+        .any(|needle| haystack.contains(needle))
+        {
+            (
+                ChallengeKind::AccessDenied,
+                vec!["access_denied_marker".to_owned()],
+            )
+        } else if ["sign in", "log in", "login required", "/login"]
+            .iter()
+            .any(|needle| haystack.contains(needle))
+        {
+            (ChallengeKind::Login, vec!["login_marker".to_owned()])
+        } else if ["cookie consent", "accept cookies", "consent required"]
+            .iter()
+            .any(|needle| haystack.contains(needle))
+        {
+            (ChallengeKind::Consent, vec!["consent_marker".to_owned()])
+        } else if ["too many requests", "rate limit", "status code 429"]
+            .iter()
+            .any(|needle| haystack.contains(needle))
+        {
+            (
+                ChallengeKind::RateLimit,
+                vec!["rate_limit_marker".to_owned()],
+            )
+        } else {
+            return None;
+        };
+        Some(ChallengeSignal {
+            kind,
+            confidence: 0.98,
+            evidence,
+            requires_escalation: true,
+        })
+    }
+
+    fn outcome_for_action(action: &AgentAction, current_url: &str) -> ActionOutcome {
+        match action {
+            AgentAction::Navigate { .. } => {
+                if current_url.is_empty() {
+                    ActionOutcome::unknown(
+                        "navigation_url_unavailable",
+                        "the browser did not expose a final URL after navigation",
+                    )
+                } else {
+                    ActionOutcome::verified("navigation_completed")
+                }
+            }
+            AgentAction::Screenshot { .. } | AgentAction::Pdf | AgentAction::GetContent => {
+                ActionOutcome::verified("artifact_or_content_captured")
+            }
+            AgentAction::WaitFor { .. } => ActionOutcome::verified("selector_observed"),
+            AgentAction::Wait { .. } => ActionOutcome::verified("wait_completed"),
+            AgentAction::Click { .. }
+            | AgentAction::ClickPoint { .. }
+            | AgentAction::Type { .. }
+            | AgentAction::Press { .. }
+            | AgentAction::Scroll { .. }
+            | AgentAction::MouseWheel { .. }
+            | AgentAction::Select { .. }
+            | AgentAction::Evaluate { .. }
+            | AgentAction::Back
+            | AgentAction::Forward => ActionOutcome::unknown(
+                "postcondition_required",
+                "the browser operation completed, but its business effect was not verified",
+            ),
+        }
+    }
+
     pub fn agent_action_to_browser_action(action: &AgentAction) -> Action {
         match action {
             AgentAction::Navigate { url } => Action::Navigate { url: url.clone() },
@@ -212,6 +317,11 @@ impl ObservationRunner {
             .unwrap_or_default();
 
         let html_bytes = self.browser.content(session).await.ok();
+        if let Some(bytes) = html_bytes.as_ref() {
+            // Proof must identify the bytes actually observed, not the
+            // synthetic run hash used before the first page is loaded.
+            ctx.page_hash = format!("blake3:{}", blake3::hash(bytes).to_hex());
+        }
 
         let dom_summary = html_bytes.as_ref().map(|bytes| {
             let html_str = String::from_utf8_lossy(bytes);
@@ -223,6 +333,13 @@ impl ObservationRunner {
                 let html_str = String::from_utf8_lossy(bytes);
                 extract_title(&html_str)
             })
+        });
+
+        let extraction_profile = request.extraction_profile.clone();
+        let extraction_result = extraction_profile.as_ref().and_then(|profile| {
+            html_bytes
+                .as_ref()
+                .and_then(|bytes| extract_profile(bytes, profile))
         });
 
         if screenshot_artifact_id.is_none() {
@@ -422,6 +539,42 @@ impl ObservationRunner {
             };
         }
 
+        let delta = observation_delta(
+            ctx.previous_url.as_deref(),
+            ctx.previous_title.as_deref(),
+            ctx.previous_dom_node_count,
+            ctx.previous_page_hash.as_deref(),
+            &ctx.current_url,
+            title.as_deref(),
+            dom_summary.as_ref().map(|summary| summary.node_count),
+            (!ctx.page_hash.is_empty()).then_some(ctx.page_hash.as_str()),
+        );
+        let action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
+        let challenge = Self::classify_challenge(
+            &ctx.current_url,
+            title.as_deref(),
+            dom_summary
+                .as_ref()
+                .and_then(|summary| summary.text_snippet.as_deref()),
+        );
+        let mut artifact_ids = Vec::new();
+        if let Some(id) = screenshot_artifact_id.clone() {
+            artifact_ids.push(id);
+        }
+        if let Some(id) = visual_observation_artifact_id.clone() {
+            artifact_ids.push(id);
+        }
+        let proof_bundle = Some(ProofBundle {
+            proof_id: format!("proof_{}_{}", run_id, ctx.step),
+            source_url: ctx.current_url.clone(),
+            run_id: run_id.clone(),
+            step: ctx.step,
+            action_outcome: action_outcome.clone(),
+            artifact_ids,
+            content_fingerprint: (!ctx.page_hash.is_empty()).then(|| ctx.page_hash.clone()),
+            challenge: challenge.clone(),
+            observed_at: Utc::now(),
+        });
         let observation = BrowserObservation {
             run_id: run_id.clone(),
             step: ctx.step,
@@ -433,8 +586,22 @@ impl ObservationRunner {
             console_summary: console_summary_from_devtools(&devtools_events),
             network_summary: network_summary_from_devtools(&devtools_events),
             policy_denials,
+            action_outcome,
+            observation_delta: Some(delta),
+            challenge,
+            extraction_profile,
+            extraction_result,
+            proof_bundle,
             observed_at: Utc::now(),
         };
+
+        ctx.previous_url = Some(observation.url.clone());
+        ctx.previous_title = observation.title.clone();
+        ctx.previous_dom_node_count = observation
+            .dom_summary
+            .as_ref()
+            .map(|summary| summary.node_count);
+        ctx.previous_page_hash = (!ctx.page_hash.is_empty()).then(|| ctx.page_hash.clone());
 
         if let Some(events) = &self.events {
             events
@@ -618,22 +785,85 @@ fn build_dom_summary(html: &str) -> DomSummary {
             let end = remaining.find('>').unwrap_or(remaining.len());
             let element_str = &remaining[..end];
 
-            let selector = if let Some(id) = extract_attr(element_str, "id") {
-                format!("#{id}")
-            } else if let Some(name) = extract_attr(element_str, "name") {
-                format!("{tag}[name=\"{name}\"]")
-            } else {
-                tag.to_string()
-            };
-
             let text = extract_inner_text(remaining);
             let role = extract_attr(element_str, "role").map(|s| s.to_string());
+            let aria_label = extract_attr(element_str, "aria-label").map(|s| s.to_string());
+            let test_id = extract_attr(element_str, "data-testid")
+                .or_else(|| extract_attr(element_str, "data-test"));
+            let id = extract_attr(element_str, "id");
+            let name = extract_attr(element_str, "name");
+            let mut selectors = Vec::new();
+            if let Some(id) = id {
+                selectors.push(format!("#{id}"));
+            }
+            if let Some(test_id) = test_id {
+                selectors.push(format!(r#"[data-testid="{test_id}"]"#));
+            }
+            if let Some(name) = name {
+                selectors.push(format!("{tag}[name=\"{name}\"]"));
+            }
+            if let Some(label) = aria_label.as_deref() {
+                selectors.push(format!(r#"{tag}[aria-label="{label}"]"#));
+            }
+            if let Some(role) = role.as_deref() {
+                selectors.push(format!(r#"{tag}[role="{role}"]"#));
+            }
+            let selector = selectors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| tag.to_string());
+            let selector_alternatives = selectors.into_iter().skip(1).collect();
+
+            let normalized_text = text
+                .as_deref()
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+            let mut attributes = Vec::new();
+            for attr in [
+                "id",
+                "data-testid",
+                "data-test",
+                "name",
+                "role",
+                "aria-label",
+            ] {
+                if let Some(value) = extract_attr(element_str, attr) {
+                    attributes.push((attr.to_owned(), value.to_owned()));
+                }
+            }
+            let logical_id = id
+                .or(test_id)
+                .or(name)
+                .or(aria_label.as_deref())
+                .map(str::to_owned);
+            let structural_path = format!("{tag}[{idx}]");
+            let fingerprint_seed =
+                format!("{tag}|{normalized_text}|{attributes:?}|{structural_path}|{logical_id:?}");
+            let fingerprint_id = format!(
+                "efp_{}",
+                &blake3::hash(fingerprint_seed.as_bytes())
+                    .to_hex()
+                    .to_string()[..24]
+            );
 
             interactive_elements.push(InteractiveElement {
                 tag: tag.to_string(),
                 selector,
+                selector_alternatives,
                 text,
                 role,
+                aria_label,
+                fingerprint: Some(ElementFingerprint {
+                    fingerprint_id,
+                    tag: tag.to_string(),
+                    normalized_text,
+                    attributes,
+                    structural_path,
+                    logical_id,
+                }),
             });
 
             if interactive_elements.len() >= 50 {
@@ -664,15 +894,197 @@ fn build_dom_summary(html: &str) -> DomSummary {
     }
 }
 
-fn extract_attr<'a>(element: &'a str, attr: &str) -> Option<&'a str> {
-    let patterns = [format!(r#"{}=""#, attr), format!("{}='", attr)];
-    for pattern in &patterns {
-        if let Some(start) = element.find(pattern.as_str()) {
-            let val_start = start + pattern.len();
-            let quote = element.as_bytes()[start + pattern.len() - 1];
-            if let Some(end) = element[val_start..].find(quote as char) {
-                return Some(&element[val_start..val_start + end]);
+/// Execute a bounded, deterministic extraction profile over the captured
+/// source. Network JSON and visual sources are represented in the profile
+/// contract but require provider-specific evidence unavailable in this page
+/// snapshot; they are skipped rather than guessed.
+fn extract_profile(bytes: &[u8], profile: &ExtractionProfile) -> Option<ExtractionResult> {
+    let max_bytes = profile.max_bytes.clamp(1, 5_000_000) as usize;
+    let html = String::from_utf8_lossy(&bytes[..bytes.len().min(max_bytes)]);
+    let mut fields = Vec::with_capacity(profile.fields.len());
+    let mut used_bytes = 0usize;
+    let mut truncated = bytes.len() > max_bytes;
+
+    for field in &profile.fields {
+        let mut extracted: Option<(Value, ExtractionSource, Option<String>)> = None;
+        for source in &profile.source_order {
+            match source {
+                ExtractionSource::JsonLd => {
+                    if let Some(value) = extract_json_ld_field(&html, &field.name) {
+                        extracted = Some((
+                            value,
+                            ExtractionSource::JsonLd,
+                            Some("script[type=application/ld+json]".into()),
+                        ));
+                    }
+                }
+                ExtractionSource::Dom | ExtractionSource::Accessibility => {
+                    let selector = field.selector.as_deref().unwrap_or(&field.name);
+                    if let Some(value) = extract_dom_field(&html, selector) {
+                        extracted =
+                            Some((Value::String(value), source.clone(), Some(selector.into())));
+                    }
+                }
+                ExtractionSource::NetworkJson | ExtractionSource::Visual => {}
             }
+            if extracted.is_some() {
+                break;
+            }
+        }
+
+        let (value, source, evidence_selector) = match extracted {
+            Some((value, source, evidence_selector)) => {
+                let encoded_len = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
+                if used_bytes.saturating_add(encoded_len) > max_bytes {
+                    truncated = true;
+                    (None, None, None)
+                } else {
+                    used_bytes = used_bytes.saturating_add(encoded_len);
+                    (Some(value), Some(source), evidence_selector)
+                }
+            }
+            None => (None, None, None),
+        };
+
+        if field.required && value.is_none() {
+            truncated = true;
+        }
+        fields.push(ExtractionFieldResult {
+            name: field.name.clone(),
+            value,
+            source,
+            evidence_selector,
+        });
+    }
+
+    Some(ExtractionResult {
+        profile_id: profile.profile_id.clone(),
+        fields,
+        truncated,
+    })
+}
+
+fn extract_dom_field(html: &str, selector: &str) -> Option<String> {
+    let needle = selector.strip_prefix('#').map(|id| format!("id=\"{id}\""));
+    let needle = needle.or_else(|| {
+        selector
+            .strip_prefix("[data-testid=\"")
+            .and_then(|value| value.strip_suffix("\"]"))
+            .map(|value| format!("data-testid=\"{value}\""))
+    });
+    let start = if let Some(needle) = needle {
+        html.find(&needle)
+            .and_then(|attribute_start| html[..attribute_start].rfind('<'))
+    } else {
+        let tag = selector.split('[').next().unwrap_or(selector).trim();
+        (!tag.is_empty())
+            .then(|| html.find(&format!("<{tag}")))
+            .flatten()
+    }?;
+    let open_end = html[start..].find('>')? + start;
+    let close_tag = html[start + 1..]
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '>')
+        .next()
+        .filter(|tag| !tag.is_empty())?;
+    let close = format!("</{close_tag}>");
+    let body_start = open_end + 1;
+    let body_end = html[body_start..].find(&close)? + body_start;
+    let text = strip_tags(&html[body_start..body_end]);
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+fn extract_json_ld_field(html: &str, field: &str) -> Option<Value> {
+    let mut offset = 0;
+    while let Some(relative) = html[offset..].find("application/ld+json") {
+        let script_start = offset + relative;
+        let body_start = html[script_start..].find('>')? + script_start + 1;
+        let body_end = html[body_start..].find("</script>")? + body_start;
+        let body = html[body_start..body_end].trim();
+        if let Ok(value) = serde_json::from_str::<Value>(body) {
+            if let Some(found) = json_value_field(&value, field) {
+                return Some(found.clone());
+            }
+        }
+        offset = body_end + "</script>".len();
+    }
+    None
+}
+
+fn json_value_field<'a>(value: &'a Value, field: &str) -> Option<&'a Value> {
+    match value {
+        Value::Object(object) => object.get(field).or_else(|| {
+            object
+                .values()
+                .find_map(|child| json_value_field(child, field))
+        }),
+        Value::Array(values) => values
+            .iter()
+            .find_map(|child| json_value_field(child, field)),
+        _ => None,
+    }
+}
+
+fn observation_delta(
+    previous_url: Option<&str>,
+    previous_title: Option<&str>,
+    previous_dom_nodes: Option<u32>,
+    previous_page_hash: Option<&str>,
+    current_url: &str,
+    current_title: Option<&str>,
+    current_dom_nodes: Option<u32>,
+    current_page_hash: Option<&str>,
+) -> ObservationDelta {
+    let url_changed = previous_url.is_some_and(|previous| previous != current_url);
+    let title_changed = previous_title != current_title;
+    let dom_changed = previous_dom_nodes
+        .is_some_and(|previous| current_dom_nodes.is_some_and(|current| current != previous));
+    let content_changed = previous_page_hash
+        .is_some_and(|previous| current_page_hash.is_some_and(|current| current != previous));
+    let mut changed_fields = Vec::new();
+    if previous_url.is_none() {
+        changed_fields.push("initial_observation".to_string());
+    } else {
+        if url_changed {
+            changed_fields.push("url".to_string());
+        }
+        if title_changed {
+            changed_fields.push("title".to_string());
+        }
+        if dom_changed {
+            changed_fields.push("dom".to_string());
+        }
+        if content_changed {
+            changed_fields.push("content".to_string());
+        }
+    }
+    ObservationDelta {
+        changed_fields,
+        url_changed,
+        title_changed,
+        dom_changed,
+        content_changed,
+    }
+}
+
+fn extract_attr<'a>(element: &'a str, attr: &str) -> Option<&'a str> {
+    for quote in ['"', '\''] {
+        let pattern = format!("{attr}={quote}");
+        let mut offset = 0;
+        while let Some(relative) = element[offset..].find(&pattern) {
+            let start = offset + relative;
+            let is_attribute_boundary = start == 0
+                || element
+                    .as_bytes()
+                    .get(start.saturating_sub(1))
+                    .is_some_and(|byte| byte.is_ascii_whitespace() || *byte == b'<');
+            if is_attribute_boundary {
+                let val_start = start + pattern.len();
+                if let Some(end) = element[val_start..].find(quote) {
+                    return Some(&element[val_start..val_start + end]);
+                }
+            }
+            offset = start + pattern.len();
         }
     }
     None
@@ -732,8 +1144,111 @@ mod tests {
     }
 
     #[test]
+    fn effectful_actions_are_unknown_without_a_postcondition() {
+        let outcome = ObservationRunner::outcome_for_action(
+            &AgentAction::Click {
+                selector: "#submit".into(),
+            },
+            "https://example.com",
+        );
+        assert_eq!(
+            outcome.status,
+            quarry_core::contracts::ActionOutcomeStatus::Unknown
+        );
+        assert_eq!(
+            outcome.reason_code.as_deref(),
+            Some("postcondition_required")
+        );
+    }
+
+    #[test]
+    fn completed_navigation_has_an_explicit_verified_receipt() {
+        let outcome = ObservationRunner::outcome_for_action(
+            &AgentAction::Navigate {
+                url: "https://example.com".into(),
+            },
+            "https://example.com",
+        );
+        assert_eq!(
+            outcome.status,
+            quarry_core::contracts::ActionOutcomeStatus::Verified
+        );
+        assert_eq!(outcome.reason_code.as_deref(), Some("navigation_completed"));
+    }
+
+    #[test]
+    fn challenge_classifier_requires_escalation_and_preserves_evidence() {
+        let signal = ObservationRunner::classify_challenge(
+            "https://example.test/challenge",
+            Some("Verify you are human"),
+            Some("captcha required"),
+        )
+        .expect("captcha should be classified");
+        assert_eq!(signal.kind, ChallengeKind::Captcha);
+        assert!(signal.requires_escalation);
+        assert!(signal.confidence > 0.9);
+        assert!(!signal.evidence.is_empty());
+    }
+
+    #[test]
+    fn ordinary_source_pages_do_not_receive_a_challenge_signal() {
+        assert!(ObservationRunner::classify_challenge(
+            "https://example.test/article",
+            Some("Example article"),
+            Some("A normal page with source text"),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn extraction_profile_prefers_json_ld_and_keeps_evidence() {
+        let html = r#"<script type="application/ld+json">{"name":"Widget","price":12}</script>
+            <main><span id="name">DOM fallback</span></main>"#;
+        let profile = ExtractionProfile {
+            profile_id: "product".into(),
+            fields: vec![
+                quarry_core::contracts::ExtractionField {
+                    name: "name".into(),
+                    selector: Some("#name".into()),
+                    required: true,
+                },
+                quarry_core::contracts::ExtractionField {
+                    name: "price".into(),
+                    selector: None,
+                    required: true,
+                },
+            ],
+            source_order: vec![ExtractionSource::JsonLd, ExtractionSource::Dom],
+            max_bytes: 10_000,
+        };
+        let result = extract_profile(html.as_bytes(), &profile).expect("result");
+        assert_eq!(result.profile_id, "product");
+        assert_eq!(result.fields[0].value, Some(Value::String("Widget".into())));
+        assert_eq!(result.fields[0].source, Some(ExtractionSource::JsonLd));
+        assert!(result.fields[0].evidence_selector.is_some());
+        assert_eq!(result.fields[1].value, Some(serde_json::json!(12)));
+    }
+
+    #[test]
+    fn extraction_profile_is_bounded_when_source_exceeds_limit() {
+        let profile = ExtractionProfile {
+            profile_id: "tiny".into(),
+            fields: vec![quarry_core::contracts::ExtractionField {
+                name: "title".into(),
+                selector: Some("#title".into()),
+                required: false,
+            }],
+            source_order: vec![ExtractionSource::Dom],
+            max_bytes: 10,
+        };
+        let result = extract_profile(b"<div id=\"title\">a very long value</div>", &profile)
+            .expect("result");
+        assert!(result.truncated);
+    }
+
+    #[test]
     fn dom_summary_counts_nodes() {
-        let html = "<html><body><a href='#' id='link1'>Click</a><button>Go</button></body></html>";
+        let html = "<html><body><a href='#' id='link1' aria-label='Open'>Click</a><button data-testid='go'>Go</button></body></html>";
         let summary = build_dom_summary(html);
         assert!(summary.node_count > 0);
         assert!(!summary.interactive_elements.is_empty());
@@ -743,7 +1258,18 @@ mod tests {
             .find(|e| e.tag == "a")
             .unwrap();
         assert_eq!(link.selector, "#link1");
+        assert_eq!(link.aria_label.as_deref(), Some("Open"));
+        assert!(link
+            .selector_alternatives
+            .iter()
+            .any(|selector| selector.contains("aria-label")));
         assert_eq!(link.text.as_deref(), Some("Click"));
+        let button = summary
+            .interactive_elements
+            .iter()
+            .find(|e| e.tag == "button")
+            .unwrap();
+        assert_eq!(button.selector, "[data-testid=\"go\"]");
     }
 
     #[test]
@@ -979,12 +1505,17 @@ mod tests {
                 max_cost_usd: None,
             },
             zdr: ZdrMode::Off,
+            extraction_profile: None,
         };
         let mut ctx = ObservationContext {
             step: 1,
             current_url: "https://example.com".into(),
             page_hash: "blake3:page".into(),
+            previous_page_hash: None,
             previous_screenshot: Some(b"previous".to_vec()),
+            previous_url: None,
+            previous_title: None,
+            previous_dom_node_count: None,
         };
 
         let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();

@@ -1,19 +1,19 @@
-# Bakeoff: quarry vs firecrawl
+# Bakeoff: quarry vs baseline
 
 ## Summary
 
 - Fixtures: 10
 - quarry pass: 10 (100%)
-- firecrawl pass: 0 (0%)
+- baseline pass: 0 (0%)
 - quarry wins: 0
-- firecrawl wins: 0
+- baseline wins: 0
 - Ties (both pass): 0
 - Ties (both fail): 0
 - Solo (no baseline): 10
 
 ## Fixture Detail
 
-| Fixture | Category | quarry | firecrawl | Verdict | Δ ms |
+| Fixture | Category | quarry | baseline | Verdict | Δ ms |
 |---|---|---|---|---|---|
 | article_basic | static_article | PASS | — | Solo | — |
 | article_js_heavy | js_heavy | PASS | — | Solo | — |

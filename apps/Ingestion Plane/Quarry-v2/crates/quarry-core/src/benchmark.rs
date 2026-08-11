@@ -8,7 +8,6 @@
 //! release candidate ships with measured numbers, not vibes:
 //!
 //! - V1 local (Quarry-v1, Go) — internal regression baseline
-//! - Firecrawl self-host / cloud — primary commercial competitor
 //! - Trafilatura — best-in-class OSS markdown extractor
 //! - Mozilla Readability — browser-native baseline
 //!
@@ -267,18 +266,7 @@ pub fn builtin_suites() -> Vec<BenchmarkSuite> {
                 "https://react.dev/learn".into(),
                 "https://nextjs.org/docs".into(),
             ],
-            baselines: vec![
-                BaselineProducer {
-                    name: "firecrawl-self-host".into(),
-                    version: None,
-                    locale: "local".into(),
-                },
-                BaselineProducer {
-                    name: "firecrawl-cloud".into(),
-                    version: None,
-                    locale: "cloud".into(),
-                },
-            ],
+            baselines: vec![],
             primary_metric: "extraction_completeness".into(),
             target: MetricTarget::HigherBetter,
         },

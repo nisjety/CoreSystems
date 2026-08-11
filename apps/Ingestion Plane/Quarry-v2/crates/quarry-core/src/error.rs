@@ -16,6 +16,18 @@ pub enum ErrorCode {
     RateLimited,
     Timeout,
     SecurityBlocked,
+    /// The browser API returned but Quarry could not verify the requested
+    /// business postcondition. Callers must not treat this as success.
+    ActionUnknown,
+    /// A challenge/access state requires a policy or human escalation.
+    ChallengeDetected,
+    /// The process is alive but its required durable/runtime dependencies are
+    /// not compatible with the requested operation.
+    RuntimeNotReady,
+    /// A resumable run checkpoint is stale, missing, or no longer valid.
+    CheckpointLost,
+    /// A selector/target repair is required before an action can continue.
+    TargetRepairRequired,
     DriverFailed,
     UpstreamBlocked,
     Unsupported,
@@ -34,13 +46,15 @@ impl ErrorCode {
         match self {
             Self::BadRequest => 400,
             Self::Unauthorized => 401,
-            Self::Forbidden | Self::SecurityBlocked => 403,
+            Self::Forbidden | Self::SecurityBlocked | Self::ChallengeDetected => 403,
+            Self::ActionUnknown | Self::CheckpointLost | Self::TargetRepairRequired => 409,
             Self::NotFound => 404,
             Self::Conflict => 409,
             Self::RateLimited => 429,
             Self::Timeout => 504,
             Self::DriverFailed | Self::UpstreamBlocked => 502,
             Self::Unsupported => 501,
+            Self::RuntimeNotReady => 503,
             Self::Internal => 500,
         }
     }

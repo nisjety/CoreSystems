@@ -9,8 +9,8 @@
 //!    scorer:
 //!    - **Quarry v2**: runs the live transform pipeline on every
 //!      corpus URL (or fixture) and computes a quality score.
-//!    - Other producers (Firecrawl / Trafilatura / Mozilla Readability
-//!      / Quarry v1): return a `not_implemented` stub note. Real
+//!    - Other producers (Trafilatura / Mozilla Readability / Quarry v1):
+//!      return a `not_implemented` stub note. Real
 //!      runners ship when each integration is built.
 //! 3. The result is a `ScorecardEntry` serialized to disk for
 //!    consumption by `docs/SCOREBOARD.md` / `compare_release_benchmarks`.

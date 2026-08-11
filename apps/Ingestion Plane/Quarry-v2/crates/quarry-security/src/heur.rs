@@ -18,6 +18,7 @@ pub fn blocks_private_host(u: &Url) -> Option<String> {
     };
     if let url::Host::Ipv4(ip) = host {
         if ip.is_loopback()
+            || ip.is_unspecified()
             || ip.is_private()
             || ip.is_link_local()
             || ip.is_broadcast()
@@ -69,6 +70,7 @@ fn ipv6_blocked_reason(ip: &std::net::Ipv6Addr) -> Option<&'static str> {
     // against the same set the v4 branch uses.
     if let Some(v4) = ip.to_ipv4_mapped() {
         if v4.is_loopback()
+            || v4.is_unspecified()
             || v4.is_private()
             || v4.is_link_local()
             || v4.is_broadcast()
@@ -104,6 +106,7 @@ pub fn resolve_guard(addrs: &[IpAddr]) -> Option<String> {
             // HTTP destination.
             IpAddr::V4(ip)
                 if ip.is_loopback()
+                    || ip.is_unspecified()
                     || ip.is_private()
                     || ip.is_link_local()
                     || ip.is_broadcast()
@@ -171,5 +174,15 @@ mod tests {
         // blocks_private_host, which at least caught broadcast.
         assert!(resolve_guard(&[broadcast]).is_some());
         assert!(resolve_guard(&[multicast]).is_some());
+    }
+
+    #[test]
+    fn blocks_ipv4_unspecified_and_mapped_unspecified() {
+        let unspecified: Url = "http://0.0.0.0/".parse().unwrap();
+        assert!(blocks_private_host(&unspecified).is_some());
+        let mapped: Url = "http://[::ffff:0.0.0.0]/".parse().unwrap();
+        assert!(blocks_private_host(&mapped).is_some());
+        let address: IpAddr = "0.0.0.0".parse().unwrap();
+        assert!(resolve_guard(&[address]).is_some());
     }
 }

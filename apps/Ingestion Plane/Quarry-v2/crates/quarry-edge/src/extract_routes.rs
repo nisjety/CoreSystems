@@ -1,6 +1,6 @@
 //! `/v1/extract` — multi-URL structured extraction (OSS-parity P1 2A).
 //!
-//! Firecrawl-`extract`-style: take a set of URLs + an optional JSON Schema and
+//! Take a set of URLs plus an optional JSON Schema and
 //! return structured data per source. Agent-harness shape: **bounded fan-out**
 //! (capped URL count), per-source isolation (one failure never sinks the
 //! batch), and a typed per-source result envelope.

@@ -13,6 +13,7 @@ pub mod ai_formats;
 pub mod answer;
 pub mod artifact_store;
 pub mod browser_driver;
+pub mod browser_procedure;
 pub mod cas_store;
 pub mod dns_guard;
 pub mod driver;
@@ -63,6 +64,8 @@ pub mod postgres_event_history;
 pub mod postgres_profile_store;
 #[cfg(feature = "postgres-queue")]
 pub mod postgres_queue;
+#[cfg(feature = "postgres-queue")]
+pub mod postgres_step_receipts;
 pub mod proxy_pool;
 pub mod publisher;
 pub mod request_queue;
@@ -76,6 +79,7 @@ pub mod smart_router;
 pub mod source_registrar;
 pub mod step_receipts;
 pub mod structured_extract;
+pub mod target_repair;
 #[cfg(feature = "test-site")]
 pub mod test_site;
 pub mod tls_driver;
@@ -95,6 +99,7 @@ pub use answer::{
 pub use autoprompt::{ModelPlaneQueryRewriter, QueryRewriter};
 pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
 pub use browser_driver::BrowserDriverAdapter;
+pub use browser_procedure::{compare_replay, compile_procedure, BrowserProcedure, ReplayDecision};
 pub use crawl_frontier::{
     CrawlFrontier, FrontierCheckpoint, FrontierConfigSnapshot, FrontierEntry,
 };
@@ -137,6 +142,8 @@ pub use policy::{
     policy_fingerprint, record_determinism_inputs, BlockPolicy, CheckpointPolicy, Determinism,
     DeterminismIdentity, DiscoveryPolicy, ExtractionPolicy, FetchPolicy, RetryPolicy, RunPolicy,
 };
+#[cfg(feature = "postgres-queue")]
+pub use postgres_step_receipts::PostgresStepReceiptStore;
 pub use publisher::EventPublisher;
 pub use quarry_tls::TlsProfile;
 pub use request_queue::{InMemoryRequestQueue, Priority, QueueStats, QueuedRequest, RequestQueue};
@@ -151,6 +158,7 @@ pub use serp::{
 pub use smart_router::{
     classify_intent, QueryIntent, RouterConfig, SmartSearchRouter, SmartSearchRouterBuilder,
 };
+pub use step_receipts::{AgentRunCheckpoint, AgentRunStatus};
 pub use step_receipts::{
     InMemoryStepReceiptStore, ReceiptBuilder, StepOutcome, StepReceipt, StepReceiptStore,
 };

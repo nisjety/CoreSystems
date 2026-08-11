@@ -32,7 +32,7 @@ type ScrapeJobInput struct {
 	// UserID is the verified-JWT initiator (private-by-default ownership).
 	UserID string `json:"user_id,omitempty"`
 	// Ingest (Phase 2 selective ingest): true = persist+embed; default NEVER.
-	Ingest bool `json:"ingest,omitempty"`
+	Ingest bool   `json:"ingest,omitempty"`
 	RunID  string `json:"run_id"`
 	JobID  string `json:"job_id,omitempty"`
 	OrgID  string `json:"org_id,omitempty"`
@@ -63,7 +63,7 @@ type BatchJobInput struct {
 	// UserID is the verified-JWT initiator (private-by-default ownership).
 	UserID string `json:"user_id,omitempty"`
 	// Ingest (Phase 2 selective ingest): true = persist+embed; default NEVER.
-	Ingest bool `json:"ingest,omitempty"`
+	Ingest bool     `json:"ingest,omitempty"`
 	RunID  string   `json:"run_id"`
 	JobID  string   `json:"job_id,omitempty"`
 	OrgID  string   `json:"org_id,omitempty"`
@@ -76,7 +76,7 @@ type CrawlJobInput struct {
 	// UserID is the verified-JWT initiator (private-by-default ownership).
 	UserID string `json:"user_id,omitempty"`
 	// Ingest (Phase 2 selective ingest): true = persist+embed; default NEVER.
-	Ingest bool `json:"ingest,omitempty"`
+	Ingest   bool     `json:"ingest,omitempty"`
 	RunID    string   `json:"run_id"`
 	JobID    string   `json:"job_id,omitempty"`
 	OrgID    string   `json:"org_id,omitempty"`
@@ -366,6 +366,9 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	}, in.RunID, string(quarrycontracts.EvtRunStarted)); err != nil {
 		return err
 	}
+	if a.DurableFrontier {
+		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl)
+	}
 
 	visited := map[string]struct{}{}
 	frontier := make([]frontierEntry, 0, len(in.Seeds))
@@ -462,4 +465,132 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		"pages_visited": pagesVisited,
 		"pages_failed":  pagesFailed,
 	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+}
+
+// crawlJobDurableFrontier keeps only counters in Temporal workflow state. All
+// URLs/depths/deduplication/in-flight visibility live in the Rust-owned
+// PostgresRequestQueue, so a worker restart resumes from the queue rather than
+// replaying a potentially massive frontier slice.
+func crawlJobDurableFrontier(
+	ctx workflow.Context,
+	in CrawlJobInput,
+	a *activities.Activities,
+	ids runIDs,
+	ctrl *crawlControl,
+) error {
+	queueName := durableFrontierQueueName(in.RunID)
+	for _, seed := range in.Seeds {
+		if strings.TrimSpace(seed) == "" {
+			continue
+		}
+		if err := workflow.ExecuteActivity(ctx, a.FrontierEnqueue, activities.FrontierEnqueueInput{
+			Queue: queueName, OrgID: in.OrgID, RequestID: durableFrontierRequestID(in.RunID, seed), URL: seed,
+		}).Get(ctx, nil); err != nil {
+			return err
+		}
+	}
+
+	var pagesVisited, pagesFailed uint32
+	emitPaused := false
+	for {
+		if ctrl.state == statePaused {
+			if !emitPaused {
+				_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunPaused, map[string]any{
+					"pages_visited": pagesVisited, "pages_failed": pagesFailed, "pending": 0,
+				}, in.RunID, string(quarrycontracts.EvtRunPaused))
+				emitPaused = true
+			}
+			if !ctrl.waitWhilePaused(ctx) {
+				break
+			}
+			_ = emitEvent(ctx, a, ids, quarrycontracts.EvtRunResumed, map[string]any{
+				"pages_visited": pagesVisited,
+			}, in.RunID, string(quarrycontracts.EvtRunResumed))
+			emitPaused = false
+		}
+		if ctrl.state == stateCancelled || (in.MaxPages > 0 && pagesVisited >= in.MaxPages) {
+			break
+		}
+
+		var item *activities.FrontierQueueItem
+		if err := workflow.ExecuteActivity(ctx, a.FrontierPop, activities.FrontierPopInput{
+			Queue: queueName, OrgID: in.OrgID,
+		}).Get(ctx, &item); err != nil {
+			return err
+		}
+		if item == nil {
+			break
+		}
+		depth := frontierPayloadDepth(item.Payload)
+		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, item.URL)
+		if pageErr != nil {
+			pagesFailed++
+		} else {
+			pagesVisited++
+			if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
+				for _, link := range res.Links {
+					if strings.TrimSpace(link) == "" {
+						continue
+					}
+					if err := workflow.ExecuteActivity(ctx, a.FrontierEnqueue, activities.FrontierEnqueueInput{
+						Queue: queueName, OrgID: in.OrgID, RequestID: durableFrontierRequestID(in.RunID, link), URL: link, Depth: depth + 1,
+					}).Get(ctx, nil); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if err := workflow.ExecuteActivity(ctx, a.FrontierAck, activities.FrontierAckInput{
+			Queue: queueName, OrgID: in.OrgID, RequestID: item.RequestID,
+		}).Get(ctx, nil); err != nil {
+			return err
+		}
+		ctrl.progress.Visited = pagesVisited
+		ctrl.progress.Failed = pagesFailed
+		ctrl.progress.Pending = 0 // queue depth is read from the durable queue view
+		if pagesVisited > 0 && pagesVisited%50 == 0 {
+			_ = workflow.ExecuteActivity(ctx, a.Checkpoint, activities.CheckpointInput{
+				RunID: in.RunID, Visited: pagesVisited, Frontier: 0,
+			}).Get(ctx, nil)
+		}
+	}
+
+	if ctrl.state == stateCancelled {
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
+			"pages_visited": pagesVisited, "pages_failed": pagesFailed,
+		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+		"pages_visited": pagesVisited, "pages_failed": pagesFailed,
+	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+}
+
+func durableFrontierQueueName(runID string) string {
+	sum := sha256.Sum256([]byte(runID))
+	return "crawl-" + hex.EncodeToString(sum[:])[:24]
+}
+
+func durableFrontierRequestID(runID, url string) string {
+	sum := sha256.Sum256([]byte(runID + "\n" + url))
+	return "frontier-" + hex.EncodeToString(sum[:])
+}
+
+func frontierPayloadDepth(payload map[string]any) uint32 {
+	value, ok := payload["depth"]
+	if !ok {
+		return 0
+	}
+	switch depth := value.(type) {
+	case float64:
+		if depth >= 0 {
+			return uint32(depth)
+		}
+	case int:
+		if depth >= 0 {
+			return uint32(depth)
+		}
+	case uint32:
+		return depth
+	}
+	return 0
 }

@@ -9,7 +9,7 @@
     {
       "name": "bakeoff_diff",
       "pass": true,
-      "detail": "quarry vs firecrawl: 0 wins / 0 losses / 0 ties / 10 solo (net +0)"
+      "detail": "quarry vs baseline: 0 wins / 0 losses / 0 ties / 10 solo (net +0)"
     },
     {
       "name": "provider_matrix",

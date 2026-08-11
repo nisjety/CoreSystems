@@ -90,6 +90,58 @@ func (d *postgresDB) WebhookDeliveries() store.WebhookDeliveryStore {
 }
 func (d *postgresDB) Blocklists() store.ResourceStore[store.BlocklistEntry] { return d.blocklists }
 
+// ListRequestQueues is a read-only projection over Quarry runtime's queue
+// tables. The control plane deliberately does not own these migrations or
+// write paths; it only exposes tenant-scoped operational visibility.
+func (d *postgresDB) ListRequestQueues(orgID string, limit int, cur string) ([]store.RequestQueueSummary, string, error) {
+	limit = pageLimit(limit, defaultMaxPage)
+	c, err := decodeCursor(cur)
+	if err != nil {
+		return nil, "", err
+	}
+	q := `SELECT q.queue_id::text, q.name,
+	              COUNT(i.request_id) FILTER (WHERE i.status = 'queued'),
+	              COUNT(i.request_id) FILTER (WHERE i.status = 'in_flight'),
+	              (EXTRACT(EPOCH FROM q.created_at) * 1000)::bigint
+	       FROM quarry_request_queues q
+	       LEFT JOIN quarry_queue_items i
+	         ON i.queue_id = q.queue_id AND i.org_id = q.org_id
+	       WHERE q.org_id = $1 AND q.deleted_at IS NULL`
+	args := []any{orgID}
+	if c != nil {
+		q += ` AND (q.created_at, q.queue_id::text) < (to_timestamp($2 / 1000.0), $3)`
+		args = append(args, c.CreatedAt, c.ID)
+	}
+	q += ` GROUP BY q.queue_id, q.name, q.created_at
+	       ORDER BY q.created_at DESC, q.queue_id::text DESC
+	       LIMIT $` + fmt.Sprint(len(args)+1)
+	args = append(args, limit+1)
+
+	rows, err := d.pool.Query(context.Background(), q, args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	out := make([]store.RequestQueueSummary, 0, limit)
+	for rows.Next() {
+		var item store.RequestQueueSummary
+		if err := rows.Scan(&item.QueueID, &item.Name, &item.Queued, &item.InFlight, &item.CreatedAt); err != nil {
+			return nil, "", err
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	var next string
+	if len(out) > limit {
+		last := out[limit-1]
+		next = encodeCursor(last.CreatedAt, last.QueueID)
+		out = out[:limit]
+	}
+	return out, next, nil
+}
+
 // Close is callable by operators via type assertion; not part of DB.
 func (d *postgresDB) Close() { d.pool.Close() }
 

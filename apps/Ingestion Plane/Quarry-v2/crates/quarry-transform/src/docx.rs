@@ -1,4 +1,4 @@
-//! DOCX text extraction (OSS-parity P2 3C) — Firecrawl media-parsing parity.
+//! DOCX text extraction (OSS-parity P2 3C).
 //!
 //! A `.docx` is a ZIP container; the body lives in `word/document.xml` as
 //! WordML. We unzip that part and strip it to plain text: `<w:t>` runs become

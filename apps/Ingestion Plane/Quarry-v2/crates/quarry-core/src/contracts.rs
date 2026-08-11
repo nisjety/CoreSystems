@@ -34,6 +34,188 @@ pub struct BrowserObservation {
     pub network_summary: Vec<NetworkEntry>,
     #[serde(default)]
     pub policy_denials: Vec<String>,
+    /// Deterministic execution outcome for the action that produced this
+    /// observation.  `Unknown` is intentionally distinct from success: a
+    /// browser API call completing does not prove that the intended business
+    /// effect occurred.
+    #[serde(default)]
+    pub action_outcome: ActionOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_delta: Option<ObservationDelta>,
+    /// Signals that the page is an access/challenge state rather than usable
+    /// source material. This is advisory; escalation remains a Model/Policy
+    /// decision and Quarry never attempts to bypass access controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<ChallengeSignal>,
+    /// Optional deterministic extraction contract selected by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_profile: Option<ExtractionProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_result: Option<ExtractionResult>,
+    /// Immutable evidence manifest for this observation/action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_bundle: Option<ProofBundle>,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObservationDelta {
+    pub changed_fields: Vec<String>,
+    pub url_changed: bool,
+    pub title_changed: bool,
+    pub dom_changed: bool,
+    /// Whether the normalized page content fingerprint changed since the
+    /// previous observation. A missing previous fingerprint is an initial
+    /// observation rather than a content change.
+    #[serde(default)]
+    pub content_changed: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionOutcomeStatus {
+    Verified,
+    Failed,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionOutcome {
+    pub status: ActionOutcomeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl ActionOutcome {
+    pub fn verified(reason_code: impl Into<String>) -> Self {
+        Self {
+            status: ActionOutcomeStatus::Verified,
+            reason_code: Some(reason_code.into()),
+            detail: None,
+        }
+    }
+
+    pub fn unknown(reason_code: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            status: ActionOutcomeStatus::Unknown,
+            reason_code: Some(reason_code.into()),
+            detail: Some(detail.into()),
+        }
+    }
+
+    pub fn failed(reason_code: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            status: ActionOutcomeStatus::Failed,
+            reason_code: Some(reason_code.into()),
+            detail: Some(detail.into()),
+        }
+    }
+}
+
+impl Default for ActionOutcome {
+    fn default() -> Self {
+        Self::unknown(
+            "not_verified",
+            "no deterministic postcondition was supplied",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeKind {
+    Captcha,
+    Waf,
+    Login,
+    Consent,
+    RateLimit,
+    AccessDenied,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChallengeSignal {
+    pub kind: ChallengeKind,
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    /// Explicitly tells the planner that automatic bypass is forbidden.
+    #[serde(default = "true_value")]
+    pub requires_escalation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtractionSource {
+    NetworkJson,
+    JsonLd,
+    Dom,
+    Accessibility,
+    Visual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtractionField {
+    pub name: String,
+    pub selector: Option<String>,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtractionProfile {
+    pub profile_id: String,
+    pub fields: Vec<ExtractionField>,
+    /// Ordered fallback sources; earlier sources are preferred and later
+    /// sources are only used when the field is absent.
+    pub source_order: Vec<ExtractionSource>,
+    #[serde(default = "default_extraction_max_bytes")]
+    pub max_bytes: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExtractionResult {
+    pub profile_id: String,
+    pub fields: Vec<ExtractionFieldResult>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExtractionFieldResult {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ExtractionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_selector: Option<String>,
+}
+
+fn true_value() -> bool {
+    true
+}
+
+fn default_extraction_max_bytes() -> u32 {
+    1_000_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProofBundle {
+    pub proof_id: String,
+    pub source_url: String,
+    pub run_id: kinds::RunKind,
+    pub step: u32,
+    pub action_outcome: ActionOutcome,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<kinds::ArtifactKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge: Option<ChallengeSignal>,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -49,10 +231,34 @@ pub struct DomSummary {
 pub struct InteractiveElement {
     pub tag: String,
     pub selector: String,
+    /// Ordered fallback locators. The first entry is canonical; later
+    /// entries let an agent recover when framework-generated DOM changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selector_alternatives: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aria_label: Option<String>,
+    /// Deterministic, non-LLM target identity used for read-only repair and
+    /// evidence. Effectful actions still require an exact/approved target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<ElementFingerprint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ElementFingerprint {
+    pub fingerprint_id: String,
+    pub tag: String,
+    #[serde(default)]
+    pub normalized_text: String,
+    #[serde(default)]
+    pub attributes: Vec<(String, String)>,
+    #[serde(default)]
+    pub structural_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logical_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +289,8 @@ pub struct AgentActionRequest {
     pub instruction: Option<String>,
     pub constraints: AgentConstraints,
     pub zdr: ZdrMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extraction_profile: Option<ExtractionProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

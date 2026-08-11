@@ -9,13 +9,33 @@ use quarry_runtime::host_scheduler::HostScheduler;
 use quarry_runtime::ingest_client::DataPlaneIngest;
 use quarry_runtime::local_index::TantivyLocalIndex;
 use quarry_runtime::serp::SearchProvider;
+use quarry_runtime::step_receipts::StepReceiptStore;
 use quarry_runtime::usage::UsageMeter;
 use quarry_runtime::vector_index::VectorIndex;
 use quarry_runtime::vision::VisualObservationProcessor;
 use quarry_security::SecurityEngine;
 
+/// Runtime readiness is deliberately separate from process liveness. A
+/// container can be alive while silently falling back to in-memory profiles,
+/// artifacts, or history; production traffic must not be admitted in that
+/// state because a restart would lose agent/crawl state.
+#[derive(Clone, Debug)]
+pub struct ReadinessState {
+    pub durable: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
+    pub readiness: ReadinessState,
+    /// Append-only action receipts. The default edge wiring uses the
+    /// in-process store for development; production readiness must pair this
+    /// field with a durable implementation before claiming crash-safe replay.
+    pub receipts: Arc<dyn StepReceiptStore>,
+    /// BrowserBroker capability validator. Noop is retained for local
+    /// development; production must configure an HTTP/gRPC-backed validator.
+    pub grant_validator: Arc<dyn quarry_runtime::GrantValidator>,
+    pub require_browser_grants: bool,
     pub driver: Arc<dyn Driver>,
     pub drivers: DriverRegistry,
     /// Wave 7 — optional HTTP/3 driver. `Some` when the runtime was
@@ -90,6 +110,10 @@ pub struct AppState {
     /// `postgres-queue` feature so default builds don't pull `sqlx`.
     #[cfg(feature = "postgres-queue")]
     pub event_history: Option<Arc<quarry_runtime::postgres_event_history::PostgresEventHistory>>,
+    /// Rust-owned durable frontier pool. Internal orchestrator queue routes
+    /// bind tenant-scoped `PostgresRequestQueue` handles from this pool.
+    #[cfg(feature = "postgres-queue")]
+    pub queue_pool: Option<sqlx::postgres::PgPool>,
     /// C30.2 / cluster #9 — durable baseline + diff store. When
     /// `Some`, `/v1/change/*` routes serve locally; otherwise they
     /// return 501.

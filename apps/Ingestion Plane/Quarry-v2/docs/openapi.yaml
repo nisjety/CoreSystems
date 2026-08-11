@@ -237,6 +237,227 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorBody"
 
+  /v1/agent/runs:
+    post:
+      operationId: startAgentRun
+      summary: Acquire a governed browser-agent run
+      description: |
+        Creates a tenant-owned browser lease. BrowserBroker grants are
+        revalidated at run start and before every action; non-ZDR runs receive
+        a durable continuation checkpoint.
+      tags: [agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartAgentRunRequest"
+      responses:
+        "200":
+          description: Browser run acquired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_StartAgentRun"
+        "400":
+          description: Invalid constraints or persistence request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+        "403":
+          description: Missing or invalid BrowserBroker grant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/agent/runs/{run_id}/step:
+    post:
+      operationId: agentStep
+      summary: Execute one governed browser action
+      tags: [agent]
+      parameters:
+        - $ref: "#/components/parameters/AgentRunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentStepRequest"
+      responses:
+        "200":
+          description: Observation and immutable outcome proof
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_BrowserObservation"
+        "403":
+          description: Domain, SSRF, policy, or grant denial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+        "429":
+          description: Step budget exhausted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/agent/runs/{run_id}/interact:
+    post:
+      operationId: agentInteract
+      summary: Ergonomic alias for one governed browser action
+      tags: [agent]
+      parameters:
+        - $ref: "#/components/parameters/AgentRunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentStepRequest"
+      responses:
+        "200":
+          description: Observation and immutable outcome proof
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_BrowserObservation"
+        "403":
+          description: Domain, SSRF, policy, or grant denial
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/agent/runs/{run_id}/receipts:
+    get:
+      operationId: listAgentReceipts
+      summary: Read tenant-scoped immutable action receipts
+      tags: [agent]
+      parameters:
+        - $ref: "#/components/parameters/AgentRunId"
+      responses:
+        "200":
+          description: Ordered action receipt stream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_StepReceipts"
+        "404":
+          description: Run or receipt stream not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/agent/runs/{run_id}/procedure:
+    post:
+      operationId: compileAgentProcedure
+      summary: Compile verified receipts into a replay candidate
+      tags: [agent]
+      parameters:
+        - $ref: "#/components/parameters/AgentRunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompileProcedureRequest"
+      responses:
+        "200":
+          description: Deterministic procedure candidate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_BrowserProcedure"
+        "409":
+          description: Receipt stream contains unverified or incomplete effects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/agent/procedures/replay-check:
+    post:
+      operationId: checkAgentProcedureReplay
+      summary: Compare actions with a procedure without executing effects
+      tags: [agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplayCheckRequest"
+      responses:
+        "200":
+          description: Exact, repair-required, or refused decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_ReplayDecision"
+
+  /v1/agent/procedures/quality-check:
+    post:
+      operationId: qualityCheckAgentProcedure
+      summary: Evaluate deterministic procedure promotion evidence
+      tags: [agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BrowserProcedure"
+      responses:
+        "200":
+          description: Quality report; does not change rollout state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_ProcedureQuality"
+
+  /v1/agent/procedures/impact-check:
+    post:
+      operationId: impactCheckAgentProcedure
+      summary: Identify changed sources that require procedure quarantine
+      tags: [agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProcedureImpactRequest"
+      responses:
+        "200":
+          description: Conservative change-impact report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_ProcedureImpact"
+
+  /v1/agent/runs/{run_id}:
+    delete:
+      operationId: closeAgentRun
+      summary: Close a browser-agent run and release its lease
+      tags: [agent]
+      parameters:
+        - $ref: "#/components/parameters/AgentRunId"
+      responses:
+        "200":
+          description: Run closed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_ClosedRun"
+        "404":
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
   /v1/map:
     post:
       operationId: map
@@ -301,7 +522,213 @@ paths:
                 $ref: "#/components/schemas/ErrorBody"
 
 components:
+  parameters:
+    AgentRunId:
+      name: run_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Tenant-owned Quarry run identifier
   schemas:
+    StartAgentRunRequest:
+      type: object
+      properties:
+        constraints:
+          $ref: "#/components/schemas/AgentConstraints"
+        profile_id: { type: string, nullable: true }
+        persist_profile: { type: boolean, default: false }
+        viewport:
+          type: object
+          nullable: true
+          properties:
+            width: { type: integer }
+            height: { type: integer }
+            device_scale_factor: { type: number }
+            is_mobile: { type: boolean }
+        zdr: { type: boolean, default: false }
+        grant_id: { type: string, nullable: true }
+        resume_run_id: { type: string, nullable: true }
+    AgentConstraints:
+      type: object
+      required: [max_steps]
+      properties:
+        max_steps: { type: integer, minimum: 0 }
+        allowed_domains:
+          type: array
+          items: { type: string }
+        max_runtime_s: { type: integer, nullable: true }
+        max_cost_usd: { type: number, nullable: true }
+    Envelope_StartAgentRun:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data:
+          type: object
+          required: [run_id, lease_id, profile_id]
+          properties:
+            run_id: { type: string }
+            lease_id: { type: string }
+            profile_id: { type: string }
+    AgentStepRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: object
+          required: [type]
+          additionalProperties: true
+          description: Tagged AgentAction; e.g. navigate, click, type, wait, or get_content.
+        instruction: { type: string, nullable: true }
+        extraction_profile:
+          type: object
+          nullable: true
+          additionalProperties: true
+    Envelope_BrowserObservation:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data:
+          $ref: "#/components/schemas/BrowserObservation"
+    BrowserObservation:
+      type: object
+      required: [run_id, step, url, action_outcome, observed_at]
+      properties:
+        run_id: { type: string }
+        step: { type: integer }
+        url: { type: string, format: uri }
+        title: { type: string, nullable: true }
+        dom_summary: { type: object, nullable: true, additionalProperties: true }
+        screenshot_artifact_id: { type: string, nullable: true }
+        visual_observation_artifact_id: { type: string, nullable: true }
+        console_summary: { type: array, items: { type: object, additionalProperties: true } }
+        network_summary: { type: array, items: { type: object, additionalProperties: true } }
+        policy_denials: { type: array, items: { type: string } }
+        action_outcome:
+          $ref: "#/components/schemas/ActionOutcome"
+        observation_delta:
+          $ref: "#/components/schemas/ObservationDelta"
+        challenge: { type: object, nullable: true, additionalProperties: true }
+        extraction_profile: { type: object, nullable: true, additionalProperties: true }
+        extraction_result: { type: object, nullable: true, additionalProperties: true }
+        proof_bundle: { type: object, nullable: true, additionalProperties: true }
+        observed_at: { type: string, format: date-time }
+    ActionOutcome:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [verified, failed, unknown] }
+        reason_code: { type: string, nullable: true }
+        detail: { type: string, nullable: true }
+    ObservationDelta:
+      type: object
+      required: [changed_fields, url_changed, title_changed, dom_changed, content_changed]
+      properties:
+        changed_fields: { type: array, items: { type: string } }
+        url_changed: { type: boolean }
+        title_changed: { type: boolean }
+        dom_changed: { type: boolean }
+        content_changed: { type: boolean }
+    Envelope_StepReceipts:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/StepReceipt"
+    StepReceipt:
+      type: object
+      required: [receipt_id, run_id, step, started_at, finished_at, action, outcome, cost_micro_usd]
+      properties:
+        org_id: { type: string, nullable: true }
+        receipt_id: { type: string }
+        run_id: { type: string }
+        step: { type: integer }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time }
+        action: { type: object, additionalProperties: true }
+        outcome: { type: object, additionalProperties: true }
+        observation: { $ref: "#/components/schemas/BrowserObservation" }
+        correction_of: { type: string, nullable: true }
+        cost_micro_usd: { type: integer, format: int64 }
+    CompileProcedureRequest:
+      type: object
+      properties:
+        procedure_id: { type: string, nullable: true }
+    BrowserProcedure:
+      type: object
+      required: [procedure_id, version, source_receipt_ids, steps]
+      properties:
+        procedure_id: { type: string }
+        version: { type: integer }
+        source_receipt_ids: { type: array, items: { type: string } }
+        steps:
+          type: array
+          items:
+            type: object
+            required: [step, action, expected_outcome]
+            properties:
+              step: { type: integer }
+              action: { type: object, additionalProperties: true }
+              expected_outcome: { type: string, enum: [verified, failed, unknown] }
+    Envelope_BrowserProcedure:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data: { $ref: "#/components/schemas/BrowserProcedure" }
+    ReplayCheckRequest:
+      type: object
+      required: [procedure]
+      properties:
+        procedure: { $ref: "#/components/schemas/BrowserProcedure" }
+        actions: { type: array, items: { type: object, additionalProperties: true } }
+    Envelope_ReplayDecision:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data: { type: object, additionalProperties: true }
+    ProcedureImpactRequest:
+      type: object
+      required: [procedure]
+      properties:
+        procedure: { $ref: "#/components/schemas/BrowserProcedure" }
+        changed_urls: { type: array, items: { type: string, format: uri } }
+    Envelope_ProcedureQuality:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data: { type: object, additionalProperties: true }
+    Envelope_ProcedureImpact:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data: { type: object, additionalProperties: true }
+    Envelope_ClosedRun:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data:
+          type: object
+          required: [closed]
+          properties:
+            closed: { type: boolean }
     SearchRequest:
       type: object
       required: [query]
@@ -756,6 +1183,10 @@ components:
               type: string
 
 tags:
+  - name: search
+    description: Tavily-lineage web discovery
+  - name: agent
+    description: Governed per-action browser-agent execution and proof
   - name: scrape
     description: Single-page scrape operations
   - name: crawl

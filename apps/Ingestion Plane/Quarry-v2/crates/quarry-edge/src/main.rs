@@ -19,6 +19,7 @@ use quarry_runtime::fetch::StaticDriver;
 use quarry_runtime::ingest_client::IngestClient;
 use quarry_runtime::lease_pool::RuntimeLeasePool;
 use quarry_runtime::tls_driver::TlsProfileDriver;
+use quarry_runtime::StepReceiptStore;
 use quarry_security::preflight::DefaultEngine;
 use quarry_tls::TlsProfile;
 
@@ -33,12 +34,12 @@ mod change_routes;
 mod config;
 mod experiments;
 mod extract_routes;
-mod firecrawl_adapter;
 mod graphql;
 mod handoff;
 mod internal_auth;
 mod map_routes;
 mod profile_routes;
+mod queue_routes;
 mod resource_routes;
 mod routes;
 mod schedule_routes;
@@ -110,6 +111,41 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!(
             "QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS must never be enabled in production"
         );
+    }
+    let durability_required = matches!(environment.as_str(), "prod" | "production")
+        || std::env::var("QUARRY_EDGE__REQUIRE_DURABLE_RUNTIME")
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false);
+    let require_browser_grants =
+        cfg.require_browser_grants || matches!(environment.as_str(), "prod" | "production");
+    if require_browser_grants
+        && cfg
+            .browser_grant_validator_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+    {
+        anyhow::bail!(
+            "browser grants are required but QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_URL is unset"
+        );
+    }
+    if durability_required
+        && matches!(
+            cfg.artifact_backend.trim().to_ascii_lowercase().as_str(),
+            "memory" | "in_memory" | ""
+        )
+    {
+        anyhow::bail!(
+            "durable runtime is required but QUARRY_EDGE__ARTIFACT_BACKEND is in-memory; configure fs or s3"
+        );
+    }
+    if durability_required
+        && cfg
+            .database_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+    {
+        anyhow::bail!("durable runtime is required but QUARRY_EDGE__DATABASE_URL is unset");
     }
     let cross_plane_tokens: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider> =
         match cfg
@@ -241,6 +277,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         DefaultEngine::new()
     };
+    let artifacts_durable = matches!(
+        cfg.artifact_backend.trim().to_ascii_lowercase().as_str(),
+        "fs" | "filesystem" | "s3"
+    );
     let artifacts: Arc<dyn ArtifactStore> = match cfg.artifact_backend.as_str() {
         "fs" | "filesystem" => {
             tracing::info!(root = %cfg.artifact_root, "artifact backend: filesystem");
@@ -426,6 +466,8 @@ async fn main() -> anyhow::Result<()> {
     // Otherwise the dev-default `InMemoryProfileStore` runs. Either
     // backend can be wrapped with Redis hot-cache via
     // `cached_profile_store::maybe_cache`.
+    #[allow(unused_mut)]
+    let mut profiles_durable = false;
     let inner_profiles: Arc<dyn quarry_browser::session::ProfileStore> = {
         #[cfg(feature = "postgres-queue")]
         {
@@ -435,6 +477,7 @@ async fn main() -> anyhow::Result<()> {
             ) {
                 (Some("postgres"), Some(dsn)) => match sqlx::postgres::PgPool::connect(dsn).await {
                     Ok(pool) => {
+                        profiles_durable = true;
                         tracing::info!("ProfileStore: PostgresProfileStore (durable)");
                         Arc::new(
                             quarry_runtime::postgres_profile_store::PostgresProfileStore::new(pool),
@@ -466,6 +509,108 @@ async fn main() -> anyhow::Result<()> {
     let profiles =
         quarry_runtime::cached_profile_store::maybe_cache(inner_profiles, cfg.redis_url.as_deref())
             .await;
+
+    // P0 action proof. A production agent must not report readiness while
+    // receipts would disappear with the edge process. The durable store uses
+    // the same migration set as the queue/history stores and enforces org_id
+    // in every list query.
+    #[allow(unused_mut)]
+    let mut receipts_durable = false;
+    let receipts: Arc<dyn StepReceiptStore> = {
+        #[cfg(feature = "postgres-queue")]
+        {
+            match cfg.database_url.as_deref().filter(|s| !s.is_empty()) {
+                Some(dsn) => match sqlx::postgres::PgPool::connect(dsn).await {
+                    Ok(pool) => match quarry_runtime::migrations::run_migrations(&pool).await {
+                        Ok(()) => {
+                            receipts_durable = true;
+                            tracing::info!("step receipts: Postgres (durable, tenant-bound)");
+                            Arc::new(quarry_runtime::PostgresStepReceiptStore::new(pool))
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "step receipt migrations failed; using in-memory store");
+                            Arc::new(quarry_runtime::InMemoryStepReceiptStore::new())
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(error = %error, "step receipt database connect failed; using in-memory store");
+                        Arc::new(quarry_runtime::InMemoryStepReceiptStore::new())
+                    }
+                },
+                None => Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
+            }
+        }
+        #[cfg(not(feature = "postgres-queue"))]
+        {
+            Arc::new(quarry_runtime::InMemoryStepReceiptStore::new())
+        }
+    };
+
+    // Rust remains the durable frontier writer. The internal Go/Temporal
+    // bridge receives a clone of this pool and binds tenant-scoped queue
+    // handles per request; a missing pool is surfaced through readiness.
+    #[cfg(feature = "postgres-queue")]
+    let queue_pool = match cfg.database_url.as_deref().filter(|s| !s.is_empty()) {
+        Some(dsn) => match sqlx::postgres::PgPool::connect(dsn).await {
+            Ok(pool) => match quarry_runtime::migrations::run_migrations(&pool).await {
+                Ok(()) => Some(pool),
+                Err(error) => {
+                    tracing::warn!(error = %error, "frontier migrations failed; durable queue routes disabled");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::warn!(error = %error, "frontier database connect failed; durable queue routes disabled");
+                None
+            }
+        },
+        None => None,
+    };
+
+    let grant_validator: Arc<dyn quarry_runtime::GrantValidator> = match cfg
+        .browser_grant_validator_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
+        Some(url) => {
+            let validator = quarry_runtime::HttpGrantValidator::new(url)?;
+            let validator = match cfg.model_plane_token.as_deref() {
+                Some(token) if cfg.cross_plane_auth_dev_bypass => {
+                    validator.with_bearer_token(token.to_owned())
+                }
+                _ => validator,
+            };
+            Arc::new(validator)
+        }
+        None => Arc::new(quarry_runtime::NoopGrantValidator),
+    };
+
+    let durable_history_configured = cfg.durable_event_history;
+    let frontier_durable = {
+        #[cfg(feature = "postgres-queue")]
+        {
+            queue_pool.is_some()
+        }
+        #[cfg(not(feature = "postgres-queue"))]
+        {
+            false
+        }
+    };
+    let durable_ready = !durability_required
+        || (artifacts_durable
+            && profiles_durable
+            && receipts_durable
+            && frontier_durable
+            && durable_history_configured
+            && cfg
+                .database_url
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()));
+    if durability_required && !durable_ready {
+        anyhow::bail!(
+            "durable runtime could not be established (artifact/profile/history backend fell back to ephemeral storage)"
+        );
+    }
 
     // C30.1 / cluster #7 — durable job-history store. Optional;
     // requires postgres-queue feature + DSN + durable_event_history
@@ -1021,6 +1166,14 @@ async fn main() -> anyhow::Result<()> {
     let page_renderer: Option<std::sync::Arc<quarry_runtime::page_renderer::PageRenderer>> = None;
 
     let app_state = state::AppState {
+        readiness: state::ReadinessState {
+            durable: durable_ready,
+            reason: (!durable_ready)
+                .then(|| "ephemeral backend configured; set durable runtime backends".to_string()),
+        },
+        receipts,
+        grant_validator,
+        require_browser_grants,
         driver: default_driver,
         drivers,
         http3: http3_driver,
@@ -1046,6 +1199,8 @@ async fn main() -> anyhow::Result<()> {
         usage,
         #[cfg(feature = "postgres-queue")]
         event_history,
+        #[cfg(feature = "postgres-queue")]
+        queue_pool,
         #[cfg(feature = "postgres-queue")]
         baseline_store,
         // D2 / cluster #14 — HMAC signer for cross-plane forwards.

@@ -38,6 +38,24 @@ type DB interface {
 	PurgeOrg(orgID string) (PurgeResult, error)
 }
 
+// RequestQueueSummary is the control-plane read model for the Rust-owned
+// durable frontier. Control never mutates these rows; Quarry runtime remains
+// the writer and authority for queue lifecycle.
+type RequestQueueSummary struct {
+	QueueID   string `json:"queue_id"`
+	Name      string `json:"name"`
+	Queued    uint64 `json:"queued"`
+	InFlight  uint64 `json:"in_flight"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// RequestQueueReader is optional so the in-memory control backend can keep
+// working without pretending that an ephemeral process has durable queues.
+// The Postgres backend implements it against the Rust-owned tables.
+type RequestQueueReader interface {
+	ListRequestQueues(orgID string, limit int, cursor string) ([]RequestQueueSummary, string, error)
+}
+
 type ResourceStore[T any] interface {
 	Create(t T) error
 	Get(id quarrycontracts.ID) (T, bool)

@@ -2,8 +2,7 @@
 //!
 //! Recombines existing primitives — `transform::sitemap`, `transform::robots`,
 //! `transform::links` — plus the runtime `LexicalRanker` to return every URL of
-//! a site, optionally ranked by relevance to a `search` term. Firecrawl/Tavily
-//! `map` parity.
+//! a site, optionally ranked by relevance to a `search` term.
 //!
 //! Read-only: no durable writes, so ZDR=on is always fine. Org-scoped only for
 //! usage metering + event emission; the discovery itself touches no tenant data.

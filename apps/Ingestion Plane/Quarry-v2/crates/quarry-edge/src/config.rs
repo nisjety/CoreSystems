@@ -85,6 +85,13 @@ pub struct EdgeConfig {
     /// Development-only static Model Plane bearer. Production uses Auth Core.
     #[serde(default)]
     pub model_plane_token: Option<String>,
+    /// BrowserBroker grant validation endpoint. When set, every agent run
+    /// must present a grant_id and every action revalidates that grant.
+    #[serde(default)]
+    pub browser_grant_validator_url: Option<String>,
+    /// Fail closed when a caller omits BrowserBroker's per-run grant.
+    #[serde(default)]
+    pub require_browser_grants: bool,
     /// Enable LLM-backed intent classification on the search router.
     /// When `true` AND `model_plane_url` is set, the router consults the
     /// Model Plane for query intent (Research / Comparative / Local /
@@ -288,6 +295,8 @@ impl EdgeConfig {
             local_index_dir: None,
             model_plane_url: None,
             model_plane_token: None,
+            browser_grant_validator_url: None,
+            require_browser_grants: false,
             llm_classify_intent: false,
             llm_classify_model: None,
             autoprompt: false,

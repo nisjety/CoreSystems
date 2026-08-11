@@ -3,10 +3,10 @@
 use quarry_core::artifact::{self, ArtifactKind};
 use quarry_core::cache::{CacheMode, CachePolicy};
 use quarry_core::contracts::{
-    AgentAction, AgentActionRequest, AgentConstraints, BrowserObservation, ChunkRef,
-    DataPlaneIngestRequest, DataPlaneIngestResponse, DomSummary, EmbeddingStatus, ExtractionUsage,
-    IndexStatus, InteractiveElement, SourceTrace, StructuredExtractRequest,
-    StructuredExtractResponse,
+    ActionOutcome, ActionOutcomeStatus, AgentAction, AgentActionRequest, AgentConstraints,
+    BrowserObservation, ChunkRef, DataPlaneIngestRequest, DataPlaneIngestResponse, DomSummary,
+    EmbeddingStatus, ExtractionUsage, IndexStatus, InteractiveElement, SourceTrace,
+    StructuredExtractRequest, StructuredExtractResponse,
 };
 use quarry_core::envelope::{Envelope, EnvelopeMeta};
 use quarry_core::error::{ErrorCode, QuarryError};
@@ -40,6 +40,11 @@ fn error_code_http_status_matrix() {
     assert_eq!(ErrorCode::RateLimited.http_status(), 429);
     assert_eq!(ErrorCode::Timeout.http_status(), 504);
     assert_eq!(ErrorCode::DriverFailed.http_status(), 502);
+    assert_eq!(ErrorCode::ActionUnknown.http_status(), 409);
+    assert_eq!(ErrorCode::CheckpointLost.http_status(), 409);
+    assert_eq!(ErrorCode::TargetRepairRequired.http_status(), 409);
+    assert_eq!(ErrorCode::ChallengeDetected.http_status(), 403);
+    assert_eq!(ErrorCode::RuntimeNotReady.http_status(), 503);
     assert_eq!(ErrorCode::Internal.http_status(), 500);
 }
 
@@ -48,6 +53,9 @@ fn error_retryable_flag_matches_semantic() {
     assert!(ErrorCode::Timeout.retryable());
     assert!(ErrorCode::RateLimited.retryable());
     assert!(!ErrorCode::SecurityBlocked.retryable());
+    assert!(!ErrorCode::ActionUnknown.retryable());
+    assert!(!ErrorCode::ChallengeDetected.retryable());
+    assert!(!ErrorCode::RuntimeNotReady.retryable());
     assert!(!ErrorCode::BadRequest.retryable());
 }
 
@@ -163,8 +171,11 @@ fn browser_observation_serde_roundtrip() {
             interactive_elements: vec![InteractiveElement {
                 tag: "button".into(),
                 selector: "#submit".into(),
+                selector_alternatives: vec!["button[name=\"submit\"]".into()],
                 text: Some("Submit".into()),
                 role: Some("button".into()),
+                aria_label: Some("Submit".into()),
+                fingerprint: None,
             }],
             text_snippet: Some("Hello world".into()),
         }),
@@ -173,6 +184,12 @@ fn browser_observation_serde_roundtrip() {
         console_summary: vec![],
         network_summary: vec![],
         policy_denials: vec!["blocked: private IP".into()],
+        action_outcome: ActionOutcome::unknown("not_verified", "test observation"),
+        observation_delta: None,
+        challenge: None,
+        extraction_profile: None,
+        extraction_result: None,
+        proof_bundle: None,
         observed_at: chrono::Utc::now(),
     };
     let json = serde_json::to_string(&obs).unwrap();
@@ -180,7 +197,23 @@ fn browser_observation_serde_roundtrip() {
     assert_eq!(back.step, 3);
     assert_eq!(back.url, "https://example.com");
     assert_eq!(back.policy_denials.len(), 1);
+    assert_eq!(back.action_outcome.status, ActionOutcomeStatus::Unknown);
     assert!(back.dom_summary.is_some());
+}
+
+#[test]
+fn action_outcome_defaults_to_unknown_for_older_wire_payloads() {
+    let payload = serde_json::json!({
+        "run_id": quarry_core::ids::Id::<quarry_core::ids::RunKind>::new(),
+        "step": 1,
+        "url": "https://example.com",
+        "observed_at": chrono::Utc::now(),
+    });
+    let observation: BrowserObservation = serde_json::from_value(payload).unwrap();
+    assert_eq!(
+        observation.action_outcome.status,
+        ActionOutcomeStatus::Unknown
+    );
 }
 
 #[test]
@@ -199,6 +232,7 @@ fn agent_action_request_serde_roundtrip() {
             max_cost_usd: Some(0.05),
         },
         zdr: ZdrMode::Off,
+        extraction_profile: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     let back: AgentActionRequest = serde_json::from_str(&json).unwrap();
@@ -408,6 +442,7 @@ fn zdr_on_serializes_correctly() {
             max_cost_usd: None,
         },
         zdr: ZdrMode::On,
+        extraction_profile: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains(r#""zdr":"on""#));

@@ -324,7 +324,6 @@ pub async fn search(
         )
             .into_response();
     }
-
     let Some(provider) = &state.search else {
         return (
             StatusCode::NOT_IMPLEMENTED,

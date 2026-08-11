@@ -198,7 +198,11 @@ impl AgentLoop {
             step: 0,
             current_url: String::new(),
             page_hash: format!("agent:{}", self.run_id),
+            previous_page_hash: None,
             previous_screenshot: None,
+            previous_url: None,
+            previous_title: None,
+            previous_dom_node_count: None,
         };
 
         let mut observations = Vec::new();
@@ -353,6 +357,7 @@ mod tests {
             instruction: None,
             constraints: make_constraints(100),
             zdr: ZdrMode::Off,
+            extraction_profile: None,
         }
     }
 
@@ -726,6 +731,12 @@ mod tests {
             console_summary: vec![],
             network_summary: vec![],
             policy_denials: vec![],
+            action_outcome: quarry_core::contracts::ActionOutcome::default(),
+            observation_delta: None,
+            challenge: None,
+            extraction_profile: None,
+            extraction_result: None,
+            proof_bundle: None,
             observed_at: chrono::Utc::now(),
         };
 

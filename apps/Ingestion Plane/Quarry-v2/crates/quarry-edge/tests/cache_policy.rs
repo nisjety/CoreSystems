@@ -40,6 +40,13 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
     let mut drivers = DriverRegistry::new(DriverKind::Static);
     drivers.register(static_driver.clone());
     let state = AppState {
+        readiness: quarry_edge::state::ReadinessState {
+            durable: true,
+            reason: None,
+        },
+        receipts: Arc::new(quarry_runtime::InMemoryStepReceiptStore::new()),
+        grant_validator: Arc::new(quarry_runtime::NoopGrantValidator),
+        require_browser_grants: false,
         driver: static_driver,
         drivers,
         http3: None,
@@ -66,6 +73,10 @@ async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
         visual_processor: None,
         #[cfg(feature = "postgres-queue")]
         event_history: None,
+        #[cfg(feature = "postgres-queue")]
+        baseline_store: None,
+        #[cfg(feature = "postgres-queue")]
+        queue_pool: None,
         usage: std::sync::Arc::new(quarry_runtime::NoopUsageMeter),
         #[cfg(feature = "browser-agent")]
         agent_driver: Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new()),

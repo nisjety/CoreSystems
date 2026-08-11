@@ -225,7 +225,7 @@ pub struct BenchmarkSummary {
     /// "docs-blog" | "pdf" | "login-profile-restore" |
     /// "crawl-sitemap" | "change-tracking"` — see gap-quarry §10.1 #12.
     pub suite: String,
-    /// `"firecrawl-self-host" | "firecrawl-cloud" | "trafilatura" |
+    /// `"trafilatura" |
     /// "mozilla-readability" | "v1-local"`.
     pub baseline: Option<String>,
     pub status: String,

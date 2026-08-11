@@ -8,7 +8,11 @@ import json
 import pytest
 
 from quarry_client.models import (
+    AgentConstraints,
+    AgentStepRequest,
     BatchRequest,
+    BrowserProcedure,
+    BrowserProcedureStepsInner,
     CachePolicy,
     ChangeInfo,
     CrawlRequest,
@@ -27,6 +31,7 @@ from quarry_client.models import (
     OutputFormats,
     PageMetadata,
     ScrapeRequest,
+    StartAgentRunRequest,
     UrlTriple,
 )
 
@@ -203,3 +208,37 @@ class TestInternalRunPageResult:
         )
         assert len(result.links) == 2
         assert result.fingerprint == "blake3:aabbcc"
+
+
+class TestWebAgentContracts:
+    def test_agent_run_and_step_models_serialize(self):
+        run = StartAgentRunRequest(
+            constraints=AgentConstraints(
+                max_steps=4,
+                allowed_domains=["example.com"],
+            ),
+            grant_id="grant_123",
+        )
+        step = AgentStepRequest(
+            action={"type": "navigate", "url": "https://example.com"},
+            extraction_profile={"fields": [{"name": "title", "source": "dom"}]},
+        )
+
+        assert json.loads(run.to_json())["constraints"]["max_steps"] == 4
+        assert json.loads(step.to_json())["action"]["type"] == "navigate"
+
+    def test_compiled_procedure_model_serializes_verified_steps(self):
+        procedure = BrowserProcedure(
+            procedure_id="proc_example",
+            version=1,
+            source_receipt_ids=["receipt_1"],
+            steps=[
+                BrowserProcedureStepsInner(
+                    step=0,
+                    action={"type": "navigate", "url": "https://example.com"},
+                    expected_outcome="verified",
+                )
+            ],
+        )
+
+        assert json.loads(procedure.to_json())["steps"][0]["expected_outcome"] == "verified"

@@ -39,11 +39,13 @@ mod enabled {
     use serde::{Deserialize, Deserializer, Serialize};
     use tokio::sync::Mutex as TokioMutex;
 
+    #[cfg(test)]
+    use quarry_browser::SessionInner;
     use quarry_browser::{
         BrowserDevtoolsEvent, BrowserSession, BrowserTab, LiveFrameFormat, LiveFrameOptions,
     };
     use quarry_core::contracts::{
-        AgentAction, AgentActionRequest, AgentConstraints, BrowserObservation,
+        AgentAction, AgentActionRequest, AgentConstraints, BrowserObservation, ExtractionProfile,
     };
     use quarry_core::envelope::Envelope;
     use quarry_core::error::{ErrorCode, QuarryError};
@@ -53,7 +55,17 @@ mod enabled {
     use quarry_core::lease::{BrowserLease, BrowserViewport, Capability, ProxyAffinity};
     use quarry_core::zdr::ZdrMode;
     use quarry_core::QuarryResult;
+    use quarry_runtime::browser_procedure::{
+        analyze_impact, assess_quality, compare_replay, compile_procedure, BrowserProcedure,
+        ProcedureImpactReport, ProcedureQualityReport, ReplayDecision,
+    };
     use quarry_runtime::observation::{ObservationContext, ObservationRunner};
+    use quarry_runtime::step_receipts::{
+        AgentRunCheckpoint, AgentRunStatus, BrowserControlMode, BrowserProfileScope,
+        BrowserTabOperation, BrowserTimelineEvent, BrowserTimelineEventKind,
+        BrowserTimelineInitiator, BrowserTimelineLifecycle, ReceiptBuilder, StepOutcome,
+        StepReceipt,
+    };
     use quarry_security::{Decision, SecurityEngine};
     use url::Url;
 
@@ -64,11 +76,21 @@ mod enabled {
     pub struct RunEntry {
         pub run_id: RunKind,
         pub org_id: String,
+        /// Signed user/service actor that started this run. The browser edge
+        /// scopes live-session reads and mutations to this actor as well as
+        /// the tenant; an org membership alone is not browser-run authority.
+        pub actor_id: String,
         pub session: BrowserSession,
         pub ctx: ObservationContext,
         pub lease: BrowserLease,
         pub constraints: AgentConstraints,
         pub zdr: ZdrMode,
+        pub grant_id: Option<String>,
+        pub control_mode: BrowserControlMode,
+        pub profile_scope: BrowserProfileScope,
+        /// Current live observation. It is intentionally process-local for a
+        /// ZDR run, while non-ZDR proof remains in immutable receipts.
+        pub last_observation: Option<BrowserObservation>,
     }
 
     /// run_id → entry. Outer std-Mutex guards the map (held only for the O(1)
@@ -117,10 +139,24 @@ mod enabled {
         pub profile_id: Option<String>,
         #[serde(default)]
         pub persist_profile: bool,
+        /// The effective scope is provided by the authenticated BFF after it
+        /// validates the requested profile. It remains owner state so reads
+        /// and resume paths never depend on a gateway-local session cache.
+        #[serde(default)]
+        pub profile_scope: BrowserProfileScope,
         #[serde(default)]
         pub viewport: Option<BrowserViewport>,
         #[serde(default)]
         pub zdr: bool,
+        /// BrowserBroker's signed capability. Quarry revalidates it before
+        /// every action, so an approval cannot be replayed after expiry.
+        #[serde(default)]
+        pub grant_id: Option<String>,
+        /// Resume a previously checkpointed run after an edge restart. The
+        /// checkpoint's tenant, constraints, profile, and current step remain
+        /// authoritative; a new/renewed grant may be supplied explicitly.
+        #[serde(default)]
+        pub resume_run_id: Option<String>,
     }
 
     fn default_constraints() -> AgentConstraints {
@@ -130,6 +166,92 @@ mod enabled {
             max_runtime_s: None,
             max_cost_usd: None,
         }
+    }
+
+    fn domain_allowed(url: &str, allowed_domains: &[String]) -> bool {
+        if allowed_domains.is_empty() {
+            return true;
+        }
+        let Ok(parsed) = Url::parse(url) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str().map(|value| value.to_ascii_lowercase()) else {
+            return false;
+        };
+        allowed_domains.iter().any(|candidate| {
+            let candidate = candidate
+                .trim()
+                .to_ascii_lowercase()
+                .trim_start_matches("*.")
+                .trim_start_matches('.')
+                .to_owned();
+            !candidate.is_empty() && (host == candidate || host.ends_with(&format!(".{candidate}")))
+        })
+    }
+
+    fn enforce_step_budget(entry: &RunEntry) -> Result<(), &'static str> {
+        if entry.constraints.max_steps > 0 && entry.ctx.step >= entry.constraints.max_steps {
+            return Err("agent step budget exhausted");
+        }
+        Ok(())
+    }
+
+    fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
+        AgentRunCheckpoint {
+            org_id: entry.org_id.clone(),
+            actor_id: entry.actor_id.clone(),
+            run_id: entry.run_id.to_string(),
+            lease_id: entry.lease.lease_id.to_string(),
+            profile_id: entry.lease.profile_id.to_string(),
+            step: entry.ctx.step,
+            current_url: entry.ctx.current_url.clone(),
+            page_hash: entry.ctx.page_hash.clone(),
+            constraints: entry.constraints.clone(),
+            persist_profile: entry.lease.persist_profile,
+            profile_scope: entry.profile_scope,
+            viewport: entry.lease.viewport,
+            zdr: entry.zdr,
+            grant_id: entry.grant_id.clone(),
+            status: AgentRunStatus::Active,
+            control_mode: entry.control_mode,
+        }
+    }
+
+    fn caller_owns_browser_run(
+        run_org_id: &str,
+        run_actor_id: &str,
+        claims: &crate::auth::Claims,
+    ) -> bool {
+        run_org_id == claims.org_id
+            && !run_actor_id.trim().is_empty()
+            && run_actor_id == claims.actor_id()
+    }
+
+    fn caller_owns_live_run(entry: &RunEntry, claims: &crate::auth::Claims) -> bool {
+        caller_owns_browser_run(&entry.org_id, &entry.actor_id, claims)
+    }
+
+    async fn record_browser_timeline_event(
+        state: &AppState,
+        entry: &RunEntry,
+        event: BrowserTimelineEventKind,
+    ) -> QuarryResult<()> {
+        if entry.zdr.is_active() {
+            return Ok(());
+        }
+        state
+            .receipts
+            .append_browser_timeline_event(BrowserTimelineEvent::new(
+                entry.org_id.clone(),
+                entry.actor_id.clone(),
+                entry.run_id.to_string(),
+                event,
+            ))
+            .await?;
+        state
+            .receipts
+            .save_run_checkpoint(checkpoint_for_entry(entry))
+            .await
     }
 
     /// Defense-in-depth ZDR guard for `POST /v1/agent/runs`, independent of
@@ -163,11 +285,274 @@ mod enabled {
         pub profile_id: String,
     }
 
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BrowserSessionProjectionData {
+        pub run_id: String,
+        pub lease_id: String,
+        pub profile_id: String,
+        pub profile_storage: &'static str,
+        pub profile_scope: BrowserProfileScope,
+        pub viewport: Option<BrowserViewport>,
+        pub current_url: String,
+        pub step: u32,
+        pub status: AgentRunStatus,
+        pub live: bool,
+        pub zdr: bool,
+        pub control_mode: BrowserControlMode,
+        pub tabs: Vec<BrowserSessionTab>,
+        pub last_observation: Option<BrowserObservation>,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BrowserSessionTab {
+        pub tab_id: String,
+        pub title: Option<String>,
+        pub url: Option<String>,
+        pub active: bool,
+    }
+
+    fn safe_display_url(raw: &str) -> String {
+        let Ok(mut parsed) = Url::parse(raw) else {
+            return String::new();
+        };
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        parsed.to_string()
+    }
+
+    fn browser_session_tab(tab: BrowserTab) -> BrowserSessionTab {
+        BrowserSessionTab {
+            tab_id: tab.tab_id,
+            title: tab.title,
+            url: tab
+                .url
+                .as_deref()
+                .map(safe_display_url)
+                .filter(|value| !value.is_empty()),
+            active: tab.active,
+        }
+    }
+
+    fn active_browser_tab_id(tabs: &[BrowserTab]) -> Option<String> {
+        tabs.iter()
+            .find(|tab| tab.active)
+            .map(|tab| tab.tab_id.clone())
+    }
+
+    fn live_browser_session_projection(
+        entry: &RunEntry,
+        tabs: Vec<BrowserTab>,
+    ) -> BrowserSessionProjectionData {
+        BrowserSessionProjectionData {
+            run_id: entry.run_id.to_string(),
+            lease_id: entry.lease.lease_id.to_string(),
+            profile_id: entry.lease.profile_id.to_string(),
+            profile_storage: if entry.lease.persist_profile {
+                "persistent"
+            } else {
+                "ephemeral"
+            },
+            profile_scope: entry.profile_scope,
+            viewport: entry.lease.viewport,
+            current_url: safe_display_url(&entry.ctx.current_url),
+            step: entry.ctx.step,
+            status: AgentRunStatus::Active,
+            live: true,
+            zdr: entry.zdr.is_active(),
+            control_mode: entry.control_mode,
+            tabs: tabs.into_iter().map(browser_session_tab).collect(),
+            last_observation: entry.last_observation.clone(),
+        }
+    }
+
+    fn checkpoint_browser_session_projection(
+        checkpoint: AgentRunCheckpoint,
+    ) -> BrowserSessionProjectionData {
+        BrowserSessionProjectionData {
+            run_id: checkpoint.run_id,
+            lease_id: checkpoint.lease_id,
+            profile_id: checkpoint.profile_id,
+            profile_storage: if checkpoint.persist_profile {
+                "persistent"
+            } else {
+                "ephemeral"
+            },
+            profile_scope: checkpoint.profile_scope,
+            viewport: checkpoint.viewport,
+            current_url: safe_display_url(&checkpoint.current_url),
+            step: checkpoint.step,
+            status: checkpoint.status,
+            live: false,
+            zdr: checkpoint.zdr.is_active(),
+            control_mode: checkpoint.control_mode,
+            tabs: Vec::new(),
+            last_observation: None,
+        }
+    }
+
+    fn browser_action_name(action: &AgentAction) -> &'static str {
+        match action {
+            AgentAction::Navigate { .. } => "navigate",
+            AgentAction::Click { .. } => "click",
+            AgentAction::ClickPoint { .. } => "click_point",
+            AgentAction::Type { .. } => "type",
+            AgentAction::Press { .. } => "press",
+            AgentAction::Scroll { .. } => "scroll",
+            AgentAction::MouseWheel { .. } => "mouse_wheel",
+            AgentAction::Select { .. } => "select",
+            AgentAction::Wait { .. } => "wait",
+            AgentAction::WaitFor { .. } => "wait_for",
+            AgentAction::Screenshot { .. } => "screenshot",
+            AgentAction::Pdf => "pdf",
+            AgentAction::Evaluate { .. } => "evaluate",
+            AgentAction::Back => "back",
+            AgentAction::Forward => "forward",
+            AgentAction::GetContent => "get_content",
+        }
+    }
+
+    fn browser_timeline_action(receipt: StepReceipt) -> BrowserTimelineItem {
+        let (outcome, error_code) = match receipt.outcome {
+            StepOutcome::Completed { .. } => ("completed", None),
+            StepOutcome::Failed { error_code, .. } => ("failed", Some(error_code)),
+            StepOutcome::Skipped { .. } => ("skipped", None),
+        };
+        BrowserTimelineItem {
+            id: receipt.receipt_id,
+            occurred_at: receipt.finished_at.to_rfc3339(),
+            detail: BrowserTimelineItemDetail::Action {
+                action: browser_action_name(&receipt.action),
+                outcome,
+                error_code,
+            },
+        }
+    }
+
+    fn browser_timeline_event(event: BrowserTimelineEvent) -> BrowserTimelineItem {
+        let detail = match event.event {
+            BrowserTimelineEventKind::Control { mode, initiated_by } => {
+                BrowserTimelineItemDetail::Control { mode, initiated_by }
+            }
+            BrowserTimelineEventKind::Tab {
+                operation,
+                tab_id,
+                active_tab_id,
+            } => BrowserTimelineItemDetail::Tab {
+                operation,
+                tab_id,
+                active_tab_id,
+            },
+            BrowserTimelineEventKind::Devtools {
+                event_count,
+                last_sequence,
+            } => BrowserTimelineItemDetail::Devtools {
+                event_count,
+                last_sequence,
+            },
+            BrowserTimelineEventKind::Lifecycle { state } => {
+                BrowserTimelineItemDetail::Lifecycle { state }
+            }
+        };
+        BrowserTimelineItem {
+            id: event.event_id,
+            occurred_at: event.occurred_at.to_rfc3339(),
+            detail,
+        }
+    }
+
+    fn timeline_sort_key(item: &BrowserTimelineItem) -> (&str, &str) {
+        (&item.occurred_at, &item.id)
+    }
+
     #[derive(Debug, Deserialize)]
     pub struct StepBody {
         pub action: AgentAction,
         #[serde(default)]
         pub instruction: Option<String>,
+        #[serde(default)]
+        pub extraction_profile: Option<ExtractionProfile>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct BrowserSessionControlBody {
+        pub mode: BrowserControlMode,
+    }
+
+    #[derive(Debug, Deserialize, Default)]
+    pub struct BrowserTimelineQuery {
+        #[serde(default)]
+        pub cursor: Option<String>,
+        #[serde(default)]
+        pub limit: Option<usize>,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BrowserTimelineData {
+        pub items: Vec<BrowserTimelineItem>,
+        pub next_cursor: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct BrowserTimelineItem {
+        pub id: String,
+        pub occurred_at: String,
+        #[serde(flatten)]
+        pub detail: BrowserTimelineItemDetail,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    pub enum BrowserTimelineItemDetail {
+        Action {
+            action: &'static str,
+            outcome: &'static str,
+            error_code: Option<String>,
+        },
+        Control {
+            mode: BrowserControlMode,
+            initiated_by: BrowserTimelineInitiator,
+        },
+        Tab {
+            operation: BrowserTabOperation,
+            tab_id: Option<String>,
+            active_tab_id: Option<String>,
+        },
+        Devtools {
+            event_count: u32,
+            last_sequence: u64,
+        },
+        Lifecycle {
+            state: BrowserTimelineLifecycle,
+        },
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct CompileProcedureBody {
+        /// Stable caller-owned identifier for the compiled candidate. The
+        /// procedure is still only a deterministic replay candidate; it is
+        /// never silently promoted to an autonomous action policy.
+        #[serde(default)]
+        pub procedure_id: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ReplayCheckBody {
+        pub procedure: BrowserProcedure,
+        #[serde(default)]
+        pub actions: Vec<AgentAction>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct ProcedureImpactBody {
+        pub procedure: BrowserProcedure,
+        #[serde(default)]
+        pub changed_urls: Vec<String>,
     }
 
     #[derive(Debug, Clone, Deserialize)]
@@ -338,22 +723,143 @@ mod enabled {
     ) -> Result<Json<Envelope<StartRunData>>, ApiErr> {
         let request_id = RequestKind::new().to_string();
         let org_id = claims.org_id.clone();
+        let actor_id = claims.actor_id().to_owned();
 
-        let run_id: RunKind = Id::new();
+        let resume_run_id = body
+            .resume_run_id
+            .as_deref()
+            .map(|raw| {
+                raw.parse::<RunKind>().map_err(|_| {
+                    status_err(
+                        StatusCode::BAD_REQUEST,
+                        &request_id,
+                        "invalid resume_run_id",
+                    )
+                })
+            })
+            .transpose()?;
+        let resume_checkpoint = if let Some(run_id) = resume_run_id.as_ref() {
+            let checkpoint = state
+                .receipts
+                .load_run_checkpoint(&org_id, run_id)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            let Some(checkpoint) = checkpoint else {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "no durable checkpoint exists for resume_run_id",
+                ));
+            };
+            if checkpoint.run_id != run_id.to_string()
+                || !caller_owns_browser_run(&checkpoint.org_id, &checkpoint.actor_id, &claims)
+            {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            }
+            if checkpoint.status == AgentRunStatus::Closed {
+                return Err(status_err(
+                    StatusCode::CONFLICT,
+                    &request_id,
+                    "agent run is already closed",
+                ));
+            }
+            if checkpoint.zdr.is_active() {
+                return Err(status_err(
+                    StatusCode::FORBIDDEN,
+                    &request_id,
+                    "ZDR runs cannot be resumed from durable state",
+                ));
+            }
+            Some(checkpoint)
+        } else {
+            None
+        };
+
+        // A resumed run's persisted constraints are authoritative. This
+        // prevents a caller from widening a budget or allowed-domain set after
+        // an edge restart.
+        let constraints = resume_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.constraints.clone())
+            .unwrap_or_else(|| body.constraints.clone());
+
+        if constraints.max_cost_usd.is_some() {
+            return Err(status_err(
+                StatusCode::BAD_REQUEST,
+                &request_id,
+                "max_cost_usd is not supported by the browser edge until a metered action cost is available",
+            ));
+        }
+        let grant_id = body.grant_id.clone().or_else(|| {
+            resume_checkpoint
+                .as_ref()
+                .and_then(|cp| cp.grant_id.clone())
+        });
+        if state.require_browser_grants && grant_id.is_none() {
+            return Err(status_err(
+                StatusCode::FORBIDDEN,
+                &request_id,
+                "browser grant_id is required",
+            ));
+        }
+        if let Some(grant_id) = grant_id.as_deref() {
+            let grant = state
+                .grant_validator
+                .validate(grant_id)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            if !grant.is_usable() {
+                return Err(status_err(
+                    StatusCode::FORBIDDEN,
+                    &request_id,
+                    "browser grant is inactive or expired",
+                ));
+            }
+        }
+
+        let run_id: RunKind = resume_run_id.unwrap_or_else(Id::new);
         let lease_id: LeaseKind = Id::new();
         // Reuse a caller-supplied profile (cookie/session continuity across
         // runs) when provided & parseable; otherwise mint a fresh one.
-        let profile_id: ProfileKind = body
-            .profile_id
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(Id::new);
-        let zdr = ZdrMode::from(body.zdr);
-        let ttl_s = body.constraints.max_runtime_s.unwrap_or(120);
-        let viewport = normalize_viewport(body.viewport)
-            .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg.as_str()))?;
+        let profile_id: ProfileKind = if let Some(checkpoint) = resume_checkpoint.as_ref() {
+            checkpoint.profile_id.parse().map_err(|_| {
+                status_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &request_id,
+                    "durable checkpoint has an invalid profile id",
+                )
+            })?
+        } else {
+            body.profile_id
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(Id::new)
+        };
+        let zdr = resume_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.zdr)
+            .unwrap_or_else(|| ZdrMode::from(body.zdr));
+        let ttl_s = constraints.max_runtime_s.unwrap_or(120);
+        let viewport = normalize_viewport(
+            resume_checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.viewport)
+                .or(body.viewport),
+        )
+        .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg.as_str()))?;
 
-        if zdr_forbids_persistent_profile(zdr, body.persist_profile, body.profile_id.is_some()) {
+        let persist_profile = resume_checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.persist_profile)
+            .unwrap_or(body.persist_profile || body.profile_id.is_some());
+        let profile_scope = resume_checkpoint
+            .as_ref()
+            .map_or(body.profile_scope, |checkpoint| checkpoint.profile_scope);
+        if zdr_forbids_persistent_profile(zdr, persist_profile, body.profile_id.is_some()) {
             return Err(status_err(
                 StatusCode::BAD_REQUEST,
                 &request_id,
@@ -361,7 +867,6 @@ mod enabled {
             ));
         }
 
-        let persist_profile = body.persist_profile || body.profile_id.is_some();
         let lease = BrowserLease {
             lease_id: lease_id.clone(),
             profile_id,
@@ -385,20 +890,94 @@ mod enabled {
             .await
             .map_err(|e| driver_err(&request_id, e))?;
 
+        // Rehydrate the last known location when resuming. This is a recovery
+        // navigation, not a claimed business action; the next explicit step
+        // still receives the first new receipt and observation.
+        if let Some(checkpoint) = resume_checkpoint.as_ref() {
+            if !checkpoint.current_url.is_empty() {
+                let recovery_action = AgentAction::Navigate {
+                    url: checkpoint.current_url.clone(),
+                };
+                if !domain_allowed(&checkpoint.current_url, &constraints.allowed_domains) {
+                    let _ = state.agent_driver.release(session).await;
+                    return Err(status_err(
+                        StatusCode::FORBIDDEN,
+                        &request_id,
+                        "durable checkpoint URL is outside the persisted allowed domains",
+                    ));
+                }
+                if let Err(error) =
+                    validate_navigation(&recovery_action, state.security.as_ref()).await
+                {
+                    let _ = state.agent_driver.release(session).await;
+                    return Err(driver_err(&request_id, error));
+                }
+                if let Err(error) = state
+                    .agent_driver
+                    .goto(&session, &checkpoint.current_url)
+                    .await
+                {
+                    let _ = state.agent_driver.release(session).await;
+                    return Err(driver_err(&request_id, error));
+                }
+            }
+        }
+
         let entry = RunEntry {
             run_id: run_id.clone(),
             org_id: org_id.clone(),
+            actor_id,
             session,
             ctx: ObservationContext {
-                step: 0,
-                current_url: String::new(),
-                page_hash: String::new(),
+                step: resume_checkpoint.as_ref().map_or(0, |cp| cp.step),
+                current_url: resume_checkpoint
+                    .as_ref()
+                    .map_or_else(String::new, |cp| cp.current_url.clone()),
+                page_hash: resume_checkpoint
+                    .as_ref()
+                    .map_or_else(String::new, |cp| cp.page_hash.clone()),
+                previous_page_hash: resume_checkpoint
+                    .as_ref()
+                    .and_then(|cp| (!cp.page_hash.is_empty()).then(|| cp.page_hash.clone())),
                 previous_screenshot: None,
+                previous_url: resume_checkpoint
+                    .as_ref()
+                    .and_then(|cp| (!cp.current_url.is_empty()).then(|| cp.current_url.clone())),
+                previous_title: None,
+                previous_dom_node_count: None,
             },
             lease,
-            constraints: body.constraints,
+            constraints,
             zdr,
+            grant_id,
+            control_mode: resume_checkpoint
+                .as_ref()
+                .map_or(BrowserControlMode::AgentControl, |checkpoint| {
+                    checkpoint.control_mode
+                }),
+            profile_scope,
+            last_observation: None,
         };
+
+        if !zdr.is_active() {
+            let checkpoint = checkpoint_for_entry(&entry);
+            if let Err(error) = state.receipts.save_run_checkpoint(checkpoint).await {
+                let _ = state.agent_driver.release(entry.session).await;
+                return Err(driver_err(&request_id, error));
+            }
+            let event = BrowserTimelineEvent::new(
+                entry.org_id.clone(),
+                entry.actor_id.clone(),
+                entry.run_id.to_string(),
+                BrowserTimelineEventKind::Lifecycle {
+                    state: BrowserTimelineLifecycle::Started,
+                },
+            );
+            if let Err(error) = state.receipts.append_browser_timeline_event(event).await {
+                let _ = state.agent_driver.release(entry.session).await;
+                return Err(driver_err(&request_id, error));
+            }
+        }
 
         state
             .agent_runs
@@ -423,6 +1002,238 @@ mod enabled {
                 run_id: run_id.to_string(),
                 lease_id: lease_id.to_string(),
                 profile_id,
+            },
+        )))
+    }
+
+    /// `GET /v1/agent/runs/{run_id}/browser-session` — the browser-session
+    /// projection owned by Quarry. Live Chromium state is read from the run;
+    /// after a restart only the non-ZDR checkpoint projection is available.
+    /// Both paths require the verified tenant and the signed initiating actor.
+    pub async fn browser_session(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+    ) -> Result<Json<Envelope<BrowserSessionProjectionData>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
+            status_err(StatusCode::BAD_REQUEST, &request_id, "invalid agent run id")
+        })?;
+
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        if let Some(entry_arc) = entry_arc {
+            let entry = entry_arc.lock().await;
+            if !caller_owns_live_run(&entry, &claims) {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            }
+            let tabs = state
+                .agent_driver
+                .list_tabs(&entry.session)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            return Ok(Json(Envelope::ok(
+                request_id,
+                live_browser_session_projection(&entry, tabs),
+            )));
+        }
+
+        let checkpoint = state
+            .receipts
+            .load_run_checkpoint(&claims.org_id, &parsed_run_id)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        let Some(checkpoint) = checkpoint else {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        };
+        if !caller_owns_browser_run(&checkpoint.org_id, &checkpoint.actor_id, &claims) {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        }
+
+        Ok(Json(Envelope::ok(
+            request_id,
+            checkpoint_browser_session_projection(checkpoint),
+        )))
+    }
+
+    /// `POST /v1/agent/runs/{run_id}/browser-session/control` — transfer
+    /// browser input authority. Quarry owns this transition, stamps it with
+    /// the verified actor, and appends a privacy-bounded audit event. ZDR
+    /// runs may be controlled live but never receive durable history.
+    pub async fn set_browser_session_control(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+        Json(body): Json<BrowserSessionControlBody>,
+    ) -> Result<Json<Envelope<BrowserSessionProjectionData>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        let Some(entry_arc) = entry_arc else {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        };
+        let mut entry = entry_arc.lock().await;
+        if !caller_owns_live_run(&entry, &claims) {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        }
+
+        entry.control_mode = body.mode;
+        record_browser_timeline_event(
+            &state,
+            &entry,
+            BrowserTimelineEventKind::Control {
+                mode: body.mode,
+                initiated_by: BrowserTimelineInitiator::Human,
+            },
+        )
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
+
+        let tabs = state
+            .agent_driver
+            .list_tabs(&entry.session)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        Ok(Json(Envelope::ok(
+            request_id,
+            live_browser_session_projection(&entry, tabs),
+        )))
+    }
+
+    /// `GET /v1/agent/runs/{run_id}/browser-session/timeline` — a bounded,
+    /// cursor-paginated owner timeline. It combines actor-bound action
+    /// receipts with Quarry's compact control/tab/devtools/lifecycle audit
+    /// records; neither stream contains raw browser contents.
+    pub async fn browser_session_timeline(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+        Query(query): Query<BrowserTimelineQuery>,
+    ) -> Result<Json<Envelope<BrowserTimelineData>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
+            status_err(StatusCode::BAD_REQUEST, &request_id, "invalid agent run id")
+        })?;
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        let (org_id, actor_id, zdr) = if let Some(entry_arc) = entry_arc {
+            let entry = entry_arc.lock().await;
+            if !caller_owns_live_run(&entry, &claims) {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            }
+            (entry.org_id.clone(), entry.actor_id.clone(), entry.zdr)
+        } else {
+            let checkpoint = state
+                .receipts
+                .load_run_checkpoint(&claims.org_id, &parsed_run_id)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            let Some(checkpoint) = checkpoint else {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            };
+            if !caller_owns_browser_run(&checkpoint.org_id, &checkpoint.actor_id, &claims) {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            }
+            (checkpoint.org_id, checkpoint.actor_id, checkpoint.zdr)
+        };
+        if zdr.is_active() {
+            return Err(status_err(
+                StatusCode::CONFLICT,
+                &request_id,
+                "browser timeline is unavailable for a Zero Data Retention run",
+            ));
+        }
+
+        let receipts = state
+            .receipts
+            .list_for_actor(&org_id, &actor_id, &parsed_run_id)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        let events = state
+            .receipts
+            .list_browser_timeline_events(&org_id, &actor_id, &parsed_run_id)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        let mut items = receipts
+            .into_iter()
+            .map(browser_timeline_action)
+            .chain(events.into_iter().map(browser_timeline_event))
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| timeline_sort_key(left).cmp(&timeline_sort_key(right)));
+
+        let start = if let Some(cursor) = query.cursor.as_deref() {
+            let Some(index) = items.iter().position(|item| item.id == cursor) else {
+                return Err(status_err(
+                    StatusCode::BAD_REQUEST,
+                    &request_id,
+                    "browser timeline cursor is invalid",
+                ));
+            };
+            index.saturating_add(1)
+        } else {
+            0
+        };
+        let limit = query.limit.unwrap_or(50).clamp(1, 100);
+        let page = items
+            .into_iter()
+            .skip(start)
+            .take(limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = page.len() > limit;
+        let mut page = page;
+        if has_more {
+            let _ = page.pop();
+        }
+        let next_cursor = has_more.then(|| {
+            page.last()
+                .expect("non-empty browser timeline page when has_more")
+                .id
+                .clone()
+        });
+
+        Ok(Json(Envelope::ok(
+            request_id,
+            BrowserTimelineData {
+                items: page,
+                next_cursor,
             },
         )))
     }
@@ -543,6 +1354,105 @@ mod enabled {
         #[test]
         fn non_zdr_run_may_request_a_persistent_profile() {
             assert!(!zdr_forbids_persistent_profile(ZdrMode::Off, true, true));
+        }
+
+        #[test]
+        fn browser_session_projection_requires_exact_tenant_and_actor() {
+            let claims = crate::auth::Claims {
+                sub: "user-owner".to_owned(),
+                iss: "https://auth.example.test".to_owned(),
+                exp: i64::MAX,
+                org_id: "org-owner".to_owned(),
+                user_id: "user-owner".to_owned(),
+                principal_type: Some("user".to_owned()),
+                service_id: None,
+                nbf: None,
+                aud: Some("quarry".to_owned()),
+                scopes: Vec::new(),
+            };
+
+            assert!(caller_owns_browser_run("org-owner", "user-owner", &claims));
+            assert!(!caller_owns_browser_run("org-owner", "user-other", &claims));
+            assert!(!caller_owns_browser_run("org-other", "user-owner", &claims));
+            assert!(!caller_owns_browser_run("org-owner", "", &claims));
+        }
+
+        #[test]
+        fn allowed_domains_accept_exact_and_subdomains_only() {
+            let allowed = vec!["example.com".to_owned()];
+            assert!(domain_allowed("https://example.com/path", &allowed));
+            assert!(domain_allowed("https://docs.example.com/path", &allowed));
+            assert!(!domain_allowed(
+                "https://example.com.evil.test/path",
+                &allowed
+            ));
+            assert!(!domain_allowed("https://other.test/path", &allowed));
+        }
+
+        #[test]
+        fn step_budget_is_fail_closed_once_limit_is_reached() {
+            let mut entry = RunEntry {
+                run_id: Id::new(),
+                org_id: "org".into(),
+                actor_id: "user".into(),
+                session: BrowserSession {
+                    lease: BrowserLease {
+                        lease_id: Id::new(),
+                        profile_id: Id::new(),
+                        session_affinity_key: "test-session".into(),
+                        proxy_affinity: ProxyAffinity {
+                            pool: String::new(),
+                            sticky_key: None,
+                        },
+                        ttl_s: 60,
+                        capabilities: vec![],
+                        artifact_bucket: String::new(),
+                        persist_profile: false,
+                        viewport: None,
+                        org_id: "org".into(),
+                    },
+                    inner: Arc::new(TokioMutex::new(SessionInner::default())),
+                },
+                ctx: ObservationContext {
+                    step: 2,
+                    current_url: String::new(),
+                    page_hash: String::new(),
+                    previous_page_hash: None,
+                    previous_screenshot: None,
+                    previous_url: None,
+                    previous_title: None,
+                    previous_dom_node_count: None,
+                },
+                lease: BrowserLease {
+                    lease_id: Id::new(),
+                    profile_id: Id::new(),
+                    session_affinity_key: "test".into(),
+                    proxy_affinity: ProxyAffinity {
+                        pool: String::new(),
+                        sticky_key: None,
+                    },
+                    ttl_s: 60,
+                    capabilities: vec![],
+                    artifact_bucket: String::new(),
+                    persist_profile: false,
+                    viewport: None,
+                    org_id: "org".into(),
+                },
+                constraints: AgentConstraints {
+                    max_steps: 2,
+                    allowed_domains: vec![],
+                    max_runtime_s: None,
+                    max_cost_usd: None,
+                },
+                zdr: ZdrMode::Off,
+                grant_id: None,
+                control_mode: BrowserControlMode::AgentControl,
+                profile_scope: BrowserProfileScope::Ephemeral,
+                last_observation: None,
+            };
+            assert!(enforce_step_budget(&entry).is_err());
+            entry.constraints.max_steps = 0;
+            assert!(enforce_step_budget(&entry).is_ok());
         }
 
         #[test]
@@ -668,12 +1578,46 @@ mod enabled {
         };
 
         let mut entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        }
+
+        if let Some(grant_id) = entry.grant_id.as_deref() {
+            let grant = state
+                .grant_validator
+                .validate(grant_id)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            if !grant.is_usable() {
+                return Err(status_err(
+                    StatusCode::FORBIDDEN,
+                    &request_id,
+                    "browser grant is inactive or expired",
+                ));
+            }
+        } else if state.require_browser_grants {
             return Err(status_err(
                 StatusCode::FORBIDDEN,
                 &request_id,
-                "run belongs to another org",
+                "browser grant is required for every action",
             ));
+        }
+
+        enforce_step_budget(&entry)
+            .map_err(|message| status_err(StatusCode::TOO_MANY_REQUESTS, &request_id, message))?;
+
+        if let AgentAction::Navigate { url } = &body.action {
+            if !domain_allowed(url, &entry.constraints.allowed_domains) {
+                return Err(status_err(
+                    StatusCode::FORBIDDEN,
+                    &request_id,
+                    "browser navigation is outside the run's allowed domains",
+                ));
+            }
         }
 
         validate_navigation(&body.action, state.security.as_ref())
@@ -687,7 +1631,11 @@ mod enabled {
             instruction: body.instruction,
             constraints: entry.constraints.clone(),
             zdr: entry.zdr,
+            extraction_profile: body.extraction_profile,
         };
+        let receipt_step = entry.ctx.step;
+        let receipt_run_id = entry.run_id.to_string();
+        let receipt_action = req.action.clone();
 
         let runner = ObservationRunner {
             browser: state.agent_driver.clone(),
@@ -701,12 +1649,194 @@ mod enabled {
 
         // Disjoint borrows: &session (shared) + &mut ctx (exclusive).
         let entry_mut: &mut RunEntry = &mut entry;
-        let obs = runner
+        // A completed browser call is not automatically a verified business
+        // effect; the observation carries that distinction. Persist an
+        // immutable receipt for both success and failure so a planner or
+        // reviewer can replay the exact action sequence.
+        let obs = match runner
             .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
             .await
-            .map_err(|e| driver_err(&request_id, e))?;
+        {
+            Ok(obs) => {
+                let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
+                    .org_id(entry.org_id.clone())
+                    .actor_id(entry.actor_id.clone())
+                    .complete(receipt_action, Some(obs.clone()), 0.0);
+                if !entry.zdr.is_active() {
+                    state
+                        .receipts
+                        .append(receipt)
+                        .await
+                        .map_err(|e| driver_err(&request_id, e))?;
+                }
+                obs
+            }
+            Err(error) => {
+                let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
+                    .org_id(entry.org_id.clone())
+                    .actor_id(entry.actor_id.clone())
+                    .fail(receipt_action, &error);
+                if !entry.zdr.is_active() {
+                    state
+                        .receipts
+                        .append(receipt)
+                        .await
+                        .map_err(|e| driver_err(&request_id, e))?;
+                }
+                return Err(driver_err(&request_id, error));
+            }
+        };
+
+        entry.last_observation = Some(obs.clone());
+
+        // Persist the continuation only after the immutable outcome receipt is
+        // durable. If this write fails, surface an internal error rather than
+        // letting the caller continue with a browser state that cannot be
+        // recovered after a crash.
+        if !entry.zdr.is_active() {
+            let checkpoint = checkpoint_for_entry(&entry);
+            state
+                .receipts
+                .save_run_checkpoint(checkpoint)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+        }
+
+        if !domain_allowed(&obs.url, &entry.constraints.allowed_domains) {
+            return Err(status_err(
+                StatusCode::FORBIDDEN,
+                &request_id,
+                "browser action reached a domain outside the run's allowed domains",
+            ));
+        }
 
         Ok(Json(Envelope::ok(request_id, obs)))
+    }
+
+    /// `GET /v1/agent/runs/{run_id}/receipts` — immutable action history for
+    /// replay, audit, and human review. The run's verified tenant owns the
+    /// receipt stream; no caller-supplied org id is accepted.
+    pub async fn list_receipts(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+    ) -> Result<Json<Envelope<Vec<StepReceipt>>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        let receipts = if let Some(entry_arc) = entry_arc {
+            let entry = entry_arc.lock().await;
+            if !caller_owns_live_run(&entry, &claims) {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            }
+            state
+                .receipts
+                .list_for_actor(&entry.org_id, &entry.actor_id, &entry.run_id)
+                .await
+                .map_err(|e| driver_err(&request_id, e))?
+        } else {
+            // Receipts are durable independently of the live Chromium
+            // session. An actor-scoped predicate is required even after an
+            // edge restart; legacy rows without this binding remain hidden.
+            let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
+                status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found")
+            })?;
+            let receipts = state
+                .receipts
+                .list_for_actor(&claims.org_id, claims.actor_id(), &parsed_run_id)
+                .await
+                .map_err(|e| driver_err(&request_id, e))?;
+            if receipts.is_empty() {
+                return Err(status_err(
+                    StatusCode::NOT_FOUND,
+                    &request_id,
+                    "agent run not found",
+                ));
+            }
+            receipts
+        };
+        Ok(Json(Envelope::ok(request_id, receipts)))
+    }
+
+    /// `POST /v1/agent/runs/{run_id}/procedure` — compile a deterministic
+    /// replay candidate from a tenant-owned verified receipt stream. Unknown,
+    /// failed, or unobserved effects are rejected by the runtime compiler;
+    /// Model Plane remains the planner and policy owner.
+    pub async fn compile_run_procedure(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+        Json(body): Json<CompileProcedureBody>,
+    ) -> Result<Json<Envelope<BrowserProcedure>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let parsed_run_id = run_id
+            .parse::<RunKind>()
+            .map_err(|_| status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found"))?;
+        let receipts = state
+            .receipts
+            .list_for_actor(&claims.org_id, claims.actor_id(), &parsed_run_id)
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        if receipts.is_empty() {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run has no durable receipts",
+            ));
+        }
+        let procedure_id = body
+            .procedure_id
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| format!("proc_{run_id}"));
+        let procedure = compile_procedure(procedure_id, &receipts)
+            .map_err(|error| driver_err(&request_id, error))?;
+        Ok(Json(Envelope::ok(request_id, procedure)))
+    }
+
+    /// `POST /v1/agent/procedures/replay-check` — compare a proposed action
+    /// sequence with a compiled procedure without executing browser effects.
+    /// Any mismatch is an explicit repair/refusal decision, never a silent
+    /// selector or business-action substitution.
+    pub async fn replay_check(
+        Extension(_claims): Extension<crate::auth::Claims>,
+        Json(body): Json<ReplayCheckBody>,
+    ) -> Json<Envelope<ReplayDecision>> {
+        let request_id = RequestKind::new().to_string();
+        Json(Envelope::ok(
+            request_id,
+            compare_replay(&body.procedure, &body.actions),
+        ))
+    }
+
+    /// `POST /v1/agent/procedures/quality-check` — deterministic promotion
+    /// report. This never changes rollout state; it supplies evidence for the
+    /// owning release/Model workflow.
+    pub async fn procedure_quality_check(
+        Extension(_claims): Extension<crate::auth::Claims>,
+        Json(procedure): Json<BrowserProcedure>,
+    ) -> Json<Envelope<ProcedureQualityReport>> {
+        let request_id = RequestKind::new().to_string();
+        Json(Envelope::ok(request_id, assess_quality(&procedure)))
+    }
+
+    /// `POST /v1/agent/procedures/impact-check` — conservative change impact
+    /// analysis. A changed source URL quarantines affected navigation steps;
+    /// Quarry does not silently replay or self-heal effectful procedures.
+    pub async fn procedure_impact_check(
+        Extension(_claims): Extension<crate::auth::Claims>,
+        Json(body): Json<ProcedureImpactBody>,
+    ) -> Json<Envelope<ProcedureImpactReport>> {
+        let request_id = RequestKind::new().to_string();
+        Json(Envelope::ok(
+            request_id,
+            analyze_impact(&body.procedure, &body.changed_urls),
+        ))
     }
 
     /// `GET /v1/agent/runs/{run_id}/frame` — return one transient live frame.
@@ -733,11 +1863,11 @@ mod enabled {
         };
 
         let entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
                 &request_id,
-                "run belongs to another org",
+                "agent run not found",
             ));
         }
 
@@ -750,7 +1880,6 @@ mod enabled {
             .live_frame(&entry.session, options)
             .await
             .map_err(|e| driver_err(&request_id, e))?;
-
         Ok(Json(Envelope::ok(
             request_id,
             LiveFrameData {
@@ -786,11 +1915,11 @@ mod enabled {
 
         let (session, viewport, zdr) = {
             let entry = entry_arc.lock().await;
-            if entry.org_id != claims.org_id {
+            if !caller_owns_live_run(&entry, &claims) {
                 return Err(status_err(
-                    StatusCode::FORBIDDEN,
+                    StatusCode::NOT_FOUND,
                     &request_id,
-                    "run belongs to another org",
+                    "agent run not found",
                 ));
             }
             (
@@ -877,11 +2006,11 @@ mod enabled {
 
         let (session, viewport, zdr) = {
             let entry = entry_arc.lock().await;
-            if entry.org_id != claims.org_id {
+            if !caller_owns_live_run(&entry, &claims) {
                 return Err(status_err(
-                    StatusCode::FORBIDDEN,
+                    StatusCode::NOT_FOUND,
                     &request_id,
-                    "run belongs to another org",
+                    "agent run not found",
                 ));
             }
             (
@@ -1033,6 +2162,16 @@ mod enabled {
     ) -> QuarryResult<BrowserObservation> {
         validate_navigation(&action, state.security.as_ref()).await?;
         let mut entry = entry_arc.lock().await;
+        enforce_step_budget(&entry)
+            .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
+        if let AgentAction::Navigate { url } = &action {
+            if !domain_allowed(url, &entry.constraints.allowed_domains) {
+                return Err(QuarryError::new(
+                    ErrorCode::SecurityBlocked,
+                    "browser navigation is outside the run's allowed domains",
+                ));
+            }
+        }
         let req = AgentActionRequest {
             run_id: entry.run_id.clone(),
             lease_id: entry.lease.lease_id.clone(),
@@ -1040,7 +2179,11 @@ mod enabled {
             instruction,
             constraints: entry.constraints.clone(),
             zdr: entry.zdr,
+            extraction_profile: None,
         };
+        let receipt_step = entry.ctx.step;
+        let receipt_action = req.action.clone();
+        let receipt_run_id = entry.run_id.to_string();
         let runner = ObservationRunner {
             browser: state.agent_driver.clone(),
             artifacts: Some(state.artifacts.clone()),
@@ -1051,9 +2194,45 @@ mod enabled {
             org_id: entry.org_id.clone(),
         };
         let entry_mut: &mut RunEntry = &mut entry;
-        runner
+        let observation = match runner
             .execute(&req, &entry_mut.session, &mut entry_mut.ctx)
             .await
+        {
+            Ok(observation) => {
+                if !entry.zdr.is_active() {
+                    let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
+                        .org_id(entry.org_id.clone())
+                        .actor_id(entry.actor_id.clone())
+                        .complete(receipt_action.clone(), Some(observation.clone()), 0.0);
+                    state.receipts.append(receipt).await?;
+                }
+                observation
+            }
+            Err(error) => {
+                if !entry.zdr.is_active() {
+                    let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
+                        .org_id(entry.org_id.clone())
+                        .actor_id(entry.actor_id.clone())
+                        .fail(receipt_action, &error);
+                    state.receipts.append(receipt).await?;
+                }
+                return Err(error);
+            }
+        };
+        entry.last_observation = Some(observation.clone());
+        if !entry.zdr.is_active() {
+            state
+                .receipts
+                .save_run_checkpoint(checkpoint_for_entry(&entry))
+                .await?;
+        }
+        if !domain_allowed(&observation.url, &entry.constraints.allowed_domains) {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "browser action reached a domain outside the run's allowed domains",
+            ));
+        }
+        Ok(observation)
     }
 
     async fn send_ws_json(
@@ -1083,11 +2262,11 @@ mod enabled {
         };
 
         let entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
                 &request_id,
-                "run belongs to another org",
+                "agent run not found",
             ));
         }
 
@@ -1121,11 +2300,11 @@ mod enabled {
         };
 
         let entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
                 &request_id,
-                "run belongs to another org",
+                "agent run not found",
             ));
         }
 
@@ -1139,6 +2318,17 @@ mod enabled {
             .list_tabs(&entry.session)
             .await
             .map_err(|e| driver_err(&request_id, e))?;
+        record_browser_timeline_event(
+            &state,
+            &entry,
+            BrowserTimelineEventKind::Tab {
+                operation: BrowserTabOperation::Opened,
+                tab_id: Some(tab.tab_id.clone()),
+                active_tab_id: active_browser_tab_id(&tabs),
+            },
+        )
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
 
         Ok(Json(Envelope::ok(request_id, BrowserTabData { tab, tabs })))
     }
@@ -1163,11 +2353,11 @@ mod enabled {
         };
 
         let entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
                 &request_id,
-                "run belongs to another org",
+                "agent run not found",
             ));
         }
 
@@ -1181,6 +2371,17 @@ mod enabled {
             .list_tabs(&entry.session)
             .await
             .map_err(|e| driver_err(&request_id, e))?;
+        record_browser_timeline_event(
+            &state,
+            &entry,
+            BrowserTimelineEventKind::Tab {
+                operation: BrowserTabOperation::Selected,
+                tab_id: Some(tab_id),
+                active_tab_id: active_browser_tab_id(&tabs),
+            },
+        )
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
 
         Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs })))
     }
@@ -1205,11 +2406,11 @@ mod enabled {
         };
 
         let entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
                 &request_id,
-                "run belongs to another org",
+                "agent run not found",
             ));
         }
 
@@ -1223,6 +2424,17 @@ mod enabled {
             .list_tabs(&entry.session)
             .await
             .map_err(|e| driver_err(&request_id, e))?;
+        record_browser_timeline_event(
+            &state,
+            &entry,
+            BrowserTimelineEventKind::Tab {
+                operation: BrowserTabOperation::Closed,
+                tab_id: Some(tab_id),
+                active_tab_id: active_browser_tab_id(&tabs),
+            },
+        )
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
 
         Ok(Json(Envelope::ok(request_id, BrowserTabsData { tabs })))
     }
@@ -1248,11 +2460,11 @@ mod enabled {
         };
 
         let entry = entry_arc.lock().await;
-        if entry.org_id != claims.org_id {
+        if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
                 &request_id,
-                "run belongs to another org",
+                "agent run not found",
             ));
         }
 
@@ -1265,6 +2477,18 @@ mod enabled {
             )
             .await
             .map_err(|e| driver_err(&request_id, e))?;
+        if let Some(last) = events.last() {
+            record_browser_timeline_event(
+                &state,
+                &entry,
+                BrowserTimelineEventKind::Devtools {
+                    event_count: events.len().min(u32::MAX as usize) as u32,
+                    last_sequence: last.sequence,
+                },
+            )
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        }
 
         Ok(Json(Envelope::ok(
             request_id,
@@ -1298,13 +2522,42 @@ mod enabled {
         // Org check before mutating shared state.
         {
             let entry = entry_arc.lock().await;
-            if entry.org_id != claims.org_id {
+            if !caller_owns_live_run(&entry, &claims) {
                 return Err(status_err(
-                    StatusCode::FORBIDDEN,
+                    StatusCode::NOT_FOUND,
                     &request_id,
-                    "run belongs to another org",
+                    "agent run not found",
                 ));
             }
+        }
+
+        let close_event = {
+            let entry = entry_arc.lock().await;
+            (!entry.zdr.is_active()).then(|| {
+                BrowserTimelineEvent::new(
+                    entry.org_id.clone(),
+                    entry.actor_id.clone(),
+                    entry.run_id.to_string(),
+                    BrowserTimelineEventKind::Lifecycle {
+                        state: BrowserTimelineLifecycle::Closed,
+                    },
+                )
+            })
+        };
+        if let Some(event) = close_event {
+            let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
+                status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found")
+            })?;
+            state
+                .receipts
+                .append_browser_timeline_event(event)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            state
+                .receipts
+                .close_run_checkpoint(&claims.org_id, &parsed_run_id)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
         }
 
         state
@@ -1348,6 +2601,36 @@ mod enabled {
         Router::new()
             .route("/v1/agent/runs", post(start_run))
             .route("/v1/agent/runs/:run_id/step", post(step))
+            // `interact` is an alias for one governed action, preserving Quarry's one-step
+            // receipt and approval semantics instead of adding an unbounded
+            // macro executor.
+            .route("/v1/agent/runs/:run_id/interact", post(step))
+            .route(
+                "/v1/agent/runs/:run_id/browser-session",
+                get(browser_session),
+            )
+            .route(
+                "/v1/agent/runs/:run_id/browser-session/control",
+                post(set_browser_session_control),
+            )
+            .route(
+                "/v1/agent/runs/:run_id/browser-session/timeline",
+                get(browser_session_timeline),
+            )
+            .route("/v1/agent/runs/:run_id/receipts", get(list_receipts))
+            .route(
+                "/v1/agent/runs/:run_id/procedure",
+                post(compile_run_procedure),
+            )
+            .route("/v1/agent/procedures/replay-check", post(replay_check))
+            .route(
+                "/v1/agent/procedures/quality-check",
+                post(procedure_quality_check),
+            )
+            .route(
+                "/v1/agent/procedures/impact-check",
+                post(procedure_impact_check),
+            )
             .route("/v1/agent/runs/:run_id/tabs", get(list_tabs).post(new_tab))
             .route(
                 "/v1/agent/runs/:run_id/tabs/:tab_id/select",

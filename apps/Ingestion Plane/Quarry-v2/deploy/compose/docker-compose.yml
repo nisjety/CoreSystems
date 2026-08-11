@@ -68,6 +68,16 @@ services:
       args: *build-metadata
     environment:
       QUARRY_EDGE__PORT: "8082"
+      # The standalone stack includes Postgres, so keep crawl frontier,
+      # profiles, checkpoints, and job history durable even across an edge
+      # restart. In-memory backends remain available for explicitly local
+      # unit-test processes outside this compose file.
+      ENVIRONMENT: "development"
+      QUARRY_EDGE__DATABASE_URL: "postgres://quarry:${QUARRY_POSTGRES_PASSWORD:?QUARRY_POSTGRES_PASSWORD is required}@postgres:5432/quarry"
+      QUARRY_EDGE__PROFILE_STORE_KIND: "postgres"
+      QUARRY_EDGE__DURABLE_EVENT_HISTORY: "1"
+      QUARRY_EDGE__ARTIFACT_BACKEND: "filesystem"
+      QUARRY_EDGE__ARTIFACT_ROOT: "/var/lib/quarry/artifacts"
       QUARRY_EDGE__CONTROL_BASE_URL: "http://quarry-control:8081"
       QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:-}
@@ -99,6 +109,8 @@ services:
       QUARRY_EDGE__RENDERED_BRANDING_VISUAL_ENABLED: "1"
       QUARRY_EDGE__VISUAL_MAX_REGIONS: "32"
     ports: ["127.0.0.1:8080:8082"]
+    volumes:
+      - quarry_artifacts:/var/lib/quarry/artifacts
     depends_on:
       quarry-control:
         condition: service_healthy
@@ -162,6 +174,7 @@ services:
     environment:
       TEMPORAL_ADDR: "temporal:7233"
       RUNTIME_BASE_URL: "http://quarry-edge:8082"
+      EDGE_BASE_URL: "http://quarry-edge:8082"
       CONTROL_BASE_URL: "http://quarry-control:8081"
       # Must match QUARRY_CONTROL_API_KEY on quarry-control. The
       # orchestrator sends this as the Authorization: Bearer header
@@ -169,6 +182,7 @@ services:
       CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       # Sent as Bearer on /v1/internal/run_page calls to edge.
       RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      EDGE_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
     depends_on:
       temporal:
@@ -213,3 +227,4 @@ services:
 
 volumes:
   quarry_pg:
+  quarry_artifacts:

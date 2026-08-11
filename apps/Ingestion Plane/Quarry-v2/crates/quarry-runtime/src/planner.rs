@@ -68,6 +68,12 @@ mod tests {
             console_summary: vec![],
             network_summary: vec![],
             policy_denials: vec![],
+            action_outcome: quarry_core::contracts::ActionOutcome::default(),
+            observation_delta: None,
+            challenge: None,
+            extraction_profile: None,
+            extraction_result: None,
+            proof_bundle: None,
             observed_at: Utc::now(),
         }
     }
@@ -85,6 +91,7 @@ mod tests {
                 max_cost_usd: None,
             },
             zdr: ZdrMode::Off,
+            extraction_profile: None,
         }
     }
 

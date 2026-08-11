@@ -1,6 +1,6 @@
 {
   "challenger_label": "quarry",
-  "baseline_label": "firecrawl",
+  "baseline_label": "baseline",
   "fixtures": [
     {
       "id": "article_basic",

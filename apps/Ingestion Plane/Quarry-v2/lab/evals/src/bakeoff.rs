@@ -1,30 +1,26 @@
 //! quarry-bakeoff — multi-engine scoreboard comparison.
 //!
-//! Reads two scoreboard JSON files (Quarry vs. baseline — Firecrawl/V1/etc.)
+//! Reads two scoreboard JSON files (Quarry vs. a baseline).
 //! and produces:
 //!
 //! - `bakeoff.json` — per-fixture wins/losses/ties
 //! - `bakeoff.md` — human-readable summary table
 //!
-//! Baselines are computed by running an external adapter and writing the
-//! same `Scoreboard` JSON shape `quarry-eval` produces. Adapter examples:
+//! Baselines use the same `Scoreboard` JSON shape `quarry-eval` produces.
+//! For example:
 //!
 //! ```bash
-//! # Firecrawl baseline (pseudo)
-//! firecrawl-eval --fixtures lab/evals/fixtures > firecrawl-scoreboard.json
-//!
-//! # Quarry V1 baseline (pseudo)
 //! quarry-v1-eval --fixtures lab/evals/fixtures > quarry-v1-scoreboard.json
 //!
 //! # Compare
 //! cargo run --bin quarry-bakeoff -- \
 //!     --challenger lab/evals/scoreboard.json \
-//!     --baseline firecrawl-scoreboard.json \
-//!     --label firecrawl
+//!     --baseline quarry-v1-scoreboard.json \
+//!     --label quarry-v1
 //! ```
 //!
 //! When the baseline file is missing, the bakeoff still writes a "challenger
-//! solo" report so CI doesn't fail just because nobody ran Firecrawl yet.
+//! solo" report so CI can run without an optional comparator.
 
 // scaffolding: dev-tool report fields parsed from JSON but not all read yet.
 #![allow(dead_code)]
@@ -171,7 +167,7 @@ fn print_help() {
          \n\
          Options:\n\
            --challenger <path>      Path to Quarry scoreboard.json (required)\n\
-           --baseline <path>        Path to baseline scoreboard.json (e.g. firecrawl)\n\
+           --baseline <path>        Path to baseline scoreboard.json\n\
            --label <name>           Human-readable label for the baseline (default: 'baseline')\n\
            --challenger-label <n>   Label for challenger (default: 'quarry')\n\
            --out <dir>              Output directory (default: alongside challenger)"

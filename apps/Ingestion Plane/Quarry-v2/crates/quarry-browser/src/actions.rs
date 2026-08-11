@@ -1,4 +1,4 @@
-//! Action sequencing. Inspired by Firecrawl/ScrapingBee `actions` arrays.
+//! Action sequencing for browser automation.
 
 use serde::{Deserialize, Serialize};
 

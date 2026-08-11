@@ -2,16 +2,18 @@
 
 Cycle 28 / cluster #12.
 
-> **Auto-generated.** Edit the suites in `crates/quarry-core/src/benchmark.rs::builtin_suites()`. Re-run via `cargo run -p quarry-evals -- scoreboard` (cycle 29 helper).
+> **Auto-generated.** Edit the suites in `crates/quarry-core/src/benchmark.rs::builtin_suites()`.
+> The local dry-run layout is emitted with `cargo run -p quarry-evals --bin
+> quarry-eval -- scoreboard`.
 
 ## Latest run
 
-| Suite                         | Bucket           | Quarry v2 | Trafilatura | Mozilla R. | Quarry v1 | Firecrawl SH | Firecrawl Cloud |
-| ----------------------------- | ---------------- | --------- | ----------- | ---------- | --------- | ------------ | --------------- |
-| `bench-static-html`           | static-html      | _pending_ | _pending_   | _pending_  | _pending_ | _–_          | _–_             |
-| `bench-js-heavy`              | js-heavy         | _pending_ | _–_         | _–_        | _–_       | _pending_    | _pending_       |
-| `bench-bot-sensitive`         | bot-sensitive    | _pending_ | _–_         | _–_        | _pending_ | _–_          | _–_             |
-| `bench-change-tracking-gold`  | change-tracking  | _pending_ | _–_         | _–_        | _–_       | _–_          | _–_             |
+| Suite                         | Bucket           | Quarry v2 | Trafilatura | Mozilla R. | Quarry v1 |
+| ----------------------------- | ---------------- | --------- | ----------- | ---------- | --------- |
+| `bench-static-html`           | static-html      | _pending_ | _pending_   | _pending_  | _pending_ |
+| `bench-js-heavy`              | js-heavy         | _pending_ | _–_         | _–_        | _–_       |
+| `bench-bot-sensitive`         | bot-sensitive    | _pending_ | _–_         | _–_        | _pending_ |
+| `bench-change-tracking-gold`  | change-tracking  | _pending_ | _–_         | _–_        | _–_       |
 
 `_pending_` = corpus + harness defined but a live run hasn't been
 checked in. `_–_` = baseline doesn't participate in this suite.
@@ -56,12 +58,12 @@ Delta on a lower-better metric uses the same bands inverted.
 1. Add a `BenchmarkSuite { … }` to `builtin_suites()` in
    `crates/quarry-core/src/benchmark.rs`.
 2. Implement the score computation in `lab/evals` (cycle 29 follow-up).
-3. Run the suite locally: `cargo run -p quarry-evals -- run --suite <id>`.
+3. Run the suite locally: `cargo run -p quarry-evals --bin quarry-eval -- scoreboard`.
 4. Submit a scoreboard PR with the recorded `ScorecardEntry`.
 
-## Cycle 29 pending
+## Remaining benchmark work
 
-- `lab/evals` extension: `run_benchmark_suite`, `compute_benchmark_score`,
-  `publish_internal_scorecard`, `compare_release_benchmarks`.
-- CI job that runs every suite on every PR + main merge.
+- Add the Spider-rs adapter after its licence, isolation, and security review.
+- Implement the remaining local baselines and fixture/gold scoring, then run
+  the credential-gated external jobs from a protected release workflow.
 - This file becomes auto-generated from the latest scorecard rows.

@@ -255,12 +255,26 @@ func MountBenchmarks(r chi.Router) {
 // MountRequestQueues exposes a list view over the Rust-owned queue
 // tables. When the Postgres pool isn't shared (in-memory dev mode),
 // returns an empty page so the contract holds.
-func MountRequestQueues(r chi.Router, _ store.DB) {
+func MountRequestQueues(r chi.Router, db store.DB) {
 	r.Get("/v1/request-queues", func(w http.ResponseWriter, r *http.Request) {
-		// Future: SELECT from quarry_request_queues WHERE org_id =
-		// $org. The Rust runtime currently owns the schema and the
-		// pool; cycle 24 will surface it through the Go db interface.
-		emptyPage(w, r)
+		orgID := strings.TrimSpace(r.URL.Query().Get("org_id"))
+		reader, ok := db.(store.RequestQueueReader)
+		if !ok {
+			emptyPage(w, r)
+			return
+		}
+		limit, _ := strconv.Atoi(pickQuery(r, "limit", "50"))
+		cursor := r.URL.Query().Get("cursor")
+		items, next, err := reader.ListRequestQueues(orgID, limit, cursor)
+		if err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "request queue read failed", nil)
+			return
+		}
+		var nextPtr *string
+		if next != "" {
+			nextPtr = &next
+		}
+		writePage(w, r, items, nil, nextPtr)
 	})
 }
 

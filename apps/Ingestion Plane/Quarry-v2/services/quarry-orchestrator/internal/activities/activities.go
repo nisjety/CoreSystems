@@ -48,8 +48,9 @@ type Config struct {
 
 // Activities wires HTTP calls into Temporal activity methods.
 type Activities struct {
-	cfg  Config
-	http *http.Client
+	cfg             Config
+	http            *http.Client
+	DurableFrontier bool
 }
 
 // New returns an Activities instance with a configured HTTP client.
@@ -59,9 +60,103 @@ func New(cfg Config) *Activities {
 		timeout = 2 * time.Minute
 	}
 	return &Activities{
-		cfg:  cfg,
-		http: &http.Client{Timeout: timeout},
+		cfg:             cfg,
+		http:            &http.Client{Timeout: timeout},
+		DurableFrontier: cfg.EdgeBaseURL != "" && cfg.EdgeAuthToken != "" && cfg.EdgeRunSecret != "",
 	}
+}
+
+// FrontierEnqueueInput/FrontierPopInput are the narrow Go/Temporal wire
+// bridge to Quarry's Rust-owned PostgresRequestQueue. Depth lives in payload
+// so the queue remains generic and the workflow can resume after a worker
+// restart without retaining a frontier slice in Temporal history.
+type FrontierEnqueueInput struct {
+	Queue     string `json:"queue"`
+	OrgID     string `json:"org_id"`
+	RequestID string `json:"request_id"`
+	URL       string `json:"url"`
+	Depth     uint32 `json:"depth"`
+}
+
+type FrontierPopInput struct {
+	Queue string `json:"queue"`
+	OrgID string `json:"org_id"`
+}
+
+type FrontierQueueItem struct {
+	RequestID string         `json:"request_id"`
+	URL       string         `json:"url"`
+	Payload   map[string]any `json:"payload"`
+	Attempt   uint32         `json:"attempt"`
+}
+
+type FrontierAckInput struct {
+	Queue     string `json:"queue"`
+	OrgID     string `json:"org_id"`
+	RequestID string `json:"request_id"`
+}
+
+func (a *Activities) FrontierEnqueue(ctx context.Context, in FrontierEnqueueInput) error {
+	body, err := json.Marshal(map[string]any{
+		"org_id": in.OrgID, "request_id": in.RequestID, "url": in.URL,
+		"priority": "default", "payload": map[string]any{"depth": in.Depth},
+	})
+	if err != nil {
+		return errs.New(errs.CategoryValidation, "activities.FrontierEnqueue", err).Temporal()
+	}
+	return a.frontierCall(ctx, http.MethodPost, "/v1/internal/queues/"+in.Queue+"/enqueue", in.OrgID, in.Queue, body, nil)
+}
+
+func (a *Activities) FrontierPop(ctx context.Context, in FrontierPopInput) (*FrontierQueueItem, error) {
+	body, err := json.Marshal(map[string]string{"org_id": in.OrgID})
+	if err != nil {
+		return nil, errs.New(errs.CategoryValidation, "activities.FrontierPop", err).Temporal()
+	}
+	var envelope quarrycontracts.RESTEnvelope[*FrontierQueueItem]
+	if err := a.frontierCall(ctx, http.MethodPost, "/v1/internal/queues/"+in.Queue+"/pop", in.OrgID, in.Queue, body, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Data == nil || *envelope.Data == nil {
+		return nil, nil
+	}
+	return *envelope.Data, nil
+}
+
+func (a *Activities) FrontierAck(ctx context.Context, in FrontierAckInput) error {
+	body, err := json.Marshal(map[string]string{"org_id": in.OrgID, "request_id": in.RequestID})
+	if err != nil {
+		return errs.New(errs.CategoryValidation, "activities.FrontierAck", err).Temporal()
+	}
+	return a.frontierCall(ctx, http.MethodPut, "/v1/internal/queues/"+in.Queue+"/ack", in.OrgID, in.Queue, body, nil)
+}
+
+func (a *Activities) frontierCall(ctx context.Context, method, path, orgID, queue string, body []byte, out any) error {
+	const op = "activities.FrontierCall"
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(a.cfg.EdgeBaseURL, "/")+path, bytes.NewReader(body))
+	if err != nil {
+		return errs.New(errs.CategoryValidation, op, err).Temporal()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Quarry-Queue-Sig", runBindingSig(a.cfg.EdgeRunSecret, orgID, queue))
+	setAuth(req, a.cfg.EdgeAuthToken)
+	resp, err := a.http.Do(req)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
+		return errs.New(errs.CategoryNetwork, op, err).Temporal()
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errs.FromHTTPStatus(op, resp.StatusCode, respBody).Temporal()
+	}
+	if out != nil {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return errs.New(errs.CategoryValidation, op, fmt.Errorf("decode frontier response: %w", err)).Temporal()
+		}
+	}
+	return nil
 }
 
 // RunPageInput is the input for a single page execution.

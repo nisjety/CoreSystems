@@ -448,6 +448,7 @@ impl Planner for ModelPlanePlanner {
                 instruction: None,
                 constraints: self.constraints.clone(),
                 zdr: self.zdr,
+                extraction_profile: None,
             })
             .collect();
 
@@ -479,6 +480,12 @@ mod tests {
             console_summary: vec![],
             network_summary: vec![],
             policy_denials: vec![],
+            action_outcome: quarry_core::contracts::ActionOutcome::default(),
+            observation_delta: None,
+            challenge: None,
+            extraction_profile: None,
+            extraction_result: None,
+            proof_bundle: None,
             observed_at: Utc::now(),
         }
     }
