@@ -84,8 +84,9 @@ as appropriate — no silent defaults.
 
 ## 7. Generation
 
-- `buf generate` runs `buf.gen.yaml` plugins: Go gRPC, Go proto, Rust tonic, TS connect.
-- Generated artifacts are **not** checked in for Rust (built via `prost-build` at crate build time).
+- `buf generate` runs `buf.gen.yaml` plugins: Go gRPC, Go proto, TS connect.
+- Rust is generated separately: `mp-contracts/build.rs` runs `tonic_build`/`prost-build`
+  directly at crate build time. Generated artifacts are **not** checked in for Rust.
 - Go generated code is checked in under `go/internal/genproto/`.
 - TS clients are built on demand in the frontend plane.
 

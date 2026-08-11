@@ -2,15 +2,12 @@ version: v2
 managed:
   enabled: true
 plugins:
-  # Rust — tonic + prost
-  - remote: buf.build/community/neoeinstein-prost
-    out: ../rust/crates/mp-contracts/src/gen
-    opt:
-      - compile_well_known_types=false
-  - remote: buf.build/community/neoeinstein-tonic
-    out: ../rust/crates/mp-contracts/src/gen
-    opt:
-      - compile_well_known_types=false
+  # Rust is intentionally NOT generated here: mp-contracts/build.rs runs
+  # tonic_build directly against this proto/ tree at `cargo build` time and
+  # includes the output via `tonic::include_proto!` (OUT_DIR), so Rust bindings
+  # are always fresh and are never checked in (see docs/phase-0/proto-contracts.md
+  # §7). A prior checked-in copy under mp-contracts/src/gen went stale and was
+  # removed — do not re-add a Rust plugin/out here.
 
   # Go — protoc-gen-go + grpc
   - remote: buf.build/protocolbuffers/go
