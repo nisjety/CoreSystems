@@ -18,6 +18,23 @@
 //! Quarry stores `browser_id` in the session inner state. Production wiring
 //! prefers the CDP URL directly via `chromiumoxide` when available; this
 //! driver is a REST-only fallback that mirrors the BrowserlessDriver shape.
+//!
+//! ## SSRF / network-interception coverage
+//!
+//! `goto()` calls `guard_navigation_target` before every navigation (see
+//! `crate::navigation`), the same entry-point check every driver in this
+//! crate uses. Kernel exposes a `chrome_policy` field that accepts standard
+//! Chrome Enterprise policy keys including `URLBlocklist`/`URLAllowlist`,
+//! but Kernel's own docs state this gates top-level navigation only and does
+//! not block resources or requests a permitted page loads from other
+//! origins — the same scope `guard_navigation_target` already covers, more
+//! precisely (DNS-resolution-based, not string-pattern-based). Wiring it in
+//! would therefore be redundant, not gap-closing, so it isn't used here.
+//! Kernel also offers an opt-in `network` telemetry category (request/
+//! response/redirect events with full URLs) that could detect, but not
+//! prevent, a session reaching a private address — a possible future
+//! monitoring addition, not a request-blocking guard. See `docs/GAP.md`
+//! §12.1 for the full per-provider capability audit.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -32,6 +49,7 @@ use tokio::sync::Mutex;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::BrowserLease;
 
+use crate::navigation::guard_navigation_target;
 use crate::session::{Cookie, ProfileStore, SessionSnapshot};
 use crate::{BrowserDriver, BrowserSession, SessionInner};
 
@@ -546,6 +564,7 @@ impl BrowserDriver for KernelDriver {
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        guard_navigation_target(url).await?;
         let id = self.ensure_browser(&session.lease).await?;
         self.post_bytes(&id, "goto", json!({ "url": url })).await?;
         self.state.lock().await.current_url = Some(url.to_string());
@@ -1133,5 +1152,36 @@ mod tests {
     fn opt_string_returns_none_for_empty() {
         assert_eq!(opt_string(""), None);
         assert_eq!(opt_string("/"), Some("/".to_string()));
+    }
+
+    #[tokio::test]
+    async fn goto_rejects_private_target_without_ever_calling_kernel() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wpath("/v1/browsers"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "browser_id": "b_blocked",
+                "cdp_url": "wss://x",
+            })))
+            .mount(&server)
+            .await;
+        // No mock is registered to succeed here — if guard_navigation_target
+        // didn't run first, this would 404 instead of the wiremock `expect(0)`
+        // panic-on-drop, so this also proves the HTTP call never fires.
+        Mock::given(method("POST"))
+            .and(wpath("/v1/browsers/b_blocked/goto"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let driver = KernelDriver::new(KernelConfig::new(server.uri(), "k"));
+        let session = driver.acquire(&make_lease()).await.unwrap();
+
+        let err = driver
+            .goto(&session, "http://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
     }
 }

@@ -51,6 +51,14 @@ pub struct FetchHints {
     /// Privacy policy for this fetch. Drivers consult this before using any
     /// third-party proxy, browser, unblocker, or managed provider.
     pub privacy: PrivacyPolicy,
+    /// Pre-resolved, validated address set for the request's target host
+    /// (see `crate::dns_guard::resolve_public_url`). When present, a driver
+    /// that supports it should pin its connection to these addresses rather
+    /// than re-resolving DNS, closing the gap between the SSRF guard's check
+    /// and the actual connection. `None` when the caller didn't preflight
+    /// (or `allow_private_hosts()` made preflighting a no-op) — drivers must
+    /// treat that the same as before this field existed.
+    pub resolved_target: Option<crate::dns_guard::ResolvedTarget>,
 }
 
 /// Browser-only render hints. Static fetch drivers ignore these.

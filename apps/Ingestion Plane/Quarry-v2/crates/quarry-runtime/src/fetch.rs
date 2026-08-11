@@ -10,6 +10,7 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use serde_json::json;
 
+use crate::dns_guard::ResolvedTarget;
 use crate::driver::{Driver, FetchHints};
 use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
@@ -35,6 +36,11 @@ pub struct StaticDriver {
     /// client handles per-request reuse.
     proxy_clients: HashMap<String, reqwest::Client>,
     egress: EgressBroker,
+    /// Retained (alongside `user_agent` below) so a pinned, single-purpose
+    /// client can be built on demand for direct-egress requests carrying a
+    /// `resolved_target` hint — see `client_for_decision`.
+    timeout: Duration,
+    user_agent: String,
 }
 
 impl StaticDriver {
@@ -63,10 +69,10 @@ impl StaticDriver {
         pool: ProxyPool,
         proxy_processor_id: Option<String>,
     ) -> QuarryResult<Self> {
-        let client = build_client(timeout, user_agent, None)?;
+        let client = build_client(timeout, user_agent, None, None)?;
         let mut proxy_clients = HashMap::with_capacity(pool.len());
         for entry in pool.entries() {
-            let proxied = build_client(timeout, user_agent, Some(entry))?;
+            let proxied = build_client(timeout, user_agent, Some(entry), None)?;
             proxy_clients.insert(entry.uri.clone(), proxied);
         }
         if !pool.is_empty() {
@@ -79,18 +85,37 @@ impl StaticDriver {
             client,
             proxy_clients,
             egress: EgressBroker::new(pool, proxy_processor_id),
+            timeout,
+            user_agent: user_agent.to_string(),
         })
     }
 
-    fn client_for_decision(&self, decision: &EgressDecision) -> QuarryResult<&reqwest::Client> {
-        match &decision.identity {
-            EgressIdentity::Direct => Ok(&self.client),
-            EgressIdentity::Proxy { uri, .. } => self.proxy_clients.get(uri).ok_or_else(|| {
-                QuarryError::new(
-                    ErrorCode::Internal,
-                    format!("egress proxy client missing for configured proxy: {uri}"),
-                )
-            }),
+    /// Resolve which client should carry this request. Direct egress with a
+    /// `resolved_target` hint gets a fresh, single-purpose client pinned to
+    /// those exact addresses via `resolve_to_addrs` — reqwest has no API to
+    /// add a resolve override to an already-built `Client`, so the pooled
+    /// `self.client` can't be reused for this case. Proxied egress is never
+    /// pinned: with a forwarding proxy, the target host is resolved by the
+    /// proxy server, not locally, so a local resolve override would have no
+    /// effect on where the connection actually lands.
+    fn client_for_decision(
+        &self,
+        decision: &EgressDecision,
+        resolved_target: Option<&ResolvedTarget>,
+    ) -> QuarryResult<reqwest::Client> {
+        match (&decision.identity, resolved_target) {
+            (EgressIdentity::Direct, Some(target)) => {
+                build_client(self.timeout, &self.user_agent, None, Some(target))
+            }
+            (EgressIdentity::Direct, None) => Ok(self.client.clone()),
+            (EgressIdentity::Proxy { uri, .. }, _) => {
+                self.proxy_clients.get(uri).cloned().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("egress proxy client missing for configured proxy: {uri}"),
+                    )
+                })
+            }
         }
     }
 
@@ -105,8 +130,8 @@ impl StaticDriver {
         let plan = self.egress.plan(hints, url)?;
         let mut attempts = Vec::with_capacity(plan.len());
         for (idx, decision) in plan.iter().enumerate() {
-            let client = self.client_for_decision(decision)?;
-            match self.send_once(client, url, hints).await {
+            let client = self.client_for_decision(decision, hints.resolved_target.as_ref())?;
+            match self.send_once(&client, url, hints).await {
                 Ok(resp) => {
                     self.egress
                         .mark_http_status(&host, &decision.identity, resp.status);
@@ -297,6 +322,7 @@ fn build_client(
     timeout: Duration,
     user_agent: &str,
     proxy: Option<&ProxyEntry>,
+    resolve_override: Option<&ResolvedTarget>,
 ) -> QuarryResult<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
@@ -315,6 +341,12 @@ fn build_client(
             )
         })?;
         builder = builder.proxy(parsed);
+    }
+    if let Some(target) = resolve_override {
+        // Pin this client's connection for `target.host` to the exact
+        // addresses the SSRF guard already validated, instead of letting
+        // reqwest perform its own independent DNS lookup at connect time.
+        builder = builder.resolve_to_addrs(&target.host, &target.addrs);
     }
     builder
         .build()
@@ -428,5 +460,54 @@ mod tests {
             .as_ref()
             .and_then(|v| v.get("egress_attempts"))
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn resolved_target_pins_direct_egress_to_the_exact_resolved_address() {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("pinned"))
+            .mount(&server)
+            .await;
+
+        // ".invalid" is reserved by RFC 2606 to never resolve via real DNS —
+        // if this fetch reaches the mock server anyway, the only possible
+        // explanation is that `resolved_target` pinned the connection to it,
+        // since ordinary DNS resolution of this host cannot succeed.
+        let host = "quarry-dns-pin-test.invalid";
+        let url: Url = format!("http://{host}:{}/", server.address().port())
+            .parse()
+            .unwrap();
+
+        let driver = StaticDriver::new(Duration::from_secs(5), "QuarryTest/1.0").unwrap();
+        let hints = FetchHints {
+            resolved_target: Some(ResolvedTarget {
+                host: host.to_string(),
+                addrs: vec![*server.address()],
+            }),
+            ..FetchHints::default()
+        };
+
+        let resp = driver.fetch_conditional(&url, &hints).await.unwrap();
+
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"pinned");
+    }
+
+    #[tokio::test]
+    async fn no_resolved_target_falls_back_to_pooled_client_unpinned() {
+        // Without a resolved_target hint, an unresolvable ".invalid" host
+        // must fail with a real DNS/connect error — proving the previous
+        // test's success came from pinning, not from some other bypass.
+        let host = "quarry-dns-pin-test-unpinned.invalid";
+        let url: Url = format!("http://{host}/").parse().unwrap();
+
+        let driver = StaticDriver::new(Duration::from_secs(5), "QuarryTest/1.0").unwrap();
+        let err = driver
+            .fetch_conditional(&url, &FetchHints::default())
+            .await
+            .unwrap_err();
+
+        assert_ne!(err.code, ErrorCode::SecurityBlocked);
     }
 }
