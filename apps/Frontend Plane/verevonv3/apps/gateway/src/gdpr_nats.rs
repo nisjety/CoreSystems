@@ -55,7 +55,19 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 
 use crate::config::AppState;
-use crate::domains::chat::history::{purge_org_history, purge_user_history, PurgeScope};
+// This consumer originally purged the BFF's own chat-history copy. That store
+// no longer exists — Session Core / Model Gateway is the sole conversation
+// owner and this gateway proxies reads without retaining them — so there is no
+// transcript here to erase.
+//
+// What this plane DOES still retain for a subject is the cached session
+// context (`session-context`, keyed by user id and active org) and the org's
+// cached ZDR posture. Those are what an erasure has to drop here, so that a
+// re-read after erasure cannot be served identity data for a subject who is
+// gone. `session-validation` is deliberately not touched: it is keyed by a
+// hash of the cookie, so it cannot be addressed by subject at all, and it
+// carries a short TTL.
+use crate::upstream::invalidate_session_context_cache;
 
 pub(crate) const STREAM_NAME: &str = "AQENCIA_CONTROLPLANE";
 pub(crate) const SUBJECT: &str = "verevon.gdpr.erasure.requested";
@@ -294,20 +306,28 @@ fn classify(payload: &[u8]) -> Result<Action, String> {
 async fn handle_message(state: &AppState, payload: &[u8]) -> Outcome {
     match classify(payload) {
         Ok(Action::PurgeUser { org_id, user_id }) => {
-            let threads =
-                purge_user_history(state, &org_id, &user_id, PurgeScope::Everything).await;
+            invalidate_session_context_cache(state, &user_id, Some(&org_id)).await;
             Outcome::Purged {
                 scope: "user",
                 users: 1,
-                threads,
+                threads: 0,
             }
         }
         Ok(Action::PurgeOrg { org_id }) => {
-            let (users, threads) = purge_org_history(state, &org_id).await;
+            // Only the org-level entry is addressable here. Per-user
+            // session-context keys would need a roster to enumerate, and this
+            // plane no longer keeps one — it stores no per-user content to
+            // justify it. Those entries are short-TTL identity cache, not
+            // retained subject data, and each is dropped on its own user
+            // erasure above.
+            state
+                .cache
+                .delete(&crate::cache::cache_key("org-zdr", &[org_id.as_str()]))
+                .await;
             Outcome::Purged {
                 scope: "organization",
-                users,
-                threads,
+                users: 0,
+                threads: 0,
             }
         }
         Ok(Action::Skip) => Outcome::Skipped,

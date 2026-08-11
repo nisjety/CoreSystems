@@ -132,29 +132,14 @@ async fn erase(
     // owning planes run. session-core deletes the messages, events and threads
     // it owns and reports success, while a complete copy of the same turns kept
     // living here for up to 90 days, readable through the transcript endpoint.
-    // An erasure attestation that is inaccurate for its retention window is not
-    // an erasure, so purge the local copy as part of the same operation.
-    //
-    // AFTER the upstream call and only on success: erasure is the irreversible
-    // step, and dropping the local copy for a request user-core rejected (not
-    // confirmed, not permitted, unreachable) would destroy data on a no-op.
-    // Markers go too — `PurgeScope::Everything` — because a ZDR marker is itself
-    // a record that this person held a conversation under that id, and there is
-    // no longer a subject for it to protect.
-    let (status, _) = &response;
-    if status.is_success() {
-        let removed = crate::domains::chat::history::purge_user_history(
-            &state,
-            &org_id,
-            &user.user_id,
-            crate::domains::chat::history::PurgeScope::Everything,
-        )
-        .await;
-        tracing::info!(
-            removed,
-            "erasure: purged the Frontend Plane chat-history copy for the subject"
-        );
-    }
+    // No local purge step here, deliberately. The BFF used to keep its own
+    // chat-history copy (a per-user index plus transcripts in Dragonfly), and
+    // erasure had to walk that index because `cache_key` hashes its keys so
+    // there is no wildcard SCAN. That store is GONE: Session Core / Model
+    // Gateway is now the sole conversation owner and this gateway proxies
+    // reads without retaining them, so the attestation is accurate for this
+    // plane's retention window without any deletion of its own. Not storing
+    // beats purging — there is no window in which a copy exists to leak.
     response.into_response()
 }
 

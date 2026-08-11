@@ -39,11 +39,19 @@ pub struct FetchHints {
     /// Previous response's `Last-Modified`. Sent as
     /// `If-Modified-Since` when `If-None-Match` is absent.
     pub if_modified_since: Option<String>,
+    /// Pre-resolved, validated address set for the request's target host: the
     /// DNS addresses resolved and checked during the request security
-    /// preflight. Direct static and TLS-profile fetch use this to connect
-    /// without performing a second, attacker-controlled hostname lookup.
-    /// Browser and proxy egress need their own connection-level pinning
-    /// contracts and must not be described as covered by this hint.
+    /// preflight (see `crate::dns_guard::resolve_public_url`).
+    ///
+    /// Direct static and TLS-profile fetch pin their connection to these
+    /// addresses rather than performing a second, attacker-controlled lookup,
+    /// which closes the gap between the SSRF guard's check and the actual
+    /// connection. Browser and proxy egress need their own connection-level
+    /// pinning contracts and must NOT be described as covered by this hint.
+    ///
+    /// `None` when the caller didn't preflight (or `allow_private_hosts()`
+    /// made preflighting a no-op) — drivers must treat that the same as
+    /// before this field existed.
     pub resolved_target: Option<crate::dns_guard::ResolvedTarget>,
     /// Render hints. Only browser drivers honour these; static and
     /// TLS-profile drivers ignore them. Plumbed from the public
@@ -57,14 +65,6 @@ pub struct FetchHints {
     /// Privacy policy for this fetch. Drivers consult this before using any
     /// third-party proxy, browser, unblocker, or managed provider.
     pub privacy: PrivacyPolicy,
-    /// Pre-resolved, validated address set for the request's target host
-    /// (see `crate::dns_guard::resolve_public_url`). When present, a driver
-    /// that supports it should pin its connection to these addresses rather
-    /// than re-resolving DNS, closing the gap between the SSRF guard's check
-    /// and the actual connection. `None` when the caller didn't preflight
-    /// (or `allow_private_hosts()` made preflighting a no-op) — drivers must
-    /// treat that the same as before this field existed.
-    pub resolved_target: Option<crate::dns_guard::ResolvedTarget>,
 }
 
 /// Browser-only render hints. Static fetch drivers ignore these.

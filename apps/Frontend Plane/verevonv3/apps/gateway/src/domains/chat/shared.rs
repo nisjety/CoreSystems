@@ -93,7 +93,11 @@ pub(crate) async fn record_zdr_thread(
     else {
         return;
     };
-    super::history::mark_thread_zdr(state, org_id, &user.user_id, thread_id).await;
+    // The durable ZDR marker this used to write guarded the BFF's OWN save
+    // path, which no longer exists — this gateway retains no transcript to
+    // suppress. The posture still travels with the request to the Model
+    // Plane, which owns the conversation and the retention decision.
+    let _ = thread_id;
 }
 
 pub(crate) fn with_identity_context(mut body: Value, user_name: &str, org_name: &str) -> Value {
