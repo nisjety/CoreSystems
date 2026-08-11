@@ -4,6 +4,7 @@
 //! emulation controls. This crate keeps that dependency behind a narrow adapter
 //! so runtime code can keep using Quarry-native request/response types.
 
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -16,6 +17,7 @@ mod redirect_policy;
 pub use redirect_policy::QuarryRedirectPolicy;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use quarry_security::heur::resolve_guard;
 use serde::{Deserialize, Serialize};
 use url::Url;
 use wreq::{
@@ -202,12 +204,52 @@ pub struct TlsFetchResponse {
     pub duration_ms: u64,
 }
 
+/// Vetted target addresses for one TLS-profile request.
+///
+/// The caller keeps using the origin hostname in the request URL, so wreq
+/// still emits the expected Host header and TLS SNI. This pin changes only the
+/// socket destination and deliberately admits no fallback DNS resolution.
+#[derive(Debug, Clone)]
+pub struct TlsDnsPin {
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+impl TlsDnsPin {
+    pub fn new(host: impl Into<String>, addresses: Vec<SocketAddr>) -> QuarryResult<Self> {
+        let host = host.into().trim_end_matches('.').to_ascii_lowercase();
+        if host.is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "TLS DNS pin is missing a host",
+            ));
+        }
+        if addresses.is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "TLS DNS pin has no addresses",
+            ));
+        }
+        let ips: Vec<IpAddr> = addresses.iter().map(SocketAddr::ip).collect();
+        if let Some(reason) = resolve_guard(&ips) {
+            return Err(QuarryError::new(ErrorCode::SecurityBlocked, reason));
+        }
+        Ok(Self { host, addresses })
+    }
+
+    fn applies_to(&self, url: &Url) -> bool {
+        url.host_str()
+            .is_some_and(|host| host.trim_end_matches('.').eq_ignore_ascii_case(&self.host))
+    }
+}
+
 /// BoringSSL-backed HTTP client with browser-family TLS and HTTP/2 emulation.
 ///
 /// The adapter does not follow redirects. Quarry must validate each redirect
 /// target through SSRF/DNS preflight before redirect-following can be enabled.
 pub struct WreqTlsClient {
     profile: TlsProfile,
+    config: TlsClientConfig,
     client: Client,
 }
 
@@ -231,17 +273,11 @@ impl WreqTlsClient {
                 "prefer_http3 requested but wreq 6.0.0-rc.x has no http3 feature; falling back to HTTP/2"
             );
         }
-        let emulation = browser_emulation(&config)?;
-        let client = Client::builder()
-            .timeout(config.timeout)
-            .connect_timeout(config.timeout)
-            .redirect(redirect::Policy::none())
-            .emulation(emulation)
-            .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("wreq client: {e}")))?;
+        let client = build_client(&config, None)?;
 
         Ok(Self {
             profile: config.profile,
+            config,
             client,
         })
     }
@@ -252,46 +288,85 @@ impl WreqTlsClient {
     }
 
     pub async fn fetch(&self, url: &Url) -> QuarryResult<TlsFetchResponse> {
-        let started = Instant::now();
-        let resp = self
-            .client
-            .get(url.as_str())
-            .send()
-            .await
-            .map_err(|e| map_wreq_error("tls fetch", e))?;
-
-        let status = resp.status().as_u16();
-        let final_url = match Url::parse(&resp.uri().to_string()) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                tracing::warn!(error = %err, "failed to parse wreq response URI; falling back to requested URL");
-                url.clone()
-            }
-        };
-        let headers = resp
-            .headers()
-            .iter()
-            .filter_map(|(key, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|text| (key.as_str().to_string(), text.to_string()))
-            })
-            .collect();
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| map_wreq_error("tls body", e))?
-            .to_vec();
-
-        Ok(TlsFetchResponse {
-            status,
-            final_url,
-            headers,
-            body,
-            duration_ms: started.elapsed().as_millis() as u64,
-        })
+        fetch_with_client(&self.client, url).await
     }
+
+    /// Fetch with a connection-level DNS pin while preserving the request URL's
+    /// hostname for TLS SNI and HTTP authority.
+    pub async fn fetch_with_dns_pin(
+        &self,
+        url: &Url,
+        pin: &TlsDnsPin,
+    ) -> QuarryResult<TlsFetchResponse> {
+        if !pin.applies_to(url) {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "TLS DNS pin does not match the requested host",
+            ));
+        }
+        let client = build_client(&self.config, Some(pin))?;
+        fetch_with_client(&client, url).await
+    }
+}
+
+fn build_client(config: &TlsClientConfig, pin: Option<&TlsDnsPin>) -> QuarryResult<Client> {
+    let emulation = browser_emulation(config)?;
+    let mut builder = Client::builder()
+        .timeout(config.timeout)
+        .connect_timeout(config.timeout)
+        .redirect(redirect::Policy::none())
+        // A TLS-profile request is direct egress. Accepting a process/system
+        // proxy here would delegate target DNS to a different authority and
+        // nullify a caller-supplied connection pin.
+        .no_proxy()
+        .emulation(emulation);
+    if let Some(pin) = pin {
+        builder = builder.resolve_to_addrs(pin.host.clone(), pin.addresses.clone());
+    }
+    builder
+        .build()
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("wreq client: {e}")))
+}
+
+async fn fetch_with_client(client: &Client, url: &Url) -> QuarryResult<TlsFetchResponse> {
+    let started = Instant::now();
+    let resp = client
+        .get(url.as_str())
+        .send()
+        .await
+        .map_err(|e| map_wreq_error("tls fetch", e))?;
+
+    let status = resp.status().as_u16();
+    let final_url = match Url::parse(&resp.uri().to_string()) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to parse wreq response URI; falling back to requested URL");
+            url.clone()
+        }
+    };
+    let headers = resp
+        .headers()
+        .iter()
+        .filter_map(|(key, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|text| (key.as_str().to_string(), text.to_string()))
+        })
+        .collect();
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| map_wreq_error("tls body", e))?
+        .to_vec();
+
+    Ok(TlsFetchResponse {
+        status,
+        final_url,
+        headers,
+        body,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 fn browser_emulation(config: &TlsClientConfig) -> QuarryResult<Emulation> {
@@ -463,6 +538,7 @@ fn map_wreq_error(context: &str, err: wreq::Error) -> QuarryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, SocketAddr};
 
     #[test]
     fn profiles_have_distinct_user_agents() {
@@ -498,6 +574,20 @@ mod tests {
         let config = TlsClientConfig::default().with_user_agent_override("CustomBrowser/1.0");
         let headers = profile_headers(&config).expect("profile headers");
         assert_eq!(headers[header::USER_AGENT], "CustomBrowser/1.0");
+    }
+
+    #[test]
+    fn dns_pin_rejects_private_or_empty_targets() {
+        let private = TlsDnsPin::new(
+            "customer.example",
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 443))],
+        )
+        .expect_err("private pins must not be accepted");
+        assert_eq!(private.code, ErrorCode::SecurityBlocked);
+
+        let empty = TlsDnsPin::new("customer.example", Vec::new())
+            .expect_err("a pin without addresses must fail closed");
+        assert_eq!(empty.code, ErrorCode::BadRequest);
     }
 
     #[test]

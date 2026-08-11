@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 pub use quarry_tls::TlsProfile;
-use quarry_tls::{TlsClientConfig, WreqTlsClient};
+use quarry_tls::{TlsClientConfig, TlsDnsPin, WreqTlsClient};
 use url::Url;
 
-use crate::driver::Driver;
+use crate::driver::{Driver, FetchHints};
 use crate::fetch::FetchResponse;
 
 /// A [`Driver`] that fetches pages using browser-like TLS and HTTP/2 emulation.
@@ -56,14 +56,22 @@ impl Driver for TlsProfileDriver {
     }
 
     async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
-        let resp = self.client.fetch(url).await?;
-        Ok(FetchResponse {
-            status: resp.status,
-            final_url: resp.final_url,
-            headers: resp.headers,
-            body: resp.body,
-            duration_ms: resp.duration_ms,
-        })
+        Ok(into_fetch_response(self.client.fetch(url).await?))
+    }
+
+    async fn fetch_conditional(
+        &self,
+        url: &Url,
+        hints: &FetchHints,
+    ) -> QuarryResult<FetchResponse> {
+        let response = match hints.resolved_target.as_ref() {
+            Some(target) => {
+                let pin = TlsDnsPin::new(target.host.clone(), target.addresses.clone())?;
+                self.client.fetch_with_dns_pin(url, &pin).await?
+            }
+            None => self.client.fetch(url).await?,
+        };
+        Ok(into_fetch_response(response))
     }
 
     fn tls_profile(&self) -> Option<quarry_tls::TlsProfile> {
@@ -71,9 +79,24 @@ impl Driver for TlsProfileDriver {
     }
 }
 
+fn into_fetch_response(response: quarry_tls::TlsFetchResponse) -> FetchResponse {
+    FetchResponse {
+        status: response.status,
+        final_url: response.final_url,
+        headers: response.headers,
+        body: response.body,
+        duration_ms: response.duration_ms,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quarry_core::error::ErrorCode;
+    use std::net::SocketAddr;
+
+    use crate::dns_guard::ResolvedTarget;
+    use crate::driver::FetchHints;
 
     #[test]
     fn profile_user_agents_are_distinct() {
@@ -111,5 +134,26 @@ mod tests {
         .expect("tls driver accepts user-agent override");
         assert_eq!(driver.kind(), DriverKind::Tls);
         assert_eq!(driver.profile(), TlsProfile::Firefox);
+    }
+
+    #[tokio::test]
+    async fn rejects_a_preflight_pin_for_a_different_host_before_connecting() {
+        let driver = TlsProfileDriver::new(TlsProfile::Chrome, Duration::from_millis(100), None)
+            .expect("tls driver builds");
+        let url: Url = "http://127.0.0.1:9/".parse().expect("valid URL");
+        let hints = FetchHints {
+            resolved_target: Some(ResolvedTarget {
+                host: "different.example".to_string(),
+                addresses: vec!["8.8.8.8:443".parse::<SocketAddr>().unwrap()],
+            }),
+            ..FetchHints::default()
+        };
+
+        let error = driver
+            .fetch_conditional(&url, &hints)
+            .await
+            .expect_err("a mismatched pin must fail before any connection");
+
+        assert_eq!(error.code, ErrorCode::BadRequest);
     }
 }
