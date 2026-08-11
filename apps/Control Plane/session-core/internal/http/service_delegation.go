@@ -113,6 +113,10 @@ func verifySessionServiceDelegation(request *http.Request, credential serviceCre
 	if !constantTimeEncodedEqual(sessionDelegationSignature(credential.Token, claims), request.Header.Get("X-Delegation-Signature")) {
 		return sessionDelegationClaims{}, false
 	}
+	// Consumed only AFTER the signature verifies, so a forged request cannot
+	// burn a legitimate caller's nonce. The entry outlives the signed timestamp
+	// only until that timestamp would fail the freshness check anyway, which
+	// bounds memory to the replay window.
 	if nonces == nil || !nonces.Consume(credential.Principal+":"+nonce, timestamp.Add(sessionDelegationMaxAge), now.UTC()) {
 		return sessionDelegationClaims{}, false
 	}
