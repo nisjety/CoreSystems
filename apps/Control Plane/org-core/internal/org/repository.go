@@ -337,16 +337,36 @@ ON CONFLICT (id) DO NOTHING`,
 // managed, attested retention policy in auth-core; this writer never grants a
 // per-request override. The write is a targeted jsonb_set so it never clobbers
 // unrelated metadata keys, and it is RLS-scoped to the organization.
-func (r *Repository) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) error {
+// enqueued reports a false-to-true ZDR transition, the only case
+// FlushInteractiveRetentionOutbox has a cross-plane cleanup signal to
+// publish; re-enabling an already-true posture, disabling, and a no-op call
+// are all correctly reported as not-enqueued. The prior value is read with
+// FOR UPDATE inside the same transaction as the write, so two concurrent
+// enable calls serialize and only the first is ever counted as a transition.
+func (r *Repository) SetInteractiveRetention(ctx context.Context, orgID string, zdr bool, changedBy string) (enqueued bool, err error) {
 	payload, err := json.Marshal(map[string]any{
 		"zdr":       zdr,
 		"updatedBy": changedBy,
 		"updatedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal interactive retention: %w", err)
+		return false, fmt.Errorf("marshal interactive retention: %w", err)
 	}
-	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+	err = r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		if err := lockOrganizationLifecycle(ctx, tx, orgID); err != nil {
+			return err
+		}
+		var wasEnabled *bool
+		if err := tx.QueryRow(ctx, `
+SELECT (metadata -> 'interactiveRetention' ->> 'zdr')::boolean
+FROM organizations
+WHERE id = $1 AND deleted_at IS NULL
+FOR UPDATE`, orgID).Scan(&wasEnabled); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("lock organization interactive retention: %w", err)
+		}
 		tag, err := tx.Exec(ctx, `
 UPDATE organizations
 SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{interactiveRetention}', $2::jsonb, true),
@@ -358,8 +378,131 @@ WHERE id = $1 AND deleted_at IS NULL`, orgID, payload)
 		if tag.RowsAffected() == 0 {
 			return ErrNotFound
 		}
+		if zdr && (wasEnabled == nil || !*wasEnabled) {
+			if _, err := tx.Exec(ctx, `
+INSERT INTO organization_interactive_retention_outbox (org_id) VALUES ($1)`, orgID); err != nil {
+				return fmt.Errorf("record interactive retention outbox: %w", err)
+			}
+			enqueued = true
+		}
 		return nil
 	})
+	return enqueued, err
+}
+
+// SetSupportAIMode persists an organization's Support AI assistance posture
+// into organizations.metadata.supportAi. "off" blocks Inbox model calls
+// entirely, "assist" allows transient help with nothing retained, and
+// "review" lets Verevon retain bounded proposals that an operator must
+// approve or reject. The write is a targeted jsonb_set so it never clobbers
+// unrelated metadata keys, and it is RLS-scoped to the organization.
+func (r *Repository) SetSupportAIMode(ctx context.Context, orgID, mode, changedBy string) error {
+	payload, err := json.Marshal(map[string]any{
+		"mode":      mode,
+		"updatedBy": changedBy,
+		"updatedAt": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal support ai mode: %w", err)
+	}
+	return r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+UPDATE organizations
+SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{supportAi}', $2::jsonb, true),
+    updated_at = NOW()
+WHERE id = $1 AND deleted_at IS NULL`, orgID, payload)
+		if err != nil {
+			return fmt.Errorf("update support ai mode: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+}
+
+// ClaimInteractiveRetentionOutbox atomically claims up to limit pending
+// interactive-retention cleanup signals for publish, mirroring
+// ClaimPlanChangeOutbox's claim-then-publish-then-acknowledge shape. A row
+// left processing for over a minute (a crashed claimant) becomes claimable
+// again.
+func (r *Repository) ClaimInteractiveRetentionOutbox(ctx context.Context, limit int) ([]InteractiveRetentionOutboxRow, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("interactive retention outbox limit must be between 1 and 1000")
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin interactive retention outbox claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+WITH claimed AS (
+  SELECT event_id
+  FROM organization_interactive_retention_outbox
+  WHERE published_at IS NULL
+    AND (processing_at IS NULL OR processing_at < NOW() - INTERVAL '1 minute')
+  ORDER BY created_at, event_id
+  LIMIT $1
+  FOR UPDATE SKIP LOCKED
+)
+UPDATE organization_interactive_retention_outbox o
+SET processing_at = NOW(), updated_at = NOW()
+FROM claimed
+WHERE o.event_id = claimed.event_id
+RETURNING o.event_id, o.org_id, o.attempts`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim interactive retention outbox: %w", err)
+	}
+	defer rows.Close()
+	claimed := make([]InteractiveRetentionOutboxRow, 0)
+	for rows.Next() {
+		var row InteractiveRetentionOutboxRow
+		if err := rows.Scan(&row.EventID, &row.OrgID, &row.Attempts); err != nil {
+			return nil, fmt.Errorf("scan interactive retention outbox: %w", err)
+		}
+		claimed = append(claimed, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate interactive retention outbox: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit interactive retention outbox claim: %w", err)
+	}
+	return claimed, nil
+}
+
+func (r *Repository) MarkInteractiveRetentionPublished(ctx context.Context, eventID int64) error {
+	result, err := r.pool.Exec(ctx, `
+UPDATE organization_interactive_retention_outbox
+SET published_at = NOW(), processing_at = NULL, attempts = attempts + 1,
+    last_error = NULL, updated_at = NOW()
+WHERE event_id = $1 AND published_at IS NULL`, eventID)
+	if err != nil {
+		return fmt.Errorf("mark interactive retention published: %w", err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("interactive retention outbox acknowledgement did not match pending event")
+	}
+	return nil
+}
+
+func (r *Repository) MarkInteractiveRetentionPublishFailed(ctx context.Context, eventID int64, publishErr error) error {
+	message := "unknown publish failure"
+	if publishErr != nil {
+		message = publishErr.Error()
+	}
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	_, err := r.pool.Exec(ctx, `
+UPDATE organization_interactive_retention_outbox
+SET processing_at = NULL, attempts = attempts + 1,
+    last_error = $2, updated_at = NOW()
+WHERE event_id = $1 AND published_at IS NULL`, eventID, message)
+	if err != nil {
+		return fmt.Errorf("record interactive retention publish failure: %w", err)
+	}
+	return nil
 }
 
 func (r *Repository) ClaimPlanChangeOutbox(ctx context.Context, limit int) ([]PlanChangeOutboxRow, error) {

@@ -313,36 +313,59 @@ func (s *Server) updatePlan(c *gin.Context) {
 	c.JSON(http.StatusOK, orgData)
 }
 
-// updateOrgSettings persists org-admin-owned organization settings. Today it
-// carries the interactive Zero-Data-Retention posture. Authorization is
-// enforced upstream (gateway require_org_admin) and by the membership guard;
-// the persisted value is org intent, never a per-request enforcement override.
+// updateOrgSettings persists org-admin-owned organization settings: the
+// interactive Zero-Data-Retention posture, or the Support AI assistance
+// mode. Exactly one of the two is accepted per call, matching the gateway's
+// mutually-exclusive PATCH contract (apps/gateway/src/domains/orgs/settings.rs).
+// Authorization is enforced upstream (gateway require_org_admin) and by the
+// membership guard; persisted values are org intent, never a per-request
+// enforcement override.
 func (s *Server) updateOrgSettings(c *gin.Context) {
 	orgID := c.Param("id")
 	var req struct {
-		ZeroDataRetention *bool `json:"zeroDataRetention"`
+		ZeroDataRetention *bool   `json:"zeroDataRetention"`
+		SupportAIMode     *string `json:"supportAiMode"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.ZeroDataRetention == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "zeroDataRetention (boolean) is required"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 	changedBy := c.GetHeader("x-user-id")
-	orgData, err := s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
-	if err != nil {
-		switch {
-		case err == org.ErrNotFound:
-			c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
-		case err == org.ErrPlanUpgradeRequired:
-			c.JSON(http.StatusPaymentRequired, gin.H{
-				"error":   "plan_upgrade_required",
-				"message": "Zero Data Retention is available on a higher plan.",
-			})
-		default:
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
+	switch {
+	case req.ZeroDataRetention != nil && req.SupportAIMode == nil:
+		orgData, err := s.orgService.SetInteractiveRetention(c.Request.Context(), orgID, *req.ZeroDataRetention, changedBy)
+		if err != nil {
+			switch {
+			case err == org.ErrNotFound:
+				c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			case err == org.ErrPlanUpgradeRequired:
+				c.JSON(http.StatusPaymentRequired, gin.H{
+					"error":   "plan_upgrade_required",
+					"message": "Zero Data Retention is available on a higher plan.",
+				})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
+			}
+			return
 		}
-		return
+		c.JSON(http.StatusOK, orgData)
+	case req.SupportAIMode != nil && req.ZeroDataRetention == nil:
+		orgData, err := s.orgService.SetSupportAIMode(c.Request.Context(), orgID, *req.SupportAIMode, changedBy)
+		if err != nil {
+			switch {
+			case err == org.ErrNotFound:
+				c.JSON(http.StatusNotFound, gin.H{"error": "organization not found"})
+			case strings.Contains(err.Error(), "invalid support AI mode"):
+				c.JSON(http.StatusBadRequest, gin.H{"error": "supportAiMode must be off, assist, or review"})
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update organization settings"})
+			}
+			return
+		}
+		c.JSON(http.StatusOK, orgData)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "provide exactly one of zeroDataRetention or supportAiMode"})
 	}
-	c.JSON(http.StatusOK, orgData)
 }
 
 func (s *Server) getEntitlements(c *gin.Context) {
@@ -457,6 +480,29 @@ func (s *Server) removeMember(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// listOrganizationsInternal enumerates every non-deleted organization for
+// background services with no per-request acting user to scope a normal
+// /orgs read to (e.g. tenant auto-discovery). Service.ListOrganizations is
+// paginated, so this pages through it at the maximum page size until a
+// short page signals the end, then returns the full set in one response.
+// GET /internal/orgs
+func (s *Server) listOrganizationsInternal(c *gin.Context) {
+	const pageSize = 500
+	all := make([]org.Organization, 0, pageSize)
+	for offset := 0; ; offset += pageSize {
+		page, err := s.orgService.ListOrganizations(c.Request.Context(), pageSize, offset)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list organizations"})
+			return
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			break
+		}
+	}
+	c.JSON(http.StatusOK, all)
 }
 
 // getOrganizationByTenant resolves an organization by provider + tenant id.
