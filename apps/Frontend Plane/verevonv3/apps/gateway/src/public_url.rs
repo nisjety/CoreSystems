@@ -1,3 +1,32 @@
+//! Best-effort SSRF **pre-filter** for user-supplied HTTP(S) URLs.
+//!
+//! This is *not* the SSRF security boundary on its own. `is_blocked_hostname`
+//! and `is_public_ip` reject obviously-dangerous input by string matching and
+//! literal-IP inspection alone — this module never resolves DNS. A hostname
+//! that resolves to a private/loopback/link-local/metadata address (DNS
+//! rebinding, a wildcard DNS record, attacker-controlled authoritative DNS,
+//! a CNAME to an internal name, ...) sails through this check every time,
+//! because the check only ever looks at the literal string the caller sent,
+//! never at what it actually resolves to.
+//!
+//! That gap is safe in this gateway *only* because every caller forwards the
+//! normalized URL to Quarry-v2 as request-body/query **content** for Quarry
+//! to fetch, instead of dialing it directly from this process. The real SSRF
+//! boundary — the part that resolves DNS, vets the resolved IPs, and pins
+//! the connection to exactly the address it vetted (closing the
+//! check-then-rebind gap this module cannot) — is Quarry-v2's
+//! `dns_guard.rs` (`ResolvedTarget` / `PinnedDnsResolver` / `TlsDnsPin`,
+//! `crates/quarry-runtime/src/dns_guard.rs`).
+//!
+//! If this gateway ever dials a [`normalize_public_http_url`] result
+//! directly instead of forwarding it to a plane client, this module's check
+//! becomes the *entire* defense and DNS rebinding walks straight through it.
+//! `tests/ssrf_forward_not_fetch.rs` is a regression test that scans the
+//! crate for exactly that pattern. If it fails, route the new call through
+//! a plane client anchored to a fixed `AppState` `..._url` field (the way
+//! every existing call site does) instead of deleting or loosening the
+//! test.
+
 use std::net::IpAddr;
 
 use url::Url;
