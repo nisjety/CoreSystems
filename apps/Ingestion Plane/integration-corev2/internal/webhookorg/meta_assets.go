@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/triodelab/integration-corev2/internal/egress"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -360,7 +361,12 @@ func (g *GraphAssetLister) subscribe(ctx context.Context, accessToken, accountID
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	client := g.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		// safePageURL above already confines the URLs fetched here to the
+		// configured Graph origin, but that is a string-level check with no
+		// DNS resolution behind it. egress.SafeClient adds the resolve+vet+
+		// pin layer underneath it, so a rebound or redirected connection for
+		// that same origin still lands on a vetted, non-private address.
+		client = egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})
 	}
 	resp, err := sameOriginClient(client, g.baseURL()).Do(req)
 	if err != nil {
@@ -409,7 +415,12 @@ func (g *GraphAssetLister) getJSONFromBase(ctx context.Context, accessToken, bas
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	client := g.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		// safePageURL above already confines the URLs fetched here to the
+		// configured Graph origin, but that is a string-level check with no
+		// DNS resolution behind it. egress.SafeClient adds the resolve+vet+
+		// pin layer underneath it, so a rebound or redirected connection for
+		// that same origin still lands on a vetted, non-private address.
+		client = egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})
 	}
 	resp, err := sameOriginClient(client, baseURL).Do(req)
 	if err != nil {
@@ -431,7 +442,12 @@ func (g *GraphAssetLister) getJSONFromBase(ctx context.Context, accessToken, bas
 
 func sameOriginClient(client *http.Client, baseURL string) *http.Client {
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		// safePageURL above already confines the URLs fetched here to the
+		// configured Graph origin, but that is a string-level check with no
+		// DNS resolution behind it. egress.SafeClient adds the resolve+vet+
+		// pin layer underneath it, so a rebound or redirected connection for
+		// that same origin still lands on a vetted, non-private address.
+		client = egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})
 	}
 	cloned := *client
 	configured, _ := url.Parse(baseURL)

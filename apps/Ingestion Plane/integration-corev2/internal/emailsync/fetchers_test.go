@@ -240,14 +240,18 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 }
 
 func TestGraph_FullBackfillOmitsReceivedDateFilter(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("changeType") != "created" {
 			t.Errorf("changeType = %q, want created", r.URL.Query().Get("changeType"))
 		}
 		if r.URL.Query().Has("$filter") {
 			t.Errorf("full backfill must not send a receivedDateTime filter: %s", r.URL.RawQuery)
 		}
-		fmt.Fprint(w, `{"value": [], "@odata.deltaLink": "delta-complete"}`)
+		// A real Graph deltaLink is always an absolute URL on the host that
+		// was called; GraphFetcher.safeNextLink now enforces that, so the
+		// fixture uses one instead of an opaque bare token.
+		fmt.Fprintf(w, `{"value": [], "@odata.deltaLink": %q}`, server.URL+"/delta-complete")
 	}))
 	defer server.Close()
 
@@ -256,8 +260,9 @@ func TestGraph_FullBackfillOmitsReceivedDateFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if result.NextCursor != "delta-complete" {
-		t.Fatalf("cursor = %q, want delta-complete", result.NextCursor)
+	want := server.URL + "/delta-complete"
+	if result.NextCursor != want {
+		t.Fatalf("cursor = %q, want %q", result.NextCursor, want)
 	}
 }
 

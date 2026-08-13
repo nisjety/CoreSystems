@@ -82,6 +82,12 @@ type OAuth2Client struct {
 func NewOAuth2Client(cfg OAuth2ClientConfig) *OAuth2Client {
 	client := cfg.HTTPClient
 	if client == nil {
+		// NewProviderClients (clients.go) is the only production caller of
+		// this constructor family, and it always resolves httpClient to a
+		// non-nil egress.SafeClient before reaching here — see its own nil
+		// check for why. This fallback only fires for direct/standalone
+		// construction (tests), so it stays a plain client rather than one
+		// that would refuse to dial a test's local httptest server.
 		client = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	if cfg.ScopeSeparator == "" {
@@ -567,6 +573,12 @@ type ShopifyOAuthClient struct {
 
 func NewShopifyOAuthClient(clientID, clientSecret string, httpClient *http.Client) *ShopifyOAuthClient {
 	if httpClient == nil {
+		// NewProviderClients (clients.go) is the only production caller of
+		// this constructor and always resolves httpClient to a non-nil
+		// egress.SafeClient before reaching here, so ExchangeCode/Profile's
+		// "https://"+shop+"/..." calls (shop is org-supplied providerContext
+		// data) are vetted in production. This fallback only fires for
+		// direct/standalone construction (tests).
 		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	return &ShopifyOAuthClient{clientID: clientID, clientSecret: clientSecret, httpClient: httpClient}
