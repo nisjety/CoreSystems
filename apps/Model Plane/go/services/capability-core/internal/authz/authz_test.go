@@ -31,6 +31,8 @@ func TestAuthorizeHTTPPinsTenantAndRequiresWriteScope(t *testing.T) {
 		{name: "user may not attest health", principal: user, method: http.MethodPost, target: "/api/v1/capabilities/availability", wantErr: true},
 		{name: "exact health workload may attest", principal: healthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability"},
 		{name: "global health workload may enter health route", principal: globalHealthWriter, method: http.MethodPost, target: "/api/v1/capabilities/availability"},
+		{name: "ordinary writer may not cancel Space schedules", principal: writer, method: http.MethodPost, target: "/api/v1/internal/space-deletion/cron", wantErr: true},
+		{name: "exact deletion scope may cancel Space schedules", principal: authctx.Principal{OrganizationID: "org-a", ActorID: "service:control-space-deletion", PrincipalType: "service", Scopes: []string{SpaceDeletionScope}, RetentionPolicyPresent: true}, method: http.MethodPost, target: "/api/v1/internal/space-deletion/cron"},
 		{name: "tenant-agnostic command execution is quarantined", principal: writer, method: http.MethodPost, target: "/api/v1/commands/exec", wantErr: true},
 		{name: "service read needs scope", principal: authctx.Principal{OrganizationID: "org-a", ActorID: "svc-a", PrincipalType: "service"}, method: http.MethodGet, target: "/api/v1/mcp", wantErr: true},
 		{name: "service writer may read", principal: writer, method: http.MethodGet, target: "/api/v1/mcp"},

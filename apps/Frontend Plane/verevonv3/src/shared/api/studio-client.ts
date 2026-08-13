@@ -23,6 +23,8 @@ export type StudioProject = {
   updatedByUserId: string
   title: string
   status: 'draft'
+  /** The current gateway-local Studio repository is not durable across restarts. */
+  persistence: 'ephemeral'
   blocks: StudioBlock[]
   selectedBlockId?: string | null
   socialDraftId?: string | null

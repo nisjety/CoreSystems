@@ -3,15 +3,14 @@
 //! The `tool_bridge` dispatch is a deterministic stub — its catch-all returns
 //! canned text and spawns nothing. This module is the missing real-execution
 //! primitive: build argv, wrap it in the sandbox ([`sandbox::wrap_command`] —
-//! bubblewrap on Linux, transparent passthrough elsewhere), spawn the process,
+//! bubblewrap on Linux), reject a policy downgrade, spawn the process,
 //! capture its output, and **scrub secrets** from that output before it leaves
 //! the execution boundary.
 //!
 //! # Scope & verification (built unverified per the user's call; e2e flagged)
 //!
 //! [`execute_sandboxed`] is the primitive. Its spawn → capture → scrub path is
-//! unit-tested cross-platform via a benign command (passthrough applies when
-//! bubblewrap is absent, e.g. on macOS/CI). The bubblewrap **isolation** itself
+//! unit-tested cross-platform via explicit policy tests. The bubblewrap **isolation** itself
 //! is Linux-gated and verified separately (`sandbox.rs` tests +
 //! `scripts/verify-sandbox-isolation.sh`).
 //!
@@ -25,8 +24,8 @@
 //! SECURITY: the `AllowDomains` network policy is not self-enforcing (see
 //! `sandbox.rs`) — a caller using it MUST also run behind a configured egress
 //! proxy or the process gets unrestricted egress. `execute_sandboxed` surfaces
-//! `sandboxed` so callers can refuse to run an un-sandboxed process under a
-//! policy that requires isolation.
+//! a process is never spawned when the requested local policy requires
+//! isolation but the runtime cannot provide it.
 
 use crate::policy::MpSandboxPolicy;
 use crate::{sandbox, scrub};
@@ -99,6 +98,26 @@ fn scrub_and_cap(raw: &[u8]) -> String {
     capped
 }
 
+/// A model-authored execution policy must never silently become a host command
+/// just because the local sandbox substrate is unavailable. `DangerFullAccess`
+/// is the explicit operator-authored escape hatch; `External` delegates its
+/// isolation contract to a separately attested provisioner and is therefore not
+/// a local Bubblewrap request. Every other policy names local filesystem and/or
+/// egress restrictions and has to fail closed when they cannot be enforced.
+fn require_requested_isolation(policy: &MpSandboxPolicy, sandboxed: bool) -> std::io::Result<()> {
+    let requires_local_isolation = matches!(
+        policy,
+        MpSandboxPolicy::ReadOnly { .. } | MpSandboxPolicy::WorkspaceWrite { .. }
+    );
+    if requires_local_isolation && !sandboxed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "requested sandbox isolation is unavailable; refusing unsandboxed execution",
+        ));
+    }
+    Ok(())
+}
+
 /// Outcome of a sandboxed execution. `stdout`/`stderr` are already
 /// secret-scrubbed, so they are safe to persist or forward.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,6 +159,7 @@ async fn execute_sandboxed_with_timeout(
     timeout: Duration,
 ) -> std::io::Result<ExecOutcome> {
     let cmd = sandbox::wrap_command(policy, program, args);
+    require_requested_isolation(policy, cmd.sandboxed)?;
     spawn_capture(&cmd, None, None, timeout).await
 }
 
@@ -176,6 +196,7 @@ pub async fn execute_sandboxed_in_dir(
         env: sandbox::SandboxEnv::Only(env),
     };
     let cmd = sandbox::wrap_command_with(policy, program, args, options);
+    require_requested_isolation(policy, cmd.sandboxed)?;
     spawn_capture(&cmd, Some(cwd), Some(env), timeout).await
 }
 
@@ -228,6 +249,31 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn local_restricted_policies_reject_an_unsandboxed_downgrade() {
+        for policy in [
+            MpSandboxPolicy::ReadOnly {
+                network: crate::policy::MpNetworkPolicy::Disabled,
+            },
+            MpSandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![],
+                network: crate::policy::MpNetworkPolicy::Disabled,
+            },
+        ] {
+            let err = require_requested_isolation(&policy, false)
+                .expect_err("restricted policy must never run as a host command");
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        }
+        assert!(require_requested_isolation(&MpSandboxPolicy::DangerFullAccess, false).is_ok());
+        assert!(require_requested_isolation(
+            &MpSandboxPolicy::External {
+                network: crate::policy::MpNetworkPolicy::Disabled,
+            },
+            false,
+        )
+        .is_ok());
     }
 
     // DangerFullAccess => wrap_command returns a transparent passthrough, so

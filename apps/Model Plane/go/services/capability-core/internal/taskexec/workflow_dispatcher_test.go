@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,6 +13,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 )
 
 func detail(status, org, title, description, config string) taskDetail {
@@ -71,6 +74,69 @@ func TestDispatchPlanSkipsTasksNoLongerRunning(t *testing.T) {
 		}
 		if req != nil {
 			t.Fatalf("status %q: expected no dispatch, got %+v", status, req)
+		}
+	}
+}
+
+func TestWorkflowDispatchLoadFenceRefusesDeletedCronSchedule(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("workflow_dispatcher.go"))
+	if err != nil {
+		t.Fatalf("read workflow dispatcher source: %v", err)
+	}
+	for _, required := range []string{
+		"FROM cron_fires AS cf",
+		"JOIN cron_schedules AS cs ON cs.id = cf.schedule_id",
+		"cf.task_id = t.id AND cs.deleted_at IS NOT NULL",
+	} {
+		if !strings.Contains(string(source), required) {
+			t.Fatalf("workflow handoff must retain deleted-cron fence %q", required)
+		}
+	}
+}
+
+type recordingFireAuthorizer struct {
+	intent cron.FireIntent
+	err    error
+}
+
+func (a *recordingFireAuthorizer) AuthorizeFire(_ context.Context, intent cron.FireIntent) error {
+	a.intent = intent
+	return a.err
+}
+
+func TestWorkflowDispatchReauthorizesOnlyBoundCronIntent(t *testing.T) {
+	intent := cron.FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
+		FireKey: "2026-08-13T00:00:00Z", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		IdempotencyKey: "schedule-1:2026-08-13T00:00:00Z",
+	}
+	config, err := json.Marshal(map[string]any{"schedule_fire_intent": intent})
+	if err != nil {
+		t.Fatalf("marshal intent: %v", err)
+	}
+	authorizer := &recordingFireAuthorizer{}
+	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer}
+	detail := taskDetail{config: config, scheduleID: "schedule-1"}
+	task := TaskRef{ID: "task-1", OrgID: "org-1"}
+	if err := dispatcher.reauthorizeScheduleFire(context.Background(), task, detail); err != nil {
+		t.Fatalf("bound intent: %v", err)
+	}
+	if authorizer.intent.ScheduleID != "schedule-1" {
+		t.Fatalf("authorizer received %+v", authorizer.intent)
+	}
+
+	for _, altered := range []taskDetail{
+		{config: config, scheduleID: "schedule-other"},
+		{config: config, scheduleID: "schedule-1"},
+	} {
+		if altered.scheduleID == "schedule-1" {
+			if err := (&WorkflowDispatcher{}).reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
+				t.Fatal("cron intent without a fresh authorizer must fail closed")
+			}
+			continue
+		}
+		if err := dispatcher.reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
+			t.Fatal("schedule mismatch must fail closed")
 		}
 	}
 }

@@ -38,17 +38,16 @@ describe('preset agents', () => {
 
   it('looks up a preset by id', () => {
     expect(getPresetAgent('draft-reply-with-sources')?.label).toBe('Draft reply with sources')
-    expect(getPresetAgent('refresh-knowledge-base')?.actionIds).toContain('knowledge.recrawl_source')
+    expect(getPresetAgent('refresh-knowledge-base')?.label).toBe('Plan a knowledge-base refresh')
+    expect(getPresetAgent('refresh-knowledge-base')?.actionIds).toEqual([])
   })
 
-  it('converts a preset action-id subset into real ChatAction tool references', () => {
+  it('keeps presets tool-free until their owner actions become Model-eligible', () => {
     const preset = getPresetAgent('triage-urgent-tickets')!
     const actions = presetAgentChatActions(preset)
 
     expect(actions).toHaveLength(preset.actionIds.length)
-    expect(actions.every((action) => action.kind === 'tool')).toBe(true)
     expect(actions.map((action) => action.id)).toEqual([...preset.actionIds])
-    // Names resolve from the real action-registry descriptor, not the id itself.
-    expect(actions.find((action) => action.id === 'tickets.assign')?.name).toBe('Assign ticket')
+    expect(actions).toEqual([])
   })
 })

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -22,12 +22,15 @@ use super::dispatchers::{
     dispatch_ticket_record_csat_outcome, dispatch_ticket_resolve, dispatch_ticket_run_macro,
     dispatch_ticket_update, dispatch_ticket_update_checklist_item,
     dispatch_ticket_update_side_conversation, dispatch_toggle_policy, dispatch_upload_files,
+    list_owner_action_contracts, reconcile_ticket_create as reconcile_ticket_create_dispatch,
 };
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ExecuteActionRequest {
     action_id: String,
+    #[serde(default)]
+    idempotency_key: String,
     input: Value,
 }
 
@@ -45,7 +48,8 @@ pub(super) async fn execute_action(
             dispatch_import_source(&state, &user, &headers, &body.input).await
         }
         "knowledge.connect_source" => {
-            dispatch_connect_source(&state, &user, &headers, &body.input).await
+            dispatch_connect_source(&state, &user, &headers, &body.input, &body.idempotency_key)
+                .await
         }
         "knowledge.upload_files" => dispatch_upload_files().await,
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
@@ -79,7 +83,9 @@ pub(super) async fn execute_action(
         }
         // Ticketing actions -> conversation-core-go (the same backend the dedicated
         // /api/v1/tickets/* routes proxy to), scoped to the caller's org.
-        "tickets.create" => dispatch_ticket_create(&state, &user, &body.input).await,
+        "tickets.create" => {
+            dispatch_ticket_create(&state, &user, &body.input, &body.idempotency_key).await
+        }
         "tickets.classify_conversation" => {
             dispatch_ticket_classify(&state, &user, &body.input).await
         }
@@ -118,4 +124,24 @@ pub(super) async fn execute_action(
         )
             .into_response(),
     }
+}
+
+/// Resolves the authenticated human's action view from a contract published by
+/// its owning plane. The browser registry remains a UX helper during the
+/// migration; it is not used here as an execution authority.
+pub(super) async fn list_action_contracts(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> Response {
+    list_owner_action_contracts(&state, &user).await
+}
+
+/// Resolve a caller-owned tickets.create key after an ambiguous response.
+/// This read-only owner receipt lookup never routes through ticket creation.
+pub(super) async fn reconcile_ticket_create(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(idempotency_key): Path<String>,
+) -> Response {
+    reconcile_ticket_create_dispatch(&state, &user, &idempotency_key).await
 }

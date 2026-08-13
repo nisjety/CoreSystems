@@ -786,16 +786,33 @@ impl RetrievalPipeline {
         let embed_ms = embed_start.elapsed().as_millis() as u64;
 
         // 2. Build filters
+        let mut request_filters = req.filters.clone();
+        if let Some(scope) = req.space_scope.as_ref() {
+            // The other hybrid arms do not yet carry an owner-resource Space
+            // predicate. Refuse a scoped request rather than letting a sparse,
+            // graph, wiki, visual, or keyword result escape the exact binding.
+            if route.sparse
+                || mix_for_scoring.w_graph > 0.0
+                || mix_for_scoring.w_wiki > 0.0
+                || mix_for_scoring.w_visual > 0.0
+                || mix_for_scoring.w_keyword > 0.0
+            {
+                anyhow::bail!(
+                    "Space-scoped retrieval requires the dense-only vertical until every hybrid arm enforces the binding"
+                );
+            }
+            scope.apply_to_filters(&mut request_filters)?;
+        }
         let filters = RetrievalFilters {
-            document_types: req.filters.document_types.clone(),
-            departments: req.filters.departments.clone(),
-            languages: req.filters.languages.clone(),
-            document_ids: req.filters.document_ids.clone(),
-            sources: req.filters.sources.clone(),
-            region: req.filters.region.clone(),
-            workspaces: req.filters.workspaces.clone(),
-            collections: req.filters.collections.clone(),
-            acl_tags: req.filters.acl_tags.clone(),
+            document_types: request_filters.document_types,
+            departments: request_filters.departments,
+            languages: request_filters.languages,
+            document_ids: request_filters.document_ids,
+            sources: request_filters.sources,
+            region: request_filters.region,
+            workspaces: request_filters.workspaces,
+            collections: request_filters.collections,
+            acl_tags: request_filters.acl_tags,
         };
         let conditions = filters.to_qdrant_conditions();
 

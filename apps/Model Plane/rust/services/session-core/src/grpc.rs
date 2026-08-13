@@ -1,6 +1,8 @@
 //! gRPC server implementing `SessionCore` on :9091.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Utc};
+use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use mp_contracts::dataplane::graph_v1::{
     self as graph_pb, graph_service_client::GraphServiceClient,
 };
@@ -22,16 +24,17 @@ use mp_contracts::model_plane::v1::{
 };
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
+use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
-use std::time::Instant;
+use std::{collections::BTreeMap, env, time::Instant};
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, authorize_system_run_owner, identity,
-    is_system_run_owner, DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
-    DATA_PLANE_AUTH_METADATA_KEY,
+    authorize_operation, authorize_owner_row, authorize_space_deletion_service,
+    authorize_system_run_owner, identity, is_system_run_owner, DelegatedDataPlaneBearer,
+    JwtVerifier, OwnerIntent, VerifiedIdentity, DATA_PLANE_AUTH_METADATA_KEY,
 };
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
 use crate::terminalization;
@@ -70,6 +73,12 @@ const THREAD_PREVIEW_MAX_CHARS: usize = 180;
 const DEFAULT_RESIDENCY: &str = "swedencentral";
 const MAX_USER_CHECKPOINT_ID_BYTES: usize = 200;
 const MAX_USER_CHECKPOINT_STATE_BYTES: usize = 4 * 1024 * 1024;
+const CONTROL_SPACE_DECISION_VERSION: &str = "v2";
+const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
+const CONTROL_THREAD_CREATE_ACTION: &str = "model.thread.create";
+const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
+const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
+const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
 
 #[allow(clippy::result_large_err)]
 fn validate_user_checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<(), Status> {
@@ -541,6 +550,20 @@ async fn insert_thread_created_event(
     .bind(serde_json::json!({
         "thread_id": thread_id,
         "session_key": &req.session_key,
+        "space_id": &req.space_id,
+        "space_decision_ref": &req.space_decision_ref,
+        "recipient_audience_ref": &req.recipient_audience_ref,
+        "recipient_audience_revision": req.recipient_audience_revision,
+        "recipient_audience_hash": &req.recipient_audience_hash,
+        "privacy_policy_ref": &req.privacy_policy_ref,
+        "resource_authorization_ref": &req.resource_authorization_ref,
+        "authority_revision": req.authority_revision,
+        // The signed decision itself is a bearer artifact and must not enter
+        // durable transcript/audit payloads. These three non-secret bindings
+        // retain the exact authorized effect for replay and investigation.
+        "action_schema_hash": &req.action_schema_hash,
+        "payload_digest": &req.payload_digest,
+        "idempotency_key": &req.idempotency_key,
     }))
     .bind(now)
     .bind(&req.org_id)
@@ -555,12 +578,505 @@ async fn insert_thread_created_event(
     Ok(())
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ControlSpaceDecisionClaims {
+    decision_ref: String,
+    org_id: String,
+    space_ref: String,
+    subject_id: String,
+    service_audience: String,
+    action_id: String,
+    action_schema_hash: String,
+    payload_digest: String,
+    idempotency_key: String,
+    recipient_audience_ref: String,
+    recipient_audience_revision: u64,
+    recipient_audience_hash: String,
+    privacy_policy_ref: String,
+    resource_authorization_ref: String,
+    purpose: String,
+    lawful_basis: String,
+    privacy_class: String,
+    third_party_processing_allowed: bool,
+    retention_class: String,
+    residency: String,
+    deletion_scope: String,
+    zero_data_retention: bool,
+    nonce: String,
+    authority_revision: u64,
+    permissions: Vec<String>,
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+/// Thread Space context is an all-or-nothing authority envelope. It is kept
+/// distinct from `workspace_id`, which remains a content-selection hint only.
+/// Any populated Space envelope additionally requires an operation-bound,
+/// Ed25519-signed Control decision. Unscoped legacy threads are still allowed
+/// only when *every* Space/binding field is empty.
+fn validate_thread_space_context_shape(req: &pb::CreateThreadRequest) -> Result<bool, Status> {
+    let values = [
+        req.space_id.trim(),
+        req.space_decision_ref.trim(),
+        req.recipient_audience_ref.trim(),
+        req.recipient_audience_hash.trim(),
+        req.privacy_policy_ref.trim(),
+        req.resource_authorization_ref.trim(),
+        req.space_decision_token.trim(),
+        req.action_schema_hash.trim(),
+        req.payload_digest.trim(),
+        req.idempotency_key.trim(),
+    ];
+    let present = values.iter().filter(|value| !value.is_empty()).count();
+    if present == 0 && req.authority_revision == 0 && req.recipient_audience_revision == 0 {
+        return Ok(false);
+    }
+    if present != values.len()
+        || req.authority_revision == 0
+        || req.recipient_audience_revision == 0
+    {
+        return Err(Status::invalid_argument(
+            "Space context requires complete signed decision and operation bindings",
+        ));
+    }
+    Ok(true)
+}
+
+/// An append uses the same complete, non-secret Space envelope as thread
+/// creation, but a distinct action/schema/payload binding. A missing envelope
+/// is only permitted for an unscoped thread (or the bootstrap first message
+/// atomically following its already-verified create); it must never silently
+/// downgrade a later scoped append.
+fn validate_append_space_context_shape(req: &pb::AppendMessageRequest) -> Result<bool, Status> {
+    let values = [
+        req.space_id.trim(),
+        req.space_decision_ref.trim(),
+        req.recipient_audience_ref.trim(),
+        req.recipient_audience_hash.trim(),
+        req.privacy_policy_ref.trim(),
+        req.resource_authorization_ref.trim(),
+        req.space_decision_token.trim(),
+        req.action_schema_hash.trim(),
+        req.payload_digest.trim(),
+        req.idempotency_key.trim(),
+    ];
+    let present = values.iter().filter(|value| !value.is_empty()).count();
+    if present == 0 && req.authority_revision == 0 && req.recipient_audience_revision == 0 {
+        return Ok(false);
+    }
+    if present != values.len()
+        || req.authority_revision == 0
+        || req.recipient_audience_revision == 0
+    {
+        return Err(Status::invalid_argument(
+            "Space append requires a complete signed decision and operation bindings",
+        ));
+    }
+    Ok(true)
+}
+
+/// Loads the current Control verification key set. During rotation the
+/// deployment supplies `CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON` as a JSON map
+/// of `{ key_id: url_safe_base64_ed25519_public_key }`; any token bearing an
+/// unlisted key id fails closed. The singular variables remain a deliberately
+/// compatible bootstrap form for deployments that have not started rotation.
+fn configured_control_space_decision_keys() -> Result<BTreeMap<String, VerifyingKey>, Status> {
+    if let Ok(raw) = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON") {
+        let encoded_keys: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|_| {
+            Status::failed_precondition("Control Space decision public key set is invalid")
+        })?;
+        if encoded_keys.is_empty() {
+            return Err(Status::failed_precondition(
+                "Control Space decision public key set is empty",
+            ));
+        }
+        let mut keys = BTreeMap::new();
+        for (key_id, encoded) in encoded_keys {
+            let key_id = key_id.trim();
+            let encoded = encoded.trim();
+            if key_id.is_empty() || encoded.is_empty() || encoded.chars().any(char::is_whitespace) {
+                return Err(Status::failed_precondition(
+                    "Control Space decision key configuration is invalid",
+                ));
+            }
+            let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+                Status::failed_precondition("Control Space decision public key is invalid")
+            })?;
+            let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+                Status::failed_precondition("Control Space decision public key length is invalid")
+            })?;
+            let key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
+                Status::failed_precondition("Control Space decision public key is invalid")
+            })?;
+            if keys.insert(key_id.to_owned(), key).is_some() {
+                return Err(Status::failed_precondition(
+                    "Control Space decision public key IDs are not unique",
+                ));
+            }
+        }
+        return Ok(keys);
+    }
+
+    let key_id = env::var("CONTROL_SPACE_DECISION_KEY_ID").map_err(|_| {
+        Status::failed_precondition("Control Space decision key ID is not configured")
+    })?;
+    let encoded = env::var("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64").map_err(|_| {
+        Status::failed_precondition("Control Space decision public key is not configured")
+    })?;
+    let key_id = key_id.trim();
+    let encoded = encoded.trim();
+    if key_id.is_empty() || encoded.is_empty() || encoded.chars().any(char::is_whitespace) {
+        return Err(Status::failed_precondition(
+            "Control Space decision key configuration is invalid",
+        ));
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
+    let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+        Status::failed_precondition("Control Space decision public key length is invalid")
+    })?;
+    let key = VerifyingKey::from_bytes(&bytes)
+        .map_err(|_| Status::failed_precondition("Control Space decision public key is invalid"))?;
+    Ok(BTreeMap::from([(key_id.to_owned(), key)]))
+}
+
+/// Canonical digest of every `CreateThread` field that changes the persisted
+/// effect. The decision bearer and its digest are intentionally excluded: they
+/// authorize this payload; they do not define it. Length-prefixing each value
+/// makes the encoding unambiguous without relying on JSON map ordering.
+fn thread_create_payload_digest(req: &pb::CreateThreadRequest) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.thread.create\0v1\0");
+    for (name, value) in [
+        ("org_id", req.org_id.as_str()),
+        ("user_id", req.user_id.as_str()),
+        ("session_key", req.session_key.as_str()),
+        ("space_id", req.space_id.as_str()),
+        ("space_decision_ref", req.space_decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            req.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            req.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", req.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            req.resource_authorization_ref.as_str(),
+        ),
+        ("action_schema_hash", req.action_schema_hash.as_str()),
+        ("idempotency_key", req.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(req.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(req.recipient_audience_revision.to_be_bytes());
+    let digest = digest.finalize();
+    format!("sha256:{digest:x}")
+}
+
+fn thread_append_content_digest(content: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(content.as_bytes()))
+}
+
+/// Canonical digest shared with Control's `threadAppendPayloadDigest`. It is
+/// deliberately computed from the final message bytes and the owner row,
+/// rather than a BFF supplied digest, immediately before persistence.
+fn thread_append_payload_digest(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.thread.append\0v1\0");
+    let content_digest = thread_append_content_digest(&req.content);
+    for (name, value) in [
+        ("org_id", org_id),
+        ("user_id", user_id),
+        ("thread_id", req.thread_id.as_str()),
+        ("space_id", req.space_id.as_str()),
+        ("space_decision_ref", req.space_decision_ref.as_str()),
+        (
+            "recipient_audience_ref",
+            req.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            req.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", req.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            req.resource_authorization_ref.as_str(),
+        ),
+        ("content_digest", content_digest.as_str()),
+        ("action_schema_hash", req.action_schema_hash.as_str()),
+        ("idempotency_key", req.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest.update(b"authority_revision\0");
+    digest.update(req.authority_revision.to_be_bytes());
+    digest.update(b"recipient_audience_revision\0");
+    digest.update(req.recipient_audience_revision.to_be_bytes());
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn verify_thread_space_decision_with_key(
+    req: &pb::CreateThreadRequest,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = req.space_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control Space decision envelope",
+        ));
+    }
+    let _key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signing_input = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    key.verify(signing_input.as_bytes(), &signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let expected_payload_digest = thread_create_payload_digest(req);
+    let matches_request = claims.decision_ref == req.space_decision_ref
+        && claims.org_id == req.org_id
+        && claims.space_ref == req.space_id
+        && claims.subject_id == req.user_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_THREAD_CREATE_ACTION
+        && claims.action_schema_hash == req.action_schema_hash
+        && claims.payload_digest == req.payload_digest
+        && claims.payload_digest == expected_payload_digest
+        && claims.idempotency_key == req.idempotency_key
+        && claims.recipient_audience_ref == req.recipient_audience_ref
+        && claims.recipient_audience_revision == req.recipient_audience_revision
+        && claims.recipient_audience_hash == req.recipient_audience_hash
+        && claims.privacy_policy_ref == req.privacy_policy_ref
+        && claims.resource_authorization_ref == req.resource_authorization_ref
+        && claims.authority_revision == req.authority_revision
+        && claims
+            .permissions
+            .iter()
+            .any(|permission| permission == "thread:create");
+    if !matches_request {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this thread",
+        ));
+    }
+    // A policy reference alone cannot establish a processing floor. Require the
+    // signed decision to carry the complete privacy metadata before Model may
+    // persist a thread that will later drive context, providers, or tools.
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    // Boolean policy flags are required serde fields, so merely decoding the
+    // claims establishes their presence; retain them for the later provider/
+    // retention propagation slices without inventing a Model-local default.
+    let _privacy_processing_flags = (
+        claims.third_party_processing_allowed,
+        claims.zero_data_retention,
+    );
+    if !privacy_complete || claims.nonce.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision has incomplete privacy policy or nonce",
+        ));
+    }
+    if claims.issued_at > now + chrono::Duration::minutes(1) || claims.expires_at <= now {
+        return Err(Status::permission_denied(
+            "Control Space decision is expired or not yet valid",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_thread_space_decision_with_keys(
+    req: &pb::CreateThreadRequest,
+    keys: &BTreeMap<String, VerifyingKey>,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    let key_id = req
+        .space_decision_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    verify_thread_space_decision_with_key(req, &key_id, key, now)
+}
+
+fn verify_thread_space_decision(req: &pb::CreateThreadRequest) -> Result<(), Status> {
+    if !validate_thread_space_context_shape(req)? {
+        return Ok(());
+    }
+    let keys = configured_control_space_decision_keys()?;
+    verify_thread_space_decision_with_keys(req, &keys, Utc::now())
+}
+
+fn verify_append_space_decision_with_key(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+    expected_key_id: &str,
+    key: &VerifyingKey,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    if req.space_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control Space decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = req.space_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control Space decision envelope",
+        ));
+    }
+    let token_key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| id == expected_key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision payload"))?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(parts[3])
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let signature = Signature::from_slice(&signature)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control Space decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control Space decision claims"))?;
+    let matches_request = claims.decision_ref == req.space_decision_ref
+        && claims.org_id == org_id
+        && claims.subject_id == user_id
+        && claims.space_ref == req.space_id
+        && claims.service_audience == CONTROL_SPACE_DECISION_AUDIENCE
+        && claims.action_id == CONTROL_THREAD_APPEND_ACTION
+        && claims.action_schema_hash == CONTROL_THREAD_APPEND_SCHEMA
+        && claims.action_schema_hash == req.action_schema_hash
+        && claims.payload_digest == req.payload_digest
+        && claims.payload_digest == thread_append_payload_digest(req, org_id, user_id)
+        && claims.idempotency_key == req.idempotency_key
+        && claims.recipient_audience_ref == req.recipient_audience_ref
+        && claims.recipient_audience_revision == req.recipient_audience_revision
+        && claims.recipient_audience_hash == req.recipient_audience_hash
+        && claims.privacy_policy_ref == req.privacy_policy_ref
+        && claims.resource_authorization_ref == req.resource_authorization_ref
+        && claims.authority_revision == req.authority_revision
+        && claims
+            .permissions
+            .iter()
+            .any(|permission| permission == "thread:append");
+    if !matches_request || token_key_id.trim().is_empty() {
+        return Err(Status::permission_denied(
+            "Control Space decision does not authorize this message append",
+        ));
+    }
+    let privacy_complete = [
+        claims.purpose.as_str(),
+        claims.lawful_basis.as_str(),
+        claims.privacy_class.as_str(),
+        claims.retention_class.as_str(),
+        claims.residency.as_str(),
+        claims.deletion_scope.as_str(),
+    ]
+    .iter()
+    .all(|value| !value.trim().is_empty());
+    if !privacy_complete
+        || claims.nonce.trim().is_empty()
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+    {
+        return Err(Status::permission_denied(
+            "Control Space append decision is expired or incomplete",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_append_space_decision(
+    req: &pb::AppendMessageRequest,
+    org_id: &str,
+    user_id: &str,
+) -> Result<(), Status> {
+    if !validate_append_space_context_shape(req)? {
+        return Ok(());
+    }
+    let keys = configured_control_space_decision_keys()?;
+    let key_id = req
+        .space_decision_token
+        .split('.')
+        .nth(1)
+        .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    verify_append_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
+}
+
 /// Core of `SessionCore::create_thread`, factored out to keep the trait method
 /// small. Inserts the thread row and its `THREAD_CREATED` event in one tx.
 async fn create_thread_inner(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    verify_thread_space_decision(&req)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
     // Reuse an existing thread with the same session key for the same owner.
     //
     // The id is minted here rather than supplied, so a retried create would
@@ -571,6 +1087,21 @@ async fn create_thread_inner(
     // another, and skipped entirely for a blank session_key, which carries no
     // identity to be idempotent on.
     if !req.session_key.trim().is_empty() {
+        // The prior read-then-insert sequence allowed two concurrent delivery
+        // attempts for the same signed effect to both observe no thread and
+        // create different ULIDs. A transaction-scoped advisory lock fences
+        // that race without changing the legacy threads schema; it covers the
+        // exact tenant/owner/session idempotency tuple and releases on commit
+        // or rollback.
+        let lock_key = format!(
+            "{}\u{1f}{}\u{1f}{}",
+            req.org_id, req.user_id, req.session_key
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
         let existing: Option<(String,)> = sqlx::query_as(
             "SELECT id FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3 \
              ORDER BY id LIMIT 1",
@@ -578,7 +1109,7 @@ async fn create_thread_inner(
         .bind(&req.org_id)
         .bind(&req.user_id)
         .bind(&req.session_key)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
         if let Some((thread_id,)) = existing {
@@ -598,19 +1129,27 @@ async fn create_thread_inner(
         .unwrap_or_else(new_ulid);
     let now = Utc::now();
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0))",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
     .bind(&req.org_id)
     .bind(&req.user_id)
     .bind(now)
+    .bind(&req.space_id)
+    .bind(&req.space_decision_ref)
+    .bind(&req.recipient_audience_ref)
+    .bind(i64::try_from(req.recipient_audience_revision).map_err(|_| {
+        Status::invalid_argument("recipient_audience_revision exceeds PostgreSQL BIGINT range")
+    })?)
+    .bind(&req.recipient_audience_hash)
+    .bind(&req.privacy_policy_ref)
+    .bind(&req.resource_authorization_ref)
+    .bind(i64::try_from(req.authority_revision).map_err(|_| {
+        Status::invalid_argument("authority_revision exceeds PostgreSQL BIGINT range")
+    })?)
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -651,37 +1190,6 @@ fn support_thread_id(session_key: &str) -> Option<&str> {
     Some(candidate)
 }
 
-/// Persist dream-memory candidates to Letta unless the verified caller is Zero
-/// Data Retention.
-///
-/// The gate lives here rather than inside `dreaming::sync_candidates_to_letta`
-/// because that function is shared with the background dreaming worker, which
-/// has no caller credential at all — it re-reads rows that already survived the
-/// RPC-level write gate. Keeping "verified caller implies policy" on the request
-/// path leaves the worker unchanged and keeps the decision next to the identity
-/// it is derived from.
-async fn sync_dream_memory_unless_zdr(
-    letta: Option<&LettaMemoryAdapter>,
-    retention: MemoryRetention,
-    org_id: &str,
-    user_id: &str,
-    thread_id: &str,
-    candidates: &[crate::dreaming::DreamMemoryCandidate],
-) {
-    if !retention.permits_durable_memory() {
-        // Skipped outright: no write-then-delete, and no reliance on
-        // letta-bridge's own authorizer refusing us. ZDR content never reaches
-        // the wire.
-        record_semantic_memory_degraded(ZDR_MEMORY_WRITE_SUPPRESSED);
-        warn!(
-            reason = ZDR_MEMORY_WRITE_SUPPRESSED,
-            thread_id, "durable Letta memory write suppressed for a ZDR caller"
-        );
-        return;
-    }
-    crate::dreaming::sync_candidates_to_letta(letta, org_id, user_id, thread_id, candidates).await;
-}
-
 /// Core of `SessionCore::append_message`, factored out to keep the trait method
 /// small. Inserts the message row and its `MESSAGE_APPENDED` event in one tx.
 async fn append_message_inner(
@@ -692,17 +1200,86 @@ async fn append_message_inner(
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
     let msg_id = new_ulid();
     let now = Utc::now();
-    let mut letta_sync: Option<(String, String, Vec<crate::dreaming::DreamMemoryCandidate>)> = None;
+    let mut letta_sync: Option<(
+        String,
+        String,
+        Vec<crate::dreaming::DreamMemoryCandidate>,
+        Vec<crate::dreaming::PersistedMemoryId>,
+    )> = None;
 
     let mut tx = pool
         .begin()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-    let row: (i64,) = sqlx::query_as(
-        "INSERT INTO messages (id, thread_id, role, content, created_at)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING sequence",
+    let has_append_context = validate_append_space_context_shape(&req)?;
+    let thread: (String, String, Option<String>) =
+        sqlx::query_as("SELECT org_id, user_id, space_id FROM threads WHERE id = $1 FOR UPDATE")
+            .bind(&req.thread_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found("thread not found"))?;
+
+    match thread.2.as_deref() {
+        Some(stored_space_id) => {
+            if !has_append_context && req.role.trim() == "user" {
+                // A scoped create is verified before the thread exists, so its
+                // first user message may be inserted by the same Gateway flow.
+                // Every later append must carry a newly-issued append decision.
+                let (message_count,): (i64,) =
+                    sqlx::query_as("SELECT COUNT(*) FROM messages WHERE thread_id = $1")
+                        .bind(&req.thread_id)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                if message_count != 0 {
+                    return Err(Status::permission_denied(
+                        "a fresh Control Space append decision is required",
+                    ));
+                }
+            } else {
+                if req.space_id != stored_space_id {
+                    return Err(Status::permission_denied(
+                        "Control Space append decision targets another Space",
+                    ));
+                }
+                verify_append_space_decision(&req, &thread.0, &thread.1)?;
+                sqlx::query(
+                    "UPDATE threads SET space_decision_ref = $2, recipient_audience_ref = $3, \
+                     recipient_audience_revision = $4, recipient_audience_hash = $5, privacy_policy_ref = $6, \
+                     resource_authorization_ref = $7, authority_revision = $8 WHERE id = $1",
+                )
+                .bind(&req.thread_id)
+                .bind(&req.space_decision_ref)
+                .bind(&req.recipient_audience_ref)
+                .bind(i64::try_from(req.recipient_audience_revision).map_err(|_| Status::invalid_argument("recipient audience revision out of range"))?)
+                .bind(&req.recipient_audience_hash)
+                .bind(&req.privacy_policy_ref)
+                .bind(&req.resource_authorization_ref)
+                .bind(i64::try_from(req.authority_revision).map_err(|_| Status::invalid_argument("authority revision out of range"))?)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            }
+        }
+        None if has_append_context => {
+            return Err(Status::permission_denied(
+                "an unscoped thread cannot accept a Space append decision",
+            ));
+        }
+        None => {}
+    }
+
+    let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
+        "INSERT INTO messages
+         (id, thread_id, role, content, created_at, space_id, recipient_audience_ref,
+          recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref)
+         SELECT $1, t.id, $3, $4, $5, t.space_id, t.recipient_audience_ref,
+                t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref
+         FROM threads t WHERE t.id=$2
+         RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
+                   recipient_audience_hash, authority_revision, resource_authorization_ref",
     )
     .bind(&msg_id)
     .bind(&req.thread_id)
@@ -735,6 +1312,12 @@ async fn append_message_inner(
         "message_id": &msg_id,
         "sequence": sequence,
         "role": &req.role,
+        "space_id": row.1,
+        "recipient_audience_ref": row.2,
+        "recipient_audience_revision": row.3,
+        "recipient_audience_hash": row.4,
+        "authority_revision": row.5,
+        "resource_authorization_ref": row.6,
     }))
     .bind(now)
     .bind(&req.thread_id)
@@ -754,7 +1337,7 @@ async fn append_message_inner(
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
-        let saved = crate::dreaming::persist_candidates(
+        let (saved, persisted) = crate::dreaming::persist_candidates(
             &mut tx,
             &org_id,
             &user_id,
@@ -781,23 +1364,25 @@ async fn append_message_inner(
             memories_saved = saved,
             "dream memory extraction completed"
         );
-        letta_sync = Some((org_id, user_id, candidates));
+        letta_sync = Some((org_id, user_id, candidates, persisted));
     }
 
     tx.commit()
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
-    if let Some((org_id, user_id, candidates)) = letta_sync {
-        sync_dream_memory_unless_zdr(
-            letta,
-            retention,
-            &org_id,
-            &user_id,
-            &req.thread_id,
-            &candidates,
-        )
-        .await;
+    if let Some((org_id, user_id, candidates, persisted)) = letta_sync {
+        if retention.permits_durable_memory() {
+            crate::dreaming::sync_persisted_candidates_to_letta(
+                letta,
+                &org_id,
+                &user_id,
+                &req.thread_id,
+                &candidates,
+                &persisted,
+            )
+            .await;
+        }
     }
 
     Ok(Response::new(pb::AppendMessageResponse { sequence }))
@@ -820,9 +1405,14 @@ async fn start_run_inner(
     // P0.4 residency: stamp the configured Model-Plane region (EU default,
     // Sweden Central) onto the run so its processing region is auditable.
     let residency = configured_residency();
-    sqlx::query(
-        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at)
-         VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10)",
+    let inherited_space_context: (Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<i64>) = sqlx::query_as(
+        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
+                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
+         SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
+                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision
+         FROM threads t
+         WHERE t.id = $2 AND t.org_id = $7
+         RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
     )
     .bind(&run_id)
     .bind(&req.thread_id)
@@ -834,9 +1424,10 @@ async fn start_run_inner(
     .bind(&req.user_id)
     .bind(&residency)
     .bind(now)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| Status::internal(e.to_string()))?;
+    .map_err(|e| Status::internal(e.to_string()))?
+    .ok_or_else(|| Status::not_found("thread not found for run creation"))?;
 
     let run_started_resource = format!("run:{}", &run_id);
     let run_started_idem = derive_idempotency_hash(
@@ -855,6 +1446,14 @@ async fn start_run_inner(
         "goal": &req.goal,
         "mode": &req.mode,
         "agent_id": &req.agent_id,
+        "space_id": inherited_space_context.0,
+        "space_decision_ref": inherited_space_context.1,
+        "recipient_audience_ref": inherited_space_context.2,
+        "recipient_audience_revision": inherited_space_context.3,
+        "recipient_audience_hash": inherited_space_context.4,
+        "privacy_policy_ref": inherited_space_context.5,
+        "resource_authorization_ref": inherited_space_context.6,
+        "authority_revision": inherited_space_context.7,
     }))
     .bind(now)
     .bind(&req.org_id)
@@ -2649,6 +3248,10 @@ impl SessionCore for SessionService {
                 Option<String>,
                 Option<DateTime<Utc>>,
                 DateTime<Utc>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<DateTime<Utc>>,
             )> = sqlx::query_as(
                 "SELECT
                     t.id,
@@ -2657,7 +3260,11 @@ impl SessionCore for SessionService {
                     COALESCE(t.presentation_title, first_user.content) AS title,
                     COALESCE(t.presentation_preview, last_message.content) AS preview,
                     t.pinned_at,
-                    COALESCE(last_message.created_at, t.created_at) AS updated_at
+                    COALESCE(last_message.created_at, t.created_at) AS updated_at,
+                    t.space_id,
+                    latest_run.id AS latest_run_id,
+                    latest_run.status AS latest_run_status,
+                    latest_run.updated_at AS latest_run_updated_at
                  FROM threads t
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -2673,13 +3280,22 @@ impl SessionCore for SessionService {
                     ORDER BY sequence DESC
                     LIMIT 1
                  ) last_message ON TRUE
+                 LEFT JOIN LATERAL (
+                    SELECT id, status, updated_at
+                    FROM runs
+                    WHERE thread_id = t.id
+                    ORDER BY updated_at DESC, created_at DESC, id DESC
+                    LIMIT 1
+                 ) latest_run ON TRUE
                  WHERE t.org_id = $1 AND t.user_id = $2 AND t.archived_at IS NULL
+                   AND (NULLIF($4, '') IS NULL OR t.space_id = $4)
                  ORDER BY (t.pinned_at IS NOT NULL) DESC, COALESCE(last_message.created_at, t.created_at) DESC, t.created_at DESC, t.id DESC
                  LIMIT $3",
             )
             .bind(&req.org_id)
             .bind(&req.user_id)
             .bind(limit)
+			.bind(&req.space_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -2690,7 +3306,7 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -2708,6 +3324,10 @@ impl SessionCore for SessionService {
                             created_at: Some(to_proto_timestamp(created_at)),
                             updated_at: Some(to_proto_timestamp(updated_at)),
                             pinned: pinned_at.is_some(),
+                            space_id: space_id.unwrap_or_default(),
+                            latest_run_id: latest_run_id.unwrap_or_default(),
+                            latest_run_status: latest_run_status.unwrap_or_default(),
+                            latest_run_updated_at: latest_run_updated_at.map(to_proto_timestamp),
                         }
                     },
                 )
@@ -3117,6 +3737,189 @@ impl SessionCore for SessionService {
         }
         .await;
         record_metrics("delete_threads", started, result.is_ok());
+        result
+    }
+
+    async fn delete_space_threads(
+        &self,
+        request: Request<pb::DeleteSpaceThreadsRequest>,
+    ) -> Result<Response<pb::DeleteSpaceThreadsResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_space_deletion_service(&caller)?;
+            let req = request.into_inner();
+            if req.org_id.trim().is_empty()
+                || req.space_id.trim().is_empty()
+                || req.owner_principal_id.trim().is_empty()
+                || req.deletion_request_id.trim().is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "org_id, space_id, owner_principal_id, and deletion_request_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+
+            let mut tx = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            // Lock exactly the scoped owner rows before deleting their
+            // descendants. This is idempotent: a retry after a committed
+            // deletion observes an empty set and cannot touch an unscoped
+            // thread in the same org.
+            let thread_ids: Vec<(String,)> = sqlx::query_as(
+                "SELECT id FROM threads
+                 WHERE org_id = $1 AND user_id = $2 AND space_id = $3
+                 ORDER BY id FOR UPDATE",
+            )
+            .bind(&req.org_id)
+            .bind(&req.owner_principal_id)
+            .bind(&req.space_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+
+            // New background thread memories are mirrored into Letta with the
+            // exact durable ID. Capture those IDs before the local deletion;
+            // remote cleanup happens only after the local transaction commits
+            // so a failed semantic bridge can never roll back or resurrect a
+            // user's canonical erase.
+            for (thread_id,) in &thread_ids {
+                let ids: Vec<(String,)> = sqlx::query_as(
+                    "SELECT id FROM agent_memory
+                     WHERE org_id = $1 AND session_id = $2 AND scope = 'thread'",
+                )
+                .bind(&req.org_id)
+                .bind(thread_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+                for (memory_id,) in &ids {
+                    sqlx::query(
+                        "INSERT INTO space_deletion_semantic_memory_receipts
+                         (deletion_request_id, org_id, owner_principal_id, space_id, memory_id)
+                         VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (deletion_request_id, memory_id) DO NOTHING",
+                    )
+                    .bind(&req.deletion_request_id)
+                    .bind(&req.org_id)
+                    .bind(&req.owner_principal_id)
+                    .bind(&req.space_id)
+                    .bind(memory_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                }
+                delete_thread_rows(&mut tx, thread_id).await?;
+                sqlx::query(
+                    "DELETE FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3 AND space_id = $4",
+                )
+                .bind(thread_id)
+                .bind(&req.org_id)
+                .bind(&req.owner_principal_id)
+                .bind(&req.space_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+
+            // On an idempotent retry the canonical memory/thread rows have
+            // already gone; the receipt ledger is the only safe source of the
+            // exact IDs still needing an external reconciliation attempt.
+            let semantic_memory_ids: Vec<(String,)> = sqlx::query_as(
+                "SELECT memory_id FROM space_deletion_semantic_memory_receipts
+                 WHERE deletion_request_id = $1 AND org_id = $2
+                   AND owner_principal_id = $3 AND space_id = $4
+                   AND status <> 'confirmed'
+                 ORDER BY memory_id",
+            )
+            .bind(&req.deletion_request_id)
+            .bind(&req.org_id)
+            .bind(&req.owner_principal_id)
+            .bind(&req.space_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            let semantic_memory_attempted_count =
+                u32::try_from(semantic_memory_ids.len()).unwrap_or(u32::MAX);
+            if let Some(letta) = self.letta_memory.as_ref() {
+                for (memory_id,) in &semantic_memory_ids {
+                    let outcome = letta
+                        .delete_detailed(&req.org_id, &req.owner_principal_id, memory_id)
+                        .await;
+                    // A `deleted=false` reply cannot distinguish an idempotent
+                    // prior delete from an unknown/mismatched semantic record,
+                    // so it remains unconfirmed until the future receipt ledger
+                    // reconciles it. Never turn that ambiguity into success.
+                    let degradation_reason = outcome.degradation_reason.clone();
+                    let confirmed = outcome.deleted && degradation_reason.is_none();
+                    let error = degradation_reason.unwrap_or_else(|| {
+                        (!outcome.deleted)
+                            .then_some("semantic_delete_not_confirmed")
+                            .unwrap_or_default()
+                    });
+                    sqlx::query(
+                        "UPDATE space_deletion_semantic_memory_receipts
+                         SET status = $1, attempts = attempts + 1, last_error = $2, updated_at = now()
+                         WHERE deletion_request_id = $3 AND memory_id = $4",
+                    )
+                    .bind(if confirmed { "confirmed" } else { "unconfirmed" })
+                    .bind(&error)
+                    .bind(&req.deletion_request_id)
+                    .bind(memory_id)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                    if !confirmed {
+                        warn!(
+                            org_id = %req.org_id,
+                            owner_principal_id = %req.owner_principal_id,
+                            memory_id,
+                            degradation = ?degradation_reason,
+                            "Space deletion could not confirm an exact correlated Letta memory erase"
+                        );
+                    }
+                }
+            } else if !semantic_memory_ids.is_empty() {
+                sqlx::query(
+                    "UPDATE space_deletion_semantic_memory_receipts
+                     SET status = 'unconfirmed', last_error = 'letta_not_configured', updated_at = now()
+                     WHERE deletion_request_id = $1 AND status <> 'confirmed'",
+                )
+                .bind(&req.deletion_request_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            }
+
+            let (semantic_memory_unconfirmed_count,): (i64,) = sqlx::query_as(
+                "SELECT count(*) FROM space_deletion_semantic_memory_receipts
+                 WHERE deletion_request_id = $1 AND org_id = $2
+                   AND owner_principal_id = $3 AND space_id = $4
+                   AND status <> 'confirmed'",
+            )
+            .bind(&req.deletion_request_id)
+            .bind(&req.org_id)
+            .bind(&req.owner_principal_id)
+            .bind(&req.space_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+
+            Ok(Response::new(pb::DeleteSpaceThreadsResponse {
+                deleted_count: u32::try_from(thread_ids.len()).unwrap_or(u32::MAX),
+                semantic_memory_attempted_count,
+                semantic_memory_unconfirmed_count: u32::try_from(semantic_memory_unconfirmed_count)
+                    .unwrap_or(u32::MAX),
+            }))
+        }
+        .await;
+        record_metrics("delete_space_threads", started, result.is_ok());
         result
     }
 
@@ -4037,15 +4840,24 @@ mod tests {
         append_letta_memory_rows, assemble_segments, authorize_dataplane, complete_step_inner,
         derive_idempotency_hash, finalize_tool_action_inner, normalize_thread_presentation_text,
         pb, reserve_tool_action_inner, resolve_dataplane_addr, resolve_residency,
-        semantic_context_search_status, support_thread_id, sync_dream_memory_unless_zdr,
-        validate_user_checkpoint, AssemblyInputs, DelegatedDataPlaneBearer, LettaMemoryAdapter,
-        MemoryRetention, SemanticContextSearchStatus, VerifiedIdentity, DEFAULT_RESIDENCY,
+        semantic_context_search_status, support_thread_id, thread_append_payload_digest,
+        thread_create_payload_digest, validate_append_space_context_shape,
+        validate_thread_space_context_shape, validate_user_checkpoint,
+        verify_append_space_decision_with_key, verify_thread_space_decision_with_key,
+        verify_thread_space_decision_with_keys, AssemblyInputs, DelegatedDataPlaneBearer,
+        LettaMemoryAdapter, MemoryRetention, SemanticContextSearchStatus, VerifiedIdentity,
+        CONTROL_SPACE_DECISION_AUDIENCE, CONTROL_SPACE_DECISION_VERSION,
+        CONTROL_THREAD_APPEND_ACTION, CONTROL_THREAD_CREATE_ACTION, DEFAULT_RESIDENCY,
         HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES,
         MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL, THREAD_TITLE_MAX_CHARS,
         ZDR_MEMORY_READ_SUPPRESSED,
     };
-    use crate::dreaming::DreamMemoryCandidate;
+    use crate::auth::{SPACE_DELETION_SCOPE, SPACE_DELETION_SERVICE};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use chrono::{DateTime, Utc};
+    use ed25519_dalek::{Signer as _, SigningKey};
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+    use std::collections::BTreeMap;
     use tonic::Request;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4065,6 +4877,25 @@ mod tests {
         let error = normalize_thread_presentation_text(&oversized, "title", THREAD_TITLE_MAX_CHARS)
             .expect_err("oversize title must not be silently truncated");
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn semantic_memory_deletion_ledger_is_request_bound_and_never_has_a_success_default() {
+        let migration =
+            include_str!("../migrations/0026_space_deletion_semantic_memory_receipts.sql");
+        for required in [
+            "PRIMARY KEY (deletion_request_id, memory_id)",
+            "DEFAULT 'pending'",
+            "'pending', 'confirmed', 'unconfirmed'",
+            "owner_principal_id",
+            "space_id",
+        ] {
+            assert!(
+                migration.contains(required),
+                "semantic deletion migration missing {required}"
+            );
+        }
+        assert!(!migration.contains("DEFAULT 'confirmed'"));
     }
 
     /// A Letta adapter whose Auth Core is a mock and whose memory endpoint is
@@ -4125,56 +4956,6 @@ mod tests {
         );
         assert!(!MemoryRetention::ZeroDataRetention.permits_durable_memory());
         assert!(MemoryRetention::Durable.permits_durable_memory());
-    }
-
-    /// Mirrors `auth::issuer_zdr_blocks_every_durable_session_write` at the
-    /// Letta boundary: memory is durable by definition, so a ZDR credential must
-    /// not persist any. Structural — the adapter is never invoked, so its Auth
-    /// Core mock sees zero requests — rather than asserting on a log line.
-    #[tokio::test]
-    async fn zdr_caller_never_reaches_the_durable_letta_write_surface() {
-        let (auth, adapter) = letta_adapter_with_observable_auth().await;
-        let candidates = vec![DreamMemoryCandidate {
-            scope: "user",
-            session_id: None,
-            key: "preference:units".to_owned(),
-            content: "prefers metric units".to_owned(),
-            kind: "preference",
-            confidence: 0.9,
-            inferred: false,
-        }];
-
-        sync_dream_memory_unless_zdr(
-            Some(&adapter),
-            MemoryRetention::of(&VerifiedIdentity::user_for_test_with_zdr(
-                "org-1", "user-1", true,
-            )),
-            "org-1",
-            "user-1",
-            "thread-1",
-            &candidates,
-        )
-        .await;
-        assert_eq!(
-            auth_request_count(&auth).await,
-            0,
-            "ZDR content must never be put on the wire to letta-bridge"
-        );
-
-        sync_dream_memory_unless_zdr(
-            Some(&adapter),
-            MemoryRetention::of(&VerifiedIdentity::user_for_test("org-1", "user-1")),
-            "org-1",
-            "user-1",
-            "thread-1",
-            &candidates,
-        )
-        .await;
-        assert_eq!(
-            auth_request_count(&auth).await,
-            1,
-            "a non-ZDR caller must still persist durable memory"
-        );
     }
 
     /// A ZDR turn is denied memory reads as well: a durable memory distils other,
@@ -4290,6 +5071,374 @@ mod tests {
             "northeurope",
             "explicit override wins"
         );
+    }
+
+    #[test]
+    fn thread_space_context_is_atomic_and_revisioned() {
+        let empty = pb::CreateThreadRequest::default();
+        assert!(
+            !validate_thread_space_context_shape(&empty).expect("unscoped thread remains valid")
+        );
+
+        let partial = pb::CreateThreadRequest {
+            space_id: "space-1".to_owned(),
+            authority_revision: 4,
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_thread_space_context_shape(&partial)
+                .expect_err("partial Space context must be rejected")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let revisionless = pb::CreateThreadRequest {
+            space_id: "space-1".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_hash: "sha256:audience-1".to_owned(),
+            privacy_policy_ref: "privacy-v1".to_owned(),
+            resource_authorization_ref: "resource-auth-1".to_owned(),
+            ..Default::default()
+        };
+        assert!(validate_thread_space_context_shape(&revisionless).is_err());
+
+        let complete = pb::CreateThreadRequest {
+            authority_revision: 4,
+            recipient_audience_revision: 2,
+            space_decision_token: "v2.token.payload.signature".to_owned(),
+            action_schema_hash: "sha256:thread-create-v1".to_owned(),
+            payload_digest: "sha256:payload-1".to_owned(),
+            idempotency_key: "thread-create:1".to_owned(),
+            ..revisionless
+        };
+        assert!(validate_thread_space_context_shape(&complete).expect("full shape is valid"));
+    }
+
+    #[test]
+    fn thread_append_context_is_atomic_and_content_bound() {
+        let empty = pb::AppendMessageRequest::default();
+        assert!(
+            !validate_append_space_context_shape(&empty).expect("unscoped append remains valid")
+        );
+        let partial = pb::AppendMessageRequest {
+            space_id: "space-1".to_owned(),
+            ..Default::default()
+        };
+        assert!(validate_append_space_context_shape(&partial).is_err());
+        let complete = pb::AppendMessageRequest {
+            thread_id: "thread-1".to_owned(),
+            content: "exact message".to_owned(),
+            space_id: "space-1".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_revision: 3,
+            recipient_audience_hash: "sha256:audience".to_owned(),
+            privacy_policy_ref: "privacy-1".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: "resource-1".to_owned(),
+            space_decision_token: "v2.key.payload.signature".to_owned(),
+            action_schema_hash: "sha256:thread-append-v1".to_owned(),
+            payload_digest: "sha256:payload".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+            ..Default::default()
+        };
+        assert!(validate_append_space_context_shape(&complete).expect("complete append shape"));
+        let digest = thread_append_payload_digest(&complete, "org-1", "user-1");
+        let changed = pb::AppendMessageRequest {
+            content: "other message".to_owned(),
+            ..complete.clone()
+        };
+        assert_ne!(
+            digest,
+            thread_append_payload_digest(&changed, "org-1", "user-1")
+        );
+        assert_ne!(
+            digest, complete.payload_digest,
+            "caller digest is not trusted as input"
+        );
+    }
+
+    #[test]
+    fn signed_control_space_decision_must_bind_the_exact_thread_effect() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let (request, key_id) = signed_personal_thread_request(&signing_key, now, true, true);
+        assert_eq!(
+            request.payload_digest,
+            "sha256:3486ffcc43f1c7e83003a6236d533faacf9c0249933180d0c1157a4992db7245",
+            "Control and Model must share one canonical effect encoding"
+        );
+        verify_thread_space_decision_with_key(&request, &key_id, &signing_key.verifying_key(), now)
+            .expect("signed Control decision must verify");
+
+        let mut another_effect = request;
+        another_effect.session_key = "another-session".to_owned();
+        assert_eq!(
+            verify_thread_space_decision_with_key(
+                &another_effect,
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("decision may not authorize another persisted effect")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn signed_append_decision_binds_exact_message_bytes_and_thread() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[10_u8; 32]);
+        let (request, key_id) = signed_thread_append_request(&signing_key, now);
+        verify_append_space_decision_with_key(
+            &request,
+            "org-1",
+            "user-1",
+            &key_id,
+            &signing_key.verifying_key(),
+            now,
+        )
+        .expect("signed append decision must verify");
+        let another_message = pb::AppendMessageRequest {
+            content: "different bytes".to_owned(),
+            ..request
+        };
+        assert_eq!(
+            verify_append_space_decision_with_key(
+                &another_message,
+                "org-1",
+                "user-1",
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("append bearer may not authorize different content")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn rotation_key_set_accepts_current_and_previous_key_but_rejects_unknown_key_id() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let current = SigningKey::from_bytes(&[17_u8; 32]);
+        let previous = SigningKey::from_bytes(&[18_u8; 32]);
+        let (current_request, _) = signed_personal_thread_request(&current, now, true, true);
+        let (previous_request, _) = signed_personal_thread_request(&previous, now, true, true);
+        // The helper uses the fixed test id, so give the previous signed token
+        // a distinct envelope id and register that same verifying key.
+        let previous_id = "control-previous-key".to_owned();
+        let parts: Vec<_> = previous_request.space_decision_token.split('.').collect();
+        let payload_part = parts[2];
+        let key_part = URL_SAFE_NO_PAD.encode(previous_id.as_bytes());
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload_part}");
+        let mut previous_request = previous_request;
+        previous_request.space_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(previous.sign(signing_input.as_bytes()).to_bytes())
+        );
+        let keys = BTreeMap::from([
+            ("control-test-key".to_owned(), current.verifying_key()),
+            (previous_id, previous.verifying_key()),
+        ]);
+        verify_thread_space_decision_with_keys(&current_request, &keys, now)
+            .expect("current key must verify during rotation");
+        verify_thread_space_decision_with_keys(&previous_request, &keys, now)
+            .expect("previous in-set key must verify during rotation");
+
+        let mut unknown = previous_request;
+        let parts: Vec<_> = unknown.space_decision_token.split('.').collect();
+        unknown.space_decision_token = format!(
+            "{CONTROL_SPACE_DECISION_VERSION}.{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(b"unknown-key"),
+            parts[2],
+            parts[3]
+        );
+        assert_eq!(
+            verify_thread_space_decision_with_keys(&unknown, &keys, now)
+                .expect_err("unknown key id must fail closed")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn signed_control_space_decision_requires_complete_privacy_claims() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[8_u8; 32]);
+        let (request, key_id) = signed_personal_thread_request(&signing_key, now, false, true);
+        assert_eq!(
+            verify_thread_space_decision_with_key(
+                &request,
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("policy-empty decision must not authorize persistence")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn signed_control_space_decision_requires_a_nonce() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+        let (request, key_id) = signed_personal_thread_request(&signing_key, now, true, false);
+        assert_eq!(
+            verify_thread_space_decision_with_key(
+                &request,
+                &key_id,
+                &signing_key.verifying_key(),
+                now,
+            )
+            .expect_err("nonce-less decision must not authorize persistence")
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    fn signed_personal_thread_request(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+        complete_privacy: bool,
+        include_nonce: bool,
+    ) -> (pb::CreateThreadRequest, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let request = pb::CreateThreadRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            session_key: "session-1".to_owned(),
+            space_id: "space-personal".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience:space-personal:2".to_owned(),
+            recipient_audience_revision: 2,
+            recipient_audience_hash: "sha256:test-audience".to_owned(),
+            privacy_policy_ref: "privacy:org-1:5".to_owned(),
+            resource_authorization_ref: "control:space-personal:thread-create:7".to_owned(),
+            authority_revision: 7,
+            action_schema_hash: "sha256:thread-create-v1".to_owned(),
+            payload_digest: String::new(),
+            idempotency_key: "thread-create:1".to_owned(),
+            ..Default::default()
+        };
+        let mut request = request;
+        request.payload_digest = thread_create_payload_digest(&request);
+        let mut payload = serde_json::json!({
+            "decision_ref": request.space_decision_ref,
+            "org_id": request.org_id,
+            "space_ref": request.space_id,
+            "subject_id": request.user_id,
+            "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_THREAD_CREATE_ACTION,
+            "action_schema_hash": request.action_schema_hash,
+            "payload_digest": request.payload_digest,
+            "idempotency_key": request.idempotency_key,
+            "recipient_audience_ref": request.recipient_audience_ref,
+            "recipient_audience_hash": request.recipient_audience_hash,
+            "privacy_policy_ref": request.privacy_policy_ref,
+            "resource_authorization_ref": request.resource_authorization_ref,
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": request.authority_revision,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "recipient_audience_revision": request.recipient_audience_revision,
+            "entitlement_revision": 3,
+            "permissions": ["thread:create"],
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        if !complete_privacy {
+            payload
+                .as_object_mut()
+                .expect("test claim object")
+                .remove("purpose");
+        }
+        if !include_nonce {
+            payload
+                .as_object_mut()
+                .expect("test claim object")
+                .remove("nonce");
+        }
+        let payload_part =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("test claims"));
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload_part}");
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let mut request = request;
+        request.space_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        );
+        (request, key_id)
+    }
+
+    fn signed_thread_append_request(
+        signing_key: &SigningKey,
+        now: DateTime<Utc>,
+    ) -> (pb::AppendMessageRequest, String) {
+        let key_id = "control-test-key".to_owned();
+        let key_part = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let mut request = pb::AppendMessageRequest {
+            thread_id: "thread-1".to_owned(),
+            role: "user".to_owned(),
+            content: "exact message".to_owned(),
+            space_id: "space-personal".to_owned(),
+            space_decision_ref: "append-decision-1".to_owned(),
+            recipient_audience_ref: "audience:space-personal:2".to_owned(),
+            recipient_audience_revision: 2,
+            recipient_audience_hash: "sha256:test-audience".to_owned(),
+            privacy_policy_ref: "privacy:org-1:5".to_owned(),
+            authority_revision: 7,
+            resource_authorization_ref: "control:space-personal:thread-append:7".to_owned(),
+            action_schema_hash: "sha256:thread-append-v1".to_owned(),
+            idempotency_key: "thread-append:1".to_owned(),
+            ..Default::default()
+        };
+        request.payload_digest = thread_append_payload_digest(&request, "org-1", "user-1");
+        let payload = serde_json::json!({
+            "decision_ref": request.space_decision_ref, "org_id": "org-1", "space_ref": request.space_id,
+            "subject_id": "user-1", "service_audience": CONTROL_SPACE_DECISION_AUDIENCE,
+            "action_id": CONTROL_THREAD_APPEND_ACTION, "action_schema_hash": request.action_schema_hash,
+            "payload_digest": request.payload_digest, "idempotency_key": request.idempotency_key,
+            "recipient_audience_ref": request.recipient_audience_ref, "recipient_audience_hash": request.recipient_audience_hash,
+            "privacy_policy_ref": request.privacy_policy_ref, "resource_authorization_ref": request.resource_authorization_ref,
+            "purpose": "assistant_collaboration", "lawful_basis": "contract", "privacy_class": "internal",
+            "third_party_processing_allowed": false, "retention_class": "standard", "residency": "swedencentral",
+            "deletion_scope": "space", "zero_data_retention": false, "nonce": "nonce-1",
+            "authority_revision": request.authority_revision, "membership_revision": 4, "privacy_revision": 5,
+            "recipient_audience_revision": request.recipient_audience_revision, "entitlement_revision": 3,
+            "permissions": ["thread:append"], "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        let payload_part =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).expect("test claims"));
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{key_part}.{payload_part}");
+        request.space_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        );
+        (request, key_id)
     }
 
     #[test]
@@ -5063,6 +6212,299 @@ mod tests {
             .ok();
     }
 
+    /// Two concurrent deliveries of the same create effect must converge on
+    /// one owner-bound thread. The advisory transaction lock in
+    /// `create_thread_inner` must cover the check-and-insert window; a unique
+    /// index alone would only turn the losing delivery into an error.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn concurrent_thread_creates_with_one_session_key_converge_in_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-create-race-{suffix}");
+        let user_id = format!("user-create-race-{suffix}");
+        let session_key = format!("session-create-race-{suffix}");
+        let request = pb::CreateThreadRequest {
+            session_key: session_key.clone(),
+            org_id: org_id.clone(),
+            user_id: user_id.clone(),
+            ..Default::default()
+        };
+
+        let first_pool = pool.clone();
+        let second_pool = pool.clone();
+        let (first, second) = tokio::join!(
+            super::create_thread_inner(&first_pool, request.clone()),
+            super::create_thread_inner(&second_pool, request),
+        );
+        let first_id = first.expect("first create succeeds").into_inner().thread_id;
+        let second_id = second
+            .expect("second create converges rather than failing")
+            .into_inner()
+            .thread_id;
+        assert_eq!(first_id, second_id, "same effect must return one thread");
+
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3",
+        )
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("count converged thread");
+        assert_eq!(count, 1, "concurrent retries must mint only one thread");
+
+        sqlx::query("DELETE FROM events WHERE run_id = $1")
+            .bind(&first_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&first_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// Managed runs are the normal gateway execution path. They must inherit
+    /// the verified thread context just like the legacy StartRun handler, or a
+    /// scoped turn could execute with a run/event that appears unscoped.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn managed_run_inherits_thread_space_context_in_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-managed-space-{suffix}");
+        let user_id = format!("user-managed-space-{suffix}");
+        let thread_id = format!("thread-managed-space-{suffix}");
+        let space_id = format!("space-managed-{suffix}");
+        let decision_ref = format!("decision-managed-{suffix}");
+        let audience_ref = format!("audience-managed-{suffix}");
+        let audience_hash = format!("sha256:audience-managed-{suffix}");
+        let privacy_ref = format!("privacy-managed-{suffix}");
+        let resource_ref = format!("resource-managed-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref,
+              authority_revision)
+             VALUES ($1, $1, $2, $3, $4, $5, $6, 4, $7, $8, $9, 9)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&space_id)
+        .bind(&decision_ref)
+        .bind(&audience_ref)
+        .bind(&audience_hash)
+        .bind(&privacy_ref)
+        .bind(&resource_ref)
+        .execute(&pool)
+        .await
+        .expect("seed scoped thread");
+
+        let managed = crate::terminalization::start_managed_run_inner(
+            &pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread_id.clone(),
+                parent_run_id: String::new(),
+                agent_id: "managed-space-agent".to_owned(),
+                goal: "scoped goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org_id.clone(),
+                user_id: user_id.clone(),
+                start_key: format!("managed-space-start-{suffix}"),
+                terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            },
+            false,
+        )
+        .await
+        .expect("start scoped managed run");
+
+        let persisted: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        ) = sqlx::query_as(
+            "SELECT space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash,
+                    privacy_policy_ref, resource_authorization_ref, authority_revision
+             FROM runs WHERE id = $1",
+        )
+        .bind(&managed.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read inherited run context");
+        assert_eq!(
+            persisted,
+            (
+                Some(space_id.clone()),
+                Some(decision_ref.clone()),
+                Some(audience_ref.clone()),
+                Some(4),
+                Some(audience_hash.clone()),
+                Some(privacy_ref.clone()),
+                Some(resource_ref.clone()),
+                Some(9),
+            )
+        );
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM events WHERE run_id = $1 AND event_type = 'RUN_STARTED'",
+        )
+        .bind(&managed.run_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read started event");
+        assert_eq!(payload["space_id"], space_id);
+        assert_eq!(payload["space_decision_ref"], decision_ref);
+        assert_eq!(payload["recipient_audience_ref"], audience_ref);
+        assert_eq!(payload["recipient_audience_revision"], 4);
+        assert_eq!(payload["recipient_audience_hash"], audience_hash);
+        assert_eq!(payload["privacy_policy_ref"], privacy_ref);
+        assert_eq!(payload["resource_authorization_ref"], resource_ref);
+        assert_eq!(payload["authority_revision"], 9);
+
+        sqlx::query("DELETE FROM events WHERE run_id = $1")
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM plans WHERE run_id = $1")
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM managed_run_terminalization_outbox WHERE run_id = $1")
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&managed.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// A duplicate managed-start delivery is normal after a worker timeout.
+    /// Both callers must receive the first durable receipt, not a uniqueness
+    /// error or a second run.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn concurrent_managed_starts_converge_on_one_receipt_in_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-managed-race-{suffix}");
+        let user_id = format!("user-managed-race-{suffix}");
+        let thread_id = format!("thread-managed-race-{suffix}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+        let request = pb::StartManagedRunRequest {
+            thread_id: thread_id.clone(),
+            parent_run_id: String::new(),
+            agent_id: "managed-race-agent".to_owned(),
+            goal: "retry-safe managed goal".to_owned(),
+            mode: "execute".to_owned(),
+            org_id: org_id.clone(),
+            user_id: user_id.clone(),
+            start_key: format!("managed-race-start-{suffix}"),
+            terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+        };
+        let first_pool = pool.clone();
+        let second_pool = pool.clone();
+        let (first, second) = tokio::join!(
+            crate::terminalization::start_managed_run_inner(&first_pool, request.clone(), false),
+            crate::terminalization::start_managed_run_inner(&second_pool, request, false),
+        );
+        let first = first.expect("first start succeeds");
+        let second = second.expect("second start replays receipt");
+        assert_eq!(first.run_id, second.run_id);
+        assert_eq!(first.thread_id, second.thread_id);
+        assert!(first.already_started ^ second.already_started);
+
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM managed_run_terminalization_outbox
+             WHERE org_id = $1 AND user_id = $2 AND start_key = $3",
+        )
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(format!("managed-race-start-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .expect("count converged obligation");
+        assert_eq!(count, 1, "one start key must have one durable obligation");
+
+        sqlx::query("DELETE FROM events WHERE run_id = $1")
+            .bind(&first.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM plans WHERE run_id = $1")
+            .bind(&first.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM managed_run_terminalization_outbox WHERE run_id = $1")
+            .bind(&first.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&first.run_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
     /// A destructive thread erase is owner-bound and removes transcript,
     /// run, event, and thread rows atomically. The bulk form must remove only
     /// the authenticated user's threads, not every thread in the org.
@@ -5227,6 +6669,153 @@ mod tests {
             .execute(&pool)
             .await
             .expect("cleanup foreign thread");
+    }
+
+    /// The cross-plane deletion coordinator is permitted to erase only the
+    /// requested owner's records in the requested Space. A same-tenant row
+    /// for another Space or another owner is a hard negative boundary.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn delete_space_threads_is_exactly_owner_and_space_bound_against_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-space-delete-{suffix}");
+        let owner = format!("user-space-owner-{suffix}");
+        let foreign = format!("user-space-foreign-{suffix}");
+        let target_space = format!("space-target-{suffix}");
+        let other_space = format!("space-other-{suffix}");
+        let target_thread = format!("thread-space-target-{suffix}");
+        let other_space_thread = format!("thread-space-other-{suffix}");
+        let foreign_thread = format!("thread-space-foreign-{suffix}");
+        let authority_ref = format!("authority-{suffix}");
+        let audience_ref = format!("audience-{suffix}");
+        let audience_hash = format!("audience-hash-{suffix}");
+        let privacy_ref = format!("privacy-{suffix}");
+        let resource_ref = format!("resource-{suffix}");
+
+        for (thread_id, user_id, space_id) in [
+            (&target_thread, &owner, &target_space),
+            (&other_space_thread, &owner, &other_space),
+            (&foreign_thread, &foreign, &target_space),
+        ] {
+            sqlx::query(
+                "INSERT INTO threads (\
+                    id, session_key, org_id, user_id, space_id, space_decision_ref, \
+                    recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, \
+                    authority_revision, recipient_audience_revision, recipient_audience_hash\
+                ) VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, 1, 1, $9)",
+            )
+            .bind(thread_id)
+            .bind(&org_id)
+            .bind(user_id)
+            .bind(space_id)
+            .bind(&authority_ref)
+            .bind(&audience_ref)
+            .bind(&privacy_ref)
+            .bind(&resource_ref)
+            .bind(&audience_hash)
+            .execute(&pool)
+            .await
+            .expect("seed scoped thread");
+        }
+
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+        let mut request = Request::new(pb::DeleteSpaceThreadsRequest {
+            org_id: org_id.clone(),
+            space_id: target_space.clone(),
+            owner_principal_id: owner.clone(),
+            deletion_request_id: format!("deletion-request-{suffix}"),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                &org_id,
+                SPACE_DELETION_SERVICE,
+                &[SPACE_DELETION_SCOPE],
+                false,
+            ));
+        let receipt = svc
+            .delete_space_threads(request)
+            .await
+            .expect("exactly scoped space deletion")
+            .into_inner();
+        assert_eq!(receipt.deleted_count, 1);
+
+        for (thread_id, expected) in [
+            (&target_thread, 0_i64),
+            (&other_space_thread, 1_i64),
+            (&foreign_thread, 1_i64),
+        ] {
+            let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM threads WHERE id = $1")
+                .bind(thread_id)
+                .fetch_one(&pool)
+                .await
+                .expect("check exact scope boundary");
+            assert_eq!(count, expected, "unexpected deletion scope for {thread_id}");
+        }
+
+        for thread_id in [&other_space_thread, &foreign_thread] {
+            sqlx::query("DELETE FROM threads WHERE id = $1")
+                .bind(thread_id)
+                .execute(&pool)
+                .await
+                .expect("cleanup preserved thread");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_space_threads_rejects_cross_org_coordinator_before_database_access() {
+        let pool =
+            sqlx::PgPool::connect_lazy("postgres://postgres:postgres@127.0.0.1/session_core")
+                .expect("construct lazy pool");
+        let svc = super::SessionService {
+            pool,
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+        let mut request = Request::new(pb::DeleteSpaceThreadsRequest {
+            org_id: "org-b".to_owned(),
+            space_id: "space-b".to_owned(),
+            owner_principal_id: "user-b".to_owned(),
+            deletion_request_id: "delete-b".to_owned(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                "org-a",
+                SPACE_DELETION_SERVICE,
+                &[SPACE_DELETION_SCOPE],
+                false,
+            ));
+
+        assert_eq!(
+            svc.delete_space_threads(request)
+                .await
+                .expect_err("cross-org coordinator must fail before SQL")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
     }
 
     #[tokio::test]

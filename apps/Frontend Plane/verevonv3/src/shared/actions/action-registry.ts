@@ -179,6 +179,8 @@ const connectSourceInput = z.object({
   sourceType: z.enum(['notion', 'crm', 'erp', 'cms', 'pim', 'hubspot', 'salesforce', 'odoo']),
   connection: z.record(z.string(), z.unknown()).optional(),
   options: z.record(z.string(), z.unknown()).optional(),
+  /** A browser selection only; the BFF resolves all import authority. */
+  spaceRef: z.string().trim().min(1).max(256).optional(),
 })
 
 const operatingMapGenerateInput = z.object({

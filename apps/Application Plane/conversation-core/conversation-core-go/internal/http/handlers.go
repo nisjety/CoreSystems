@@ -94,6 +94,7 @@ type outboundIntentResponse struct {
 }
 
 type createTicketBody struct {
+	IdempotencyKey      string   `json:"idempotency_key"`
 	ConversationID      string   `json:"conversation_id"`
 	Status              string   `json:"status"`
 	WorkType            string   `json:"work_type"`
@@ -504,8 +505,9 @@ func (h *Handler) CreateTicket(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, errorPayload("validation_error", "escalation_at must be RFC3339 when provided."))
 		return
 	}
-	ticket, err := h.service.CreateTicket(c.Request.Context(), conversation.CreateTicketInput{
+	input := conversation.CreateTicketInput{
 		OrgID:               orgID,
+		IdempotencyKey:      body.IdempotencyKey,
 		ConversationID:      body.ConversationID,
 		Status:              body.Status,
 		WorkType:            body.WorkType,
@@ -531,12 +533,43 @@ func (h *Handler) CreateTicket(c *gin.Context) {
 		EscalationAt:        escalationAt,
 		Labels:              body.Labels,
 		ActorUserID:         actorUserID(c),
-	})
+	}
+	// The generic Verevon action surface supplies an idempotency key and uses
+	// the durable owner receipt. Retain the legacy response only for existing
+	// dedicated ticket clients during their compatibility window.
+	if strings.TrimSpace(body.IdempotencyKey) != "" {
+		receipt, err := h.service.CreateTicketOperation(c.Request.Context(), input)
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": gin.H{"ticket": receipt.Ticket, "operation": receipt}})
+		return
+	}
+	ticket, err := h.service.CreateTicket(c.Request.Context(), input)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"data": ticket})
+}
+
+// GetTicketOperation reconciles an ambiguous tickets.create response without
+// re-executing the effect. Conversation Core resolves the actor from the
+// verified delegation and binds the owner lookup to it.
+func (h *Handler) GetTicketOperation(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	receipt, err := h.service.GetTicketOperation(
+		c.Request.Context(), orgID, actorUserID(c), c.Param("idempotency_key"),
+	)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"ticket": receipt.Ticket, "operation": receipt}})
 }
 
 func (h *Handler) GetTicket(c *gin.Context) {

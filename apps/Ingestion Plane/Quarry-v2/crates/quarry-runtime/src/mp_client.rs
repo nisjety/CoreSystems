@@ -349,6 +349,7 @@ impl ModelPlanePlanner {
             "url": observation.url,
             "title": observation.title,
             "step": observation.step,
+            "snapshot": observation.snapshot.as_ref(),
             "interactive_elements": observation
                 .dom_summary
                 .as_ref()
@@ -370,7 +371,9 @@ impl ModelPlanePlanner {
              {{\"done\": false, \"actions\": [<action>, ...]}}\n\n\
              Each <action> must match one of these shapes:\n\
              {{\"type\": \"navigate\", \"url\": \"...\"}}\n\
-             {{\"type\": \"click\", \"selector\": \"...\"}}\n\
+             {{\"type\": \"click_ref\", \"snapshot_id\": \"...\", \"generation\": 0, \"ref_id\": \"@e1\"}}\n\
+             {{\"type\": \"click_semantic\", \"snapshot_id\": \"...\", \"generation\": 0, \"locator\": {{\"kind\": \"role\", \"role\": \"button\", \"name\": \"...\", \"exact\": true}}}}\n\
+             {{\"type\": \"type_ref\", \"snapshot_id\": \"...\", \"generation\": 0, \"ref_id\": \"@e1\", \"text\": \"...\"}}\n\
              {{\"type\": \"type\", \"selector\": \"...\", \"text\": \"...\"}}\n\
              {{\"type\": \"press\", \"key\": \"Enter\"}}\n\
              {{\"type\": \"scroll\", \"target\": \"...\"}}\n\
@@ -382,6 +385,11 @@ impl ModelPlanePlanner {
              {{\"type\": \"evaluate\", \"script\": \"...\"}}\n\
              {{\"type\": \"back\"}}\n\
              {{\"type\": \"get_content\"}}\n\n\
+             When `snapshot` is present, prefer its `@e…` refs for any effectful\n\
+             action. Echo its exact `snapshot_id` and `generation`; never invent\n\
+             a ref and never reuse one after a new observation. Semantic locators\n\
+             are allowed only when they identify exactly one snapshot target.\n\
+             CSS selectors are legacy fallback only.\n\n\
              Set \"done\": true with empty actions when the agent goal is reached \
              or no further productive action is possible."
         )
@@ -474,11 +482,15 @@ mod tests {
             step: 0,
             url: "https://example.com".into(),
             title: Some("Example".into()),
+            snapshot: None,
             dom_summary: None,
             screenshot_artifact_id: None,
             visual_observation_artifact_id: None,
+            evidence_delta_artifact_id: None,
             console_summary: vec![],
             network_summary: vec![],
+            egress_receipts: vec![],
+            dialogs: vec![],
             policy_denials: vec![],
             action_outcome: quarry_core::contracts::ActionOutcome::default(),
             observation_delta: None,
@@ -486,6 +498,8 @@ mod tests {
             extraction_profile: None,
             extraction_result: None,
             proof_bundle: None,
+            target_resolution: None,
+            telemetry: quarry_core::contracts::BrowserTelemetry::default(),
             observed_at: Utc::now(),
         }
     }

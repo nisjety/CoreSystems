@@ -19,4 +19,5 @@ pub mod pipeline;
 pub mod rate_limit;
 pub mod redact;
 pub mod search;
+pub mod space_scope;
 pub mod trace;

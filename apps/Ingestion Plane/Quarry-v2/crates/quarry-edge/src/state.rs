@@ -123,6 +123,11 @@ pub struct AppState {
     /// Acquires a leased session per `/v1/agent/runs`; one action per `/step`.
     #[cfg(feature = "browser-agent")]
     pub agent_driver: Arc<dyn quarry_browser::BrowserDriver>,
+    /// Process-local DNS-pinning CONNECT/HTTP authority used by every local
+    /// Chromium path. Keeping this handle in state prevents the proxy task
+    /// from being dropped while browser sessions are still live.
+    #[cfg(feature = "browser-agent")]
+    pub browser_egress_proxy: Option<Arc<quarry_runtime::PinnedBrowserEgressProxy>>,
     /// P7 — live agent runs keyed by run_id (session + observation ctx + lease).
     #[cfg(feature = "browser-agent")]
     pub agent_runs: crate::agent_routes::AgentRuns,

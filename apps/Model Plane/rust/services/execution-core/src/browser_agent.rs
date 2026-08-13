@@ -140,6 +140,10 @@ pub struct BrowserAction {
     pub value: String,
     pub url: String,
     pub max_wait_ms: i32,
+    /// Opaque Quarry target binding from the most recent browser observation.
+    /// When present for click/type, the Quarry wire client uses the native
+    /// snapshot-ref action instead of replaying a CSS selector.
+    pub target: Option<BrowserTargetRef>,
     /// The planner's rationale for choosing this action. Empty for the
     /// deterministic fallback (no LLM reason available). Surfaced on the
     /// run-event stream (Phase 2) so the UI can show model reasoning live.
@@ -150,6 +154,17 @@ pub struct BrowserAction {
     /// (`classify_action_risk`) that runs regardless, so a model that omits
     /// or under-reports risk cannot silently bypass the HITL gate.
     pub risk_category: Option<RiskCategory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserTargetRef {
+    pub snapshot_id: String,
+    pub generation: u32,
+    pub ref_id: String,
+    /// Child-frame identity from the Quarry snapshot. `None` means this is a
+    /// top-level target; a child frame is emitted through the dedicated
+    /// frame-ref action wire variant rather than downgraded to CSS.
+    pub frame_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -163,7 +178,20 @@ pub struct BrowserObservation {
     pub extracted_text: String,
     pub screenshot_ref: String,
     pub dom_snapshot_ref: String,
+    /// Compact, public AX targets from Quarry's active snapshot. These are
+    /// opaque evidence handles, never CDP backend node ids or selectors.
+    pub snapshot_generation: Option<u32>,
+    pub snapshot_targets: Vec<BrowserSnapshotTarget>,
     pub error_message: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BrowserSnapshotTarget {
+    pub ref_id: String,
+    pub role: Option<String>,
+    pub name: Option<String>,
+    pub text: Option<String>,
+    pub frame_id: Option<String>,
 }
 
 /// Sink for surfacing browser-agent progress as orchestration events (B4).
@@ -546,6 +574,7 @@ pub fn plan_next_action(
                 value: String::new(),
                 url: url.to_owned(),
                 max_wait_ms: 15_000,
+                target: None,
                 reason: "navigate to the run's starting page".to_owned(),
                 risk_category: None,
             },
@@ -557,6 +586,7 @@ pub fn plan_next_action(
                 value: String::new(),
                 url: String::new(),
                 max_wait_ms: 5000,
+                target: None,
                 reason: String::new(),
                 risk_category: None,
             },
@@ -571,6 +601,7 @@ pub fn plan_next_action(
         value: String::new(),
         url: String::new(),
         max_wait_ms: 5000,
+        target: None,
         reason: String::new(),
         risk_category: None,
     })
@@ -1156,6 +1187,8 @@ mod tests {
             extracted_text: String::new(),
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
+            snapshot_generation: None,
+            snapshot_targets: vec![],
             error_message: "element not found".to_owned(),
         };
         let result = plan_next_action(&mut plan, Some(&obs));
@@ -1182,6 +1215,8 @@ mod tests {
             extracted_text: "result: success_marker found".to_owned(),
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
+            snapshot_generation: None,
+            snapshot_targets: vec![],
             error_message: String::new(),
         };
         let result = plan_next_action(&mut plan, Some(&obs));
@@ -1603,6 +1638,7 @@ mod tests {
             value: String::new(),
             url: "https://shop.example.com/checkout".to_owned(),
             max_wait_ms: 5_000,
+            target: None,
             reason: "continue after sign-in".to_owned(),
             risk_category: Some(RiskCategory::Login),
         };

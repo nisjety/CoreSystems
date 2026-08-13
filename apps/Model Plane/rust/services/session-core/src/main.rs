@@ -31,6 +31,7 @@ mod orchestration_store;
 mod routing_policy_grpc;
 mod run_service_grpc;
 mod service_token;
+mod space_deletion_reconciler;
 mod store;
 mod terminalization;
 
@@ -111,14 +112,38 @@ async fn main() -> Result<()> {
     });
     let compaction_handle = tokio::spawn(compaction::run(pool.clone()));
     let dreaming_pool = pool.clone();
+    let dreaming_letta_memory = letta_memory.clone();
     let dreaming_handle = tokio::spawn(supervise_background(
         "session-core Dreaming Core",
         move || {
             let pool = dreaming_pool.clone();
-            let letta = letta_memory.clone();
+            let letta = dreaming_letta_memory.clone();
             async move { dreaming::run(pool, letta).await }
         },
     ));
+    let semantic_reconciliation_handle = {
+        let pool = pool.clone();
+        let letta = letta_memory.clone();
+        tokio::spawn(async move {
+            match letta {
+                Some(letta) => {
+                    supervise_background(
+                        "session-core Space deletion semantic-memory reconciler",
+                        move || {
+                            let pool = pool.clone();
+                            let letta = letta.clone();
+                            async move { space_deletion_reconciler::run(pool, letta).await }
+                        },
+                    )
+                    .await
+                }
+                None => {
+                    warn!("Letta is not configured; Space deletion semantic-memory reconciliation is disabled");
+                    std::future::pending::<Result<()>>().await
+                }
+            }
+        })
+    };
     let terminalization_pool = pool.clone();
     let terminalization_handle = tokio::spawn(supervise_background(
         "session-core managed-run terminalization recovery",
@@ -144,6 +169,7 @@ async fn main() -> Result<()> {
         result = gdpr_erasure_handle => result??,
         result = compaction_handle => result??,
         result = dreaming_handle => result??,
+        result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         () = shutdown => {},
     }

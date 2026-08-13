@@ -613,16 +613,18 @@ fn collect_output_files(workspace: &Path, staged: &[&str]) -> Vec<OutputFile> {
 mod tests {
     use super::*;
 
-    /// The real end-to-end tests need a Python interpreter. Gated the same way
-    /// `sandbox.rs` gates its Linux-only tests: skip (loudly) rather than fail
-    /// on a dev host that has no `python3`.
+    /// The real end-to-end tests require both the interpreter and enforced
+    /// local isolation. A machine without either one is a deliberately
+    /// unavailable `code_interpreter` runtime, not a reason to test it through
+    /// the forbidden host-process fallback.
     fn python3_available() -> bool {
-        std::process::Command::new("python3")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+        crate::sandbox::is_supported()
+            && std::process::Command::new("python3")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
     }
 
     async fn run_python(code: &str, files_in: serde_json::Value) -> serde_json::Value {
@@ -1084,6 +1086,10 @@ mod tests {
 
     #[tokio::test]
     async fn sh_programs_run_too() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: local sandbox isolation is unavailable");
+            return;
+        }
         let input = serde_json::json!({
             "language": "sh",
             "code": "printf 'shell ok'; printf 'x' > made.txt",

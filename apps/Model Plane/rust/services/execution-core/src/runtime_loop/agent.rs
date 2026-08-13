@@ -1064,6 +1064,41 @@ fn retrieval_signature(tool_name: &str, tool_input: &str) -> Option<String> {
     ))
 }
 
+/// The browser adapter deliberately has a narrower wire schema than Quarry's
+/// public `/step` endpoint. Model Plane can act only on opaque observations
+/// from an already-granted run; it cannot smuggle CSS, URL, CDP, coordinate,
+/// or filesystem authority through a generic JSON payload.
+fn browser_act_parameters_json() -> String {
+    r#"{
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {"type": "string", "description": "Opaque active BrowserBroker grant id"},
+        "quarry_run_id": {"type": "string", "description": "Existing Quarry browser run id"},
+        "lease_id": {"type": "string", "description": "Existing Quarry browser lease id"},
+        "action": {
+          "oneOf": [
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"click_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"ref_id":{"type":"string"}},"required":["type","snapshot_id","generation","ref_id"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"type_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"ref_id":{"type":"string"},"text":{"type":"string","maxLength":65536}},"required":["type","snapshot_id","generation","ref_id","text"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"select_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"ref_id":{"type":"string"},"value":{"type":"string","maxLength":65536}},"required":["type","snapshot_id","generation","ref_id","value"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"wait_for_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"ref_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1,"maximum":30000}},"required":["type","snapshot_id","generation","ref_id","timeout_ms"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"frame_click_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"frame_id":{"type":"string"},"ref_id":{"type":"string"}},"required":["type","snapshot_id","generation","frame_id","ref_id"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"frame_type_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"frame_id":{"type":"string"},"ref_id":{"type":"string"},"text":{"type":"string","maxLength":65536}},"required":["type","snapshot_id","generation","frame_id","ref_id","text"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"frame_select_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"frame_id":{"type":"string"},"ref_id":{"type":"string"},"value":{"type":"string","maxLength":65536}},"required":["type","snapshot_id","generation","frame_id","ref_id","value"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"frame_wait_for_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"frame_id":{"type":"string"},"ref_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1,"maximum":30000}},"required":["type","snapshot_id","generation","frame_id","ref_id","timeout_ms"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"respond_dialog"},"dialog_id":{"type":"string"},"accept":{"type":"boolean"},"approval_grant_id":{"type":"string"},"prompt_text":{"type":"string","maxLength":65536}},"required":["type","dialog_id","accept","approval_grant_id"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"upload_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"ref_id":{"type":"string"},"artifact_id":{"type":"string","description":"Tenant-owned Quarry artifact id, never a host path"},"approval_grant_id":{"type":"string"}},"required":["type","snapshot_id","generation","ref_id","artifact_id","approval_grant_id"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"download_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"ref_id":{"type":"string"},"approval_grant_id":{"type":"string"}},"required":["type","snapshot_id","generation","ref_id","approval_grant_id"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"frame_upload_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"frame_id":{"type":"string"},"ref_id":{"type":"string"},"artifact_id":{"type":"string","description":"Tenant-owned Quarry artifact id, never a host path"},"approval_grant_id":{"type":"string"}},"required":["type","snapshot_id","generation","frame_id","ref_id","artifact_id","approval_grant_id"]},
+            {"type":"object","additionalProperties":false,"properties":{"type":{"const":"frame_download_ref"},"snapshot_id":{"type":"string"},"generation":{"type":"integer","minimum":0},"frame_id":{"type":"string"},"ref_id":{"type":"string"},"approval_grant_id":{"type":"string"}},"required":["type","snapshot_id","generation","frame_id","ref_id","approval_grant_id"]}
+          ]
+        }
+      },
+      "required": ["grant_id", "quarry_run_id", "lease_id", "action"]
+    }"#
+        .to_owned()
+}
+
 /// The read-tool allowlist offered to the model. JSON-Schema literals follow the
 /// `model-gateway::tool_loop::builtin_tool_defs` pattern. This set IS the
 /// purpose-lock scope: only these tools may be called.
@@ -1143,6 +1178,26 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             name: "web_fetch".to_owned(),
             description: "Fetch and read a specific web page; returns its cleaned text content.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"}},"required":["url"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "web.search".to_owned(),
+            description: "Quarry public-web discovery. Uses the same tenant-scoped, cited search boundary as web_search; no external web-execution service is involved.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"query":{"type":"string","description":"Search query"},"limit":{"type":"integer","description":"Max results 1-50"}},"required":["query"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "web.read".to_owned(),
+            description: "Quarry source normalization for one public URL. Returns cleaned text through Quarry's scoped extract boundary; it is not Data Plane retrieval.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"url":{"type":"string","description":"Absolute http(s) URL to read"}},"required":["url"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "browser.observe".to_owned(),
+            description: "Observe an EXISTING Quarry browser run using a BrowserBroker-issued grant, returning its current Quarry evidence, opaque accessibility snapshot refs, dialogs, redacted network/egress receipts, and telemetry. This cannot open a browser or navigate; use only run and lease ids provided by the approved browser workflow.".to_owned(),
+            parameters_json: r#"{"type":"object","additionalProperties":false,"properties":{"grant_id":{"type":"string","description":"Opaque active BrowserBroker grant id"},"quarry_run_id":{"type":"string","description":"Existing Quarry browser run id"},"lease_id":{"type":"string","description":"Existing Quarry browser lease id"}},"required":["grant_id","quarry_run_id","lease_id"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "browser.act".to_owned(),
+            description: "Execute ONE governed action against an EXISTING Quarry browser run. Use only an exact snapshot_id, generation, and @e-style ref returned by browser.observe; never invent refs. A target with child frame_id requires the matching frame_*_ref action and exact frame id. No URLs, CSS selectors, JavaScript, raw CDP, coordinates, or filesystem paths are accepted. Dialog replies and artifact transfers require their fresh scope-specific approval grant and Quarry remains the final enforcer. This can have real external effects and requires human approval under ask posture.".to_owned(),
+            parameters_json: browser_act_parameters_json(),
         },
         // Sandboxed code execution. Offered for the same reason as delegation
         // below — the purpose-lock rejects any tool absent from this list, so
@@ -1559,6 +1614,7 @@ async fn finalize(
                 role: "assistant".to_owned(),
                 content: answer.to_owned(),
                 metadata: None,
+                ..Default::default()
             },
             bearer,
         );

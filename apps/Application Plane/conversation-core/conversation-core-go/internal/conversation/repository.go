@@ -1804,6 +1804,245 @@ INSERT INTO conversation_tickets (
 	return r.GetTicket(ctx, input.OrgID, ticketID)
 }
 
+// CreateTicketOperation performs the ticket, immutable receipt, audit record,
+// and outbox write in one owner-plane transaction. A replay may return only
+// the exact same actor/action/conversation/request digest; reusing a key for a
+// changed operation is a conflict, never a misleading success.
+func (r *PGRepository) CreateTicketOperation(ctx context.Context, input CreateTicketInput) (*TicketOperationReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	// The unique constraint is the final integrity backstop. The advisory lock
+	// makes concurrent exact retries wait and then read the committed receipt
+	// instead of surfacing a misleading ticket uniqueness conflict.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+
+	var existing struct {
+		OperationID, ActionID, ActorUserID, ConversationID, RequestSHA256, TicketID, AuditEventID, Status string
+	}
+	err = tx.QueryRow(ctx, `
+SELECT operation_id, action_id, actor_user_id, conversation_id, request_sha256, ticket_id, audit_event_id, status
+FROM conversation_ticket_operations
+WHERE org_id = $1 AND idempotency_key = $2
+FOR UPDATE`, input.OrgID, input.IdempotencyKey).Scan(
+		&existing.OperationID, &existing.ActionID, &existing.ActorUserID, &existing.ConversationID,
+		&existing.RequestSHA256, &existing.TicketID, &existing.AuditEventID, &existing.Status,
+	)
+	if err == nil {
+		if existing.OperationID != input.OperationID || existing.ActionID != input.ActionID ||
+			existing.ActorUserID != input.ActorUserID || existing.ConversationID != input.ConversationID ||
+			existing.RequestSHA256 != input.RequestSHA256 || existing.Status != "completed" {
+			return nil, ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		ticket, err := r.GetTicket(ctx, input.OrgID, existing.TicketID)
+		if err != nil {
+			return nil, err
+		}
+		return &TicketOperationReceipt{
+			OperationID: existing.OperationID, AuditEventID: existing.AuditEventID,
+			Status: existing.Status, Ticket: ticket, Replayed: true,
+		}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	ticketID := newID("ticket")
+	ticketKey := stableTicketKey(input.OrgID, input.ConversationID)
+	_, err = tx.Exec(ctx, `
+INSERT INTO conversation_tickets (
+	id, org_id, conversation_id, ticket_key, status, priority, severity, category, intent,
+	assignee_user_id, assignee_name, team_id, team_name, due_at, follow_up_at, source, ai_confidence,
+	ai_reason, created_by, waiting_since, last_customer_reply_at, first_response_at, resolved_at,
+	snoozed_until, sla_policy_id, escalation_at, labels, work_type, created_at, updated_at
+) VALUES (
+	$1, $2, $3, $4, $5, $6, $7, $8, $9,
+	$10, $11, $12, $13, $14, NULL, $15, $16,
+	$17, $18, $19, $20, $21, $22,
+	$23, $24, $25, $26, $27, NOW(), NOW()
+)`, ticketID, input.OrgID, input.ConversationID, ticketKey, input.Status, input.Priority, input.Severity,
+		input.Category, input.Intent, input.AssigneeUserID, input.AssigneeName, input.TeamID, input.TeamName,
+		input.DueAt, input.Source, input.AIConfidence, input.AIReason, input.CreatedBy, input.WaitingSince,
+		input.LastCustomerReplyAt, input.FirstResponseAt, input.ResolvedAt, input.SnoozedUntil,
+		input.SLAPolicyID, input.EscalationAt, input.Labels, input.WorkType)
+	if err != nil {
+		return nil, normalizeOperationalPGError(err)
+	}
+	auditEventID := newID("audit")
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_audit_events (id, org_id, conversation_id, actor_user_id, action, payload)
+VALUES ($1, $2, $3, $4, 'ticket.created', $5::jsonb)`, auditEventID, input.OrgID,
+		input.ConversationID, input.ActorUserID, mustJSON(map[string]any{
+			"ticket_id": ticketID, "ticket_key": ticketKey, "status": input.Status,
+			"work_type": input.WorkType, "operation_id": input.OperationID,
+			"request_sha256": input.RequestSHA256,
+		})); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_events (id, org_id, conversation_id, type, payload)
+VALUES ($1, $2, $3, 'ticket.created', $4::jsonb)`, newID("evt"), input.OrgID, input.ConversationID,
+		mustJSON(map[string]any{
+			"ticket_id": ticketID, "operation_id": input.OperationID, "audit_event_id": auditEventID,
+			"actor_user_id": input.ActorUserID,
+		})); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_ticket_operations (
+ operation_id, org_id, idempotency_key, action_id, actor_user_id, conversation_id,
+ request_sha256, ticket_id, audit_event_id, status
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'completed')`,
+		input.OperationID, input.OrgID, input.IdempotencyKey, input.ActionID, input.ActorUserID,
+		input.ConversationID, input.RequestSHA256, ticketID, auditEventID); err != nil {
+		return nil, normalizeOperationalPGError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	ticket, err := r.GetTicket(ctx, input.OrgID, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	return &TicketOperationReceipt{
+		OperationID: input.OperationID, AuditEventID: auditEventID, Status: "completed", Ticket: ticket,
+	}, nil
+}
+
+// GetTicketOperation is the owner-side reconciliation lookup for a request
+// whose HTTP response may have been lost. Matching the exact actor prevents an
+// org peer from using a guessed idempotency key as a receipt-discovery oracle.
+func (r *PGRepository) GetTicketOperation(ctx context.Context, orgID, actorUserID, idempotencyKey string) (*TicketOperationReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	var receipt TicketOperationReceipt
+	var ticketID string
+	err := r.pool.QueryRow(ctx, `
+SELECT operation_id, audit_event_id, status, ticket_id
+FROM conversation_ticket_operations
+WHERE org_id = $1 AND actor_user_id = $2 AND idempotency_key = $3`, orgID, actorUserID, idempotencyKey).Scan(
+		&receipt.OperationID, &receipt.AuditEventID, &receipt.Status, &ticketID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	ticket, err := r.GetTicket(ctx, orgID, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	receipt.Ticket = ticket
+	receipt.Replayed = true
+	return &receipt, nil
+}
+
+func (r *PGRepository) ClaimTicketOperationOutbox(ctx context.Context, workerID string, now time.Time, lease time.Duration, limit int) ([]TicketOperationOutboxEvent, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(workerID) == "" || lease <= 0 || limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("%w: invalid ticket operation outbox claim", ErrInvalidInput)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+WITH candidates AS (
+ SELECT id FROM conversation_events
+ WHERE published_at IS NULL
+   AND type = 'ticket.created'
+   AND payload ? 'operation_id'
+   AND next_attempt_at <= $1
+   AND (lease_expires_at IS NULL OR lease_expires_at <= $1)
+ ORDER BY created_at ASC, id ASC
+ FOR UPDATE SKIP LOCKED
+ LIMIT $2
+)
+UPDATE conversation_events event
+SET lease_owner = $3, lease_expires_at = $4, delivery_attempts = event.delivery_attempts + 1,
+    last_delivery_error = NULL
+FROM candidates
+WHERE event.id = candidates.id
+RETURNING event.id, event.org_id, event.conversation_id, event.payload, event.created_at`, now, limit, workerID, now.Add(lease))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	events := []TicketOperationOutboxEvent{}
+	for rows.Next() {
+		var event TicketOperationOutboxEvent
+		var payload []byte
+		if err := rows.Scan(&event.ID, &event.OrgID, &event.ConversationID, &payload, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(payload, &event.Payload); err != nil {
+			return nil, err
+		}
+		event.ActorUserID, _ = event.Payload["actor_user_id"].(string)
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (r *PGRepository) AcknowledgeTicketOperationOutbox(ctx context.Context, eventID, workerID string, now time.Time) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	command, err := r.pool.Exec(ctx, `
+UPDATE conversation_events
+SET published_at = $3, lease_owner = NULL, lease_expires_at = NULL, last_delivery_error = NULL
+WHERE id = $1 AND lease_owner = $2 AND published_at IS NULL`, eventID, workerID, now)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (r *PGRepository) ReleaseTicketOperationOutbox(ctx context.Context, eventID, workerID, reason string, retryAt time.Time) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > 256 {
+		return fmt.Errorf("%w: invalid ticket operation outbox error", ErrInvalidInput)
+	}
+	command, err := r.pool.Exec(ctx, `
+UPDATE conversation_events
+SET lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = $4, last_delivery_error = $3
+WHERE id = $1 AND lease_owner = $2 AND published_at IS NULL`, eventID, workerID, reason, retryAt)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
 func (r *PGRepository) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error) {
 	if err := r.ensureConfigured(); err != nil {
 		return nil, err

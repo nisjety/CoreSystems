@@ -89,6 +89,11 @@ pub struct EdgeConfig {
     /// must present a grant_id and every action revalidates that grant.
     #[serde(default)]
     pub browser_grant_validator_url: Option<String>,
+    /// BrowserBroker gRPC endpoint. This is the preferred production path
+    /// when the `grpc` feature is enabled; the HTTP validator URL remains a
+    /// compatibility shim for deployments that have not exposed gRPC yet.
+    #[serde(default)]
+    pub browser_grant_validator_grpc_url: Option<String>,
     /// Fail closed when a caller omits BrowserBroker's per-run grant.
     #[serde(default)]
     pub require_browser_grants: bool,
@@ -296,6 +301,7 @@ impl EdgeConfig {
             model_plane_url: None,
             model_plane_token: None,
             browser_grant_validator_url: None,
+            browser_grant_validator_grpc_url: None,
             require_browser_grants: false,
             llm_classify_intent: false,
             llm_classify_model: None,

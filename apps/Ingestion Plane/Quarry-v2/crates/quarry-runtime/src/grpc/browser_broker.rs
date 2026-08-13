@@ -1,9 +1,9 @@
 //! gRPC `GrantValidator` implementation calling Model Plane's
-//! `BrowserBrokerService` over tonic.
+//! `BrowserBroker` over tonic.
 //!
 //! Quarry brokers browser leases internally, but Model Plane issues *grants*
 //! that authorize a specific Model Plane session to use Quarry's browser. The
-//! `BrowserBrokerService` is the authority — Quarry calls `ValidateGrant`
+//! `BrowserBroker` is the authority — Quarry calls `ValidateGrant`
 //! before any privileged browser action.
 
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
-use super::model_plane::v1::browser_broker_service_client::BrowserBrokerServiceClient;
+use super::model_plane::v1::browser_broker_client::BrowserBrokerClient;
 use super::model_plane::v1::{
     AcquireGrantRequest, AcquireGrantResponse, RevokeGrantRequest, ValidateGrantRequest,
 };
@@ -80,8 +80,8 @@ impl GrpcGrantValidator {
         self
     }
 
-    fn client(&self) -> BrowserBrokerServiceClient<Channel> {
-        BrowserBrokerServiceClient::new(self.channel.clone())
+    fn client(&self) -> BrowserBrokerClient<Channel> {
+        BrowserBrokerClient::new(self.channel.clone())
     }
 
     fn apply_auth<T>(&self, mut req: tonic::Request<T>) -> tonic::Request<T> {
@@ -105,6 +105,15 @@ impl GrpcGrantValidator {
             session_key: session_key.to_string(),
             mode: mode.to_string(),
             org_id: org_id.to_string(),
+            // Quarry normally validates Model Plane-issued grants rather than
+            // issuing them. Keep this legacy acquisition path deny-by-default
+            // until its caller can supply a broker-owned domain policy.
+            allowed_domains: Vec::new(),
+            allowed_actions: Vec::new(),
+            allowed_frame_ids: Vec::new(),
+            allowed_dialog_ids: Vec::new(),
+            allowed_artifact_ids: Vec::new(),
+            parent_grant_id: None,
         }));
         let resp: AcquireGrantResponse = client
             .acquire_grant(request)
@@ -174,6 +183,13 @@ impl GrantValidator for GrpcGrantValidator {
                         grant_id: resp.grant_id,
                         active: resp.active,
                         expires_at: resp.expires_at.and_then(prost_ts_to_chrono),
+                        allowed_domains: resp.allowed_domains,
+                        allowed_actions: resp.allowed_actions,
+                        allowed_frame_ids: resp.allowed_frame_ids,
+                        allowed_dialog_ids: resp.allowed_dialog_ids,
+                        allowed_artifact_ids: resp.allowed_artifact_ids,
+                        parent_grant_id: (!resp.parent_grant_id.is_empty())
+                            .then_some(resp.parent_grant_id),
                     });
                 }
                 Err(status) if status.code() == tonic::Code::NotFound => {
@@ -181,6 +197,12 @@ impl GrantValidator for GrpcGrantValidator {
                         grant_id: grant_id.to_string(),
                         active: false,
                         expires_at: None,
+                        allowed_domains: Vec::new(),
+                        allowed_actions: Vec::new(),
+                        allowed_frame_ids: Vec::new(),
+                        allowed_dialog_ids: Vec::new(),
+                        allowed_artifact_ids: Vec::new(),
+                        parent_grant_id: None,
                     });
                 }
                 Err(status) if is_transient(status.code()) => {

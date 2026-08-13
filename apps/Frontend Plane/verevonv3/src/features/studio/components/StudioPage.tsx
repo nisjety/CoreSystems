@@ -120,6 +120,10 @@ function StudioCanvasPage() {
   const i18n = useI18n()
   const launchCanvasTitle = i18n.tr('Lanseringslerret', 'Launch canvas')
   const localCanvasMessage = i18n.tr('Lokalt lerret', 'Local canvas')
+  const ephemeralProjectMessage = i18n.tr(
+    'Midlertidig Studio-prosjekt — nullstilles hvis gatewayen starter på nytt',
+    'Temporary Studio project — resets when the gateway restarts',
+  )
   let canvasRef: HTMLDivElement | undefined
   let loadedProjectId: string | null = null
   const [blocks, setBlocks] = createSignal<StudioBlock[]>(initialBlocks)
@@ -175,7 +179,7 @@ function StudioCanvasPage() {
     setSelectedBlockId(nextWorkspace.project.selectedBlockId ?? nextBlocks[0]?.id ?? '')
     setHistory([])
     setFuture([])
-    setPersistenceMessage(i18n.tr('Prosjekt lagret', 'Saved project'))
+    setPersistenceMessage(ephemeralProjectMessage)
   })
 
   const pushHistory = (snapshot: StudioBlock[]) => {
@@ -232,7 +236,7 @@ function StudioCanvasPage() {
     setProjectId(result.project.id)
     setProjectTitle(result.project.title)
     setPersistenceSource('live')
-    setPersistenceMessage(i18n.tr('Prosjekt lagret', 'Saved project'))
+    setPersistenceMessage(ephemeralProjectMessage)
     return result.project
   }
 

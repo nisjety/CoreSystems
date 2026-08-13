@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { actionRegistry } from '@/shared/actions/action-registry'
+import { actionRegistry, type ActionId } from '@/shared/actions/action-registry'
+import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import type { ActionDescriptor } from '@/shared/actions/types'
 
 export type AgentActionSelection = {
@@ -111,13 +112,20 @@ export function createVerevonActionToolSpec(action: ActionDescriptor): AgentTool
 export function createVerevonActionToolSpecs(
   actions: readonly ActionDescriptor[] = actionRegistry,
 ): AgentToolSpec[] {
-  return dedupeTools(actions.map(createVerevonActionToolSpec))
+  // A registry entry is a valid human/browser action, not proof that Model
+  // Gateway can invoke its owning plane. Never advertise a known action until
+  // the governed Model operation path explicitly marks it executable.
+  return dedupeTools(
+    actions
+      .filter((action) => isModelExecutableAction(action.id))
+      .map(createVerevonActionToolSpec),
+  )
 }
 
 export function createVerevonActionToolDefinitions(
   actions: readonly ActionDescriptor[] = actionRegistry,
 ): VerevonActionToolDefinition[] {
-  return actions.map((action) => ({
+  return actions.filter((action) => isModelExecutableAction(action.id)).map((action) => ({
     __toolSide: 'definition',
     name: action.id,
     description: actionDescription(action),
@@ -136,6 +144,7 @@ export function createSelectedAgentToolSpecs(input: {
   const registryTools = new Map(
     createVerevonActionToolSpecs().map((tool) => [tool.name, tool] as const),
   )
+  const knownRegistryIds = new Set<ActionId>(actionRegistry.map((action) => action.id))
   const selected: AgentToolSpec[] = []
 
   if (input.browseWeb) selected.push(WEB_SEARCH_AGENT_TOOL)
@@ -146,7 +155,16 @@ export function createSelectedAgentToolSpecs(input: {
       continue
     }
 
-    const tool = registryTools.get(action.id) ?? dynamicActionTool(action)
+    // Known-but-ineligible registry actions must not fall through to the
+    // generic dynamic-tool escape hatch. That would recreate the exact false
+    // Model capability this module is meant to prevent.
+    if (knownRegistryIds.has(action.id as ActionId)) {
+      const tool = registryTools.get(action.id)
+      if (tool) selected.push(tool)
+      continue
+    }
+
+    const tool = dynamicActionTool(action)
     if (tool) selected.push(tool)
   }
 

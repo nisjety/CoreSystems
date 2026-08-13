@@ -217,6 +217,33 @@ pub fn authorize_operation(caller: &VerifiedIdentity, service_scope: &str) -> Re
 /// so it must be grantable independently in the service-principal registry.
 pub const SYSTEM_RUN_OWNER_SCOPE: &str = "session:runs:system-owner";
 
+/// Scope reserved for the Control-owned data-subject deletion coordinator.
+/// It intentionally does not grant ordinary session writes or user
+/// impersonation; Session Core pairs it with the exact service identity below.
+pub const SPACE_DELETION_SCOPE: &str = "session:space-delete";
+
+/// The sole workload permitted to delete Space-bound human transcripts after
+/// Control has authorized a data-subject deletion request. Keep this an exact
+/// closed set rather than a service prefix: a registry entry alone must never
+/// turn an arbitrary workload into an erasure authority.
+pub const SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
+
+/// Verify the deliberately narrow service identity for a Space erasure.
+#[allow(clippy::result_large_err)]
+pub fn authorize_space_deletion_service(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(Status::failed_precondition(
+            "ZDR credentials cannot access durable session writes",
+        ));
+    }
+    if !caller.is_service() || caller.principal_id() != SPACE_DELETION_SERVICE {
+        return Err(Status::permission_denied(
+            "only the Control space-deletion coordinator may erase Space threads",
+        ));
+    }
+    caller.require_service_scope(SPACE_DELETION_SCOPE)
+}
+
 /// The closed set of principals allowed to own a run with no human behind it.
 ///
 /// A run row is normally owned by a person. A durable workflow fired by cron has
@@ -1078,6 +1105,50 @@ mod tests {
         assert_eq!(
             authorize_operation(&caller, "session:write")
                 .expect_err("ZDR write")
+                .code(),
+            Code::FailedPrecondition,
+        );
+    }
+
+    #[test]
+    fn space_deletion_requires_exact_coordinator_identity_and_scope() {
+        let authorized = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            SPACE_DELETION_SERVICE,
+            &[SPACE_DELETION_SCOPE],
+            false,
+        );
+        authorize_space_deletion_service(&authorized).expect("exact coordinator may erase");
+
+        for (principal, scopes) in [
+            (SPACE_DELETION_SERVICE, Vec::<&str>::new()),
+            (
+                "service:control-space-deletion-copy",
+                vec![SPACE_DELETION_SCOPE],
+            ),
+            ("service:session-core", vec![SPACE_DELETION_SCOPE]),
+        ] {
+            let caller = VerifiedIdentity::service_for_test_as("org-1", principal, &scopes, false);
+            assert_eq!(
+                authorize_space_deletion_service(&caller)
+                    .expect_err("a broad or look-alike service must not erase Space threads")
+                    .code(),
+                Code::PermissionDenied,
+            );
+        }
+    }
+
+    #[test]
+    fn zdr_space_deletion_service_is_refused() {
+        let caller = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            SPACE_DELETION_SERVICE,
+            &[SPACE_DELETION_SCOPE],
+            true,
+        );
+        assert_eq!(
+            authorize_space_deletion_service(&caller)
+                .expect_err("ZDR credential must not perform durable erasure")
                 .code(),
             Code::FailedPrecondition,
         );

@@ -68,6 +68,7 @@ type fakeRepository struct {
 	emailDeliveryFailures          []EmailDeliveryFailureInput
 	emailDeliveryFailureErr        error
 	supportRecurrenceCorpus        []SupportRecurrenceCorpusEntry
+	ticketOperations               map[string]*TicketOperationReceipt
 }
 
 func newFakeRepository() *fakeRepository {
@@ -90,6 +91,7 @@ func newFakeRepository() *fakeRepository {
 		csatPreferences:     make(map[string]*CSATPreference),
 		csatOutcomes:        make(map[string]*TicketCSATOutcome),
 		sideConversations:   make(map[string]*TicketSideConversation),
+		ticketOperations:    make(map[string]*TicketOperationReceipt),
 	}
 }
 
@@ -828,6 +830,44 @@ func (f *fakeRepository) CreateTicket(_ context.Context, input CreateTicketInput
 	}
 	f.tickets[ticket.ID] = ticket
 	return ticket, nil
+}
+
+func (f *fakeRepository) CreateTicketOperation(ctx context.Context, input CreateTicketInput) (*TicketOperationReceipt, error) {
+	f.mu.Lock()
+	if prior := f.ticketOperations[input.OrgID+":"+input.IdempotencyKey]; prior != nil {
+		if prior.OperationID != input.OperationID {
+			f.mu.Unlock()
+			return nil, ErrConflict
+		}
+		copy := *prior
+		copy.Replayed = true
+		f.mu.Unlock()
+		return &copy, nil
+	}
+	f.mu.Unlock()
+	ticket, err := f.CreateTicket(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	receipt := &TicketOperationReceipt{
+		OperationID: input.OperationID, AuditEventID: "audit_ticketop_1", Status: "completed", Ticket: ticket,
+	}
+	f.mu.Lock()
+	f.ticketOperations[input.OrgID+":"+input.IdempotencyKey] = receipt
+	f.mu.Unlock()
+	return receipt, nil
+}
+
+func (f *fakeRepository) GetTicketOperation(_ context.Context, orgID, _ string, idempotencyKey string) (*TicketOperationReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	receipt := f.ticketOperations[orgID+":"+idempotencyKey]
+	if receipt == nil {
+		return nil, ErrNotFound
+	}
+	copy := *receipt
+	copy.Replayed = true
+	return &copy, nil
 }
 
 func (f *fakeRepository) UpdateTicket(_ context.Context, input UpdateTicketInput) (*Ticket, error) {
@@ -2478,6 +2518,113 @@ func TestTicketRoutingRejectsUnknownOrInactiveTeams(t *testing.T) {
 	}
 	if _, err := service.CreateTicket(context.Background(), CreateTicketInput{OrgID: "org_1", ConversationID: "conv_1", TeamID: "team_inactive"}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("inactive team error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestCreateTicketOperationReturnsStableOwnerReceiptOnExactRetry(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	publisher := &fakePublisher{}
+	service := NewService(repository, publisher)
+	input := CreateTicketInput{
+		OrgID: "org_1", ConversationID: "conv_1", ActorUserID: "user_1", IdempotencyKey: "ticket-create-001",
+	}
+
+	first, err := service.CreateTicketOperation(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateTicketOperation(first) error = %v", err)
+	}
+	second, err := service.CreateTicketOperation(context.Background(), input)
+	if err != nil {
+		t.Fatalf("CreateTicketOperation(retry) error = %v", err)
+	}
+	if first.OperationID == "" || first.AuditEventID == "" || first.Ticket == nil || first.Status != "completed" {
+		t.Fatalf("first receipt = %#v, want completed durable receipt", first)
+	}
+	if second.OperationID != first.OperationID || second.AuditEventID != first.AuditEventID || second.Ticket.ID != first.Ticket.ID || !second.Replayed {
+		t.Fatalf("retry receipt = %#v, want replay of %#v", second, first)
+	}
+	if len(publisher.subjects) != 0 {
+		t.Fatalf("published %#v, want no direct publish before durable outbox dispatch", publisher.subjects)
+	}
+}
+
+func TestCreateTicketOperationRejectsMissingIdempotencyKey(t *testing.T) {
+	repository := newFakeRepository()
+	repository.details["conv_1"] = &ConversationDetail{ConversationSummary: ConversationSummary{ID: "conv_1", OrgID: "org_1"}}
+	service := NewService(repository, nil)
+	_, err := service.CreateTicketOperation(context.Background(), CreateTicketInput{
+		OrgID: "org_1", ConversationID: "conv_1", ActorUserID: "user_1",
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("CreateTicketOperation(missing key) error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestGetTicketOperationReturnsOnlyTheOwnerReceiptForItsRetryKey(t *testing.T) {
+	repository := newFakeRepository()
+	repository.ticketOperations["org_1:ticket-create-001"] = &TicketOperationReceipt{
+		OperationID: "ticketop_1", AuditEventID: "audit_1", Status: "completed", Ticket: &Ticket{ID: "ticket_1"},
+	}
+	service := NewService(repository, nil)
+
+	receipt, err := service.GetTicketOperation(context.Background(), "org_1", "user_1", "ticket-create-001")
+	if err != nil || receipt == nil || receipt.OperationID != "ticketop_1" || !receipt.Replayed {
+		t.Fatalf("receipt/error = %#v/%v", receipt, err)
+	}
+	if _, err := service.GetTicketOperation(context.Background(), "org_1", "user_1", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing owner receipt error = %v, want ErrNotFound", err)
+	}
+}
+
+func ticketOperationTestTimePtr(value time.Time) *time.Time { return &value }
+
+func TestTicketOperationRequestDigestBindsEveryPersistedCreateField(t *testing.T) {
+	base := CreateTicketInput{
+		ActionID: "tickets.create", ActorUserID: "user_1", ConversationID: "conv_1",
+		Status: "open", WorkType: "customer_case", AIConfidence: 0.4,
+		AIReason: "matched support intent", CreatedBy: "user_1",
+		WaitingSince:        ticketOperationTestTimePtr(time.Date(2026, 8, 13, 10, 0, 0, 0, time.UTC)),
+		LastCustomerReplyAt: ticketOperationTestTimePtr(time.Date(2026, 8, 13, 10, 1, 0, 0, time.UTC)),
+		FirstResponseAt:     ticketOperationTestTimePtr(time.Date(2026, 8, 13, 10, 2, 0, 0, time.UTC)),
+		ResolvedAt:          ticketOperationTestTimePtr(time.Date(2026, 8, 13, 10, 3, 0, 0, time.UTC)),
+		SnoozedUntil:        ticketOperationTestTimePtr(time.Date(2026, 8, 13, 10, 4, 0, 0, time.UTC)),
+		EscalationAt:        ticketOperationTestTimePtr(time.Date(2026, 8, 13, 10, 5, 0, 0, time.UTC)),
+	}
+	original := ticketOperationRequestSHA256(base)
+
+	mutations := []struct {
+		name  string
+		apply func(*CreateTicketInput)
+	}{
+		{"ai confidence", func(input *CreateTicketInput) { input.AIConfidence = 0.9 }},
+		{"ai reason", func(input *CreateTicketInput) { input.AIReason = "different classification" }},
+		{"created by", func(input *CreateTicketInput) { input.CreatedBy = "user_2" }},
+		{"waiting since", func(input *CreateTicketInput) {
+			input.WaitingSince = ticketOperationTestTimePtr(time.Date(2026, 8, 14, 10, 0, 0, 0, time.UTC))
+		}},
+		{"last customer reply", func(input *CreateTicketInput) {
+			input.LastCustomerReplyAt = ticketOperationTestTimePtr(time.Date(2026, 8, 14, 10, 1, 0, 0, time.UTC))
+		}},
+		{"first response", func(input *CreateTicketInput) {
+			input.FirstResponseAt = ticketOperationTestTimePtr(time.Date(2026, 8, 14, 10, 2, 0, 0, time.UTC))
+		}},
+		{"resolved", func(input *CreateTicketInput) {
+			input.ResolvedAt = ticketOperationTestTimePtr(time.Date(2026, 8, 14, 10, 3, 0, 0, time.UTC))
+		}},
+		{"snoozed", func(input *CreateTicketInput) {
+			input.SnoozedUntil = ticketOperationTestTimePtr(time.Date(2026, 8, 14, 10, 4, 0, 0, time.UTC))
+		}},
+		{"escalation", func(input *CreateTicketInput) {
+			input.EscalationAt = ticketOperationTestTimePtr(time.Date(2026, 8, 14, 10, 5, 0, 0, time.UTC))
+		}},
+	}
+	for _, mutation := range mutations {
+		candidate := base
+		mutation.apply(&candidate)
+		if got := ticketOperationRequestSHA256(candidate); got == original {
+			t.Fatalf("ticket operation digest ignored persisted %s field", mutation.name)
+		}
 	}
 }
 

@@ -164,10 +164,20 @@ func (e *Executor) RunOnce(ctx context.Context) (int, error) {
 	}()
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, org_id, kind
-		FROM tasks
-		WHERE status = 'created' AND deleted_at IS NULL AND kind <> 'manual'
-		ORDER BY priority DESC, created_at ASC
+		SELECT t.id, t.org_id, t.kind
+		FROM tasks AS t
+		WHERE t.status = 'created' AND t.deleted_at IS NULL AND t.kind <> 'manual'
+		  -- A Space deletion can race the executor between a cron fire and
+		  -- task claim.  The deletion adapter cancels pending rows, and this
+		  -- independent read fence prevents a legacy/pending row belonging to a
+		  -- deleted schedule from starting in the first place.
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM cron_fires AS cf
+			JOIN cron_schedules AS cs ON cs.id = cf.schedule_id
+			WHERE cf.task_id = t.id AND cs.deleted_at IS NOT NULL
+		  )
+		ORDER BY t.priority DESC, t.created_at ASC
 		FOR UPDATE SKIP LOCKED
 		LIMIT $1
 	`, e.batch)

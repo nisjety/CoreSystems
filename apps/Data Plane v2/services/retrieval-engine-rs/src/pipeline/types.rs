@@ -90,6 +90,10 @@ pub struct RetrievalRequest {
     /// agent grounding by construction.
     #[serde(default, skip_deserializing)]
     pub admin_read_all: bool,
+    /// Control-verified Space authority and its Data-owned target mapping. This
+    /// is intentionally boundary-injected, never accepted from request JSON.
+    #[serde(skip)]
+    pub space_scope: Option<crate::space_scope::ResolvedSpaceRetrievalScope>,
 }
 
 /// Per-query hybrid-retrieval blend weights. Recorded in `retrieval_runs.mode_mix`

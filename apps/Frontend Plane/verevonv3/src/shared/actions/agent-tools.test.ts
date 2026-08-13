@@ -4,52 +4,22 @@ import {
   createVerevonActionToolDefinitions,
   createVerevonActionToolSpecs,
 } from './agent-tools'
+import { actionRegistry } from './action-registry'
 
 describe('agent tool surface', () => {
-  it('exposes every registered UI action as an AI-visible tool contract', () => {
+  it('does not advertise browser-only actions as Model tools before an owner path exists', () => {
     const specs = createVerevonActionToolSpecs()
 
-    expect(specs.map((tool) => tool.name)).toContain('knowledge.recrawl_source')
-
-    const recrawl = specs.find((tool) => tool.name === 'knowledge.recrawl_source')
-    expect(recrawl?.description).toContain('Owner plane: ingestion')
-    expect(recrawl?.description).toContain('Requires approval: no')
-    expect(JSON.parse(recrawl?.parametersJson ?? '{}')).toMatchObject({
-      type: 'object',
-      properties: {
-        sourceId: { type: 'string' },
-      },
-      required: ['sourceId'],
-    })
-
-    const brreg = specs.find((tool) => tool.name === 'brreg.lookup_organization')
-    expect(brreg?.description).toContain('Owner plane: control')
-    expect(JSON.parse(brreg?.parametersJson ?? '{}')).toMatchObject({
-      type: 'object',
-      properties: {
-        q: { type: 'string' },
-        size: { type: 'integer' },
-      },
-      required: ['q', 'size'],
-    })
+    expect(actionRegistry).not.toHaveLength(0)
+    expect(specs).toEqual([])
   })
 
-  it('creates TanStack tool definitions with approval metadata', () => {
+  it('does not create client-side Model tool definitions for browser actions', () => {
     const definitions = createVerevonActionToolDefinitions()
-    const blueprint = definitions.find(
-      (tool) => tool.name === 'operating_map.create_agent_blueprint',
-    )
-
-    expect(blueprint?.needsApproval).toBe(true)
-    expect(blueprint?.metadata).toMatchObject({
-      actionId: 'operating_map.create_agent_blueprint',
-      ownerPlane: 'application',
-      risk: 'medium',
-      reversible: true,
-    })
+    expect(definitions).toEqual([])
   })
 
-  it('dedupes selected composer tools and keeps builtin web search available to the model', () => {
+  it('keeps builtin web search but strips known actions lacking Model eligibility', () => {
     const specs = createSelectedAgentToolSpecs({
       browseWeb: true,
       actions: [
@@ -60,7 +30,13 @@ describe('agent tool surface', () => {
 
     expect(specs.map((tool) => tool.name)).toEqual([
       'web_search',
-      'knowledge.recrawl_source',
     ])
+  })
+
+  it('retains explicitly supplied non-registry tools for the runtime that owns them', () => {
+    const specs = createSelectedAgentToolSpecs({
+      actions: [{ id: 'owner_runtime_tool', name: 'Owner runtime tool', kind: 'tool' }],
+    })
+    expect(specs.map((tool) => tool.name)).toEqual(['owner_runtime_tool'])
   })
 })

@@ -1,14 +1,14 @@
 //! BrowserBroker grant validation.
 //!
 //! Quarry brokers browser leases internally, but Model Plane has its own
-//! `BrowserBrokerService` (proto §browser.proto) that issues *grants* —
+//! `BrowserBroker` (proto §browser.proto) that issues *grants* —
 //! signed, expiring tokens that authorize a specific Model Plane session
 //! to use Quarry's browser. Before a lease handoff, Quarry MUST validate
 //! the grant via `ValidateGrant(grant_id) → {active, expires_at}`.
 //!
 //! The trait below defines the validation surface so Quarry stays decoupled
 //! from gRPC tooling. A real `GrpcGrantValidator` (against
-//! `BrowserBrokerService` over tonic) is the natural follow-up; for now we
+//! `BrowserBroker` over tonic) is the natural follow-up; for now we
 //! ship `HttpGrantValidator` (against an HTTP shim Model Plane can expose) and
 //! `NoopGrantValidator` (dev/test).
 
@@ -27,6 +27,23 @@ pub struct GrantValidation {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+    /// Broker-owned navigation policy. Quarry must never derive agent browser
+    /// authority from the caller's requested domains when a broker grant is
+    /// present.
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// Empty for a run grant. Sensitive grants must explicitly name every
+    /// action they authorize; Quarry never treats domain scope as approval.
+    #[serde(default)]
+    pub allowed_actions: Vec<String>,
+    #[serde(default)]
+    pub allowed_frame_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_dialog_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_grant_id: Option<String>,
 }
 
 impl GrantValidation {
@@ -38,6 +55,58 @@ impl GrantValidation {
             Some(exp) => exp > Utc::now(),
             None => true,
         }
+    }
+
+    pub fn authorizes_sensitive_action(
+        &self,
+        action: &str,
+        frame_id: Option<&str>,
+        dialog_id: Option<&str>,
+        artifact_id: Option<&str>,
+    ) -> bool {
+        if !self.allowed_actions.iter().any(|allowed| allowed == action) {
+            return false;
+        }
+        if let Some(frame_id) = frame_id {
+            if self.allowed_frame_ids.len() != 1 || self.allowed_frame_ids[0] != frame_id {
+                return false;
+            }
+        } else if !self.allowed_frame_ids.is_empty() {
+            return false;
+        }
+        if let Some(dialog_id) = dialog_id {
+            if self.allowed_dialog_ids.len() != 1 || self.allowed_dialog_ids[0] != dialog_id {
+                return false;
+            }
+        } else if !self.allowed_dialog_ids.is_empty() {
+            return false;
+        }
+        if let Some(artifact_id) = artifact_id {
+            if self.allowed_artifact_ids.len() != 1 || self.allowed_artifact_ids[0] != artifact_id {
+                return false;
+            }
+        } else if !self.allowed_artifact_ids.is_empty() {
+            return false;
+        }
+        true
+    }
+
+    /// A sensitive approval must be strict single-action authority. This
+    /// prevents a valid grant that happens to include an allowed action from
+    /// also smuggling unrelated irreversible permissions into one replayable
+    /// token.
+    pub fn authorizes_exact_sensitive_action(
+        &self,
+        action: &str,
+        parent_grant_id: &str,
+        frame_id: Option<&str>,
+        dialog_id: Option<&str>,
+        artifact_id: Option<&str>,
+    ) -> bool {
+        self.allowed_actions.len() == 1
+            && self.allowed_actions[0] == action
+            && self.parent_grant_id.as_deref() == Some(parent_grant_id)
+            && self.authorizes_sensitive_action(action, frame_id, dialog_id, artifact_id)
     }
 }
 
@@ -58,6 +127,12 @@ impl GrantValidator for NoopGrantValidator {
             grant_id: grant_id.to_string(),
             active: true,
             expires_at: None,
+            allowed_domains: Vec::new(),
+            allowed_actions: Vec::new(),
+            allowed_frame_ids: Vec::new(),
+            allowed_dialog_ids: Vec::new(),
+            allowed_artifact_ids: Vec::new(),
+            parent_grant_id: None,
         })
     }
 }
@@ -66,7 +141,7 @@ impl GrantValidator for NoopGrantValidator {
 /// with optional bearer auth, expecting a JSON body shaped like `GrantValidation`.
 ///
 /// Wire this against a Model Plane HTTP shim that proxies
-/// `BrowserBrokerService.ValidateGrant` until a tonic gRPC client lands.
+/// `BrowserBroker.ValidateGrant` until a tonic gRPC client lands.
 #[derive(Clone)]
 pub struct HttpGrantValidator {
     http: Client,
@@ -131,6 +206,12 @@ impl GrantValidator for HttpGrantValidator {
                 grant_id: grant_id.to_string(),
                 active: false,
                 expires_at: None,
+                allowed_domains: Vec::new(),
+                allowed_actions: Vec::new(),
+                allowed_frame_ids: Vec::new(),
+                allowed_dialog_ids: Vec::new(),
+                allowed_artifact_ids: Vec::new(),
+                parent_grant_id: None,
             });
         }
         if !status.is_success() {
@@ -164,6 +245,12 @@ mod tests {
             grant_id: "x".into(),
             active: false,
             expires_at: None,
+            allowed_domains: Vec::new(),
+            allowed_actions: Vec::new(),
+            allowed_frame_ids: Vec::new(),
+            allowed_dialog_ids: Vec::new(),
+            allowed_artifact_ids: Vec::new(),
+            parent_grant_id: None,
         };
         assert!(!g.is_usable());
     }
@@ -174,6 +261,12 @@ mod tests {
             grant_id: "x".into(),
             active: true,
             expires_at: Some(Utc::now() - ChronoDuration::seconds(1)),
+            allowed_domains: Vec::new(),
+            allowed_actions: Vec::new(),
+            allowed_frame_ids: Vec::new(),
+            allowed_dialog_ids: Vec::new(),
+            allowed_artifact_ids: Vec::new(),
+            parent_grant_id: None,
         };
         assert!(!g.is_usable());
     }
@@ -184,6 +277,12 @@ mod tests {
             grant_id: "x".into(),
             active: true,
             expires_at: Some(Utc::now() + ChronoDuration::minutes(5)),
+            allowed_domains: Vec::new(),
+            allowed_actions: Vec::new(),
+            allowed_frame_ids: Vec::new(),
+            allowed_dialog_ids: Vec::new(),
+            allowed_artifact_ids: Vec::new(),
+            parent_grant_id: None,
         };
         assert!(g.is_usable());
     }
@@ -194,6 +293,12 @@ mod tests {
             grant_id: "x".into(),
             active: true,
             expires_at: None,
+            allowed_domains: Vec::new(),
+            allowed_actions: Vec::new(),
+            allowed_frame_ids: Vec::new(),
+            allowed_dialog_ids: Vec::new(),
+            allowed_artifact_ids: Vec::new(),
+            parent_grant_id: None,
         };
         assert!(g.is_usable());
     }

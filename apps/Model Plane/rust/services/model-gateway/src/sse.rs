@@ -320,7 +320,17 @@ pub async fn invoke_stream_sse(
                     false,
                 );
             };
-            crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, true).await
+            crate::retrieval::retrieve(
+                &state,
+                bearer,
+                &org_id,
+                &req.content,
+                true,
+                req.space_context
+                    .as_ref()
+                    .map(|context| context.retrieval_decision_token.as_str()),
+            )
+            .await
         } else {
             None
         };
@@ -570,6 +580,8 @@ pub async fn invoke_stream_sse(
         managed_source,
         effective_zdr,
         &model_bearer,
+        req.space_context.as_ref(),
+        req.space_append_context.as_ref(),
     )
     .await
     {
@@ -805,8 +817,17 @@ pub async fn invoke_stream_sse(
         // Bearer presence already verified above.
         match data_plane_bearer.as_ref() {
             Some(bearer) => {
-                crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr)
-                    .await
+                crate::retrieval::retrieve(
+                    &state,
+                    bearer,
+                    &org_id,
+                    &req.content,
+                    effective_zdr,
+                    req.space_context
+                        .as_ref()
+                        .map(|context| context.retrieval_decision_token.as_str()),
+                )
+                .await
             }
             None => None,
         }
@@ -817,8 +838,17 @@ pub async fn invoke_stream_sse(
         // missing credential here must never break plain chat.
         match data_plane_bearer.as_ref() {
             Some(bearer) => {
-                crate::retrieval::retrieve(&state, bearer, &org_id, &req.content, effective_zdr)
-                    .await
+                crate::retrieval::retrieve(
+                    &state,
+                    bearer,
+                    &org_id,
+                    &req.content,
+                    effective_zdr,
+                    req.space_context
+                        .as_ref()
+                        .map(|context| context.retrieval_decision_token.as_str()),
+                )
+                .await
             }
             None => None,
         }

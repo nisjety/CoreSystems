@@ -270,6 +270,7 @@ mod tests {
             value: value.to_owned(),
             url: url.to_owned(),
             max_wait_ms: 5000,
+            target: None,
             reason: String::new(),
             risk_category: None,
         }
@@ -286,6 +287,8 @@ mod tests {
             extracted_text: String::new(),
             screenshot_ref: String::new(),
             dom_snapshot_ref: String::new(),
+            snapshot_generation: None,
+            snapshot_targets: vec![],
             error_message: String::new(),
         }
     }

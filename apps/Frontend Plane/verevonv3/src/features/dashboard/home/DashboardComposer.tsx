@@ -17,7 +17,6 @@ import {
 	Clock3,
 	EyeOff,
 	FileText,
-	FolderPlus,
 	Globe2,
 	ImagePlus,
 	Lightbulb,
@@ -142,7 +141,7 @@ type ComposerSettings = {
 	voiceLang: string;
 };
 
-type SettingsView = "main" | "skills" | "projects" | "connectors";
+type SettingsView = "main" | "skills" | "connectors";
 type EntityKind = "date" | "file" | "person";
 
 type EntityToken = {
@@ -3247,21 +3246,6 @@ function SettingsPanel(props: {
 							/>
 							<ComposerMenuRow
 								icon={
-									<FolderPlus
-										class="size-[17px]"
-										strokeWidth={1.7}
-									/>
-								}
-								label={props.i18n.tr(
-									"Legg til i prosjekt",
-									"Add to project",
-								)}
-								onClick={() => setView("projects")}
-								right={<ChevronRight class="size-3.5" />}
-							/>
-							<div class="dashboard-composer-menu-divider" />
-							<ComposerMenuRow
-								icon={
 									<Blocks
 										class="size-[17px]"
 										strokeWidth={1.7}
@@ -3302,26 +3286,6 @@ function SettingsPanel(props: {
 									"Administrer ferdigheter",
 									"Manage skills",
 								)}
-								i18n={props.i18n}
-							/>
-						</SettingsSubView>
-					</Match>
-
-					<Match when={view() === "projects"}>
-						<SettingsSubView
-							title={props.i18n.tr(
-								"Legg til i prosjekt",
-								"Add to project",
-							)}
-							onBack={() => setView("main")}
-						>
-							<RemoteSettingsList
-								emptyLabel={props.i18n.tr(
-									"Ingen prosjekter er tilgjengelige ennå.",
-									"No projects are available yet.",
-								)}
-								endpoint="/api/v1/projects"
-								itemKey="projects"
 								i18n={props.i18n}
 							/>
 						</SettingsSubView>

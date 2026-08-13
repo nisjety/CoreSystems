@@ -39,6 +39,12 @@ export type ActionExecution = {
   status: RunStatus
   auditId: string
   eventStream: string
+  /** Owner-issued operation receipt when an action has migrated off synthetic gateway IDs. */
+  operationId?: string
+  /** Durable owner audit-event identifier paired with operationId. */
+  auditEventId?: string
+  /** True only when the owner returned the receipt for an exact idempotent replay. */
+  replayed?: boolean
   /** Present when a ticket action durably creates or mutates a ticket. */
   ticketId?: string
 }

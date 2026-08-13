@@ -22,16 +22,39 @@ pub struct BrowserObservation {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// A compact, per-observation browser accessibility snapshot. Native
+    /// drivers project the CDP accessibility tree and bind each exposed ref to
+    /// an exact backend DOM node; legacy read-only drivers may expose a
+    /// clearly non-authoritative compatibility projection. References are
+    /// opaque handles that belong only to this run and generation; callers
+    /// must re-observe after a page state change instead of replaying a stale
+    /// selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<BrowserSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dom_summary: Option<DomSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot_artifact_id: Option<kinds::ArtifactKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_observation_artifact_id: Option<kinds::ArtifactKind>,
+    /// Bounded DOM, visual, and redacted-network change evidence for this
+    /// observation. Omitted under ZDR or when artifact persistence is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_delta_artifact_id: Option<kinds::ArtifactKind>,
     #[serde(default)]
     pub console_summary: Vec<ConsoleLine>,
     #[serde(default)]
     pub network_summary: Vec<NetworkEntry>,
+    /// Redacted, per-request decisions emitted by Quarry's browser egress
+    /// boundary. These receipts contain no query string, request body,
+    /// credentials, or resolved IP address.
+    #[serde(default)]
+    pub egress_receipts: Vec<BrowserEgressReceipt>,
+    /// JavaScript dialogs that are currently open. Quarry never accepts or
+    /// dismisses these implicitly; a response is an explicit, grant-bound
+    /// action referencing this opaque dialog id.
+    #[serde(default)]
+    pub dialogs: Vec<BrowserDialog>,
     #[serde(default)]
     pub policy_denials: Vec<String>,
     /// Deterministic execution outcome for the action that produced this
@@ -55,7 +78,58 @@ pub struct BrowserObservation {
     /// Immutable evidence manifest for this observation/action.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proof_bundle: Option<ProofBundle>,
+    /// The snapshot-bound target Quarry resolved before executing this step.
+    /// This makes an effectful action independently auditable without
+    /// exposing Quarry's internal CSS selector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_resolution: Option<ResolvedTargetProof>,
+    /// Measured browser execution facts for this observation. Fields are
+    /// intentionally optional where Quarry has no provider-authoritative
+    /// meter; absence is never a zero-cost or zero-resource claim.
+    #[serde(default)]
+    pub telemetry: BrowserTelemetry,
     pub observed_at: DateTime<Utc>,
+}
+
+/// Browser execution telemetry attached to every observation and step proof.
+///
+/// `renderer_*` values are sampled from the browser's active renderer, not
+/// host-wide process accounting. This distinction prevents a Chromium metric
+/// from being misrepresented as container or fleet resource usage.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserTelemetry {
+    #[serde(default)]
+    pub startup_mode: BrowserStartupMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub usable_observation_latency_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_task_cpu_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renderer_js_heap_used_bytes: Option<u64>,
+    #[serde(default)]
+    pub estimated_snapshot_tokens: u32,
+    #[serde(default)]
+    pub observed_action_count: u32,
+    #[serde(default)]
+    pub challenge_observation_count: u32,
+    /// Challenge observations per thousand observations in this live run.
+    #[serde(default)]
+    pub challenge_rate_per_mille: u16,
+    /// Provider-metered cost of the verified action, if one exists. `None`
+    /// means Quarry did not receive an authoritative cost figure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_action_cost_micro_usd: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserStartupMode {
+    Cold,
+    Warm,
+    #[default]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,6 +143,39 @@ pub struct ObservationDelta {
     /// observation rather than a content change.
     #[serde(default)]
     pub content_changed: bool,
+}
+
+/// Redacted, bounded evidence persisted as `evidence_delta`. It tells a
+/// planner what changed without exposing query strings, credentials, raw DOM,
+/// or the browser's network trace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvidenceDelta {
+    pub version: u8,
+    pub step: u32,
+    pub dom: DomEvidenceDelta,
+    pub network: NetworkEvidenceDelta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_observation_artifact_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DomEvidenceDelta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_node_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_node_count: Option<u32>,
+    pub changed: bool,
+    pub snapshot_target_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkEvidenceDelta {
+    #[serde(default)]
+    pub added: Vec<String>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub current_count: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,7 +323,24 @@ pub struct ProofBundle {
     pub content_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub challenge: Option<ChallengeSignal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_resolution: Option<ResolvedTargetProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_delta_artifact_id: Option<kinds::ArtifactKind>,
     pub observed_at: DateTime<Utc>,
+}
+
+/// Receipt evidence for a snapshot-backed action. The fingerprint proves the
+/// action was bound to the target observed by Quarry, rather than a caller
+/// supplied selector that may have drifted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResolvedTargetProof {
+    pub snapshot_id: String,
+    pub generation: u32,
+    pub ref_id: String,
+    pub fingerprint: ElementFingerprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<SemanticLocator>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +349,100 @@ pub struct DomSummary {
     pub interactive_elements: Vec<InteractiveElement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_snippet: Option<String>,
+}
+
+/// Bounded agent-facing page snapshot. This is deliberately a stable wire
+/// representation, not a raw DOM or CDP object: Model Plane receives only
+/// the targets Quarry is willing to resolve and execute against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserSnapshot {
+    /// Opaque, deterministic identifier for this run + page state.
+    pub snapshot_id: String,
+    /// Monotonic generation within the run. A ref must always name its source
+    /// generation when an action uses it.
+    pub generation: u32,
+    #[serde(default)]
+    pub targets: Vec<SnapshotTarget>,
+    /// Browser-authored accessibility projection, when the selected driver
+    /// supports it. This is intentionally distinct from `targets`: an AX node
+    /// is not executable until Quarry binds it to an exact live DOM target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility: Option<AccessibilityProjection>,
+    /// Origin-labelled browser frame topology. Frame ids are opaque browser
+    /// ids; a model must request an explicit, grant-bound frame interaction
+    /// before action execution can cross a frame boundary.
+    #[serde(default)]
+    pub frames: Vec<BrowserFrame>,
+}
+
+/// Bounded projection of the browser's computed accessibility tree. It is
+/// produced by the renderer, rather than inferred from HTML by Quarry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityProjection {
+    pub source: String,
+    #[serde(default)]
+    pub nodes: Vec<AccessibilityNode>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityNode {
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub ignored: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    #[serde(default)]
+    pub child_ids: Vec<String>,
+}
+
+/// A frame is disclosed with its security origin only. Raw URLs, query
+/// strings, and frame documents remain browser evidence rather than a model
+/// input surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserFrame {
+    pub frame_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub child_frame_ids: Vec<String>,
+}
+
+/// One target exposed by an agent snapshot. The selector remains internal to
+/// Quarry's resolver: agent callers address `ref_id`, not CSS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotTarget {
+    /// Opaque target handle in the familiar agent form, e.g. `@e1`.
+    pub ref_id: String,
+    pub tag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
+    /// The observed frame that owns this target. A child-frame target is
+    /// executable only through the matching explicit `frame_*_ref` action;
+    /// ordinary refs fail closed before the browser driver is reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<ElementFingerprint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,10 +459,55 @@ pub struct InteractiveElement {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aria_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessible_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
     /// Deterministic, non-LLM target identity used for read-only repair and
     /// evidence. Effectful actions still require an exact/approved target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<ElementFingerprint>,
+}
+
+/// A semantic locator is resolved against the latest Quarry observation, then
+/// pinned to that observation's target fingerprint before browser execution.
+/// It intentionally supports only deterministic, bounded matching rules.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SemanticLocator {
+    Role {
+        role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default)]
+        exact: bool,
+    },
+    Text {
+        text: String,
+        #[serde(default)]
+        exact: bool,
+    },
+    Label {
+        label: String,
+        #[serde(default)]
+        exact: bool,
+    },
+    Placeholder {
+        placeholder: String,
+        #[serde(default)]
+        exact: bool,
+    },
+    TestId {
+        test_id: String,
+        #[serde(default)]
+        exact: bool,
+    },
+    Nth {
+        selector: String,
+        index: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -276,6 +539,50 @@ pub struct NetworkEntry {
     pub content_type: Option<String>,
 }
 
+/// A policy decision made before a browser request is continued or aborted.
+/// `Allow` is evidence of the guard's admission decision, not a claim that a
+/// response was successfully received.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserEgressDecision {
+    Allow,
+    Block,
+}
+
+/// Immutable-safe representation of one browser request-policy decision.
+/// The runtime copies a bounded set into the observation which is then stored
+/// in the ordinary step receipt. The URL must be redacted by the driver.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserEgressReceipt {
+    pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    pub method: String,
+    pub url: String,
+    pub decision: BrowserEgressDecision,
+    /// Stable policy category only; never the raw underlying error because it
+    /// could contain page-controlled values.
+    pub policy: String,
+    pub timestamp_ms: u64,
+}
+
+/// A browser-level JavaScript dialog observed through the driver. The dialog
+/// identifier is scoped to its live browser session and cannot be replayed
+/// after resolution or resume.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserDialog {
+    pub dialog_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    pub opened_at_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // §2  AgentActionRequest  (Model Plane → Quarry)
 // ---------------------------------------------------------------------------
@@ -302,12 +609,56 @@ pub enum AgentAction {
     Click {
         selector: String,
     },
+    /// Click a target referenced from the caller's most recent snapshot.
+    /// Quarry rejects missing, stale, or mismatched references before it
+    /// reaches a browser driver.
+    ClickRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+    },
+    /// Click an exact target inside an observed child frame. The frame id is
+    /// an opaque snapshot-scoped contract: Quarry verifies it against the
+    /// native target before dispatch and never treats it as a URL or selector.
+    FrameClickRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+    },
+    /// Resolve a semantic locator from the latest observation then click its
+    /// single deterministic match. Ambiguous matches fail closed.
+    ClickSemantic {
+        snapshot_id: String,
+        generation: u32,
+        locator: SemanticLocator,
+    },
     ClickPoint {
         x: f64,
         y: f64,
     },
     Type {
         selector: String,
+        text: String,
+    },
+    TypeRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        text: String,
+    },
+    /// Type into an exact target inside an observed child frame.
+    FrameTypeRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        text: String,
+    },
+    TypeSemantic {
+        snapshot_id: String,
+        generation: u32,
+        locator: SemanticLocator,
         text: String,
     },
     Press {
@@ -326,12 +677,107 @@ pub enum AgentAction {
         selector: String,
         value: String,
     },
+    SelectRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        value: String,
+    },
+    /// Select an option in an exact target inside an observed child frame.
+    FrameSelectRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        value: String,
+    },
+    SelectSemantic {
+        snapshot_id: String,
+        generation: u32,
+        locator: SemanticLocator,
+        value: String,
+    },
     Wait {
         ms: u32,
     },
     WaitFor {
         selector: String,
         timeout_ms: u32,
+    },
+    WaitForRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        timeout_ms: u32,
+    },
+    /// Wait for an already-observed target inside an observed child frame.
+    FrameWaitForRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        timeout_ms: u32,
+    },
+    WaitForSemantic {
+        snapshot_id: String,
+        generation: u32,
+        locator: SemanticLocator,
+        timeout_ms: u32,
+    },
+    /// Reply to an observed JavaScript dialog. The edge requires a live,
+    /// explicit browser grant for this action even when ordinary read actions
+    /// are allowed without one.
+    RespondDialog {
+        dialog_id: String,
+        accept: bool,
+        /// Fresh BrowserBroker approval grant supplied with this response,
+        /// rather than a broad run-level capability retained from an earlier
+        /// observation. Quarry rejects replay within the live run; Model
+        /// Plane must additionally issue it with dialog/action scope.
+        approval_grant_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_text: Option<String>,
+    },
+    /// Upload a tenant-owned Quarry artifact to an exact file-input node from
+    /// the latest accessibility snapshot. Callers can name only the opaque
+    /// artifact id: Quarry stages the bytes in a short-lived private file and
+    /// never accepts a host filesystem path.
+    UploadRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        artifact_id: kinds::ArtifactKind,
+        /// A fresh BrowserBroker approval grant for this irreversible data
+        /// disclosure. The edge consumes it once per live run.
+        approval_grant_id: String,
+    },
+    /// Upload a tenant-owned artifact to an exact child-frame input. This has
+    /// the same one-shot approval semantics as [`Self::UploadRef`] plus an
+    /// explicit frame contract.
+    FrameUploadRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        artifact_id: kinds::ArtifactKind,
+        approval_grant_id: String,
+    },
+    /// Collect a download caused by an exact native target. Quarry keeps the
+    /// browser's temporary path private, admits only an allowed safe type, and
+    /// promotes accepted bytes into tenant-owned artifact storage.
+    DownloadRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
+    /// Collect an artifact-only download from an exact child-frame target.
+    FrameDownloadRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        approval_grant_id: String,
     },
     Screenshot {
         full_page: bool,

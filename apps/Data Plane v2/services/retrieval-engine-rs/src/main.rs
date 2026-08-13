@@ -18,6 +18,7 @@ mod pipeline;
 mod rate_limit;
 mod redact;
 mod search;
+mod space_scope;
 mod telemetry;
 mod trace;
 

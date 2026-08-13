@@ -31,6 +31,8 @@ class ImportJob(Base):
     lease_owner: Mapped[str | None] = mapped_column(String, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Never persist a short-lived decision bearer with a recoverable job.
+    space_import_intent: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     items: Mapped[list["ImportJobItem"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"

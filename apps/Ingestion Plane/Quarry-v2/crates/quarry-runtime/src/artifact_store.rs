@@ -26,6 +26,7 @@ fn kind_from_str(kind: &str) -> QuarryResult<artifact_meta::ArtifactKind> {
         "extract" => Ok(K::Extract),
         "visual_change" | "visual_change.json" => Ok(K::VisualChange),
         "visual_observation" | "visual_observation.json" => Ok(K::VisualObservation),
+        "evidence_delta" | "evidence_delta.json" => Ok(K::EvidenceDelta),
         "thumbnail" | "thumbnail.png" => Ok(K::Thumbnail),
         "tiles" | "tiles.json" => Ok(K::Tiles),
         "page_image_clean" | "page_image_clean.png" => Ok(K::PageImageClean),

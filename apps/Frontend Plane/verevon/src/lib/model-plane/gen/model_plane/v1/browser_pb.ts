@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/browser.proto.
  */
 export const file_model_plane_v1_browser: GenFile = /*@__PURE__*/
-  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSJhChNBY3F1aXJlR3JhbnRSZXF1ZXN0EhMKC3Nlc3Npb25fa2V5GAEgASgJEgwKBG1vZGUYAiABKAkSDgoGb3JnX2lkGAMgASgJEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCSKDAQoUQWNxdWlyZUdyYW50UmVzcG9uc2USEAoIZ3JhbnRfaWQYASABKAkSEAoIZW5kcG9pbnQYAiABKAkSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJIjYKElJldm9rZUdyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoTUmV2b2tlR3JhbnRSZXNwb25zZRIPCgdyZXZva2VkGAEgASgIIhYKFEJyb3dzZXJIZWFsdGhSZXF1ZXN0IicKFUJyb3dzZXJIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkiKAoUVmFsaWRhdGVHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkiggEKFVZhbGlkYXRlR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIOCgZhY3RpdmUYAiABKAgSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJMvcCCg1Ccm93c2VyQnJva2VyElkKDEFjcXVpcmVHcmFudBIjLm1vZGVsX3BsYW5lLnYxLkFjcXVpcmVHcmFudFJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXNwb25zZRJWCgtSZXZva2VHcmFudBIiLm1vZGVsX3BsYW5lLnYxLlJldm9rZUdyYW50UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLlJldm9rZUdyYW50UmVzcG9uc2USXAoNVmFsaWRhdGVHcmFudBIkLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXF1ZXN0GiUubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVHcmFudFJlc3BvbnNlElUKBkhlYWx0aBIkLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJIZWFsdGhSZXF1ZXN0GiUubW9kZWxfcGxhbmUudjEuQnJvd3NlckhlYWx0aFJlc3BvbnNlQrQBChJjb20ubW9kZWxfcGxhbmUudjFCDEJyb3dzZXJQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp]);
+  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSLoAQoTQWNxdWlyZUdyYW50UmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIMCgRtb2RlGAIgASgJEg4KBm9yZ19pZBgDIAEoCRIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPYWxsb3dlZF9hY3Rpb25zGAUgAygJEhkKEWFsbG93ZWRfZnJhbWVfaWRzGAYgAygJEhoKEmFsbG93ZWRfZGlhbG9nX2lkcxgHIAMoCRIcChRhbGxvd2VkX2FydGlmYWN0X2lkcxgIIAMoCRIXCg9wYXJlbnRfZ3JhbnRfaWQYCSABKAkiigIKFEFjcXVpcmVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIXCg9hbGxvd2VkX2FjdGlvbnMYBSADKAkSGQoRYWxsb3dlZF9mcmFtZV9pZHMYBiADKAkSGgoSYWxsb3dlZF9kaWFsb2dfaWRzGAcgAygJEhwKFGFsbG93ZWRfYXJ0aWZhY3RfaWRzGAggAygJEhcKD3BhcmVudF9ncmFudF9pZBgJIAEoCSI2ChJSZXZva2VHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkSDgoGcmVhc29uGAIgASgJIiYKE1Jldm9rZUdyYW50UmVzcG9uc2USDwoHcmV2b2tlZBgBIAEoCCIWChRCcm93c2VySGVhbHRoUmVxdWVzdCInChVCcm93c2VySGVhbHRoUmVzcG9uc2USDgoGc3RhdHVzGAEgASgJIigKFFZhbGlkYXRlR3JhbnRSZXF1ZXN0EhAKCGdyYW50X2lkGAEgASgJIokCChVWYWxpZGF0ZUdyYW50UmVzcG9uc2USEAoIZ3JhbnRfaWQYASABKAkSDgoGYWN0aXZlGAIgASgIEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIXCg9hbGxvd2VkX2FjdGlvbnMYBSADKAkSGQoRYWxsb3dlZF9mcmFtZV9pZHMYBiADKAkSGgoSYWxsb3dlZF9kaWFsb2dfaWRzGAcgAygJEhwKFGFsbG93ZWRfYXJ0aWZhY3RfaWRzGAggAygJEhcKD3BhcmVudF9ncmFudF9pZBgJIAEoCTL3AgoNQnJvd3NlckJyb2tlchJZCgxBY3F1aXJlR3JhbnQSIy5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXF1ZXN0GiQubW9kZWxfcGxhbmUudjEuQWNxdWlyZUdyYW50UmVzcG9uc2USVgoLUmV2b2tlR3JhbnQSIi5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5SZXZva2VHcmFudFJlc3BvbnNlElwKDVZhbGlkYXRlR3JhbnQSJC5tb2RlbF9wbGFuZS52MS5WYWxpZGF0ZUdyYW50UmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXNwb25zZRJVCgZIZWFsdGgSJC5tb2RlbF9wbGFuZS52MS5Ccm93c2VySGVhbHRoUmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJIZWFsdGhSZXNwb25zZUK0AQoSY29tLm1vZGVsX3BsYW5lLnYxQgxCcm93c2VyUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.AcquireGrantRequest
@@ -47,6 +47,37 @@ export type AcquireGrantRequest = Message<"model_plane.v1.AcquireGrantRequest"> 
    * @generated from field: repeated string allowed_domains = 4;
    */
   allowedDomains: string[];
+
+  /**
+   * Optional least-privilege scopes for a one-time sensitive browser action.
+   * Empty means this is an ordinary run grant, never implicit approval.
+   *
+   * @generated from field: repeated string allowed_actions = 5;
+   */
+  allowedActions: string[];
+
+  /**
+   * @generated from field: repeated string allowed_frame_ids = 6;
+   */
+  allowedFrameIds: string[];
+
+  /**
+   * @generated from field: repeated string allowed_dialog_ids = 7;
+   */
+  allowedDialogIds: string[];
+
+  /**
+   * @generated from field: repeated string allowed_artifact_ids = 8;
+   */
+  allowedArtifactIds: string[];
+
+  /**
+   * Required for a sensitive approval. It binds that one-time authority to
+   * the ordinary BrowserBroker grant held by the target Quarry run.
+   *
+   * @generated from field: string parent_grant_id = 9;
+   */
+  parentGrantId: string;
 };
 
 /**
@@ -87,6 +118,31 @@ export type AcquireGrantResponse = Message<"model_plane.v1.AcquireGrantResponse"
    * @generated from field: repeated string allowed_domains = 4;
    */
   allowedDomains: string[];
+
+  /**
+   * @generated from field: repeated string allowed_actions = 5;
+   */
+  allowedActions: string[];
+
+  /**
+   * @generated from field: repeated string allowed_frame_ids = 6;
+   */
+  allowedFrameIds: string[];
+
+  /**
+   * @generated from field: repeated string allowed_dialog_ids = 7;
+   */
+  allowedDialogIds: string[];
+
+  /**
+   * @generated from field: repeated string allowed_artifact_ids = 8;
+   */
+  allowedArtifactIds: string[];
+
+  /**
+   * @generated from field: string parent_grant_id = 9;
+   */
+  parentGrantId: string;
 };
 
 /**
@@ -224,6 +280,31 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
    * @generated from field: repeated string allowed_domains = 4;
    */
   allowedDomains: string[];
+
+  /**
+   * @generated from field: repeated string allowed_actions = 5;
+   */
+  allowedActions: string[];
+
+  /**
+   * @generated from field: repeated string allowed_frame_ids = 6;
+   */
+  allowedFrameIds: string[];
+
+  /**
+   * @generated from field: repeated string allowed_dialog_ids = 7;
+   */
+  allowedDialogIds: string[];
+
+  /**
+   * @generated from field: repeated string allowed_artifact_ids = 8;
+   */
+  allowedArtifactIds: string[];
+
+  /**
+   * @generated from field: string parent_grant_id = 9;
+   */
+  parentGrantId: string;
 };
 
 /**

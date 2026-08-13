@@ -1,4 +1,5 @@
 import { actionRegistry } from '@/shared/actions/action-registry'
+import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 
 export type VisibleItem = {
   type: 'ticket' | 'source' | 'agent' | 'metric' | 'run'
@@ -63,7 +64,13 @@ export function buildModelContextPack(input: ModelContextPackInput): ModelContex
   return {
     ...input,
     currentView,
-    availableActions: actionRegistry.map((action) => action.id),
+    // A browser action registry entry is not evidence that Model Plane can
+    // invoke its owning plane. Keep the context pack aligned with the
+    // fail-closed Model tool surface until Capability Core resolves a governed
+    // actor-specific catalog view.
+    availableActions: actionRegistry
+      .filter((action) => isModelExecutableAction(action.id))
+      .map((action) => action.id),
     redactionPolicy: 'ids-and-summaries-only',
   }
 }

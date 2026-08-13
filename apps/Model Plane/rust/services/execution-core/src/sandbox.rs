@@ -244,8 +244,54 @@ pub fn log_support() {
         tracing::warn!(
             sandbox = "none",
             "bubblewrap is unavailable or unusable here: sandboxed tool processes \
-             degrade to an UNSANDBOXED passthrough on this host"
+             are refused rather than downgraded to host execution"
         );
+    }
+}
+
+/// A small, runtime-measured profile for callers that must decide whether a
+/// Space can use this execution substrate. It deliberately reports what the
+/// local executor can prove today, rather than promising a durable computer:
+/// work is credential-free, bounded to one child process, and has no backup or
+/// durable workspace. A caller needing any stronger property must select an
+/// explicit external, attested backend instead of treating this process as a
+/// compatible fallback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SandboxCapabilityProfile {
+    /// `bubblewrap` when a real namespace probe passed; otherwise `unavailable`.
+    pub backend: &'static str,
+    /// Whether restricted Model-authored work can execute on this host.
+    pub local_isolation_available: bool,
+    /// This executor never promises a durable Space workspace.
+    pub persistence: &'static str,
+    /// Only bounded one-shot children are supported; no detached process lease.
+    pub processes: &'static str,
+    /// Snapshots/backups are not a property of this substrate.
+    pub backup: bool,
+    /// Model-authored restricted policies start with egress disabled.
+    pub egress: &'static str,
+    /// The executor never forwards service credentials to model-authored code.
+    pub credential_mode: &'static str,
+}
+
+/// Return the substrate contract measured on this process. This is intentionally
+/// independent of a Space lease: a lease must pin this profile (or a stronger
+/// external profile) before it is used for an effect.
+#[must_use]
+pub fn capability_profile() -> SandboxCapabilityProfile {
+    let local_isolation_available = is_supported();
+    SandboxCapabilityProfile {
+        backend: if local_isolation_available {
+            "bubblewrap"
+        } else {
+            "unavailable"
+        },
+        local_isolation_available,
+        persistence: "ephemeral",
+        processes: "bounded_oneshot",
+        backup: false,
+        egress: "disabled_by_default",
+        credential_mode: "credential_free",
     }
 }
 
@@ -319,6 +365,18 @@ mod tests {
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn capability_profile_never_claims_durable_or_credentialed_workspace() {
+        let profile = capability_profile();
+        assert!(matches!(profile.backend, "bubblewrap" | "unavailable"));
+        assert_eq!(profile.local_isolation_available, is_supported());
+        assert_eq!(profile.persistence, "ephemeral");
+        assert_eq!(profile.processes, "bounded_oneshot");
+        assert!(!profile.backup);
+        assert_eq!(profile.egress, "disabled_by_default");
+        assert_eq!(profile.credential_mode, "credential_free");
     }
 
     #[test]

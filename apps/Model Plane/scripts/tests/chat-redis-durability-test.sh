@@ -11,7 +11,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTAINER="model-plane-chat-redis-${RANDOM}-$$"
 PORT="${MODEL_PLANE_CHAT_REDIS_PORT:-6397}"
 REQUEST_ID="redis-e2e-$(date +%s)-$$"
-TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/model-plane-redis-target}"
+TARGET_DIR="${CARGO_TARGET_DIR:-/Volumes/Applikasjon/Triodelab/CoreSystem-build-cache/cargo/model-plane}"
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true

@@ -229,6 +229,12 @@ func mcpAuthenticatedHandlerWithSigner(t *testing.T, handler http.Handler) (http
 		}
 		if principalType == "service" {
 			actorID = "capability-writer"
+			for _, scope := range scopes {
+				if scope == authz.SpaceDeletionScope {
+					actorID = spaceDeletionCoordinator
+					break
+				}
+			}
 			claims.ServiceID = actorID
 		} else {
 			claims.UserID = actorID

@@ -38,6 +38,9 @@ export type ChatInvokeRequest = {
   content: string
   model?: string
   threadId?: string
+  /** The requested personal Space for a new durable chat thread. The BFF
+   * exchanges this selection for a Control-signed, effect-bound decision. */
+  spaceRef?: string
   sessionKey?: string
   features?: string[]
   generateImage?: boolean
@@ -150,6 +153,9 @@ export type ChatThreadSession = {
    * existed.
    */
   pinned: boolean
+  /** Non-secret Space routing reference for a scoped thread. The BFF still
+   * resolves fresh Control authority before an append. */
+  spaceRef?: string
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -349,6 +355,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     profile: request.profile ?? 'chat',
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
+    space_ref: request.spaceRef?.trim() || undefined,
     browse_web: supportReadOnly ? false : request.browseWeb ?? false,
     generate_image: supportReadOnly ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the
@@ -686,6 +693,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     preview: str(item.preview) ?? '',
     updatedAt: normalizeIsoTimestamp(str(item.updatedAt) ?? str(item.updated_at)),
     pinned: item.pinned === true,
+    spaceRef: str(item.spaceRef) ?? str(item.space_ref),
   }
 }
 

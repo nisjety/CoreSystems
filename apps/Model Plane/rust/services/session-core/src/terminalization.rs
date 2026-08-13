@@ -500,9 +500,27 @@ async fn insert_managed_run_started(
     now: DateTime<Utc>,
 ) -> Result<(), Status> {
     let residency = super::grpc::configured_residency();
-    sqlx::query(
-        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at)
-         VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10)",
+    // The thread was created only after verifying its signed Space decision.
+    // Copy that durable, non-secret context here instead of trusting any
+    // managed-run caller to restate it. The exact tenant/owner predicate is a
+    // second boundary check for direct callers of this inner persistence path.
+    let inherited_space_context: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+    ) = sqlx::query_as(
+        "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
+                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
+         SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
+                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision
+         FROM threads AS t
+         WHERE t.id = $2 AND t.org_id = $7 AND t.user_id = $8
+         RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
     )
     .bind(run_id)
     .bind(thread_id)
@@ -514,9 +532,47 @@ async fn insert_managed_run_started(
     .bind(&request.user_id)
     .bind(residency)
     .bind(now)
-    .execute(&mut **transaction)
+    .fetch_optional(&mut **transaction)
     .await
-    .map_err(database_error)?;
+    .map_err(database_error)?
+    .ok_or_else(|| Status::not_found("thread not found for managed run creation"))?;
+
+    let mut run_started_payload = persisted.run_started_payload.clone();
+    let payload = run_started_payload
+        .as_object_mut()
+        .ok_or_else(|| Status::internal("managed run payload must be an object"))?;
+    payload.insert(
+        "space_id".to_owned(),
+        serde_json::json!(inherited_space_context.0),
+    );
+    payload.insert(
+        "space_decision_ref".to_owned(),
+        serde_json::json!(inherited_space_context.1),
+    );
+    payload.insert(
+        "recipient_audience_ref".to_owned(),
+        serde_json::json!(inherited_space_context.2),
+    );
+    payload.insert(
+        "recipient_audience_revision".to_owned(),
+        serde_json::json!(inherited_space_context.3),
+    );
+    payload.insert(
+        "recipient_audience_hash".to_owned(),
+        serde_json::json!(inherited_space_context.4),
+    );
+    payload.insert(
+        "privacy_policy_ref".to_owned(),
+        serde_json::json!(inherited_space_context.5),
+    );
+    payload.insert(
+        "resource_authorization_ref".to_owned(),
+        serde_json::json!(inherited_space_context.6),
+    );
+    payload.insert(
+        "authority_revision".to_owned(),
+        serde_json::json!(inherited_space_context.7),
+    );
 
     let resource = format!("run:{run_id}");
     let idempotency_key = derive_idempotency_hash(
@@ -531,7 +587,7 @@ async fn insert_managed_run_started(
     )
     .bind(new_ulid())
     .bind(run_id)
-    .bind(&persisted.run_started_payload)
+    .bind(&run_started_payload)
     .bind(now)
     .bind(&request.org_id)
     .bind(&request.user_id)
@@ -578,6 +634,20 @@ pub(crate) async fn start_managed_run_inner(
     let source = validate_managed_start_request(&request, zdr)?;
     let persisted = managed_start_persistence(&request, zdr);
     let mut transaction = pool.begin().await.map_err(database_error)?;
+
+    // `UNIQUE (org_id, user_id, start_key)` prevents duplicate obligations,
+    // but a concurrent read-then-insert would still make one normal retry fail
+    // with a constraint error. Serialize the exact durable effect identity so
+    // the waiter sees and returns the winner's immutable receipt instead.
+    let lock_key = format!(
+        "{}\u{1f}{}\u{1f}{}",
+        request.org_id, request.user_id, request.start_key
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(database_error)?;
 
     let existing: Option<ExistingManagedStart> = sqlx::query_as(
         "SELECT o.run_id, r.thread_id, r.created_at, o.configured_source,

@@ -3,45 +3,13 @@ import { getActionDescriptor, type ActionId } from '@/shared/actions/action-regi
 import type { ActionActor, ActionExecution, ActionPreview } from '@/shared/actions/types'
 import type { z } from 'zod'
 
-const LIVE_ACTIONS = new Set<ActionId>([
-  'knowledge.recrawl_source',
-  'knowledge.scrape_url',
-  'knowledge.crawl_site',
-  'knowledge.import_source',
-  'knowledge.upload_files',
-  'knowledge.connect_source',
-  'operating_map.generate',
-  'operating_map.refresh',
-  'operating_map.review_proposal',
-  'operating_map.create_agent_blueprint',
-  'workflows.toggle_policy',
-  // Ticketing actions are backed by conversation-core-go via the gateway
-  // /api/v1/actions/execute dispatcher (domains/actions/handlers.rs).
-  'tickets.create',
-  'tickets.classify_conversation',
-  'tickets.update',
-  'tickets.assign',
-  'tickets.link_resource',
-  'tickets.resolve',
-  'tickets.run_macro',
-  'tickets.create_macro',
-  'tickets.create_checklist',
-  'tickets.update_checklist_item',
-  'tickets.create_side_conversation',
-  'tickets.add_side_conversation_message',
-  'tickets.update_side_conversation',
-  'tickets.record_chat_handoff',
-  'inbox.follow_conversation',
-  'inbox.set_csat_preference',
-  'tickets.record_csat_outcome',
-  // Live server-side via the gateway /actions/execute dispatchers. brreg is
-  // dispatched to org-core; the social.* actions proxy to social-core's real
-  // draft/schedule/publish routes (social-core enforces the approval gate).
-  'brreg.lookup_organization',
-  'social.create_draft',
-  'social.schedule_post',
-  'social.publish_post',
-])
+export type ActionExecutionOptions = Readonly<{
+  /**
+   * Reuse this exact key after an ambiguous response. The owner—not the
+   * browser—decides whether it is a replay or a conflicting request.
+   */
+  idempotencyKey?: string
+}>
 
 const riskCost = {
   low: 'low token budget',
@@ -77,6 +45,7 @@ export async function executeAction(
   actionId: ActionId,
   actor: ActionActor,
   input: unknown,
+  options?: ActionExecutionOptions,
 ): Promise<ActionExecution> {
   const descriptor = getActionDescriptor(actionId)
 
@@ -91,16 +60,38 @@ export async function executeAction(
     throw new Error(`Invalid action input for ${actionId}: ${issues}`)
   }
 
-  if (!LIVE_ACTIONS.has(actionId)) {
-    // No client-side fabrication: an action without a gateway implementation is
-    // surfaced as an honest, typed "not available" error instead of a synthetic
-    // queued run with a fake runId/auditId.
-    throw new Error(`action_not_available: "${actionId}" has no gateway implementation`)
+  // The gateway owns live action availability. Keeping a second handwritten
+  // browser allowlist caused shipping.get_quotes to be denied even though its
+  // authenticated gateway dispatcher existed. The source-level contract test
+  // protects registry-to-dispatcher parity; runtime availability remains a
+  // server decision and must never be fabricated by the client.
+  const suppliedKey = options?.idempotencyKey?.trim()
+  if (suppliedKey !== undefined && (!suppliedKey || suppliedKey.length > 200)) {
+    throw new Error('Invalid action idempotency key')
   }
 
   return requestJson<ActionExecution>('/api/v1/actions/execute', {
     method: 'POST',
-    body: JSON.stringify({ actionId, input: validation.data }),
+    body: JSON.stringify({
+      actionId,
+      idempotencyKey: suppliedKey ?? crypto.randomUUID(),
+      input: validation.data,
+    }),
     headers: { 'x-verevon-org-id': actor.orgId },
   })
+}
+
+/**
+ * Read the owner receipt for a tickets.create request whose original response
+ * may have been lost. This never replays the create request itself.
+ */
+export async function reconcileTicketCreate(idempotencyKey: string): Promise<ActionExecution> {
+  const key = idempotencyKey.trim()
+  if (!key || key.length > 200 || /[\u0000-\u001f\u007f]/.test(key)) {
+    throw new Error('Invalid action idempotency key')
+  }
+  return requestJson<ActionExecution>(
+    `/api/v1/actions/tickets/create/${encodeURIComponent(key)}`,
+    { method: 'GET' },
+  )
 }

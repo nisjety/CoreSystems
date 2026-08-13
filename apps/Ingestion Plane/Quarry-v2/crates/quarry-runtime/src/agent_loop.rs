@@ -203,6 +203,11 @@ impl AgentLoop {
             previous_url: None,
             previous_title: None,
             previous_dom_node_count: None,
+            previous_network_keys: vec![],
+            last_egress_sequence: 0,
+            active_snapshot: None,
+            observed_action_count: 0,
+            challenge_observation_count: 0,
         };
 
         let mut observations = Vec::new();
@@ -725,11 +730,15 @@ mod tests {
             step: 0,
             url: String::new(),
             title: None,
+            snapshot: None,
             dom_summary: None,
             screenshot_artifact_id: None,
             visual_observation_artifact_id: None,
+            evidence_delta_artifact_id: None,
             console_summary: vec![],
             network_summary: vec![],
+            egress_receipts: vec![],
+            dialogs: vec![],
             policy_denials: vec![],
             action_outcome: quarry_core::contracts::ActionOutcome::default(),
             observation_delta: None,
@@ -737,6 +746,8 @@ mod tests {
             extraction_profile: None,
             extraction_result: None,
             proof_bundle: None,
+            target_resolution: None,
+            telemetry: quarry_core::contracts::BrowserTelemetry::default(),
             observed_at: chrono::Utc::now(),
         };
 

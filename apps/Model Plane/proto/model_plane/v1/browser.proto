@@ -36,6 +36,17 @@ message AcquireGrantRequest {
   // browser grant: issuance rejects it. Values are normalized and persisted by
   // the broker, then returned by ValidateGrant for downstream enforcement.
   repeated string allowed_domains = 4;
+
+  // Optional least-privilege scopes for a one-time sensitive browser action.
+  // Empty means this is an ordinary run grant, never implicit approval.
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+
+  // Required for a sensitive approval. It binds that one-time authority to
+  // the ordinary BrowserBroker grant held by the target Quarry run.
+  string parent_grant_id = 9;
 }
 
 message AcquireGrantResponse {
@@ -50,6 +61,11 @@ message AcquireGrantResponse {
 
   // Canonical broker-owned navigation policy for this grant.
   repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
 }
 
 message RevokeGrantRequest {
@@ -90,4 +106,9 @@ message ValidateGrantResponse {
   // Canonical broker-owned navigation policy. Consumers must reject an empty
   // policy and must not substitute caller-supplied domains.
   repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
 }

@@ -3,14 +3,10 @@ import { VEREVON_BALANCE_MODE_ID, type ChatAction } from '@/shared/api/chat-clie
 
 // ── Preset agents ─────────────────────────────────────────────────────────────
 // A small, curated set of ready-to-run tasks for the Agent Run Console. Each
-// preset pins a goal template plus a FIXED subset of `action-registry` ids —
-// the same ids the Model Plane already understands via `createSelectedAgentToolSpecs`
-// (see `src/shared/actions/agent-tools.ts`). Selecting a preset must put those
-// ids on the real `runTask()` request (`ChatInvokeRequest.actions`), not just
-// drop text into the composer, so the model actually receives the tool
-// contracts — with their existing `requiresApproval` gating intact. Presets
-// never set `planMode: false`; every preset action still runs through the
-// console's normal HITL/approval deck.
+// preset pins a goal template plus a fixed Model-eligible action subset.
+// Browser registry actions are deliberately NOT treated as Model tools until a
+// governed owner-operation adapter exists; the goal may request a proposal,
+// but cannot claim an effect happened. Presets never set `planMode: false`.
 
 export type PresetAgentId =
   | 'draft-reply-with-sources'
@@ -36,7 +32,7 @@ export type PresetAgent = {
   description: string
   /** Seeds the composer's goal field; the user can still edit it before running. */
   goalTemplate: string
-  /** Fixed subset of `action-registry` ids exposed to the model for this preset. */
+  /** Fixed Model-eligible action subset; empty until owner adapters are live. */
   actionIds: readonly ActionId[]
   defaults: PresetAgentDefaults
 }
@@ -56,7 +52,7 @@ export const presetAgents: readonly PresetAgent[] = [
     description: 'Answer the latest inbound conversation, grounded and cited from the knowledge base.',
     goalTemplate:
       "Draft a reply to the customer's most recent inbound message. Ground the answer in our knowledge base and cite the sources you used. If the conversation looks like it needs ongoing tracking, classify it as a ticket candidate — but do not send the reply or create anything without my approval.",
-    actionIds: ['tickets.classify_conversation'],
+    actionIds: [],
     defaults: defaultLaunch(),
   },
   {
@@ -65,16 +61,16 @@ export const presetAgents: readonly PresetAgent[] = [
     description: 'Digest unread and unassigned conversations so nothing slips through.',
     goalTemplate:
       'Summarize all unread and unassigned inbox conversations from the last 24 hours. Group them by topic, flag anything urgent, and suggest who or which team each one should be assigned to.',
-    actionIds: ['tickets.assign'],
+    actionIds: [],
     defaults: defaultLaunch(),
   },
   {
     id: 'refresh-knowledge-base',
-    label: 'Refresh knowledge base from website',
-    description: "Trigger a Quarry re-crawl of the organization's known website.",
+    label: 'Plan a knowledge-base refresh',
+    description: "Propose a Quarry re-crawl of the organization's known website.",
     goalTemplate:
-      "Refresh our knowledge base by re-crawling the organization's known website. Report what changed once the crawl completes.",
-    actionIds: ['knowledge.recrawl_source', 'knowledge.crawl_site'],
+      "Propose a safe refresh plan for our knowledge base from the organization's known website. Do not start a crawl; explain the evidence, expected scope, and approval needed.",
+    actionIds: [],
     defaults: defaultLaunch(),
   },
   {
@@ -83,7 +79,7 @@ export const presetAgents: readonly PresetAgent[] = [
     description: 'Classify open conversations and route the urgent ones to the right team.',
     goalTemplate:
       'Review open support conversations, classify which ones should become tickets, and assign the urgent ones to the right team. Escalate anything that needs a human to look at it right away.',
-    actionIds: ['tickets.classify_conversation', 'tickets.assign', 'tickets.update'],
+    actionIds: [],
     defaults: defaultLaunch(),
   },
 ] as const satisfies readonly PresetAgent[]
@@ -94,9 +90,8 @@ export function getPresetAgent(id: PresetAgentId): PresetAgent | undefined {
 
 /**
  * Turn a preset's fixed action-id subset into `ChatAction[]` for
- * `ChatInvokeRequest.actions`. `createSelectedAgentToolSpecs` resolves each id
- * against the real `action-registry` entry (full input schema + approval
- * metadata) as long as the id matches exactly, so callers must not rename it.
+ * `ChatInvokeRequest.actions`. Empty sets are intentional until their owner
+ * actions are explicitly Model-eligible and enforceable at execution time.
  */
 export function presetAgentChatActions(preset: PresetAgent): ChatAction[] {
   return preset.actionIds.map((id) => ({

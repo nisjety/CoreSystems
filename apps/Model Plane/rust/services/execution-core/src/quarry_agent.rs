@@ -26,7 +26,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::browser_agent::{ActionType, BrowserAction, BrowserObservation, ObservationStatus};
+use crate::browser_agent::{
+    ActionType, BrowserAction, BrowserObservation, BrowserSnapshotTarget, ObservationStatus,
+};
 use crate::quarry_auth::TokenSource;
 
 const AGENT_SCOPES: &[&str] = &["browser:execute"];
@@ -40,17 +42,125 @@ const AGENT_SCOPES: &[&str] = &["browser:execute"];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentAction {
-    Navigate { url: String },
-    Click { selector: String },
-    Type { selector: String, text: String },
-    Press { key: String },
-    Scroll { target: String },
-    Select { selector: String, value: String },
-    Wait { ms: u32 },
-    WaitFor { selector: String, timeout_ms: u32 },
-    Screenshot { full_page: bool },
+    Navigate {
+        url: String,
+    },
+    Click {
+        selector: String,
+    },
+    ClickRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+    },
+    FrameClickRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+    },
+    Type {
+        selector: String,
+        text: String,
+    },
+    TypeRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        text: String,
+    },
+    FrameTypeRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        text: String,
+    },
+    SelectRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        value: String,
+    },
+    FrameSelectRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        value: String,
+    },
+    WaitForRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        timeout_ms: u32,
+    },
+    FrameWaitForRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        timeout_ms: u32,
+    },
+    RespondDialog {
+        dialog_id: String,
+        accept: bool,
+        approval_grant_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_text: Option<String>,
+    },
+    UploadRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        artifact_id: String,
+        approval_grant_id: String,
+    },
+    FrameUploadRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        artifact_id: String,
+        approval_grant_id: String,
+    },
+    DownloadRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
+    FrameDownloadRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        approval_grant_id: String,
+    },
+    Press {
+        key: String,
+    },
+    Scroll {
+        target: String,
+    },
+    Select {
+        selector: String,
+        value: String,
+    },
+    Wait {
+        ms: u32,
+    },
+    WaitFor {
+        selector: String,
+        timeout_ms: u32,
+    },
+    Screenshot {
+        full_page: bool,
+    },
     Pdf,
-    Evaluate { script: String },
+    Evaluate {
+        script: String,
+    },
     Back,
     GetContent,
 }
@@ -105,7 +215,7 @@ pub struct StepRequest {
 }
 
 /// Observation returned by a step. Mirrors quarry-core `BrowserObservation`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct WireObservation {
     #[serde(default)]
     pub run_id: String,
@@ -116,6 +226,8 @@ pub struct WireObservation {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
+    pub snapshot: Option<WireBrowserSnapshot>,
+    #[serde(default)]
     pub dom_summary: Option<DomSummary>,
     #[serde(default)]
     pub screenshot_artifact_id: Option<String>,
@@ -124,12 +236,61 @@ pub struct WireObservation {
     #[serde(default)]
     pub network_summary: Vec<NetworkEntry>,
     #[serde(default)]
+    pub egress_receipts: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub dialogs: Vec<serde_json::Value>,
+    #[serde(default)]
     pub policy_denials: Vec<String>,
+    #[serde(default)]
+    pub telemetry: serde_json::Value,
     #[serde(default)]
     pub observed_at: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+/// The public portion of Quarry's active AX snapshot. These fields are enough
+/// for Model Plane to plan a ref-bound action, while private CDP node bindings
+/// remain solely inside Quarry.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WireBrowserSnapshot {
+    #[serde(default)]
+    pub snapshot_id: String,
+    #[serde(default)]
+    pub generation: u32,
+    #[serde(default)]
+    pub targets: Vec<WireSnapshotTarget>,
+    #[serde(default)]
+    pub frames: Vec<WireBrowserFrame>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WireBrowserFrame {
+    #[serde(default)]
+    pub frame_id: String,
+    #[serde(default)]
+    pub parent_frame_id: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub child_frame_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WireSnapshotTarget {
+    #[serde(default)]
+    pub ref_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub frame_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DomSummary {
     #[serde(default)]
     pub node_count: u32,
@@ -139,7 +300,7 @@ pub struct DomSummary {
     pub text_snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InteractiveElement {
     pub tag: String,
     pub selector: String,
@@ -149,13 +310,13 @@ pub struct InteractiveElement {
     pub role: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConsoleLine {
     pub level: String,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NetworkEntry {
     pub method: String,
     pub url: String,
@@ -187,12 +348,44 @@ pub fn action_to_wire(action: &BrowserAction) -> AgentAction {
         ActionType::Goto => AgentAction::Navigate {
             url: action.url.clone(),
         },
-        ActionType::Click => AgentAction::Click {
-            selector: action.selector.clone(),
+        ActionType::Click => match action.target.as_ref() {
+            Some(target) => match target.frame_id.as_deref() {
+                Some(frame_id) => AgentAction::FrameClickRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    frame_id: frame_id.to_owned(),
+                    ref_id: target.ref_id.clone(),
+                },
+                None => AgentAction::ClickRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    ref_id: target.ref_id.clone(),
+                },
+            },
+            None => AgentAction::Click {
+                selector: action.selector.clone(),
+            },
         },
-        ActionType::Type => AgentAction::Type {
-            selector: action.selector.clone(),
-            text: action.value.clone(),
+        ActionType::Type => match action.target.as_ref() {
+            Some(target) => match target.frame_id.as_deref() {
+                Some(frame_id) => AgentAction::FrameTypeRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    frame_id: frame_id.to_owned(),
+                    ref_id: target.ref_id.clone(),
+                    text: action.value.clone(),
+                },
+                None => AgentAction::TypeRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    ref_id: target.ref_id.clone(),
+                    text: action.value.clone(),
+                },
+            },
+            None => AgentAction::Type {
+                selector: action.selector.clone(),
+                text: action.value.clone(),
+            },
         },
         ActionType::Scroll => AgentAction::Scroll {
             target: if action.value.is_empty() {
@@ -231,6 +424,38 @@ pub fn observation_from_wire(
     } else {
         wire.policy_denials.join("; ")
     };
+    let (dom_snapshot_ref, snapshot_generation, snapshot_targets) = wire
+        .snapshot
+        .as_ref()
+        .map(|snapshot| {
+            (snapshot.snapshot_id.clone(), Some(snapshot.generation), {
+                let root_frame_id = snapshot
+                    .frames
+                    .iter()
+                    .find(|frame| frame.parent_frame_id.is_none())
+                    .map(|frame| frame.frame_id.as_str());
+                snapshot
+                    .targets
+                    .iter()
+                    .map(|target| BrowserSnapshotTarget {
+                        ref_id: target.ref_id.clone(),
+                        role: target.role.clone(),
+                        name: target.name.clone(),
+                        text: target.text.clone(),
+                        // A top-level frame id is implementation detail for
+                        // this model abstraction. Preserve only a child id:
+                        // its presence selects Quarry's explicit frame-ref
+                        // action instead of accidentally framing a root ref.
+                        frame_id: target
+                            .frame_id
+                            .as_deref()
+                            .filter(|frame_id| Some(*frame_id) != root_frame_id)
+                            .map(str::to_owned),
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_else(|| (String::new(), None, Vec::new()));
 
     BrowserObservation {
         observation_id: format!("obs_{}_{:04}", wire.run_id, wire.step),
@@ -241,7 +466,9 @@ pub fn observation_from_wire(
         page_title: wire.title.clone().unwrap_or_default(),
         extracted_text,
         screenshot_ref: wire.screenshot_artifact_id.clone().unwrap_or_default(),
-        dom_snapshot_ref: String::new(),
+        dom_snapshot_ref,
+        snapshot_generation,
+        snapshot_targets,
         error_message,
     }
 }
@@ -500,6 +727,7 @@ mod tests {
             value: value.to_owned(),
             url: url.to_owned(),
             max_wait_ms: 3000,
+            target: None,
             reason: String::new(),
             risk_category: None,
         }

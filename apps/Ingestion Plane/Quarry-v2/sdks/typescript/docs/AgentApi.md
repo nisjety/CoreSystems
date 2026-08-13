@@ -11,6 +11,7 @@ All URIs are relative to *http://localhost:8080*
 | [**compileAgentProcedure**](AgentApi.md#compileagentprocedure) | **POST** /v1/agent/runs/{run_id}/procedure | Compile verified receipts into a replay candidate |
 | [**impactCheckAgentProcedure**](AgentApi.md#impactcheckagentprocedure) | **POST** /v1/agent/procedures/impact-check | Identify changed sources that require procedure quarantine |
 | [**listAgentReceipts**](AgentApi.md#listagentreceipts) | **GET** /v1/agent/runs/{run_id}/receipts | Read tenant-scoped immutable action receipts |
+| [**listAgentEgressReceipts**](AgentApi.md#listagentegressreceipts) | **GET** /v1/agent/runs/{run_id}/egress-receipts | Read redacted live browser egress decisions |
 | [**qualityCheckAgentProcedure**](AgentApi.md#qualitycheckagentprocedure) | **POST** /v1/agent/procedures/quality-check | Evaluate deterministic procedure promotion evidence |
 | [**startAgentRun**](AgentApi.md#startagentrunoperation) | **POST** /v1/agent/runs | Acquire a governed browser-agent run |
 
@@ -486,6 +487,37 @@ No authorization required
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
 
+## listAgentEgressReceipts
+
+> EnvelopeEgressReceipts listAgentEgressReceipts(runId, afterSequence?, limit?)
+
+Read ordered, redacted policy decisions from the live browser egress boundary.
+The receipt stream is cursor-based. A cursor that can no longer be served as
+a continuous sequence is rejected rather than returning partial proof.
+
+### Parameters
+
+| Name | Type | Description | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **runId** | `string` | Tenant-owned Quarry run identifier | required |
+| **afterSequence** | `number` | Return receipts after this sequence | optional, minimum `0` |
+| **limit** | `number` | Maximum returned receipts | optional, `1`–`512` |
+
+### Return type
+
+[**EnvelopeEgressReceipts**](EnvelopeEgressReceipts.md)
+
+### HTTP response details
+
+| Status code | Description |
+|-------------|-------------|
+| **200** | Ordered redacted egress decisions |
+| **404** | Run not found or not owned by the caller |
+| **409** | Receipt cursor is no longer continuous in the bounded proof buffer |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
 ## qualityCheckAgentProcedure
 
 > EnvelopeProcedureQuality qualityCheckAgentProcedure(browserProcedure)
@@ -618,4 +650,3 @@ No authorization required
 | **403** | Missing or invalid BrowserBroker grant |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
-

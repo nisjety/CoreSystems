@@ -57,7 +57,7 @@ App / Shell → human-facing UX (CLI, IDE, channels, dashboards)
 2. **Quarry edge** validates `Authorization: Bearer <token>` against Control Plane (or accepts internal-network tokens).
 3. **Quarry → Data Plane**: Bearer-tokened, scoped to the request's `org_id`. Data Plane re-validates org status.
 4. **Quarry → Model Plane**: Bearer-tokened, gateway returns an `org_id`-scoped session.
-5. **Model Plane → Quarry browser**: `BrowserBrokerService.AcquireGrant` issues a short-lived `grant_id`. Quarry validates each action with `ValidateGrant` before execution.
+5. **Model Plane → Quarry browser**: `BrowserBroker.AcquireGrant` issues a short-lived `grant_id`. Quarry validates each action with `ValidateGrant` before execution.
 
 ## ZDR propagation
 
@@ -103,7 +103,7 @@ Subjects: `organization.*`, `user.*`. Quarry does NOT re-publish these — it co
 
 | Service | Owner | Endpoint | Quarry caller |
 |---|---|---|---|
-| `BrowserBrokerService` | Model Plane | `:9090` | `GrpcGrantValidator` |
+| `BrowserBroker` | Model Plane | `:9090` | `GrpcGrantValidator` |
 | `DocumentService` (v2) | Data Plane | `:9001` | `GrpcDataPlaneClient` |
 | `InferenceCoreService` | Model Plane | `:9092` | (via gateway HTTP) |
 
@@ -183,7 +183,7 @@ Response includes `data` (validated JSON), `schema_valid`, `usage.cost_usd`. If 
 |---|---|
 | Quarry edge healthy | `GET http://edge:8082/health` → 200 |
 | NATS reachable | `nats stream info QUARRY_EVENTS` succeeds |
-| Browser broker reachable | `grpcurl model-plane-broker:9090 model_plane.v1.BrowserBrokerService/Health` |
+| Browser broker reachable | `grpcurl model-plane-broker:9090 model_plane.v1.BrowserBroker/Health` |
 | Data Plane ingest reachable | `curl http://documents-api-go:9001/health` |
 | Model Plane gateway reachable | `curl http://model-gateway:8080/health` |
 

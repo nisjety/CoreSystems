@@ -23,6 +23,7 @@ import (
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/metrics"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -376,6 +377,7 @@ func main() {
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
+	httpServer.SetSpaceRepository(spaces.NewRepository(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)
 
 	// Prometheus /metrics on a dedicated port (default 9091), scraped by the

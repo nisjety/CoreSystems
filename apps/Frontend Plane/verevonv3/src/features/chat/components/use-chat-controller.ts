@@ -42,6 +42,7 @@ import {
 import {
   bindSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
+import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import {
   readChatRunPanelCollapsed,
   writeChatRunPanelCollapsed,
@@ -62,6 +63,7 @@ import {
   describeFeedbackFailure,
   getChatThreadTranscript,
   getThreadMessages,
+  listChatThreads,
   listModels,
   resumeStream,
   saveChatThreadSnapshot,
@@ -167,6 +169,11 @@ export function useChatController() {
   // top of `writeThreadSnapshot`.
   const [temporaryChat, setTemporaryChat] = createSignal(false)
   const [temporaryThreadIds, setTemporaryThreadIds] = createSignal<ReadonlySet<string>>(new Set())
+  // This is a non-authoritative UI routing hint only. The BFF strips it and
+  // re-resolves current Control evidence on every scoped append; keeping it in
+  // memory makes a newly-created scoped thread continue to send the selected
+  // Space on later turns during this chat session without persisting a bearer.
+  const scopedThreadRefs = new Map<string, string>()
   const [input, setInput] = createSignal('')
   /**
    * Quiet, non-blocking notice for a rating that did NOT persist.
@@ -413,6 +420,12 @@ export function useChatController() {
     // eagerly rather than leave stale siblings from the old thread reachable
     // until the next regenerate/edit happens to overwrite them.
     setVersionState(null)
+    // Recover the non-secret routing hint from the server-owned listing so a
+    // scoped thread remains appendable after a page reload. No authority is
+    // cached: the BFF obtains a new Control decision for the actual content.
+    const listed = await listChatThreads().catch(() => [])
+    const scoped = listed.find((thread) => thread.threadId === threadId)?.spaceRef?.trim()
+    if (scoped) scopedThreadRefs.set(threadId, scoped)
     const localCached = readChatThreadTranscript(threadId)
     const serverCached = await getChatThreadTranscript(threadId).catch(() => null)
     if (seq !== threadLoadSequence) return
@@ -627,7 +640,13 @@ export function useChatController() {
     onCleanup(() => window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange))
 
     const initializeChat = async () => {
-      const storedThread = readActiveChatThreadId()
+      // A Space Activity link is URL-addressable across a browser restart. It
+      // may choose the requested view but never grants it: `loadThread` still
+      // goes through the owner-bound transcript endpoints, and a 404 clears
+      // the local selection rather than retaining a cross-user ghost thread.
+      const linkedThread = readThreadDeepLink(window.location.search)
+      if (linkedThread) setActiveChatThreadId(linkedThread)
+      const storedThread = linkedThread ?? readActiveChatThreadId()
       if (storedThread) await loadThread(storedThread)
 
       try {
@@ -756,6 +775,13 @@ export function useChatController() {
     // the rest of the session (see `isTemporaryThread`), independent of
     // whatever the composer toggle does afterward.
     const isNewThread = !state.threadId
+    // The URL can select a Space for a *new* chat, but it cannot supply any
+    // authority. The BFF strips this selection after exchanging it with Control
+    // for the signed, effect-bound creation decision.
+    const selectedNewSpaceRef = isNewThread && typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('space_ref')?.trim() || undefined
+      : undefined
+    const requestedSpaceRef = selectedNewSpaceRef ?? scopedThreadRefs.get(activeThreadId)
     if (isNewThread) {
       setState('threadId', activeThreadId)
       if (options.zdr) markThreadTemporary(activeThreadId)
@@ -844,8 +870,13 @@ export function useChatController() {
         {
           content,
           model,
-          threadId: activeThreadId,
+          // A scoped first turn lets Session Core mint the durable thread ID.
+          // The local provisional ID remains only a UI correlation key until
+          // `onConnected` replaces it; sending it as a thread ID would make
+          // the BFF correctly treat the request as an existing-thread write.
+          threadId: selectedNewSpaceRef ? undefined : activeThreadId,
           sessionKey: activeThreadId,
+          spaceRef: requestedSpaceRef,
           browseWeb: options.browseWeb,
           deepResearch: options.deepResearch,
           generateImage: options.generateImage,
@@ -865,6 +896,7 @@ export function useChatController() {
             // instead of only once the run pauses for an approval.
             if (runId) setTurnRunId(assistantId, runId)
             if (serverThreadId) {
+              const priorThreadId = activeThreadId
               if (serverThreadId !== activeThreadId) {
                 const provisionalThreadId = activeThreadId
                 removeChatThreadHistoryItem(provisionalThreadId)
@@ -880,6 +912,10 @@ export function useChatController() {
                 renameTemporaryThread(provisionalThreadId, serverThreadId)
               }
               activeThreadId = serverThreadId
+              if (requestedSpaceRef) {
+                scopedThreadRefs.delete(priorThreadId)
+                scopedThreadRefs.set(serverThreadId, requestedSpaceRef)
+              }
               setState('threadId', serverThreadId)
               if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
               writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })

@@ -226,6 +226,513 @@ pub(crate) async fn execute_browser_agent(
     }
 }
 
+/// Execute one narrow, already-leased Quarry browser operation for the
+/// Model-Plane MCP facade. This deliberately does *not* create a browser run,
+/// accept a URL/selector/script, or expose a CDP channel: callers can only
+/// observe an existing Quarry run or execute a current opaque snapshot target.
+///
+/// BrowserBroker remains the authority for the run grant. Sensitive transfer
+/// and dialog operations retain their one-shot approval grant and Quarry
+/// validates that scope before an effect reaches the driver.
+pub(crate) async fn execute_quarry_browser_mcp(
+    tool_name: &str,
+    tool_input: &str,
+    verified_org_id: &str,
+    verified_zdr: bool,
+    validated_grant: Option<&ValidatedBrowserGrant>,
+) -> ToolExecution {
+    if verified_org_id.trim().is_empty() {
+        return browser_mcp_error("browser MCP requires the verified run organization");
+    }
+    let Some(validated_grant) = validated_grant else {
+        return browser_mcp_error("browser MCP requires a broker-validated grant");
+    };
+
+    let request = match BrowserMcpRequest::parse(tool_name, tool_input, validated_grant) {
+        Ok(request) => request,
+        Err(error) => return browser_mcp_error(error),
+    };
+    let client = match crate::quarry_agent::QuarryAgentClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return browser_mcp_error(
+                "browser MCP unavailable: QUARRY_BROWSER_AGENT_ENABLED or QUARRY_EDGE_URL is not configured",
+            );
+        }
+        Err(error) => return browser_mcp_error(format!("browser MCP unavailable: {error}")),
+    };
+
+    let action = request
+        .action
+        .unwrap_or(crate::quarry_agent::AgentAction::GetContent);
+    let constraints = crate::quarry_agent::AgentConstraints {
+        max_steps: 1,
+        allowed_domains: validated_grant.allowed_domains().to_vec(),
+        max_runtime_s: Some(30),
+        max_cost_usd: None,
+    };
+    match client
+        .step(
+            &request.quarry_run_id,
+            &request.lease_id,
+            verified_org_id,
+            action,
+            &constraints,
+            verified_zdr,
+            validated_grant.grant_id(),
+        )
+        .await
+    {
+        Ok(observation) => match serde_json::to_string(&observation) {
+            Ok(output) => ToolExecution {
+                output,
+                error: None,
+            },
+            Err(error) => browser_mcp_error(format!("serialize Quarry observation: {error}")),
+        },
+        Err(error) => browser_mcp_error(format!("Quarry browser operation failed: {error}")),
+    }
+}
+
+fn browser_mcp_error(error: impl Into<String>) -> ToolExecution {
+    ToolExecution {
+        output: String::new(),
+        error: Some(error.into()),
+    }
+}
+
+const MAX_BROWSER_MCP_TEXT_BYTES: usize = 64 * 1024;
+const MAX_BROWSER_MCP_WAIT_MS: u32 = 30_000;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserMcpObserveInput {
+    grant_id: String,
+    quarry_run_id: String,
+    lease_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserMcpActInput {
+    grant_id: String,
+    quarry_run_id: String,
+    lease_id: String,
+    action: BrowserMcpAction,
+}
+
+/// The public browser-action grammar is intentionally smaller than Quarry's
+/// internal action enum. Legacy CSS actions, navigation, screen coordinates,
+/// arbitrary JavaScript, and host-file paths have no MCP representation.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum BrowserMcpAction {
+    ClickRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+    },
+    FrameClickRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+    },
+    TypeRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        text: String,
+    },
+    FrameTypeRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        text: String,
+    },
+    SelectRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        value: String,
+    },
+    FrameSelectRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        value: String,
+    },
+    WaitForRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        timeout_ms: u32,
+    },
+    FrameWaitForRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        timeout_ms: u32,
+    },
+    RespondDialog {
+        dialog_id: String,
+        accept: bool,
+        approval_grant_id: String,
+        prompt_text: Option<String>,
+    },
+    UploadRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        artifact_id: String,
+        approval_grant_id: String,
+    },
+    FrameUploadRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        artifact_id: String,
+        approval_grant_id: String,
+    },
+    DownloadRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
+    FrameDownloadRef {
+        snapshot_id: String,
+        generation: u32,
+        frame_id: String,
+        ref_id: String,
+        approval_grant_id: String,
+    },
+}
+
+struct BrowserMcpRequest {
+    quarry_run_id: String,
+    lease_id: String,
+    action: Option<crate::quarry_agent::AgentAction>,
+}
+
+impl BrowserMcpRequest {
+    fn parse(
+        tool_name: &str,
+        tool_input: &str,
+        validated_grant: &ValidatedBrowserGrant,
+    ) -> Result<Self, String> {
+        match tool_name {
+            "browser.observe" => {
+                let input: BrowserMcpObserveInput = serde_json::from_str(tool_input)
+                    .map_err(|error| format!("invalid browser.observe input: {error}"))?;
+                validate_browser_mcp_scope(
+                    &input.grant_id,
+                    &input.quarry_run_id,
+                    &input.lease_id,
+                    validated_grant,
+                )?;
+                Ok(Self {
+                    quarry_run_id: input.quarry_run_id,
+                    lease_id: input.lease_id,
+                    action: None,
+                })
+            }
+            "browser.act" => {
+                let input: BrowserMcpActInput = serde_json::from_str(tool_input)
+                    .map_err(|error| format!("invalid browser.act input: {error}"))?;
+                validate_browser_mcp_scope(
+                    &input.grant_id,
+                    &input.quarry_run_id,
+                    &input.lease_id,
+                    validated_grant,
+                )?;
+                Ok(Self {
+                    quarry_run_id: input.quarry_run_id,
+                    lease_id: input.lease_id,
+                    action: Some(input.action.into_quarry_action()?),
+                })
+            }
+            _ => Err("unsupported Quarry browser MCP tool".to_owned()),
+        }
+    }
+}
+
+fn validate_browser_mcp_scope(
+    input_grant_id: &str,
+    quarry_run_id: &str,
+    lease_id: &str,
+    validated_grant: &ValidatedBrowserGrant,
+) -> Result<(), String> {
+    if input_grant_id.trim() != validated_grant.grant_id() {
+        return Err(
+            "browser tool input grant does not match the broker-validated grant".to_owned(),
+        );
+    }
+    if quarry_run_id.trim().is_empty() || lease_id.trim().is_empty() {
+        return Err("browser MCP requires a non-empty Quarry run and lease".to_owned());
+    }
+    Ok(())
+}
+
+impl BrowserMcpAction {
+    fn into_quarry_action(self) -> Result<crate::quarry_agent::AgentAction, String> {
+        use crate::quarry_agent::AgentAction;
+
+        match self {
+            Self::ClickRef {
+                snapshot_id,
+                generation,
+                ref_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                Ok(AgentAction::ClickRef {
+                    snapshot_id,
+                    generation,
+                    ref_id,
+                })
+            }
+            Self::FrameClickRef {
+                snapshot_id,
+                generation,
+                frame_id,
+                ref_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("frame_id", &frame_id)?;
+                Ok(AgentAction::FrameClickRef {
+                    snapshot_id,
+                    generation,
+                    frame_id,
+                    ref_id,
+                })
+            }
+            Self::TypeRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                text,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                validate_bounded_text("type_ref text", &text, false)?;
+                Ok(AgentAction::TypeRef {
+                    snapshot_id,
+                    generation,
+                    ref_id,
+                    text,
+                })
+            }
+            Self::FrameTypeRef {
+                snapshot_id,
+                generation,
+                frame_id,
+                ref_id,
+                text,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("frame_id", &frame_id)?;
+                validate_bounded_text("frame_type_ref text", &text, false)?;
+                Ok(AgentAction::FrameTypeRef {
+                    snapshot_id,
+                    generation,
+                    frame_id,
+                    ref_id,
+                    text,
+                })
+            }
+            Self::SelectRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                value,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                validate_bounded_text("select_ref value", &value, true)?;
+                Ok(AgentAction::SelectRef {
+                    snapshot_id,
+                    generation,
+                    ref_id,
+                    value,
+                })
+            }
+            Self::FrameSelectRef {
+                snapshot_id,
+                generation,
+                frame_id,
+                ref_id,
+                value,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("frame_id", &frame_id)?;
+                validate_bounded_text("frame_select_ref value", &value, true)?;
+                Ok(AgentAction::FrameSelectRef {
+                    snapshot_id,
+                    generation,
+                    frame_id,
+                    ref_id,
+                    value,
+                })
+            }
+            Self::WaitForRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                timeout_ms,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                if timeout_ms == 0 || timeout_ms > MAX_BROWSER_MCP_WAIT_MS {
+                    return Err(format!(
+                        "wait_for_ref timeout_ms must be between 1 and {MAX_BROWSER_MCP_WAIT_MS}"
+                    ));
+                }
+                Ok(AgentAction::WaitForRef {
+                    snapshot_id,
+                    generation,
+                    ref_id,
+                    timeout_ms,
+                })
+            }
+            Self::FrameWaitForRef {
+                snapshot_id,
+                generation,
+                frame_id,
+                ref_id,
+                timeout_ms,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("frame_id", &frame_id)?;
+                if timeout_ms == 0 || timeout_ms > MAX_BROWSER_MCP_WAIT_MS {
+                    return Err(format!(
+                        "frame_wait_for_ref timeout_ms must be between 1 and {MAX_BROWSER_MCP_WAIT_MS}"
+                    ));
+                }
+                Ok(AgentAction::FrameWaitForRef {
+                    snapshot_id,
+                    generation,
+                    frame_id,
+                    ref_id,
+                    timeout_ms,
+                })
+            }
+            Self::RespondDialog {
+                dialog_id,
+                accept,
+                approval_grant_id,
+                prompt_text,
+            } => {
+                require_non_empty("dialog_id", &dialog_id)?;
+                require_non_empty("dialog approval_grant_id", &approval_grant_id)?;
+                if let Some(prompt_text) = prompt_text.as_deref() {
+                    validate_bounded_text("dialog prompt_text", prompt_text, true)?;
+                }
+                Ok(AgentAction::RespondDialog {
+                    dialog_id,
+                    accept,
+                    approval_grant_id,
+                    prompt_text,
+                })
+            }
+            Self::UploadRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                artifact_id,
+                approval_grant_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("artifact_id", &artifact_id)?;
+                require_non_empty("upload approval_grant_id", &approval_grant_id)?;
+                Ok(AgentAction::UploadRef {
+                    snapshot_id,
+                    generation,
+                    ref_id,
+                    artifact_id,
+                    approval_grant_id,
+                })
+            }
+            Self::FrameUploadRef {
+                snapshot_id,
+                generation,
+                frame_id,
+                ref_id,
+                artifact_id,
+                approval_grant_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("frame_id", &frame_id)?;
+                require_non_empty("artifact_id", &artifact_id)?;
+                require_non_empty("upload approval_grant_id", &approval_grant_id)?;
+                Ok(AgentAction::FrameUploadRef {
+                    snapshot_id,
+                    generation,
+                    frame_id,
+                    ref_id,
+                    artifact_id,
+                    approval_grant_id,
+                })
+            }
+            Self::DownloadRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                approval_grant_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("download approval_grant_id", &approval_grant_id)?;
+                Ok(AgentAction::DownloadRef {
+                    snapshot_id,
+                    generation,
+                    ref_id,
+                    approval_grant_id,
+                })
+            }
+            Self::FrameDownloadRef {
+                snapshot_id,
+                generation,
+                frame_id,
+                ref_id,
+                approval_grant_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("frame_id", &frame_id)?;
+                require_non_empty("download approval_grant_id", &approval_grant_id)?;
+                Ok(AgentAction::FrameDownloadRef {
+                    snapshot_id,
+                    generation,
+                    frame_id,
+                    ref_id,
+                    approval_grant_id,
+                })
+            }
+        }
+    }
+}
+
+fn validate_snapshot_target(snapshot_id: &str, ref_id: &str) -> Result<(), String> {
+    require_non_empty("snapshot_id", snapshot_id)?;
+    require_non_empty("ref_id", ref_id)
+}
+
+fn validate_bounded_text(name: &str, value: &str, permit_empty: bool) -> Result<(), String> {
+    if !permit_empty && value.is_empty() {
+        return Err(format!("{name} must be non-empty"));
+    }
+    if value.len() > MAX_BROWSER_MCP_TEXT_BYTES {
+        return Err(format!("{name} exceeds {MAX_BROWSER_MCP_TEXT_BYTES} bytes"));
+    }
+    Ok(())
+}
+
+fn require_non_empty(name: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{name} must be non-empty"));
+    }
+    Ok(())
+}
+
 /// The plan fields the postcondition judgment needs, captured before the
 /// browser loop consumes the config.
 #[derive(Default)]
@@ -583,6 +1090,8 @@ mod tests {
             extracted_text: text.to_owned(),
             screenshot_ref: "shot_1".to_owned(),
             dom_snapshot_ref: String::new(),
+            snapshot_generation: None,
+            snapshot_targets: vec![],
             error_message: String::new(),
         }
     }

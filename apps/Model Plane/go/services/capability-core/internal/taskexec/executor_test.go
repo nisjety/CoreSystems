@@ -3,6 +3,9 @@ package taskexec
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/triodelab/model-plane/pkg/publisher"
@@ -21,6 +24,22 @@ func TestIsAutoExecutable(t *testing.T) {
 	for kind, want := range cases {
 		if got := isAutoExecutable(kind); got != want {
 			t.Errorf("isAutoExecutable(%q) = %v, want %v", kind, got, want)
+		}
+	}
+}
+
+func TestExecutorClaimQueryRefusesTasksFromDeletedCronSchedules(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("executor.go"))
+	if err != nil {
+		t.Fatalf("read executor source: %v", err)
+	}
+	for _, required := range []string{
+		"FROM cron_fires AS cf",
+		"JOIN cron_schedules AS cs ON cs.id = cf.schedule_id",
+		"cf.task_id = t.id AND cs.deleted_at IS NOT NULL",
+	} {
+		if !strings.Contains(string(source), required) {
+			t.Fatalf("claim query must retain deleted-cron task fence %q", required)
 		}
 	}
 }

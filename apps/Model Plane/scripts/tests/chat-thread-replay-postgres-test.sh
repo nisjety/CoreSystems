@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTAINER="model-plane-thread-replay-pg-${RANDOM}-$$"
-TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/model-plane-crypto-target}"
+TARGET_DIR="${CARGO_TARGET_DIR:-/Volumes/Applikasjon/Triodelab/CoreSystem-build-cache/cargo/model-plane}"
 
 cleanup() { docker rm -f "$CONTAINER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT

@@ -6,7 +6,7 @@
 
 Name | Type
 ------------ | -------------
-`action` | { [key: string]: any; }
+`action` | AgentAction — tagged governed action. Snapshot and semantic effects include the exact `snapshot_id` and `generation`; artifact and dialog effects include a fresh one-time `approval_grant_id`.
 `instruction` | string
 `extractionProfile` | { [key: string]: any; }
 
@@ -34,5 +34,3 @@ console.log(exampleParsed)
 ```
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
-
-

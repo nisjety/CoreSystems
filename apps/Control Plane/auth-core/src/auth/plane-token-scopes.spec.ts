@@ -31,6 +31,14 @@ describe('plane user scope contract', () => {
     expect(planeScopesForRole('owner')).not.toContain('data:search:rebuild');
   });
 
+  it('never grants Space retrieval binding authority to an interactive user', () => {
+    for (const role of ['viewer', 'member', 'admin', 'owner']) {
+      expect(planeScopesForRole(role, 'data-plane')).not.toContain(
+        'data:space-binding:write',
+      );
+    }
+  });
+
   it('grants only the exact interactive scopes required by each hardened Model service', () => {
     expect(planeScopesForRole('member', 'inference-core')).toEqual([
       'inference:invoke',

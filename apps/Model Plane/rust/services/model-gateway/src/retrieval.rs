@@ -866,6 +866,7 @@ pub async fn retrieve(
     org_id: &str,
     query: &str,
     zdr: bool,
+    space_decision: Option<&str>,
 ) -> Option<Grounding> {
     let query = query.trim();
     if query.is_empty() {
@@ -884,13 +885,30 @@ pub async fn retrieve(
     };
 
     let mut retrieval_client = state.retrieval_client.clone();
-    let grpc_req = match authorize(tonic::Request::new(request), bearer) {
+    let mut grpc_req = match authorize(tonic::Request::new(request), bearer) {
         Ok(request) => request,
         Err(error) => {
             tracing::warn!(error = %error.message(), org_id = %org_id, "retrieval bearer could not be forwarded");
             return None;
         }
     };
+    let scoped_token = match scoped_retrieval_token(space_decision) {
+        Ok(token) => token,
+        Err(()) => {
+            tracing::warn!(org_id = %org_id, "scoped grounding suppressed because retrieval authority is absent");
+            return None;
+        }
+    };
+    if let Some(token) = scoped_token {
+        let metadata = match tonic::metadata::MetadataValue::try_from(token) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                tracing::warn!(org_id = %org_id, "Space decision could not be encoded for Data Plane");
+                return None;
+            }
+        };
+        grpc_req.metadata_mut().insert("x-space-decision", metadata);
+    }
     let retrieval_future = retrieval_client.retrieve(grpc_req);
     let graph_future = load_graph_grounding(state, bearer, org_id, query, zdr);
     let (retrieval_result, graph) = tokio::join!(retrieval_future, graph_future);
@@ -921,10 +939,37 @@ pub async fn retrieve(
     }
 }
 
+/// `None` means a legacy unscoped request. An explicitly scoped request must
+/// carry a non-empty Data audience bearer; it must never fall back to an
+/// unscoped retrieval simply because an upstream deployment is mid-rollout.
+fn scoped_retrieval_token(space_decision: Option<&str>) -> Result<Option<&str>, ()> {
+    match space_decision {
+        None => Ok(None),
+        Some(token) => {
+            let token = token.trim();
+            if token.is_empty() {
+                Err(())
+            } else {
+                Ok(Some(token))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use mp_contracts::dataplane::retrieval_v2::{Candidate, ContextFact, ContextPack};
+
+    #[test]
+    fn scoped_grounding_never_downgrades_to_an_unscoped_data_call() {
+        assert_eq!(scoped_retrieval_token(None), Ok(None));
+        assert_eq!(
+            scoped_retrieval_token(Some("control-data-decision")),
+            Ok(Some("control-data-decision"))
+        );
+        assert_eq!(scoped_retrieval_token(Some("  ")), Err(()));
+    }
 
     #[test]
     fn data_plane_grpc_authorization_uses_only_verified_bearer() {

@@ -24,6 +24,9 @@ import type * as organizations from "../organizations.js";
 import type * as plannerDocuments from "../plannerDocuments.js";
 import type * as projects from "../projects.js";
 import type * as searches from "../searches.js";
+import type * as spaceRegistration from "../spaceRegistration.js";
+import type * as spaceAudienceRegistration from "../spaceAudienceRegistration.js";
+import type * as spaces from "../spaces.js";
 import type * as users from "../users.js";
 
 import type {
@@ -49,6 +52,9 @@ declare const fullApi: ApiFromModules<{
   plannerDocuments: typeof plannerDocuments;
   projects: typeof projects;
   searches: typeof searches;
+  spaceRegistration: typeof spaceRegistration;
+  spaceAudienceRegistration: typeof spaceAudienceRegistration;
+  spaces: typeof spaces;
   users: typeof users;
 }>;
 

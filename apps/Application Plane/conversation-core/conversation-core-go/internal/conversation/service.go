@@ -1146,6 +1146,87 @@ func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (*T
 	return s.evaluateTicketAutomationRules(ctx, "ticket.created", ticket, input.ActorUserID)
 }
 
+// CreateTicketOperation is the first owner-plane operation-envelope vertical
+// slice. It keeps gateway routing stateless: the owner derives the stable
+// operation ID and request digest, persists the ticket/audit/outbox together,
+// and returns the exact durable receipt on a retry.
+func (s *Service) CreateTicketOperation(ctx context.Context, input CreateTicketInput) (*TicketOperationReceipt, error) {
+	input = normalizeCreateTicketInput(input)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.IdempotencyKey == "" || len(input.IdempotencyKey) > 200 {
+		return nil, fmt.Errorf("%w: idempotency_key is required and must be at most 200 characters", ErrInvalidInput)
+	}
+	if input.OrgID == "" || input.ConversationID == "" {
+		return nil, fmt.Errorf("%w: org_id and conversation_id are required", ErrInvalidInput)
+	}
+	if !isTicketWorkType(input.WorkType) {
+		return nil, fmt.Errorf("%w: work_type must be customer_case, internal_work, or incident", ErrInvalidInput)
+	}
+	if err := s.canonicalizeCreateTicketTeam(ctx, &input); err != nil {
+		return nil, err
+	}
+	if _, err := s.repository.GetConversation(ctx, input.OrgID, input.ConversationID); err != nil {
+		return nil, err
+	}
+	input.ActionID = "tickets.create"
+	input.OperationID = TicketOperationID(input.OrgID, input.IdempotencyKey)
+	input.RequestSHA256 = ticketOperationRequestSHA256(input)
+	receipt, err := s.repository.CreateTicketOperation(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil || receipt.Ticket == nil || receipt.OperationID != input.OperationID || receipt.Status != "completed" {
+		return nil, fmt.Errorf("ticket operation returned an invalid durable receipt")
+	}
+	// The repository's transaction created the outbox event. Do not publish
+	// directly here: a process crash after a direct publish but before durable
+	// acknowledgement would create an untraceable duplicate path. The leased
+	// outbox dispatcher owns at-least-once broker delivery.
+	return receipt, nil
+}
+
+// GetTicketOperation reconciles an ambiguous request without attempting the
+// effect again. The repository binds the lookup to the same authenticated
+// actor that created the operation, so an organization peer cannot probe
+// another user's idempotency keys or receipts.
+func (s *Service) GetTicketOperation(ctx context.Context, orgID, actorUserID, idempotencyKey string) (*TicketOperationReceipt, error) {
+	orgID = strings.TrimSpace(orgID)
+	actorUserID = strings.TrimSpace(actorUserID)
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if orgID == "" || actorUserID == "" || idempotencyKey == "" || len(idempotencyKey) > 200 {
+		return nil, fmt.Errorf("%w: operation lookup requires org, actor, and bounded idempotency_key", ErrInvalidInput)
+	}
+	receipt, err := s.repository.GetTicketOperation(ctx, orgID, actorUserID, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil || receipt.OperationID == "" || receipt.AuditEventID == "" || receipt.Status == "" || receipt.Ticket == nil {
+		return nil, fmt.Errorf("ticket operation lookup returned an invalid durable receipt")
+	}
+	return receipt, nil
+}
+
+func ticketOperationRequestSHA256(input CreateTicketInput) string {
+	// encoding/json orders map keys, so this records a stable, content-minimized
+	// semantic request binding without retaining the raw generic action body.
+	payload, _ := json.Marshal(map[string]any{
+		"action_id": input.ActionID, "actor_user_id": input.ActorUserID,
+		"conversation_id": input.ConversationID, "status": input.Status,
+		"work_type": input.WorkType, "priority": input.Priority, "severity": input.Severity,
+		"category": input.Category, "intent": input.Intent, "assignee_user_id": input.AssigneeUserID,
+		"assignee_name": input.AssigneeName, "team_id": input.TeamID, "team_name": input.TeamName,
+		"due_at": input.DueAt, "source": input.Source, "labels": input.Labels,
+		"ai_confidence": input.AIConfidence, "ai_reason": input.AIReason,
+		"created_by": input.CreatedBy, "waiting_since": input.WaitingSince,
+		"last_customer_reply_at": input.LastCustomerReplyAt,
+		"first_response_at":      input.FirstResponseAt, "resolved_at": input.ResolvedAt,
+		"snoozed_until": input.SnoozedUntil, "sla_policy_id": input.SLAPolicyID,
+		"escalation_at": input.EscalationAt,
+	})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
 func (s *Service) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error) {
 	input.OrgID = strings.TrimSpace(input.OrgID)
 	input.TicketID = strings.TrimSpace(input.TicketID)

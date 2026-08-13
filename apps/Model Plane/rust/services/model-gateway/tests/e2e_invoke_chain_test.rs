@@ -1015,6 +1015,15 @@ impl SessionCore for MockSessionCore {
         ))
     }
 
+    async fn delete_space_threads(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::DeleteSpaceThreadsRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::DeleteSpaceThreadsResponse>, Status> {
+        Err(Status::unimplemented(
+            "delete_space_threads not needed in this test",
+        ))
+    }
+
     async fn replay_thread(
         &self,
         _: TReq<ReplayThreadRequest>,

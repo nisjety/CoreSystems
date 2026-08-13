@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy import text
 
@@ -23,6 +24,8 @@ from app.orchestration import orchestrator
 from app.parsers import UnsupportedFileTypeError, parse_uploaded_file
 from app.progress import progress_hub
 from app.schemas import JobDetailResponse, JobItemResponse, JobResponse, SourceImportRequest
+from app.space_import_authority import SpaceImportIngressDenied, verify_space_import_ingress_decision
+from app.space_deletion_auth import is_space_deletion_principal
 from app.service import (
     QuotaCheckUnavailable,
     close_http_client,
@@ -97,6 +100,12 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.import_service_name, lifespan=lifespan)
+
+
+class SpaceDeletionCancelRequest(BaseModel):
+    deletion_request_id: str = Field(min_length=1, max_length=256)
+    space_ref: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=8, max_length=500)
 
 
 @app.exception_handler(QuotaCheckUnavailable)
@@ -250,6 +259,9 @@ async def create_upload_job(
 async def create_source_job(
     request: SourceImportRequest,
     auth: AuthContext = Depends(require_internal_auth),
+    space_import_ingress_decision: str | None = Header(
+        default=None, alias="X-Space-Import-Ingress-Decision"
+    ),
 ) -> JobResponse:
     if request.zdr:
         raise HTTPException(
@@ -258,6 +270,16 @@ async def create_source_job(
         )
     org_id = auth.org_id
     user_id = auth.user_id
+    space_import_intent = None
+    if space_import_ingress_decision is not None:
+        try:
+            space_import_intent = verify_space_import_ingress_decision(
+                space_import_ingress_decision, auth
+            )
+        except SpaceImportIngressDenied as exc:
+            raise HTTPException(status_code=403, detail="Space import authority denied") from exc
+        if space_import_intent.source_type != request.source_type:
+            raise HTTPException(status_code=403, detail="Space import authority denied")
 
     try:
         documents = await import_service.create_source_documents(
@@ -284,6 +306,7 @@ async def create_source_job(
         source_type=request.source_type,
         documents=documents,
         metadata={"source": request.source_type, "count": len(documents)},
+        space_import_intent=space_import_intent,
     )
 
     await orchestrator.dispatch(job_id, import_service.run_job)
@@ -291,6 +314,36 @@ async def create_source_job(
     if not job:
         raise HTTPException(status_code=500, detail="Failed to create import job")
     return _job_to_response(job)
+
+
+@app.post("/api/v1/internal/space-deletion/cancel-imports")
+async def cancel_space_imports_for_deletion(
+    request: SpaceDeletionCancelRequest,
+    auth: AuthContext = Depends(require_internal_auth),
+) -> JSONResponse:
+    """Ingestion's bounded deletion adapter.
+
+    It cancels queued Space-scoped jobs and erases pending payloads. It does
+    not delete documents already handed to Data or connector credentials, so
+    the owner outcome is explicitly partial and cannot become a completion
+    receipt for the Space deletion coordinator.
+    """
+    if not is_space_deletion_principal(auth):
+        raise HTTPException(status_code=403, detail="Dedicated Space deletion service scope required")
+    result = await import_service.cancel_queued_space_jobs(
+        auth.org_id, request.space_ref.strip(), request.reason.strip()
+    )
+    return JSONResponse(
+        {
+            "request_id": request.deletion_request_id.strip(),
+            "owner_plane": "ingestion",
+            "org_id": auth.org_id,
+            "space_ref": request.space_ref.strip(),
+            **result,
+            "owner_outcome": "partial",
+            "remaining_work": "Data document and connector resource owners must report separately",
+        }
+    )
 
 
 class _NatsKnowledgeSyncAudit:

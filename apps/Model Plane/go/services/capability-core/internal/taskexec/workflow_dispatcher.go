@@ -18,6 +18,7 @@ import (
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/publisher"
+	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 )
 
@@ -68,6 +69,14 @@ type WorkflowStarter interface {
 	) (*mpv1.StartWorkflowResponse, error)
 }
 
+// ScheduleFireAuthorizer obtains fresh Control authority for a persisted,
+// non-secret cron fire intent immediately before the task becomes a workflow.
+// It is intentionally optional for ordinary tasks, but mandatory whenever the
+// task carries a cron fire intent.
+type ScheduleFireAuthorizer interface {
+	AuthorizeFire(context.Context, cron.FireIntent) error
+}
+
 // WorkflowDispatcher turns a claimed task into one durable Temporal run.
 //
 // Why this and not a NATS consumer of mp.v1.capability.task.dispatched: the
@@ -90,6 +99,7 @@ type WorkflowDispatcher struct {
 	internalToken       string
 	pub                 publisher.EventPublisher
 	defaultWorkflowType string
+	fireAuthorizer      ScheduleFireAuthorizer
 }
 
 // NewWorkflowDispatcher builds the dispatcher. pub may be nil (reconcile events
@@ -110,6 +120,7 @@ func NewWorkflowDispatcher(
 	internalToken string,
 	pub publisher.EventPublisher,
 	defaultWorkflowType string,
+	fireAuthorizers ...ScheduleFireAuthorizer,
 ) (*WorkflowDispatcher, error) {
 	if pool == nil {
 		return nil, errors.New("taskexec: workflow dispatcher requires a database pool")
@@ -124,6 +135,10 @@ func NewWorkflowDispatcher(
 	if strings.TrimSpace(defaultWorkflowType) == "" {
 		defaultWorkflowType = DefaultWorkflowType
 	}
+	var fireAuthorizer ScheduleFireAuthorizer
+	if len(fireAuthorizers) == 1 {
+		fireAuthorizer = fireAuthorizers[0]
+	}
 	return &WorkflowDispatcher{
 		pool:                pool,
 		client:              client,
@@ -131,6 +146,7 @@ func NewWorkflowDispatcher(
 		internalToken:       strings.TrimSpace(internalToken),
 		pub:                 pub,
 		defaultWorkflowType: strings.TrimSpace(defaultWorkflowType),
+		fireAuthorizer:      fireAuthorizer,
 	}, nil
 }
 
@@ -141,6 +157,7 @@ type taskDetail struct {
 	orgID       string
 	status      string
 	config      json.RawMessage
+	scheduleID  string
 }
 
 // taskTemplate is the optional per-task override carried in tasks.config_json.
@@ -161,6 +178,9 @@ type taskTemplate struct {
 func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 	detail, err := d.loadTask(ctx, task.ID)
 	if err != nil {
+		return err
+	}
+	if err := d.reauthorizeScheduleFire(ctx, task, detail); err != nil {
 		return err
 	}
 	req, err := dispatchPlan(task, detail, d.defaultWorkflowType)
@@ -238,10 +258,20 @@ func (d *WorkflowDispatcher) loadTask(ctx context.Context, taskID string) (taskD
 	var detail taskDetail
 	var config []byte
 	err := d.pool.QueryRow(ctx, `
-		SELECT title, description, org_id, status, config_json
-		FROM tasks
-		WHERE id = $1 AND deleted_at IS NULL
-	`, taskID).Scan(&detail.title, &detail.description, &detail.orgID, &detail.status, &config)
+		SELECT title, description, org_id, status, config_json,
+		       COALESCE((SELECT schedule_id FROM cron_fires WHERE task_id = t.id ORDER BY fired_at DESC LIMIT 1), '')
+		FROM tasks AS t
+		WHERE t.id = $1 AND t.deleted_at IS NULL
+		  -- Recheck at the irreversible Temporal handoff. The executor's claim
+		  -- fence covers ordinary pending work; this closes the interval in
+		  -- which a cron task was claimed before its Space deletion committed.
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM cron_fires AS cf
+			JOIN cron_schedules AS cs ON cs.id = cf.schedule_id
+			WHERE cf.task_id = t.id AND cs.deleted_at IS NOT NULL
+		  )
+	`, taskID).Scan(&detail.title, &detail.description, &detail.orgID, &detail.status, &config, &detail.scheduleID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return taskDetail{}, fmt.Errorf("taskexec: task %s not found", taskID)
 	}
@@ -250,6 +280,31 @@ func (d *WorkflowDispatcher) loadTask(ctx context.Context, taskID string) (taskD
 	}
 	detail.config = config
 	return detail, nil
+}
+
+func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task TaskRef, detail taskDetail) error {
+	var envelope struct {
+		ScheduleFireIntent *cron.FireIntent `json:"schedule_fire_intent"`
+	}
+	if len(detail.config) > 0 {
+		if err := json.Unmarshal(detail.config, &envelope); err != nil {
+			return fmt.Errorf("taskexec: task %s config_json is not a valid template: %w", task.ID, err)
+		}
+	}
+	if envelope.ScheduleFireIntent == nil {
+		return nil
+	}
+	if d.fireAuthorizer == nil {
+		return fmt.Errorf("taskexec: cron task %s cannot start without fresh Control fire authorization", task.ID)
+	}
+	intent := *envelope.ScheduleFireIntent
+	if intent.OrgID != task.OrgID || intent.ScheduleID != detail.scheduleID {
+		return fmt.Errorf("taskexec: cron task %s fire intent does not match durable task/schedule ownership", task.ID)
+	}
+	if err := d.fireAuthorizer.AuthorizeFire(ctx, intent); err != nil {
+		return fmt.Errorf("taskexec: cron task %s fresh Control fire authorization failed: %w", task.ID, err)
+	}
+	return nil
 }
 
 // dispatchPlan turns a claimed row into the StartWorkflow request to send, or

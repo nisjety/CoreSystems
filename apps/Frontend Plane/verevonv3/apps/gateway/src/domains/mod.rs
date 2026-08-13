@@ -36,5 +36,6 @@ pub mod settings;
 pub mod shares;
 pub mod shipping;
 pub mod social;
+pub mod spaces;
 pub mod studio;
 pub mod tickets;

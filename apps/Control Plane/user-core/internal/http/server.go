@@ -15,6 +15,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/users"
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
@@ -29,6 +30,7 @@ type Server struct {
 	userService                *users.Service
 	removeMembershipProjection func(context.Context, string, string) error
 	aclRepo                    *users.AclRepository
+	spaceRepo                  *spaces.Repository
 	port                       string
 	httpClient                 *http.Client
 	orgService                 string
@@ -46,6 +48,13 @@ type Server struct {
 // identity used only for Auth Core internal OAuth contracts.
 func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClientCredential) {
 	s.authInternalCredential = credential
+}
+
+// SetSpaceRepository wires Control's registered-Space authority storage. It is
+// intentionally separate from resource_grants: Space membership and revision
+// authority must not be represented as an owner-resource ACL.
+func (s *Server) SetSpaceRepository(repository *spaces.Repository) {
+	s.spaceRepo = repository
 }
 
 // NewServer creates a new HTTP server. aclRepo backs the per-user authz facade
@@ -272,6 +281,26 @@ func (s *Server) setupRoutes() {
 		{
 			internal.POST("/memberships/ensure", s.ensureMembership)
 			internal.POST("/users/enrich-from-provider", s.enrichUserFromProvider)
+
+			spaces := internal.Group("/spaces")
+			{
+				spaces.POST("/register", s.requireSpaceLifecycleRegistrar, s.registerSpace)
+				spaces.POST("/deletion-authorizations", s.requireSpaceDeletionAuthorizer, s.authorizeSpaceDeletion)
+				spaces.PUT("/deletion-policy", s.requireSpacePolicyWriter, s.upsertSpaceDeletionPolicy)
+				spaces.PUT("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.applySpaceLegalHold)
+				spaces.DELETE("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.releaseSpaceLegalHold)
+				spaces.POST("/recipient-audiences", s.requireSpaceAudiencePublisher, s.registerRecipientAudience)
+				spaces.PUT("/effect-policy", s.requireSpacePolicyWriter, s.upsertSpaceEffectPolicy)
+				spaces.GET("/:space_ref/membership", s.requireVerifiedSpaceResolver, s.resolveCurrentSpaceMembership)
+				spaces.POST("/personal-thread-decision", s.requireVerifiedSpaceResolver, s.issuePersonalThreadDecision)
+				spaces.POST("/thread-decision", s.requireVerifiedSpaceResolver, s.issueThreadDecision)
+				spaces.POST("/thread-append-decision", s.requireVerifiedSpaceResolver, s.issueThreadAppendDecision)
+				spaces.POST("/personal-retrieval-decision", s.requireVerifiedSpaceResolver, s.issuePersonalRetrievalDecision)
+				spaces.POST("/personal-import-decision", s.requireVerifiedSpaceResolver, s.issuePersonalImportDecision)
+				spaces.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
+				spaces.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
+				spaces.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
+			}
 
 			// Per-user authz facade — the single internal surface Data Plane
 			// services (documents-api, retrieval) call to resolve a viewer's

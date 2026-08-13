@@ -1,14 +1,14 @@
 syntax = "proto3";
 
 // Vendored from /Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane/proto/model_plane/v1/browser.proto
-// Quarry only consumes the BrowserBrokerService — we vendor the wire schema to keep Quarry buildable
+// Quarry only consumes BrowserBroker — we vendor the wire schema to keep Quarry buildable
 // in isolation. Update with `tools/sync-protos.sh` if the upstream contract changes.
 
 package model_plane.v1;
 
 import "google/protobuf/timestamp.proto";
 
-service BrowserBrokerService {
+service BrowserBroker {
   rpc AcquireGrant(AcquireGrantRequest) returns (AcquireGrantResponse);
   rpc RevokeGrant(RevokeGrantRequest) returns (RevokeGrantResponse);
   rpc ValidateGrant(ValidateGrantRequest) returns (ValidateGrantResponse);
@@ -19,12 +19,24 @@ message AcquireGrantRequest {
   string session_key = 1;
   string mode = 2;
   string org_id = 3;
+  repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
 }
 
 message AcquireGrantResponse {
   string grant_id = 1;
   string endpoint = 2;
   google.protobuf.Timestamp expires_at = 3;
+  repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
 }
 
 message RevokeGrantRequest {
@@ -50,4 +62,12 @@ message ValidateGrantResponse {
   string grant_id = 1;
   bool active = 2;
   google.protobuf.Timestamp expires_at = 3;
+  // Canonical broker-owned policy. Consumers reject missing or non-canonical
+  // policy rather than falling back to a caller-supplied allow-list.
+  repeated string allowed_domains = 4;
+  repeated string allowed_actions = 5;
+  repeated string allowed_frame_ids = 6;
+  repeated string allowed_dialog_ids = 7;
+  repeated string allowed_artifact_ids = 8;
+  string parent_grant_id = 9;
 }

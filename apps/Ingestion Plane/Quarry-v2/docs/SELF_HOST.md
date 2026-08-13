@@ -94,7 +94,7 @@ The agentic browser loop calls Model Plane's `/v1/invoke` for each step decision
 
 ### Model Plane → Quarry (browser grants)
 
-When Model Plane wants Quarry to execute browser actions, it issues a *grant* via `BrowserBrokerService.AcquireGrant`. Quarry validates the grant via gRPC `ValidateGrant` before any privileged action. With `BROWSER_BROKER_GRPC` unset, Quarry falls back to `NoopGrantValidator` for development.
+When Model Plane wants Quarry to execute browser actions, it issues a *grant* via `BrowserBroker.AcquireGrant`. Enable Quarry Edge's `grpc` feature and set `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` to validate each privileged action over gRPC. `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_URL` remains the HTTP-shim compatibility path; when neither is configured, only development may fall back to `NoopGrantValidator`.
 
 ### NATS event flow
 

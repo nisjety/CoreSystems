@@ -13,6 +13,8 @@ Name | Type
 `zdr` | boolean
 `grantId` | string
 `resumeRunId` | string
+`executionTier` | string
+`driverRequirements` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
 
 ## Example
 
@@ -28,6 +30,8 @@ const example = {
   "zdr": null,
   "grantId": null,
   "resumeRunId": null,
+  "executionTier": null,
+  "driverRequirements": null,
 } satisfies StartAgentRunRequest
 
 console.log(example)
@@ -42,5 +46,3 @@ console.log(exampleParsed)
 ```
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
-
-

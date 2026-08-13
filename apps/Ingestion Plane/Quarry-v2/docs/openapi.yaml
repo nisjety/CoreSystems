@@ -298,6 +298,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Envelope_Error"
+        "409":
+          description: Snapshot target is stale, absent, ambiguous, or changed; re-observe before acting
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
         "429":
           description: Step budget exhausted
           content:
@@ -331,6 +337,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Envelope_Error"
+        "409":
+          description: Snapshot target is stale, absent, ambiguous, or changed; re-observe before acting
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
 
   /v1/agent/runs/{run_id}/receipts:
     get:
@@ -348,6 +360,43 @@ paths:
                 $ref: "#/components/schemas/Envelope_StepReceipts"
         "404":
           description: Run or receipt stream not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+
+  /v1/agent/runs/{run_id}/egress-receipts:
+    get:
+      operationId: listAgentEgressReceipts
+      summary: Read redacted live browser egress decisions
+      description: >-
+        Returns bounded, driver-authored policy receipts for the live session.
+        URLs contain only origin and path; query strings, headers, bodies,
+        credentials, resolved IP addresses, and proxy details are omitted.
+      tags: [agent]
+      parameters:
+        - $ref: "#/components/parameters/AgentRunId"
+        - name: after_sequence
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 512, default: 100 }
+      responses:
+        "200":
+          description: Ordered, redacted egress decisions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_EgressReceipts"
+        "404":
+          description: Run not found or not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope_Error"
+        "409":
+          description: Requested receipt cursor is no longer continuous in the bounded proof buffer
           content:
             application/json:
               schema:
@@ -549,6 +598,33 @@ components:
         zdr: { type: boolean, default: false }
         grant_id: { type: string, nullable: true }
         resume_run_id: { type: string, nullable: true }
+        execution_tier:
+          type: string
+          enum: [chromium, ephemeral_evidence]
+          default: chromium
+          description: >-
+            Experimental ephemeral_evidence forces a disposable no-profile,
+            no-resume, no-durable-state run and remains gated by isolated
+            egress/security proof. Its current explicit engine is Chromium
+            fallback, not a claim of a production Lite renderer.
+        driver_requirements:
+          $ref: "#/components/schemas/BrowserDriverCapabilities"
+    BrowserDriverCapabilities:
+      type: object
+      description: >-
+        Requested or selected execution capabilities. Every true value is an
+        affirmative provider claim; omitted values are not inferred. Agent
+        runs always require isolated_egress and security_evidence regardless
+        of optional requirements.
+      properties:
+        persistent_profile: { type: boolean, default: false }
+        devtools_trace: { type: boolean, default: false }
+        downloads_to_artifacts: { type: boolean, default: false }
+        uploads_from_artifacts: { type: boolean, default: false }
+        full_visual_fidelity: { type: boolean, default: false }
+        isolated_egress: { type: boolean, default: false }
+        security_evidence: { type: boolean, default: false }
+        atomic_target_actions: { type: boolean, default: false }
     AgentConstraints:
       type: object
       required: [max_steps]
@@ -567,20 +643,25 @@ components:
         success: { type: boolean }
         data:
           type: object
-          required: [run_id, lease_id, profile_id]
+          required: [run_id, lease_id, profile_id, driver_capabilities, execution_tier, execution_engine]
           properties:
             run_id: { type: string }
             lease_id: { type: string }
             profile_id: { type: string }
+            driver_capabilities:
+              $ref: "#/components/schemas/BrowserDriverCapabilities"
+            execution_tier:
+              type: string
+              enum: [chromium, ephemeral_evidence]
+            execution_engine:
+              type: string
+              enum: [chromium, chromium_fallback]
     AgentStepRequest:
       type: object
       required: [action]
       properties:
         action:
-          type: object
-          required: [type]
-          additionalProperties: true
-          description: Tagged AgentAction; e.g. navigate, click, type, wait, or get_content.
+          $ref: "#/components/schemas/AgentAction"
         instruction: { type: string, nullable: true }
         extraction_profile:
           type: object
@@ -602,11 +683,28 @@ components:
         step: { type: integer }
         url: { type: string, format: uri }
         title: { type: string, nullable: true }
+        snapshot:
+          $ref: "#/components/schemas/BrowserSnapshot"
         dom_summary: { type: object, nullable: true, additionalProperties: true }
         screenshot_artifact_id: { type: string, nullable: true }
         visual_observation_artifact_id: { type: string, nullable: true }
+        evidence_delta_artifact_id: { type: string, nullable: true }
         console_summary: { type: array, items: { type: object, additionalProperties: true } }
         network_summary: { type: array, items: { type: object, additionalProperties: true } }
+        egress_receipts:
+          type: array
+          description: >-
+            Redacted request-policy decisions. URLs contain origin and path only;
+            query strings, headers, bodies, credentials, and resolved IPs are omitted.
+          items:
+            $ref: "#/components/schemas/BrowserEgressReceipt"
+        dialogs:
+          type: array
+          description: >-
+            Open JavaScript dialogs. Quarry never resolves them implicitly;
+            respond_dialog requires an explicit live browser grant.
+          items:
+            $ref: "#/components/schemas/BrowserDialog"
         policy_denials: { type: array, items: { type: string } }
         action_outcome:
           $ref: "#/components/schemas/ActionOutcome"
@@ -616,7 +714,562 @@ components:
         extraction_profile: { type: object, nullable: true, additionalProperties: true }
         extraction_result: { type: object, nullable: true, additionalProperties: true }
         proof_bundle: { type: object, nullable: true, additionalProperties: true }
+        target_resolution: { type: object, nullable: true, additionalProperties: true }
+        telemetry:
+          $ref: "#/components/schemas/BrowserTelemetry"
         observed_at: { type: string, format: date-time }
+    BrowserTelemetry:
+      type: object
+      required:
+        [startup_mode, usable_observation_latency_ms, estimated_snapshot_tokens,
+         observed_action_count, challenge_observation_count, challenge_rate_per_mille]
+      description: >-
+        Measured browser execution facts. renderer_* values are renderer-scoped
+        CDP metrics, not host-wide process usage. Missing cost/resource values
+        mean no provider-authoritative meter was available.
+      properties:
+        startup_mode: { type: string, enum: [cold, warm, unknown] }
+        startup_latency_ms: { type: integer, minimum: 0, nullable: true }
+        usable_observation_latency_ms: { type: integer, minimum: 0 }
+        renderer_task_cpu_ms: { type: integer, minimum: 0, nullable: true }
+        renderer_js_heap_used_bytes: { type: integer, minimum: 0, nullable: true }
+        estimated_snapshot_tokens: { type: integer, minimum: 0 }
+        observed_action_count: { type: integer, minimum: 0 }
+        challenge_observation_count: { type: integer, minimum: 0 }
+        challenge_rate_per_mille: { type: integer, minimum: 0, maximum: 1000 }
+        verified_action_cost_micro_usd: { type: integer, minimum: 0, nullable: true }
+    BrowserEgressReceipt:
+      type: object
+      required: [sequence, method, url, decision, policy, timestamp_ms]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        tab_id: { type: string, nullable: true }
+        method: { type: string, example: GET }
+        url: { type: string, example: "https://example.com/path" }
+        decision: { type: string, enum: [allow, block] }
+        policy:
+          type: string
+          enum:
+            - url_dns_public
+            - url_or_dns_blocked
+            - domain_grant_blocked
+            - dns_or_ssrf_blocked
+            - pinned_connect_failed
+            - dns_pinned_proxy
+        timestamp_ms: { type: integer, minimum: 0 }
+    Envelope_EgressReceipts:
+      type: object
+      required: [request_id, success, data]
+      properties:
+        request_id: { type: string }
+        success: { type: boolean }
+        data:
+          type: object
+          required: [receipts, zdr]
+          properties:
+            receipts:
+              type: array
+              items: { $ref: "#/components/schemas/BrowserEgressReceipt" }
+            zdr: { type: boolean }
+    BrowserDialog:
+      type: object
+      required: [dialog_id, kind, message, opened_at_ms]
+      properties:
+        dialog_id: { type: string }
+        frame_id: { type: string, nullable: true }
+        kind: { type: string, enum: [alert, confirm, prompt, beforeunload] }
+        message: { type: string }
+        default_prompt: { type: string, nullable: true }
+        origin: { type: string, nullable: true }
+        opened_at_ms: { type: integer, minimum: 0 }
+    AgentAction:
+      type: object
+      required: [type]
+      discriminator:
+        propertyName: type
+      oneOf:
+        - $ref: "#/components/schemas/LegacyAgentAction"
+        - $ref: "#/components/schemas/SnapshotRefAction"
+        - $ref: "#/components/schemas/FrameSnapshotRefAction"
+        - $ref: "#/components/schemas/SemanticTargetAction"
+        - $ref: "#/components/schemas/DialogResponseAction"
+        - $ref: "#/components/schemas/UploadRefAction"
+        - $ref: "#/components/schemas/DownloadRefAction"
+      additionalProperties: true
+      description: >-
+        Tagged action. Existing CSS selector actions remain supported. Snapshot
+        actions (`*_ref` and `*_semantic`) must include the exact snapshot_id
+        and generation from BrowserObservation.snapshot; stale, missing, or
+        ambiguous targets return TARGET_REPAIR_REQUIRED (409).
+    LegacyAgentAction:
+      type: object
+      oneOf:
+        - $ref: "#/components/schemas/NavigateAction"
+        - $ref: "#/components/schemas/ClickAction"
+        - $ref: "#/components/schemas/ClickPointAction"
+        - $ref: "#/components/schemas/TypeAction"
+        - $ref: "#/components/schemas/PressAction"
+        - $ref: "#/components/schemas/ScrollAction"
+        - $ref: "#/components/schemas/MouseWheelAction"
+        - $ref: "#/components/schemas/SelectAction"
+        - $ref: "#/components/schemas/WaitAction"
+        - $ref: "#/components/schemas/WaitForAction"
+        - $ref: "#/components/schemas/ScreenshotAction"
+        - $ref: "#/components/schemas/PdfAction"
+        - $ref: "#/components/schemas/EvaluateAction"
+        - $ref: "#/components/schemas/BackAction"
+        - $ref: "#/components/schemas/ForwardAction"
+        - $ref: "#/components/schemas/GetContentAction"
+    NavigateAction:
+      type: object
+      required: [type, url]
+      properties:
+        type: { const: navigate }
+        url: { type: string, format: uri }
+    ClickAction:
+      type: object
+      required: [type, selector]
+      properties:
+        type: { const: click }
+        selector: { type: string }
+    ClickPointAction:
+      type: object
+      required: [type, x, y]
+      properties:
+        type: { const: click_point }
+        x: { type: number }
+        y: { type: number }
+    TypeAction:
+      type: object
+      required: [type, selector, text]
+      properties:
+        type: { const: type }
+        selector: { type: string }
+        text: { type: string }
+    PressAction:
+      type: object
+      required: [type, key]
+      properties:
+        type: { const: press }
+        key: { type: string }
+    ScrollAction:
+      type: object
+      required: [type, target]
+      properties:
+        type: { const: scroll }
+        target: { type: string }
+    MouseWheelAction:
+      type: object
+      required: [type, x, y, delta_x, delta_y]
+      properties:
+        type: { const: mouse_wheel }
+        x: { type: number }
+        y: { type: number }
+        delta_x: { type: number }
+        delta_y: { type: number }
+    SelectAction:
+      type: object
+      required: [type, selector, value]
+      properties:
+        type: { const: select }
+        selector: { type: string }
+        value: { type: string }
+    WaitAction:
+      type: object
+      required: [type, ms]
+      properties:
+        type: { const: wait }
+        ms: { type: integer, minimum: 0 }
+    WaitForAction:
+      type: object
+      required: [type, selector, timeout_ms]
+      properties:
+        type: { const: wait_for }
+        selector: { type: string }
+        timeout_ms: { type: integer, minimum: 0 }
+    ScreenshotAction:
+      type: object
+      required: [type, full_page]
+      properties:
+        type: { const: screenshot }
+        full_page: { type: boolean }
+    PdfAction:
+      type: object
+      required: [type]
+      properties:
+        type: { const: pdf }
+    EvaluateAction:
+      type: object
+      required: [type, script]
+      properties:
+        type: { const: evaluate }
+        script: { type: string }
+    BackAction:
+      type: object
+      required: [type]
+      properties:
+        type: { const: back }
+    ForwardAction:
+      type: object
+      required: [type]
+      properties:
+        type: { const: forward }
+    GetContentAction:
+      type: object
+      required: [type]
+      properties:
+        type: { const: get_content }
+    SnapshotRefAction:
+      type: object
+      oneOf:
+        - $ref: "#/components/schemas/ClickRefAction"
+        - $ref: "#/components/schemas/TypeRefAction"
+        - $ref: "#/components/schemas/SelectRefAction"
+        - $ref: "#/components/schemas/WaitForRefAction"
+    FrameSnapshotRefAction:
+      type: object
+      description: >-
+        Child-frame action. frame_id must exactly match the observed target's
+        opaque frame id; ordinary snapshot refs cannot act across a frame.
+      oneOf:
+        - $ref: "#/components/schemas/FrameClickRefAction"
+        - $ref: "#/components/schemas/FrameTypeRefAction"
+        - $ref: "#/components/schemas/FrameSelectRefAction"
+        - $ref: "#/components/schemas/FrameWaitForRefAction"
+        - $ref: "#/components/schemas/FrameUploadRefAction"
+        - $ref: "#/components/schemas/FrameDownloadRefAction"
+    SemanticTargetAction:
+      type: object
+      oneOf:
+        - $ref: "#/components/schemas/ClickSemanticAction"
+        - $ref: "#/components/schemas/TypeSemanticAction"
+        - $ref: "#/components/schemas/SelectSemanticAction"
+        - $ref: "#/components/schemas/WaitForSemanticAction"
+    DialogResponseAction:
+      type: object
+      required: [type, dialog_id, accept, approval_grant_id]
+      properties:
+        type: { const: respond_dialog }
+        dialog_id: { type: string }
+        accept: { type: boolean }
+        approval_grant_id:
+          type: string
+          description: >-
+            Fresh active BrowserBroker approval grant. Quarry rejects replay
+            within this live run. It must authorize only respond_dialog and
+            the exact observed dialog plus its frame, when framed.
+        prompt_text: { type: string, nullable: true }
+    UploadRefAction:
+      type: object
+      required: [type, snapshot_id, generation, ref_id, artifact_id, approval_grant_id]
+      properties:
+        type: { const: upload_ref }
+        snapshot_id: { type: string }
+        generation: { type: integer, minimum: 0 }
+        ref_id: { type: string, example: "@e1" }
+        artifact_id:
+          type: string
+          description: Tenant-owned Quarry artifact identifier; host paths and URLs are not accepted.
+        approval_grant_id:
+          type: string
+          description: >-
+            Fresh single-use BrowserBroker approval authorizing only upload_ref,
+            this exact artifact, and the observed target frame when framed.
+    DownloadRefAction:
+      type: object
+      required: [type, snapshot_id, generation, ref_id, approval_grant_id]
+      properties:
+        type: { const: download_ref }
+        snapshot_id: { type: string }
+        generation: { type: integer, minimum: 0 }
+        ref_id: { type: string, example: "@e1" }
+        approval_grant_id:
+          type: string
+          description: >-
+            Fresh single-use BrowserBroker approval authorizing only download_ref
+            and the observed target frame when framed. Quarry stores only an
+            admitted tenant-owned artifact; local download paths are never exposed.
+    SnapshotTargetBase:
+      type: object
+      required: [snapshot_id, generation]
+      properties:
+        snapshot_id: { type: string }
+        generation: { type: integer, minimum: 0 }
+    FrameSnapshotTargetBase:
+      type: object
+      required: [snapshot_id, generation, frame_id]
+      properties:
+        snapshot_id: { type: string }
+        generation: { type: integer, minimum: 0 }
+        frame_id:
+          type: string
+          description: Opaque child-frame id from the current snapshot.
+    ClickRefAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, ref_id]
+          properties:
+            type: { const: click_ref }
+            ref_id: { type: string, example: "@e1" }
+    TypeRefAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, text]
+          properties:
+            type: { const: type_ref }
+            ref_id: { type: string, example: "@e1" }
+            text: { type: string }
+    SelectRefAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, value]
+          properties:
+            type: { const: select_ref }
+            ref_id: { type: string, example: "@e1" }
+            value: { type: string }
+    WaitForRefAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, timeout_ms]
+          properties:
+            type: { const: wait_for_ref }
+            ref_id: { type: string, example: "@e1" }
+            timeout_ms: { type: integer, minimum: 0 }
+    FrameClickRefAction:
+      allOf:
+        - $ref: "#/components/schemas/FrameSnapshotTargetBase"
+        - type: object
+          required: [type, ref_id]
+          properties:
+            type: { const: frame_click_ref }
+            ref_id: { type: string, example: "@e1" }
+    FrameTypeRefAction:
+      allOf:
+        - $ref: "#/components/schemas/FrameSnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, text]
+          properties:
+            type: { const: frame_type_ref }
+            ref_id: { type: string, example: "@e1" }
+            text: { type: string }
+    FrameSelectRefAction:
+      allOf:
+        - $ref: "#/components/schemas/FrameSnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, value]
+          properties:
+            type: { const: frame_select_ref }
+            ref_id: { type: string, example: "@e1" }
+            value: { type: string }
+    FrameWaitForRefAction:
+      allOf:
+        - $ref: "#/components/schemas/FrameSnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, timeout_ms]
+          properties:
+            type: { const: frame_wait_for_ref }
+            ref_id: { type: string, example: "@e1" }
+            timeout_ms: { type: integer, minimum: 1 }
+    FrameUploadRefAction:
+      allOf:
+        - $ref: "#/components/schemas/FrameSnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, artifact_id, approval_grant_id]
+          properties:
+            type: { const: frame_upload_ref }
+            ref_id: { type: string, example: "@e1" }
+            artifact_id:
+              type: string
+              description: Tenant-owned Quarry artifact identifier; host paths and URLs are not accepted.
+            approval_grant_id:
+              type: string
+              description: Fresh single-use BrowserBroker approval for this exact child-frame upload.
+    FrameDownloadRefAction:
+      allOf:
+        - $ref: "#/components/schemas/FrameSnapshotTargetBase"
+        - type: object
+          required: [type, ref_id, approval_grant_id]
+          properties:
+            type: { const: frame_download_ref }
+            ref_id: { type: string, example: "@e1" }
+            approval_grant_id:
+              type: string
+              description: Fresh single-use BrowserBroker approval for this exact child-frame download.
+    ClickSemanticAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, locator]
+          properties:
+            type: { const: click_semantic }
+            locator: { $ref: "#/components/schemas/SemanticLocator" }
+    TypeSemanticAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, locator, text]
+          properties:
+            type: { const: type_semantic }
+            locator: { $ref: "#/components/schemas/SemanticLocator" }
+            text: { type: string }
+    SelectSemanticAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, locator, value]
+          properties:
+            type: { const: select_semantic }
+            locator: { $ref: "#/components/schemas/SemanticLocator" }
+            value: { type: string }
+    WaitForSemanticAction:
+      allOf:
+        - $ref: "#/components/schemas/SnapshotTargetBase"
+        - type: object
+          required: [type, locator, timeout_ms]
+          properties:
+            type: { const: wait_for_semantic }
+            locator: { $ref: "#/components/schemas/SemanticLocator" }
+            timeout_ms: { type: integer, minimum: 0 }
+    SemanticLocator:
+      type: object
+      oneOf:
+        - $ref: "#/components/schemas/RoleLocator"
+        - $ref: "#/components/schemas/TextLocator"
+        - $ref: "#/components/schemas/LabelLocator"
+        - $ref: "#/components/schemas/PlaceholderLocator"
+        - $ref: "#/components/schemas/TestIdLocator"
+        - $ref: "#/components/schemas/NthLocator"
+    RoleLocator:
+      type: object
+      required: [kind, role]
+      properties:
+        kind: { const: role }
+        role: { type: string }
+        name: { type: string }
+        exact: { type: boolean, default: false }
+    TextLocator:
+      type: object
+      required: [kind, text]
+      properties:
+        kind: { const: text }
+        text: { type: string }
+        exact: { type: boolean, default: false }
+    LabelLocator:
+      type: object
+      required: [kind, label]
+      properties:
+        kind: { const: label }
+        label: { type: string }
+        exact: { type: boolean, default: false }
+    PlaceholderLocator:
+      type: object
+      required: [kind, placeholder]
+      properties:
+        kind: { const: placeholder }
+        placeholder: { type: string }
+        exact: { type: boolean, default: false }
+    TestIdLocator:
+      type: object
+      required: [kind, test_id]
+      properties:
+        kind: { const: test_id }
+        test_id: { type: string }
+        exact: { type: boolean, default: false }
+    NthLocator:
+      type: object
+      required: [kind, selector, index]
+      properties:
+        kind: { const: nth }
+        selector: { type: string, description: Tag or ARIA role from the active snapshot. }
+        index: { type: integer, minimum: 0 }
+    BrowserSnapshot:
+      type: object
+      required: [snapshot_id, generation, targets]
+      properties:
+        snapshot_id: { type: string }
+        generation: { type: integer, minimum: 0 }
+        targets:
+          type: array
+          items: { $ref: "#/components/schemas/SnapshotTarget" }
+        accessibility:
+          $ref: "#/components/schemas/AccessibilityProjection"
+        frames:
+          type: array
+          items: { $ref: "#/components/schemas/BrowserFrame" }
+    AccessibilityProjection:
+      type: object
+      required: [source, nodes, truncated]
+      properties:
+        source: { type: string, example: chromium_cdp_ax }
+        truncated: { type: boolean }
+        nodes:
+          type: array
+          items: { $ref: "#/components/schemas/AccessibilityNode" }
+    AccessibilityNode:
+      type: object
+      required: [node_id, ignored, child_ids]
+      properties:
+        node_id: { type: string }
+        role: { type: string, nullable: true }
+        name: { type: string, nullable: true }
+        value: { type: string, nullable: true }
+        ignored: { type: boolean }
+        frame_id: { type: string, nullable: true }
+        child_ids: { type: array, items: { type: string } }
+    BrowserFrame:
+      type: object
+      required: [frame_id, child_frame_ids]
+      properties:
+        frame_id: { type: string }
+        parent_frame_id: { type: string, nullable: true }
+        origin:
+          type: string
+          nullable: true
+          description: Security origin only; no frame URL or query string is exposed.
+        name: { type: string, nullable: true }
+        child_frame_ids: { type: array, items: { type: string } }
+    SnapshotTarget:
+      type: object
+      required: [ref_id, tag]
+      properties:
+        ref_id: { type: string, example: "@e1" }
+        tag: { type: string }
+        text: { type: string, nullable: true }
+        role: { type: string, nullable: true }
+        name: { type: string, nullable: true }
+        placeholder: { type: string, nullable: true }
+        test_id: { type: string, nullable: true }
+        frame_id:
+          type: string
+          nullable: true
+          description: >-
+            Opaque observed owner frame. A non-root target is executable only
+            through the matching frame_*_ref action with this exact id.
+        fingerprint:
+          $ref: "#/components/schemas/ElementFingerprint"
+    ElementFingerprint:
+      type: object
+      required: [fingerprint_id, tag, normalized_text, attributes, structural_path]
+      description: >-
+        Read-only observed target identity used for repair and proof. It is
+        not an executable selector and must never be sent as a raw action target.
+      properties:
+        fingerprint_id: { type: string }
+        tag: { type: string }
+        normalized_text: { type: string }
+        attributes:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: string }
+        structural_path: { type: string }
+        logical_id: { type: string, nullable: true }
     ActionOutcome:
       type: object
       required: [status]
@@ -633,6 +1286,29 @@ components:
         title_changed: { type: boolean }
         dom_changed: { type: boolean }
         content_changed: { type: boolean }
+    EvidenceDelta:
+      type: object
+      required: [version, step, dom, network]
+      description: Bounded DOM, visual, and redacted-network evidence stored in an artifact.
+      properties:
+        version: { type: integer }
+        step: { type: integer }
+        dom:
+          type: object
+          required: [changed, snapshot_target_count]
+          properties:
+            previous_node_count: { type: integer, nullable: true }
+            current_node_count: { type: integer, nullable: true }
+            changed: { type: boolean }
+            snapshot_target_count: { type: integer }
+        network:
+          type: object
+          required: [added, removed, current_count]
+          properties:
+            added: { type: array, items: { type: string } }
+            removed: { type: array, items: { type: string } }
+            current_count: { type: integer }
+        visual_observation_artifact_id: { type: string, nullable: true }
     Envelope_StepReceipts:
       type: object
       required: [request_id, success, data]

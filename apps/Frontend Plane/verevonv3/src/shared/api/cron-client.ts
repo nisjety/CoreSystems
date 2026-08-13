@@ -29,10 +29,10 @@ export interface CronTaskTemplate {
 }
 
 /**
- * A durable cron schedule, mirroring capability-core's `cron_schedules` row
- * (fronted by model-gateway `/v1/cron`). The capability-core sweeper fires due
- * schedules: it creates a task from `task_template`, records a cron_fires row,
- * and advances `next_fire_at`.
+ * A durable, Space-bound cron schedule, mirroring capability-core's
+ * `cron_schedules` row (fronted by model-gateway `/v1/cron`). New schedules
+ * are authorized by Control for one Space and every fire is reauthorized; the
+ * client never receives the signed authority token.
  */
 export interface CronSchedule {
   id: string
@@ -47,6 +47,8 @@ export interface CronSchedule {
   next_fire_at?: string | null
   created_at?: string
   updated_at?: string
+  space_ref?: string
+  creator_subject_id?: string
 }
 
 export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[] }> {
@@ -69,6 +71,9 @@ export function createCronSchedule(
     description?: string
     task_template?: CronTaskTemplate
     enabled?: boolean
+    /** Optional explicit Space; the BFF resolves the active Personal Space for
+     * the legacy Settings form until the Work cockpit supplies a picker. */
+    space_ref?: string
   },
 ): Promise<{ id: string }> {
   return requestJson<{ id: string }>('/api/v1/cron', {

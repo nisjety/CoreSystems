@@ -13,6 +13,7 @@ pub mod ai_formats;
 pub mod answer;
 pub mod artifact_store;
 pub mod browser_driver;
+pub mod browser_egress_proxy;
 pub mod browser_procedure;
 pub mod cas_store;
 pub mod dns_guard;
@@ -99,6 +100,7 @@ pub use answer::{
 pub use autoprompt::{ModelPlaneQueryRewriter, QueryRewriter};
 pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
 pub use browser_driver::BrowserDriverAdapter;
+pub use browser_egress_proxy::PinnedBrowserEgressProxy;
 pub use browser_procedure::{compare_replay, compile_procedure, BrowserProcedure, ReplayDecision};
 pub use crawl_frontier::{
     CrawlFrontier, FrontierCheckpoint, FrontierConfigSnapshot, FrontierEntry,
@@ -187,6 +189,13 @@ pub(crate) mod tests {
 
     #[async_trait]
     impl BrowserDriver for MockBrowserDriver {
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: quarry_browser::BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             Ok(BrowserSession {
                 lease: lease.clone(),

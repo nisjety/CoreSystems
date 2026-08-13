@@ -118,6 +118,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::shares::router(state.clone()))
         .merge(domains::shipping::router(state.clone()))
         .merge(domains::social::router(state.clone()))
+        .merge(domains::spaces::router(state.clone()))
         .merge(domains::studio::router(state.clone()))
         .merge(domains::tickets::router(state.clone()))
         // Inbound rate limiting. Runs early — after identity-header stripping

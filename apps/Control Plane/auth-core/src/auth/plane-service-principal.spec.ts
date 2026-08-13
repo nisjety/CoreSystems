@@ -131,6 +131,45 @@ describe('plane service-principal issuance policy', () => {
     });
   });
 
+  it('allows the Space binding scope only for an explicitly registered service principal', () => {
+    const binderRegistry = JSON.stringify({
+      'application-space-binder': {
+        credential: 'test-only-space-binder-key',
+        audiences: ['data-plane'],
+        orgIds: ['org-a'],
+        scopes: ['data:space-binding:write'],
+        scopesByAudience: {
+          'data-plane': ['data:space-binding:write'],
+        },
+      },
+    });
+
+    expect(
+      authorizePlaneServicePrincipal(binderRegistry, {
+        serviceId: 'application-space-binder',
+        credential: 'test-only-space-binder-key',
+        audience: 'data-plane',
+        orgId: 'org-a',
+        requestedScopes: ['data:space-binding:write'],
+        reason: 'provision approved Space retrieval binding',
+      }),
+    ).toMatchObject({
+      subject: 'service:application-space-binder',
+      scopes: ['data:space-binding:write'],
+    });
+
+    expect(() =>
+      authorizePlaneServicePrincipal(binderRegistry, {
+        serviceId: 'application-space-binder',
+        credential: 'test-only-space-binder-key',
+        audience: 'data-plane',
+        orgId: 'org-a',
+        requestedScopes: ['data:admin'],
+        reason: 'attempt broader Data authority',
+      }),
+    ).toThrow();
+  });
+
   it('selects exact scopes by audience for retrieval and graph inference', () => {
     const multiAudience = JSON.stringify({
       'retrieval-engine': {

@@ -4,6 +4,7 @@
 **Scope:** `apps/Ingestion Plane/Quarry-v2`, Model Plane browser planning, BrowserBroker, browser runtime adapters, and App Shell replay/approval UX  
 **Research date:** 2026-08-03  
 **Verified against the running stack:** 2026-08-03 (same day) — every major proposed component cross-checked against actual Rust/Go source in `Quarry-v2`, with file:line citations. See §1a for the full ledger. Two findings change how this document should be prioritized: the SSRF/DNS controls in P0 item 1 are not merely "incomplete," they are confirmed broken in the headless-browser path today (a real security gap, not a hardening exercise), and the "in-memory frontier" in P0 item 2 has a durable Postgres replacement **already written** in Rust — feature-flagged off and with zero production callers. Both are smaller, more urgent, and more concrete than they read as proposals. Re-verify before trusting anything below without a citation next to it.  
+**Current implementation verification:** 2026-08-13 — §1a is retained as the historical baseline, not current state. Local Chromium P0 browser egress is now implemented and dynamically proved through Quarry's DNS-pinned proxy and CDP boundary for redirect/frame/XHR/fetch/subresource traffic; see the delivered ledger near the end of this document. Remote providers are not promoted by that evidence.
 **Primary rule:** Control Plane attests identity. Application/Conversation records durable human intent and approvals. Model Plane plans and classifies risk. BrowserBroker grants exact browser authority. Quarry executes, verifies, and records evidence. Browser runtimes provide isolated sessions.
 
 ---
@@ -39,18 +40,19 @@ The objective is to make Quarry's agentic browser execution **top class** by imp
 - browser-procedure compilation and self-healing;
 - browser-agent security;
 - evaluation and continuous learning;
-- Firecrawl-level API and SDK ergonomics.
+- production-grade API and SDK ergonomics.
 
 ---
 
-## 1a. Verification pass against the running stack — 2026-08-03
+## 1a. Historical verification baseline — 2026-08-03
 
 This document was written as a research proposal. This section is the
 difference between that and reality: every major component was checked
 against the actual current Rust/Go source (file:line cited), including
 findings from a separate down-the-stack code-health audit run earlier the
 same day. Re-run this check before treating anything below as still
-accurate.
+accurate. The dated findings below explain why the work was prioritized; the
+2026-08-13 delivered ledger is authoritative for current implementation status.
 
 **Read this first — three corrections that change how the rest of the
 document should be read.**
@@ -119,7 +121,7 @@ inline at each relevant section:
 | §39.1 | Challenge/failure classification | PARTIAL — two real enums exist but lump 401/403/451/999/CDN-challenge into one bucket by explicit design comment |
 | §39.4 | Runtime compatibility manifest (real probe, not process health) | GREENFIELD |
 | §42 | Compiled/deterministic browser procedure with rollout state | GREENFIELD — only an unrelated session video-replay concept exists |
-| §48 P0.1 | SSRF/DNS/address-authority controls | **BROKEN TODAY**, see correction 1 above |
+| §48 P0.1 | SSRF/DNS/address-authority controls | **BROKEN AT THE 2026-08-03 BASELINE**; closed for the proved local Chromium path on 2026-08-13, see delivered ledger |
 
 ---
 
@@ -1059,7 +1061,7 @@ Velion should show Browserbase replay/live-view through its own SolidJS task UI 
 **Verified 2026-08-03 — GREENFIELD as Quarry execution continuation, not
 Quarry approval authority.** `crates/quarry-runtime/src/grant_validator.rs:1-13`'s
 own doc comment is explicit: "Model Plane has its own
-`BrowserBrokerService` that issues *grants*... Before a lease handoff,
+`BrowserBroker` that issues *grants*... Before a lease handoff,
 Quarry MUST validate the grant via `ValidateGrant`." Quarry currently only
 validates externally issued grants (`HttpGrantValidator`/`NoopGrantValidator`)
 and has no per-action pending-state/resume mechanism. The only pause/resume
@@ -2024,7 +2026,7 @@ Quarry's browser-agent improvements are successful when:
 - browser sessions can be watched, taken over, resumed, and replayed in Velion's own UI;
 - benchmark results identify the best planner/observation/backend combination by task class;
 - security tests include indirect prompt injection and credential-exfiltration attempts;
-- Firecrawl-level endpoint and SDK ergonomics are available without making Firecrawl a dependency.
+- First-party endpoint and SDK ergonomics are available without any Firecrawl dependency.
 
 ---
 
@@ -3645,7 +3647,7 @@ schema," not "build a durable frontier."
 1. Benchmark Lightpanda for read-heavy extraction.
 2. Benchmark Patchright, Camoufox, and nodriver patterns in isolated labs.
 3. Evaluate Steel as a self-hosted runtime adapter.
-4. Improve Firecrawl-level SDK and stateful interact ergonomics.
+4. Improve first-party SDK and stateful-interact ergonomics.
 5. Add recorder/procedure authoring UX inspired by Maxun and Stagehand.
 6. Add richer semantic/visual change-monitoring UX.
 
@@ -3720,3 +3722,317 @@ when:
 
 - Playwright MCP: https://github.com/microsoft/playwright-mcp
 - Playwright CLI: https://github.com/microsoft/playwright-cli
+
+---
+
+## 51. Implementation ledger — 2026-08-13
+
+### Delivered: snapshot-bound browser targeting and native AX binding
+
+Quarry now exposes a compact, run-scoped target snapshot on each
+`BrowserObservation` and accepts `click_ref`, `type_ref`, `select_ref`, and
+`wait_for_ref`, plus equivalent `*_semantic` actions. A caller must echo the
+exact `snapshot_id` and generation from the observation. Quarry resolves the
+target internally and fails with
+`TARGET_REPAIR_REQUIRED` (HTTP 409) if the snapshot, ref, fingerprint, or
+semantic match is stale, absent, or ambiguous. Effectful snapshot actions are
+then sent only to a driver that can atomically re-validate a unique target and
+perform the operation; a driver without that capability rejects the action
+rather than falling back to raw CSS. The selected fingerprint is included in
+both the observation and proof bundle receipt.
+
+Chromium now captures its computed accessibility tree and origin-labelled
+frame topology through CDP. For every actionable AX node with a backend
+DOM-node identity across the observed frame tree, Quarry retains a short-lived private binding and
+publishes only an opaque `@e…` ref plus the AX role/name/value to Model Plane.
+On an effectful action Chromium resolves that exact backend node and invokes
+the effect on the resolved object in the same driver operation; it does not
+fall back to selector matching. The backend-node identity never crosses the
+Quarry API boundary.
+
+Child-frame topology is observable and child-frame targets have a separate,
+explicit action grammar: `frame_click_ref`, `frame_type_ref`,
+`frame_select_ref`, `frame_wait_for_ref`, `frame_upload_ref`, and
+`frame_download_ref`. A normal `*_ref` action rejects a child target, while a
+frame action must echo the exact observed opaque frame id. Chromium resolves
+the backend node in that frame's execution context and still has no CSS
+fallback. Broker scope is checked before the action and Quarry's snapshot
+resolver checks the exact frame binding immediately before the driver effect.
+The bounded HTML scanner remains only a compatibility fallback for drivers
+that cannot provide a native projection; such a driver cannot claim the
+agent-safe Chromium path.
+
+The central resolver lives in `ObservationRunner`, so REST and WebSocket agent
+actions share identical grant-adjacent target validation. Active snapshots are
+in-process and are deliberately absent after resume, requiring re-observation.
+No external web-execution service or Firecrawl dependency is involved.
+
+The tracked OpenAPI contract is updated. Generated SDK directories are ignored
+in this repository, so they must be regenerated with `sdks/generate.sh` in a
+Docker-enabled release/CI environment before publishing SDK artifacts.
+
+### Delivered: Model Plane BrowserBroker wire reconciliation
+
+Quarry's vendored gRPC schema and client now use Model Plane's actual
+`model_plane.v1.BrowserBroker` service identity rather than the obsolete
+`BrowserBrokerService` name. Edge can select the direct gRPC validator with
+`QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` when built with its `grpc`
+feature; the HTTP validator remains only a deployment-compatibility shim.
+Both paths keep the same grant expiry and broker-owned domain-policy checks.
+
+### Delivered: bounded change evidence
+
+Each eligible persisted observation now attempts an `evidence_delta` artifact
+through the same tenant-stamped, ZDR-aware artifact path as screenshots and
+visual evidence. It records DOM node/count state, the current opaque-target
+count, the existing visual-observation artifact handle, and a bounded network
+delta.
+Network entries are reduced to method, status, content type, origin and path:
+query strings and request bodies are never included in this delta. The prior
+network state is in-memory only and is discarded on resume, consistent with
+the existing snapshot lifecycle.
+
+### Delivered: egress-receipt continuity is fail-closed
+
+The loopback DNS-pinning proxy and Chromium's unified browser receipt stream
+now use a sequence local to each browser lease. Observations retain a
+run-local cursor and page their egress decisions into step proofs, preventing
+the same first receipt page from being repeated indefinitely. Both bounded
+receipt buffers reject a detected sequence discontinuity rather than silently
+returning a partial audit trail after burst traffic.
+
+**Runtime proof completed 2026-08-13 (local Chromium only).** The focused
+non-Docker suite now exercises the production `PinnedBrowserEgressProxy` and
+the installed Microsoft Edge Chromium binary. It proves deny-all before
+configuration, loopback and cloud-metadata blocking after policy admission,
+DNS pin retention/no fallback resolution, ordered redacted receipts, session
+teardown, and zero private-server hits for iframe, XHR, fetch, image
+subresource, and script-navigation attempts. A public-network test follows a
+real HTTP 302 from a granted origin and proves the ungranted redirected target
+is blocked at CDP before any transport allow receipt. These tests live in
+`quarry-runtime::browser_egress_proxy::tests` and the DNS rebinding/pin tests
+remain in `quarry-runtime::dns_guard::tests`.
+
+The ordinary browser-backed scrape adapter and page-image renderer now install
+the same narrow, request-host-derived egress policy before their first
+navigation. `ActionRuntime`, which has no request-shaped host grant of its
+own, installs an explicit caller-supplied policy at acquire time and otherwise
+starts deny-all. A browser driver that cannot accept that policy fails rather
+than becoming an untracked egress exception. This does not make a remote
+provider agent-safe; it removes inconsistent local Chromium paths while
+equivalent remote-provider proof remains pending.
+
+The browser-driver policy hook itself now defaults to `Unsupported`, not a
+successful no-op. Every browser implementation must explicitly own policy
+enforcement before it can be used by a navigation path.
+
+### Delivered: capability declarations begin fail-closed
+
+The browser-driver contract now declares persistent-profile, CDP/trace,
+artifact-download, artifact-upload, full-visual-fidelity, isolated-egress, independently
+verifiable security-evidence, and atomic-target-action capabilities.
+All values default to false. Chromium now declares isolated egress and current
+security evidence because the browser-path DNS pinning and
+redirect/frame/XHR/subresource proof above passes against a real Chromium
+binary. This promotion applies only to the local `ChromiumoxideDriver` wired
+with Quarry's pinned proxy; it does not promote Browserless, Browserbase, or
+Kernel.
+Snapshot-based click/type/select and artifact transfer actions reject drivers
+without their required atomic target or transfer capability before any browser
+action is attempted. Agent-run admission also rejects a persistent-profile
+request when the selected driver cannot provide one, and
+screenshot/PDF/live-frame evidence requires full visual fidelity rather than
+silently degrading to a lightweight renderer.
+
+### Delivered: unsafe providers cannot start agent runs
+
+The agent-run admission route requires the selected browser driver to declare
+both `isolated_egress` and `security_evidence`. Local Chromium now satisfies
+that gate through the proxy/CDP runtime proof above. Browserless, Browserbase,
+and Kernel still cannot prove equivalent subresource containment and retain
+their false defaults; none may be represented as safe for agent execution
+merely because its top-level `goto` input is guarded.
+
+### Delivered: domain grants reach the browser request boundary
+
+`allowed_domains` is now normalized once into a run-scoped browser egress
+policy. `ObservationRunner` installs it before every REST and WebSocket action,
+and the direct new-tab route installs the same policy before it creates a page.
+Chromium's Fetch listener checks this policy for every intercepted navigation,
+redirect, iframe, XHR/fetch, and subresource; it aborts a denied request and
+records a redacted `domain_grant_blocked` receipt. The live, tenant/actor-scoped
+`/v1/agent/runs/{run_id}/egress-receipts` endpoint exposes the bounded receipt
+stream independently of the next observation.
+
+Local Chromium now routes through a per-session loopback HTTP/CONNECT egress
+proxy which enforces the same grant-derived domain policy as CDP Fetch, uses
+Quarry's one-resolution public-address guard, and dials the vetted address
+directly. Its redacted transport receipts are merged into Quarry's per-session
+receipt stream and copied into non-ZDR immutable step receipts; it also
+disables QUIC so Chromium cannot bypass the proxy with a separate UDP
+transport. The 2026-08-13 focused suite now supplies the missing adversarial
+redirect/frame/XHR/resource proof for local Chromium, so that driver alone can
+be called isolated egress. The live receipt stream remains bounded and
+fail-closed on continuity loss; remote drivers have no equivalent proof and
+remain unavailable for agent runs.
+
+The transport and CDP layers now fail closed during their configuration window:
+a newly bound loopback proxy starts with an explicit deny-all policy, and a
+Chromium Fetch listener with no installed session policy also denies the
+request. `Fetch.enable` is issued before navigation so the listener is not an
+inert event subscription. This is a source-level hardening correction, not the
+adversarial evidence required to turn on `isolated_egress` or
+`security_evidence`.
+
+Chromium now enforces that invariant at its public driver boundary as well:
+`goto` and `new_tab` reject a session unless it has both the loopback
+DNS-pinning proxy and an installed egress policy. Policy configuration itself
+rejects a Chromium instance without the proxy. This prevents a future direct
+caller from creating an ungoverned browser navigation merely by bypassing an
+edge-route helper.
+
+When `require_browser_grants` is enabled, the policy is not request-owned:
+Quarry requires `ValidateGrant` to return a non-empty, canonical, bounded
+domain list, replaces initial request domains with it, and revalidates exact
+equality before every action. A resumed checkpoint is refused if its stored
+policy no longer equals the current broker grant. The vendored BrowserBroker
+wire contract and HTTP/gRPC validation projections now carry `allowed_domains`;
+deployments must roll out the corresponding Model Plane broker response before
+enabling this mode.
+
+### Delivered: native Chromium accessibility and frame projection
+
+The Chromium driver now reads `Accessibility.getFullAXTree` and
+`Page.getFrameTree` through CDP. `BrowserSnapshot` carries a bounded,
+browser-authored accessibility projection and an origin-labelled frame tree;
+the latter deliberately excludes raw frame URLs, queries, and document bytes.
+For actionable top-level AX nodes Chromium retains a private backend-DOM-node
+binding and publishes only an opaque snapshot ref plus role/name/value. The
+effect is invoked on the resolved backend node rather than by re-querying a
+CSS selector. A child-frame target is actionable only through the matching
+explicit `frame_*_ref` grammar and exact observed frame id; an ordinary ref is
+rejected before the driver is reached.
+
+### Delivered: observed, grant-bound JavaScript dialogs
+
+Chromium now reports open JavaScript dialogs as bounded `BrowserObservation`
+state, with an opaque per-session dialog id, browser frame id, dialog kind,
+message, optional default prompt, and redacted origin. Quarry never accepts or
+dismisses one automatically. The only response action is `respond_dialog`,
+which validates that the dialog remains active in the current session, requires
+a fresh active BrowserBroker approval id, and rejects replay of that approval
+within the live run. REST and WebSocket execution use the same rule. Model Plane
+still needs to return dialog/action-scoped grant claims before this can be
+called end-to-end cryptographically bound approval.
+
+### Delivered: governed artifact transfers and typed action contract
+
+`upload_ref` accepts only a tenant-owned Quarry artifact and an exact native
+file-input target from the active snapshot. Quarry stages that content in a
+private temporary file and invokes CDP's file-input primitive; no client can
+supply a host path or URL. `download_ref` is likewise a one-time,
+frame-scoped approval action: Chromium writes to a private per-session
+quarantine directory, Quarry applies bounded type/size admission, and only a
+tenant-owned artifact id can appear in the resulting proof. Local paths never
+cross the driver boundary. Chromium still advertises
+`downloads_to_artifacts: false` until the complete malware/isolation and
+runtime-evidence gate is available, so routing continues to reject the action
+on that driver rather than overstate readiness.
+
+The checked-in OpenAPI document now defines every legacy action's required
+payload fields (for example `text`, `value`, and `timeout_ms`) as well as the
+snapshot, semantic, dialog, upload, download, explicit child-frame, driver
+capability, and egress-receipt variants. Generated TypeScript and Python
+client directories are intentionally ignored in this repository, so this is
+the durable contract source—not a claim that a checked-in generated package is
+already publishable. A Docker-enabled release/CI job must run
+`sdks/generate.sh`, review the generated action/capability unions and
+`listAgentEgressReceipts` endpoint, and publish those artifacts from that
+fresh output.
+
+### Delivered: observation telemetry with truthful measurement scope
+
+Every Quarry browser observation now carries a `telemetry` object and therefore
+is embedded in the immutable step receipt. It records cold/warm lease startup
+mode and latency where a driver can measure them, usable-observation latency,
+a bounded estimate of the serialized public snapshot's model-token footprint,
+and a run-local challenge-observation rate. Chromium additionally samples the
+active renderer's CDP `TaskDuration` and `JSHeapUsedSize` values. These are
+explicitly renderer-scoped samples, not host/container CPU or RSS claims.
+
+No action cost is fabricated: `verified_action_cost_micro_usd` remains absent
+until a provider returns an authoritative meter. The 2026-08-13 runtime test
+now asserts this on the real local Chromium path. The current Browserbase
+session API exposes timestamps/resource counters but no billed per-action cost,
+and Kernel publishes usage pricing rather than a per-session authoritative
+billing result. Static price multiplication would therefore be an estimate,
+not a provider meter. `max_cost_usd` correctly remains rejected at admission.
+Likewise, an unavailable driver telemetry sample is represented as unknown
+rather than zero. Fleet-wide CPU/RSS, provider billing, and traffic benchmarks
+remain operational telemetry work.
+
+When a driver does provide that meter, Quarry copies the exact micro-USD value
+into the immutable REST and WebSocket step receipt for the completed action.
+The legacy receipt amount remains zero where no Quarry-known charge exists;
+the observation telemetry field remains the authoritative
+unknown-versus-metered signal until a versioned nullable receipt migration.
+
+### Delivered: Model snapshot-ref wire alignment and first MCP read aliases
+
+Model Plane's Quarry browser client now receives the public snapshot id,
+generation, and opaque target refs. Its browser planner is instructed to use
+those refs and serializes ref-bound `click_ref`/`type_ref` actions when all
+three values are present. A partial opaque binding deliberately does not
+silently fall back to a CSS selector. The live browser admission gate remains
+fail-closed until P0's egress proof is complete.
+
+Model Plane now offers `web.search` and `web.read` as first-party aliases over
+the existing scoped Quarry search/extract client, while retaining
+`web_search`/`web_fetch` for compatibility. These aliases are the read half of
+the thin MCP surface; `browser.observe` and `browser.act` use the separate
+run/grant-bound adapter described below.
+
+### Delivered: thin Model-Plane MCP browser adapter and experimental Lite contract
+
+Model Plane now exposes the narrow `browser.observe` and `browser.act` tools
+alongside the existing first-party Quarry `web.search` and `web.read` aliases.
+The browser tools require a Rust-side BrowserBroker-validated grant, operate
+only on an existing Quarry run and lease, and pass Quarry's returned
+observation/receipt back to the model. Their input schema contains only opaque
+snapshot refs (including the explicit child-frame variants), bounded text,
+and one-shot dialog or artifact approval ids. It has no URL, CSS selector,
+coordinate, raw CDP, JavaScript, or host-path representation. Quarry remains
+the final action, grant, native-binding, and receipt authority.
+
+`execution_tier: ephemeral_evidence` is now an experimental, opt-in public
+evidence contract behind `QUARRY_LITE_EXPERIMENTAL=1`. It forces a disposable
+ZDR no-profile/no-resume browser context and rejects dialogs, uploads,
+downloads, raw selectors, coordinates, scripting, and other privileged
+operations. It is still subject to the exact same isolated-egress/security
+admission gate as every browser agent run. Until a separate renderer earns
+its own compatibility and security evidence, its reported engine is explicit
+`chromium_fallback`; this is not a claim that Boa/Blitz/Stylo/Parley has been
+integrated or that Lite has production throughput.
+
+### Next implementation order
+
+1. Run adversarial proof against the native AX/frame and artifact paths,
+   including stale root/child targets, OOPIF actions, download correlation,
+   dialog approval replay, and incompatible renderer fallback. Do not promote
+   `downloads_to_artifacts` or other evidence-gated capabilities from source
+   inspection alone.
+2. Close the remaining approval contract on the Model Plane: signed
+   dialog/action/frame/artifact claims must be checked end-to-end, while
+   download readiness remains false until its isolation and malware evidence
+   gates close.
+3. Complete operational telemetry with fleet/resource accounting and provider
+   billing measurements; preserve the renderer-only scope of the current CDP
+   samples and do not infer Kitesurf-like claims from design alone.
+4. Add provider-metered cost only when a provider exposes an authoritative
+   value, then publish measured
+   capability/readiness evidence rather than inferring it from the Chromium
+   implementation.
+5. Keep the experimental `ephemeral_evidence` contract behind the existing
+   egress/SSRF/DNS authority and Chromium fallback gates. Treat any Boa/Blitz/
+   Stylo/Parley work as an isolated rendering lab until measured compatibility,
+   security, and resource gates justify promotion.

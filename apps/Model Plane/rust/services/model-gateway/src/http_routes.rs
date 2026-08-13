@@ -120,6 +120,13 @@ pub fn build_router_with_readiness(
         )
         .route("/v1/threads/:thread_id/archive", post(archive_thread))
         .route("/v1/threads/:thread_id", delete(delete_thread))
+        // Control-authorized internal deletion adapter. This is deliberately
+        // outside the browser/BFF API and is allowed only for the exact
+        // deletion coordinator service by auth::authorize_principal_route.
+        .route(
+            "/v1/internal/space-deletion/threads",
+            post(delete_space_threads_for_deletion_coordinator),
+        )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Memory management ("what do you remember about me") — user-scoped,
         // backed by session-core's MemoryService.ListMemory/DeleteMemory.
@@ -5692,6 +5699,15 @@ pub struct InvokeRequest {
     pub model: Option<String>,
     pub session_key: Option<String>,
     pub thread_id: Option<String>,
+    /// Server-injected, fresh Control decision for a message appended to an
+    /// existing scoped thread. Session Core verifies its signature and exact
+    /// content commitment before the message is durable.
+    pub space_append_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// Complete Control authority for a newly-created scoped thread. The V3
+    /// BFF injects this after calling Control; raw browser scope fields are not
+    /// authority and Session Core independently verifies this bearer.
+    #[serde(default)]
+    pub space_context: Option<crate::session_flow::ThreadSpaceContext>,
     #[serde(default)]
     pub structured_output_schema: Option<String>,
     #[serde(default)]
@@ -6084,6 +6100,7 @@ struct ListThreadMessagesResponse {
 #[derive(Debug, Deserialize)]
 struct ListThreadsQuery {
     limit: Option<u32>,
+    space_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -6095,6 +6112,10 @@ struct ThreadSummaryResponse {
     created_at: String,
     updated_at: String,
     pinned: bool,
+    space_id: String,
+    latest_run_id: String,
+    latest_run_status: String,
+    latest_run_updated_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -6142,6 +6163,32 @@ struct DeleteThreadsResponse {
     deleted_count: u32,
 }
 
+#[derive(Debug, Deserialize)]
+struct DeleteSpaceThreadsRequestBody {
+    org_id: String,
+    space_id: String,
+    owner_principal_id: String,
+    deletion_request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteSpaceThreadsResponseBody {
+    request_id: String,
+    owner_plane: &'static str,
+    owner_outcome: &'static str,
+    deleted_thread_count: u32,
+    semantic_memory_attempted_count: u32,
+    semantic_memory_unconfirmed_count: u32,
+    remaining_work: Vec<&'static str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteSpaceSchedulesResponseBody {
+    request_id: String,
+    owner_plane: String,
+    outcome: String,
+}
+
 async fn list_threads(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -6158,6 +6205,7 @@ async fn list_threads(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 limit: query.limit.unwrap_or(80),
+                space_id: query.space_id.unwrap_or_default(),
             },
             &bearer,
         )?)
@@ -6176,6 +6224,12 @@ async fn list_threads(
             created_at: timestamp_to_rfc3339(thread.created_at),
             updated_at: timestamp_to_rfc3339(thread.updated_at),
             pinned: thread.pinned,
+            space_id: thread.space_id,
+            latest_run_id: thread.latest_run_id,
+            latest_run_status: thread.latest_run_status,
+            latest_run_updated_at: thread
+                .latest_run_updated_at
+                .map(|value| timestamp_to_rfc3339(Some(value))),
         })
         .collect();
 
@@ -6355,6 +6409,127 @@ async fn delete_threads(
 
     Ok(Json(DeleteThreadsResponse {
         deleted_count: response.deleted_count,
+    }))
+}
+
+/// Control-authorized Model Plane adapter for one owner's threads in one
+/// canonical Space. It is intentionally not a generic service/user deletion:
+/// auth middleware admits only `service:control-space-deletion` with an
+/// independently verified `aud=session-core` bearer carrying
+/// `session:space-delete`; Session Core repeats the exact service check.
+async fn delete_space_threads_for_deletion_coordinator(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Json(body): Json<DeleteSpaceThreadsRequestBody>,
+) -> Result<Json<DeleteSpaceThreadsResponseBody>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteSpaceThreadsRequest;
+
+    if body.org_id.trim().is_empty()
+        || body.space_id.trim().is_empty()
+        || body.owner_principal_id.trim().is_empty()
+        || body.deletion_request_id.trim().is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error": "org_id, space_id, owner_principal_id, and deletion_request_id are required"}),
+            ),
+        ));
+    }
+    if claims.org_id != body.org_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                json!({"error": "deletion request tenant does not match verified service identity"}),
+            ),
+        ));
+    }
+    let Some(Extension(capability_bearer)) = capability_bearer else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "independently verified capability deletion bearer is required"})),
+        ));
+    };
+
+    let response = state
+        .session_client
+        .clone()
+        .delete_space_threads(authenticated_session_request(
+            DeleteSpaceThreadsRequest {
+                org_id: body.org_id.clone(),
+                space_id: body.space_id.clone(),
+                owner_principal_id: body.owner_principal_id.clone(),
+                deletion_request_id: body.deletion_request_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core delete_space_threads failed", &error))?
+        .into_inner();
+
+    let cron_url = format!(
+        "{}/api/v1/internal/space-deletion/cron",
+        state.capability_core_base_url.trim_end_matches('/')
+    );
+    let cron_response = state
+        .http_client
+        .post(cron_url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&json!({
+            "org_id": body.org_id,
+            "space_ref": body.space_id,
+            "owner_principal_id": body.owner_principal_id,
+            "deletion_request_id": body.deletion_request_id,
+        }))
+        .send()
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": "Capability Core Space schedule deletion unavailable"})),
+            )
+        })?;
+    if !cron_response.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "Capability Core Space schedule deletion rejected"})),
+        ));
+    }
+    let cron_receipt: DeleteSpaceSchedulesResponseBody = cron_response.json().await.map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": "Capability Core Space schedule deletion returned an invalid receipt"})),
+        )
+    })?;
+    if cron_receipt.request_id != body.deletion_request_id
+        || cron_receipt.owner_plane != "model"
+        || cron_receipt.outcome != "partial"
+    {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(
+                json!({"error": "Capability Core Space schedule deletion receipt does not match request"}),
+            ),
+        ));
+    }
+
+    // Session Core fully removes its local thread/run/transcript rows. A
+    // correlated semantic delete is reported separately; historical records
+    // remain uncorrelated and therefore keep the Model owner partial.
+    let mut remaining_work = vec!["historical_uncorrelated_letta_memory"];
+    if response.semantic_memory_unconfirmed_count > 0 {
+        remaining_work.push("unconfirmed_correlated_letta_memory_deletion");
+    }
+    Ok(Json(DeleteSpaceThreadsResponseBody {
+        request_id: body.deletion_request_id,
+        owner_plane: "model",
+        owner_outcome: "partial",
+        deleted_thread_count: response.deleted_count,
+        semantic_memory_attempted_count: response.semantic_memory_attempted_count,
+        semantic_memory_unconfirmed_count: response.semantic_memory_unconfirmed_count,
+        remaining_work,
     }))
 }
 
@@ -6741,6 +6916,8 @@ async fn invoke(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect,
         effective_zdr,
         &model_bearer,
+        normalized.space_context.as_ref(),
+        normalized.space_append_context.as_ref(),
     )
     .await
     .map_err(|error| {
@@ -7451,6 +7628,29 @@ mod capability_contract_tests {
                 .expect("ZDR read should preserve normal capability discovery");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn space_deletion_requires_capability_bearer_before_session_core_call() {
+        let error = delete_space_threads_for_deletion_coordinator(
+            State(AppState::new()),
+            Extension(proxy_claims(false)),
+            crate::auth::VerifiedSessionBearer::for_test("session-core-bearer"),
+            None,
+            Json(DeleteSpaceThreadsRequestBody {
+                org_id: "org-a".to_owned(),
+                space_id: "space-a".to_owned(),
+                owner_principal_id: "user-a".to_owned(),
+                deletion_request_id: "delete-a".to_owned(),
+            }),
+        )
+        .await
+        .expect_err("a Session Core bearer must not substitute for capability-core");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert!(error.1 .0["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("capability deletion bearer"));
     }
 }
 

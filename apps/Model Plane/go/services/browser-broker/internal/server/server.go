@@ -62,24 +62,47 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "allowed_domains must contain bounded hostnames")
 	}
-	g, err := s.grants.Create(
-		principal.OrganizationID,
-		principal.ActorID,
-		req.GetSessionKey(),
-		scopeURL,
-		allowedDomains,
-		defaultGrantTTL,
-	)
+	allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs :=
+		req.GetAllowedActions(), req.GetAllowedFrameIds(), req.GetAllowedDialogIds(), req.GetAllowedArtifactIds()
+	if _, err := grant.NormalizeSensitiveScopes(
+		allowedActions,
+		allowedFrameIDs,
+		allowedDialogIDs,
+		allowedArtifactIDs,
+	); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid sensitive browser approval scope")
+	}
+	var g *grant.Grant
+	if len(allowedActions) == 0 {
+		g, err = s.grants.Create(
+			principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL,
+			allowedDomains, defaultGrantTTL,
+		)
+	} else {
+		if req.GetParentGrantId() == "" {
+			return nil, status.Error(codes.InvalidArgument, "sensitive browser approval requires parent_grant_id")
+		}
+		g, err = s.grants.CreateScopedSensitiveApproval(
+			principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL,
+			allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
+			req.GetParentGrantId(), defaultGrantTTL,
+		)
+	}
 	if err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
 	}
 	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
 	return &AcquireGrantResponse{
-		GrantId:        g.ID,
-		Endpoint:       s.baseURL + "/grants/" + g.ID,
-		ExpiresAt:      timestamppb.New(g.ExpiresAt),
-		AllowedDomains: append([]string(nil), g.AllowedDomains...),
+		GrantId:            g.ID,
+		Endpoint:           s.baseURL + "/grants/" + g.ID,
+		ExpiresAt:          timestamppb.New(g.ExpiresAt),
+		AllowedDomains:     append([]string(nil), g.AllowedDomains...),
+		AllowedActions:     append([]string(nil), g.AllowedActions...),
+		AllowedFrameIds:    append([]string(nil), g.AllowedFrameIDs...),
+		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
+		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
+		ParentGrantId:      g.ParentGrantID,
 	}, nil
 }
 
@@ -118,10 +141,15 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 	}
 	telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "ok")))
 	return &ValidateGrantResponse{
-		GrantId:        g.ID,
-		Active:         true,
-		ExpiresAt:      timestamppb.New(g.ExpiresAt),
-		AllowedDomains: append([]string(nil), g.AllowedDomains...),
+		GrantId:            g.ID,
+		Active:             true,
+		ExpiresAt:          timestamppb.New(g.ExpiresAt),
+		AllowedDomains:     append([]string(nil), g.AllowedDomains...),
+		AllowedActions:     append([]string(nil), g.AllowedActions...),
+		AllowedFrameIds:    append([]string(nil), g.AllowedFrameIDs...),
+		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
+		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
+		ParentGrantId:      g.ParentGrantID,
 	}, nil
 }
 

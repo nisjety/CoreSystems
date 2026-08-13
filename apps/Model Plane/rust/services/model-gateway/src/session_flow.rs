@@ -111,6 +111,27 @@ pub enum BrowserAgentTerminal {
     Failed(&'static str),
 }
 
+/// A BFF-injected Control decision for the one scoped thread-creation slice.
+/// It is not an authority by itself: Session Core verifies the signed token and
+/// recomputes the exact effect digest before it persists anything.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct ThreadSpaceContext {
+    pub space_id: String,
+    pub space_decision_ref: String,
+    pub recipient_audience_ref: String,
+    pub recipient_audience_revision: u64,
+    pub recipient_audience_hash: String,
+    pub privacy_policy_ref: String,
+    pub authority_revision: u64,
+    pub resource_authorization_ref: String,
+    pub space_decision_token: String,
+    #[serde(default)]
+    pub retrieval_decision_token: String,
+    pub action_schema_hash: String,
+    pub payload_digest: String,
+    pub idempotency_key: String,
+}
+
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
@@ -123,7 +144,23 @@ async fn create_thread(
     org_id: &str,
     user_id: &str,
     bearer: Option<&str>,
+    space: Option<&ThreadSpaceContext>,
 ) -> Result<String> {
+    let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
+        space_id: String::new(),
+        space_decision_ref: String::new(),
+        recipient_audience_ref: String::new(),
+        recipient_audience_revision: 0,
+        recipient_audience_hash: String::new(),
+        privacy_policy_ref: String::new(),
+        authority_revision: 0,
+        resource_authorization_ref: String::new(),
+        space_decision_token: String::new(),
+        retrieval_decision_token: String::new(),
+        action_schema_hash: String::new(),
+        payload_digest: String::new(),
+        idempotency_key: String::new(),
+    });
     let response = client
         .create_thread(authenticated_request(
             CreateThreadRequest {
@@ -134,6 +171,21 @@ async fn create_thread(
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
                 metadata: None,
+                // Chat ingress does not yet resolve a Control Space decision.
+                // Keep the entire envelope empty rather than treating its
+                // session_key or workspace context as authority.
+                space_id: space.space_id,
+                space_decision_ref: space.space_decision_ref,
+                recipient_audience_ref: space.recipient_audience_ref,
+                recipient_audience_revision: space.recipient_audience_revision,
+                recipient_audience_hash: space.recipient_audience_hash,
+                privacy_policy_ref: space.privacy_policy_ref,
+                authority_revision: space.authority_revision,
+                resource_authorization_ref: space.resource_authorization_ref,
+                space_decision_token: space.space_decision_token,
+                action_schema_hash: space.action_schema_hash,
+                payload_digest: space.payload_digest,
+                idempotency_key: space.idempotency_key,
             },
             bearer,
         )?)
@@ -158,13 +210,41 @@ async fn append_user_message(
     thread_id: &str,
     goal: &str,
     bearer: Option<&str>,
+    space: Option<&ThreadSpaceContext>,
 ) -> Result<(), tonic::Status> {
+    let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
+        space_id: String::new(),
+        space_decision_ref: String::new(),
+        recipient_audience_ref: String::new(),
+        recipient_audience_revision: 0,
+        recipient_audience_hash: String::new(),
+        privacy_policy_ref: String::new(),
+        authority_revision: 0,
+        resource_authorization_ref: String::new(),
+        space_decision_token: String::new(),
+        retrieval_decision_token: String::new(),
+        action_schema_hash: String::new(),
+        payload_digest: String::new(),
+        idempotency_key: String::new(),
+    });
     let request = authenticated_request(
         AppendMessageRequest {
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),
             content: goal.to_owned(),
             metadata: None,
+            space_id: space.space_id,
+            space_decision_ref: space.space_decision_ref,
+            recipient_audience_ref: space.recipient_audience_ref,
+            recipient_audience_revision: space.recipient_audience_revision,
+            recipient_audience_hash: space.recipient_audience_hash,
+            privacy_policy_ref: space.privacy_policy_ref,
+            authority_revision: space.authority_revision,
+            resource_authorization_ref: space.resource_authorization_ref,
+            space_decision_token: space.space_decision_token,
+            action_schema_hash: space.action_schema_hash,
+            payload_digest: space.payload_digest,
+            idempotency_key: space.idempotency_key,
         },
         bearer,
     )
@@ -246,6 +326,8 @@ pub async fn prepare_managed_run_authenticated(
     source: ManagedRunSource,
     zdr: bool,
     bearer: &VerifiedSessionBearer,
+    space: Option<&ThreadSpaceContext>,
+    append_space: Option<&ThreadSpaceContext>,
 ) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
@@ -260,6 +342,8 @@ pub async fn prepare_managed_run_authenticated(
         source,
         zdr,
         Some(bearer.as_str()),
+        space,
+        append_space,
     )
     .await
 }
@@ -295,6 +379,8 @@ pub(crate) async fn prepare_managed_run_with_token(
         source,
         zdr,
         Some(bearer),
+        None,
+        None,
     )
     .await
 }
@@ -313,6 +399,8 @@ async fn prepare_managed_run_with_bearer(
     source: ManagedRunSource,
     zdr: bool,
     bearer: Option<&str>,
+    space: Option<&ThreadSpaceContext>,
+    append_space: Option<&ThreadSpaceContext>,
 ) -> Result<SessionRun> {
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
@@ -330,10 +418,12 @@ async fn prepare_managed_run_with_bearer(
                 org_id,
                 user_id,
                 bearer,
+                space,
             )
             .await?
         };
-        if let Err(error) = append_user_message(&mut session_client, &thread_id, goal, bearer).await
+        if let Err(error) =
+            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space).await
         {
             if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
                 tracing::info!(
@@ -346,9 +436,10 @@ async fn prepare_managed_run_with_bearer(
                     org_id,
                     user_id,
                     bearer,
+                    space,
                 )
                 .await?;
-                append_user_message(&mut session_client, &thread_id, goal, bearer)
+                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space)
                     .await
                     .context("session-core append_message(user) failed")?;
             } else {
@@ -473,10 +564,18 @@ async fn prepare_run_with_bearer(
     let mut thread_id = if let Some(thread_id) = non_empty(requested_thread_id) {
         thread_id.to_owned()
     } else {
-        create_thread(&mut client, requested_session_key, org_id, user_id, bearer).await?
+        create_thread(
+            &mut client,
+            requested_session_key,
+            org_id,
+            user_id,
+            bearer,
+            None,
+        )
+        .await?
     };
 
-    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer).await {
+    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None).await {
         if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
             tracing::info!(
                 requested_thread_id = %thread_id,
@@ -488,9 +587,10 @@ async fn prepare_run_with_bearer(
                 org_id,
                 user_id,
                 bearer,
+                None,
             )
             .await?;
-            append_user_message(&mut client, &thread_id, goal, bearer)
+            append_user_message(&mut client, &thread_id, goal, bearer, None)
                 .await
                 .context("session-core append_message(user) failed")?;
         } else {
@@ -896,6 +996,7 @@ async fn append_assistant_message_with_bearer(
                 role: "assistant".to_owned(),
                 content: trimmed.to_owned(),
                 metadata: None,
+                ..Default::default()
             },
             bearer,
         )?)

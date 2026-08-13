@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Aquatiq Integration Gateway - Multi-stage build
 FROM golang:1.24-alpine AS builder
 
@@ -8,13 +9,16 @@ WORKDIR /build
 
 # Copy go mod files
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download
 
 # Copy source code
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o gateway ./cmd/gateway
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags="-w -s" -o gateway ./cmd/gateway
 
 # Final stage - minimal runtime image
 FROM alpine:3.21

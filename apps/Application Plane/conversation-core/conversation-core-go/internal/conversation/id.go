@@ -25,6 +25,13 @@ func OutboundIntentID(orgID, idempotencyKey string) string {
 	return "outintent_" + hex.EncodeToString(digest[:12])
 }
 
+// TicketOperationID keeps a request retry tied to one owner-issued operation
+// record without embedding request content in the identifier.
+func TicketOperationID(orgID, idempotencyKey string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(orgID) + ":tickets.create:" + strings.TrimSpace(idempotencyKey)))
+	return "ticketop_" + hex.EncodeToString(digest[:12])
+}
+
 func stableInboxID(orgID, channel string) string {
 	hash := sha1.Sum([]byte(strings.TrimSpace(orgID) + ":" + strings.TrimSpace(channel)))
 	return "inbox_" + hex.EncodeToString(hash[:])[:16]

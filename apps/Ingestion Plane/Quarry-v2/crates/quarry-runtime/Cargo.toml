@@ -61,6 +61,7 @@ default = ["test-site"]
 grpc = ["dep:tonic", "dep:prost", "dep:prost-types"]
 test-site = ["dep:axum"]
 postgres-queue = ["dep:sqlx", "dep:uuid"]
+chromiumoxide = ["quarry-browser/chromiumoxide"]
 # Wave 7 — gate the real-QUIC driver. Off by default to keep the build
 # fast; opt in with `--features http3`. See `Http3Driver` docs and
 # `.cargo/config.toml` (`reqwest_unstable` cfg) for the build-time

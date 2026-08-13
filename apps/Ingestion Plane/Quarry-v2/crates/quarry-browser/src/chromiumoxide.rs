@@ -7,9 +7,18 @@
 //! browser process per `ChromiumoxideDriver` and reuses it across leases;
 //! each lease owns a small tab set keyed by its session affinity key.
 
-use ::chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
+use ::chromiumoxide::cdp::browser_protocol::accessibility::{
+    EnableParams as AccessibilityEnableParams, GetFullAxTreeParams,
+};
+use ::chromiumoxide::cdp::browser_protocol::browser::{
+    BrowserContextId, CancelDownloadParams, DownloadProgressState, EventDownloadProgress,
+    EventDownloadWillBegin, SetDownloadBehaviorBehavior, SetDownloadBehaviorParams,
+};
+use ::chromiumoxide::cdp::browser_protocol::dom::{
+    BackendNodeId, ResolveNodeParams, SetFileInputFilesParams,
+};
 use ::chromiumoxide::cdp::browser_protocol::fetch::{
-    ContinueRequestParams, EventRequestPaused, FailRequestParams,
+    ContinueRequestParams, EnableParams as FetchEnableParams, EventRequestPaused, FailRequestParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::input::{
     DispatchMouseEventParams, DispatchMouseEventPointerType, DispatchMouseEventType, MouseButton,
@@ -30,17 +39,24 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use ::chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, CaptureScreenshotParamsBuilder, EventLifecycleEvent,
-    EventScreencastFrame, PrintToPdfParams, ScreencastFrameAckParams, StartScreencastFormat,
-    StartScreencastParams, StopScreencastParams,
+    CaptureScreenshotFormat, CaptureScreenshotParamsBuilder, EventJavascriptDialogOpening,
+    EventLifecycleEvent, EventScreencastFrame, FrameId, GetFrameTreeParams,
+    HandleJavaScriptDialogParams, PrintToPdfParams, ScreencastFrameAckParams,
+    StartScreencastFormat, StartScreencastParams, StopScreencastParams,
 };
-use ::chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
+use ::chromiumoxide::cdp::js_protocol::runtime::{
+    CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
+};
 use ::chromiumoxide::handler::viewport::Viewport as ChromiumViewport;
 use ::chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use quarry_core::contracts::{
+    AccessibilityNode, AccessibilityProjection, BrowserDialog, BrowserEgressDecision,
+    BrowserEgressReceipt, BrowserFrame, BrowserStartupMode, BrowserTelemetry,
+};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::{BrowserLease, BrowserViewport};
 
@@ -48,12 +64,17 @@ use crate::actions::ScrollTarget;
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::session::{Cookie, ProfileStore, SessionSnapshot, Viewport};
 use crate::{
-    BrowserDevtoolsEvent, BrowserDriver, BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat,
-    LiveFrameOptions, SessionInner,
+    BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
+    BrowserEgressPolicy, BrowserEgressProxyProvider, BrowserNativeProjection, BrowserNativeTarget,
+    BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat, LiveFrameOptions, SessionInner,
+    VerifiedTargetAction, VerifiedTargetOperation,
 };
 
 const LIVE_FRAME_CACHE_TTL_MS: u64 = 250;
 const DEVTOOLS_EVENT_BUFFER_LIMIT: usize = 512;
+const MAX_GOVERNED_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
+const DOWNLOAD_BEGIN_TIMEOUT: Duration = Duration::from_secs(10);
+const DOWNLOAD_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct CachedLiveFrame {
@@ -83,6 +104,9 @@ struct SessionPages {
     /// so multiple tabs in the same session share one cookie/storage jar,
     /// while distinct sessions (distinct `session_affinity_key`s) never do.
     browser_context_id: Option<BrowserContextId>,
+    /// Private download directory configured only for this isolated browser
+    /// context. Dropping the session removes it after all tabs are closed.
+    download_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 /// Local Chromium driver backed by chromiumoxide.
@@ -98,6 +122,25 @@ pub struct ChromiumoxideDriver {
     live_frame_cache: Arc<Mutex<Option<CachedLiveFrame>>>,
     devtools_events: Arc<Mutex<HashMap<String, Vec<BrowserDevtoolsEvent>>>>,
     devtools_sequence: Arc<Mutex<u64>>,
+    egress_receipts: Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
+    /// Egress receipts are paged per browser session, so their sequence must
+    /// be per-session too. A process-global sequence would make a fresh run
+    /// appear to have skipped receipts created by an unrelated tenant.
+    egress_sequence: Arc<Mutex<HashMap<String, u64>>>,
+    egress_policies: Arc<Mutex<HashMap<String, BrowserEgressPolicy>>>,
+    pinned_egress_proxy: Option<Arc<dyn BrowserEgressProxyProvider>>,
+    proxy_receipt_cursors: Arc<Mutex<HashMap<String, u64>>>,
+    /// Startup data is recorded per lease. Renderer metrics are sampled only
+    /// when telemetry is requested, so no global process metric can bleed
+    /// across tenant-owned browser sessions.
+    session_telemetry: Arc<Mutex<HashMap<String, BrowserTelemetry>>>,
+    dialogs: Arc<Mutex<HashMap<String, Vec<BrowserDialog>>>>,
+    /// The public dialog id is an opaque Quarry receipt handle, while CDP
+    /// responds to the target/page that owns the active dialog. Keep that
+    /// binding private so responding after a tab switch cannot affect a
+    /// dialog on the newly active tab.
+    dialog_pages: Arc<Mutex<HashMap<String, HashMap<String, Page>>>>,
+    dialog_sequence: Arc<Mutex<u64>>,
     profiles: Option<Arc<dyn ProfileStore>>,
 }
 
@@ -118,12 +161,33 @@ impl ChromiumoxideDriver {
             live_frame_cache: Arc::new(Mutex::new(None)),
             devtools_events: Arc::new(Mutex::new(HashMap::new())),
             devtools_sequence: Arc::new(Mutex::new(0)),
+            egress_receipts: Arc::new(Mutex::new(HashMap::new())),
+            egress_sequence: Arc::new(Mutex::new(HashMap::new())),
+            egress_policies: Arc::new(Mutex::new(HashMap::new())),
+            pinned_egress_proxy: None,
+            proxy_receipt_cursors: Arc::new(Mutex::new(HashMap::new())),
+            session_telemetry: Arc::new(Mutex::new(HashMap::new())),
+            dialogs: Arc::new(Mutex::new(HashMap::new())),
+            dialog_pages: Arc::new(Mutex::new(HashMap::new())),
+            dialog_sequence: Arc::new(Mutex::new(0)),
             profiles: None,
         }
     }
 
     pub fn with_profile_store(mut self, store: Arc<dyn ProfileStore>) -> Self {
         self.profiles = Some(store);
+        self
+    }
+
+    /// Route every Chromium HTTP(S) connection through Quarry's loopback
+    /// DNS-pinning egress authority. Capability advertising remains
+    /// fail-closed until the complete path is verified; this config merely
+    /// prevents the browser from bypassing the transport boundary.
+    pub fn with_pinned_egress_proxy(
+        mut self,
+        provider: Arc<dyn BrowserEgressProxyProvider>,
+    ) -> Self {
+        self.pinned_egress_proxy = Some(provider);
         self
     }
 
@@ -143,6 +207,13 @@ impl ChromiumoxideDriver {
         }
         self.pages.lock().await.clear();
         self.devtools_events.lock().await.clear();
+        self.egress_receipts.lock().await.clear();
+        self.egress_sequence.lock().await.clear();
+        self.egress_policies.lock().await.clear();
+        self.proxy_receipt_cursors.lock().await.clear();
+        self.session_telemetry.lock().await.clear();
+        self.dialogs.lock().await.clear();
+        self.dialog_pages.lock().await.clear();
         self.invalidate_live_frame_cache().await;
 
         let launch_dirs = chromium_launch_dirs().map_err(|e| {
@@ -154,7 +225,6 @@ impl ChromiumoxideDriver {
         })?;
         let mut builder = BrowserConfig::builder()
             .user_data_dir(&launch_dirs.user_data)
-            .enable_request_intercept()
             .arg("--disable-dev-shm-usage")
             .arg("--disable-breakpad")
             .arg("--disable-crash-reporter")
@@ -164,6 +234,13 @@ impl ChromiumoxideDriver {
                 "--crash-dumps-dir={}",
                 launch_dirs.crash_dumps.display()
             ));
+        if self.pinned_egress_proxy.is_some() {
+            // QUIC/HTTP3 can open sockets outside the explicit HTTP proxy
+            // path. Per-session CDP contexts install the actual proxy below;
+            // Chromium must use that CONNECT/HTTP boundary until a separately
+            // pinned QUIC egress implementation exists.
+            builder = builder.arg("--disable-quic");
+        }
         if let Some(viewport) = viewport {
             builder = builder.viewport(chromium_viewport(viewport));
         }
@@ -195,6 +272,75 @@ impl ChromiumoxideDriver {
 
     fn session_key(session: &BrowserSession) -> String {
         session.lease.session_affinity_key.clone()
+    }
+
+    /// Browser navigation is permitted only after both halves of Quarry's
+    /// egress boundary are present: the DNS-pinning transport provider and a
+    /// session-scoped host policy. Keeping this invariant in the driver
+    /// prevents a new caller from accidentally treating CDP's URL guard as a
+    /// sufficient network boundary.
+    async fn require_configured_egress(&self, session: &BrowserSession) -> QuarryResult<()> {
+        if self.pinned_egress_proxy.is_none() {
+            return Err(QuarryError::unsupported_action(
+                "chromium browser navigation requires a pinned egress proxy",
+            ));
+        }
+        let session_key = Self::session_key(session);
+        if self.egress_policies.lock().await.contains_key(&session_key) {
+            Ok(())
+        } else {
+            Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "chromium browser navigation requires an installed egress policy",
+            ))
+        }
+    }
+
+    /// Copy transport-authority receipts into the driver's one monotonic,
+    /// session-scoped receipt stream. The provider's native sequence stays
+    /// private; callers only see the driver's unified sequence together with
+    /// the CDP Fetch decisions that caused Chromium to continue or abort.
+    async fn synchronize_proxy_egress_receipts(&self, session_key: &str) -> QuarryResult<()> {
+        let Some(provider) = &self.pinned_egress_proxy else {
+            return Ok(());
+        };
+        // Serialize a session's cursor advancement. Holding this small mutex
+        // through the provider read prevents two concurrent observers from
+        // promoting the same transport receipt twice.
+        let mut cursors = self.proxy_receipt_cursors.lock().await;
+        let after_sequence = cursors.get(session_key).copied().unwrap_or(0);
+        let transport_receipts = provider
+            .receipts_after(session_key, after_sequence, DEVTOOLS_EVENT_BUFFER_LIMIT)
+            .await?;
+        if let Some(last_sequence) = transport_receipts
+            .iter()
+            .map(|receipt| receipt.sequence)
+            .max()
+        {
+            cursors.insert(session_key.to_owned(), last_sequence);
+        }
+        drop(cursors);
+
+        for receipt in transport_receipts {
+            push_egress_receipt(
+                &self.egress_receipts,
+                &self.egress_sequence,
+                session_key,
+                BrowserEgressReceipt {
+                    sequence: 0,
+                    // The HTTP proxy observes a connection, not a CDP target;
+                    // do not fabricate a tab attribution.
+                    tab_id: None,
+                    method: receipt.method,
+                    url: receipt.url,
+                    decision: receipt.decision,
+                    policy: receipt.policy,
+                    timestamp_ms: receipt.timestamp_ms,
+                },
+            )
+            .await;
+        }
+        Ok(())
     }
 
     async fn active_tab_page(&self, session: &BrowserSession) -> Option<(String, Page)> {
@@ -255,8 +401,20 @@ impl ChromiumoxideDriver {
         let context_id = match existing_context_id {
             Some(id) => id,
             None => {
+                let context_params = if let Some(provider) = &self.pinned_egress_proxy {
+                    let endpoint = provider.endpoint_for_session(&session_key).await?;
+                    CreateBrowserContextParams::builder()
+                        .proxy_server(endpoint.as_str())
+                        // Override Chromium's implicit loopback bypass. The
+                        // Fetch policy still denies loopback destinations;
+                        // this only stops a transport-level proxy bypass.
+                        .proxy_bypass_list("<-loopback>")
+                        .build()
+                } else {
+                    CreateBrowserContextParams::default()
+                };
                 let id = browser
-                    .create_browser_context(CreateBrowserContextParams::default())
+                    .create_browser_context(context_params)
                     .await
                     .map_err(|e| {
                         QuarryError::new(
@@ -265,9 +423,48 @@ impl ChromiumoxideDriver {
                         )
                         .with_details(json!({ "error": e.to_string() }))
                     })?;
+                let download_dir = Arc::new(
+                    tempfile::Builder::new()
+                        .prefix("quarry-download-")
+                        .tempdir()
+                        .map_err(|error| {
+                            QuarryError::new(
+                                ErrorCode::DriverFailed,
+                                "chromiumoxide download quarantine directory creation failed",
+                            )
+                            .with_details(json!({ "error": error.to_string() }))
+                        })?,
+                );
+                let download_path = download_dir.path().to_str().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        "chromiumoxide download quarantine path is not valid UTF-8",
+                    )
+                })?;
+                let download_behavior = SetDownloadBehaviorParams::builder()
+                    .behavior(SetDownloadBehaviorBehavior::AllowAndName)
+                    .browser_context_id(id.clone())
+                    .download_path(download_path)
+                    .events_enabled(true)
+                    .build()
+                    .map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::Internal,
+                            "build chromiumoxide download quarantine configuration failed",
+                        )
+                        .with_details(json!({ "error": error }))
+                    })?;
+                browser.execute(download_behavior).await.map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide download quarantine configuration failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
                 let mut pages = self.pages.lock().await;
                 let session_pages = pages.entry(session_key.clone()).or_default();
                 session_pages.browser_context_id = Some(id.clone());
+                session_pages.download_dir = Some(download_dir);
                 id
             }
         };
@@ -290,7 +487,23 @@ impl ChromiumoxideDriver {
         })?;
         self.install_devtools_collectors(session_key.clone(), tab_id.clone(), &page)
             .await;
-        install_network_guard(&page).await?;
+        install_dialog_collector(
+            &page,
+            session_key.clone(),
+            self.dialogs.clone(),
+            self.dialog_pages.clone(),
+            self.dialog_sequence.clone(),
+        )
+        .await;
+        install_network_guard(
+            &page,
+            session_key.clone(),
+            tab_id.clone(),
+            self.egress_receipts.clone(),
+            self.egress_sequence.clone(),
+            self.egress_policies.clone(),
+        )
+        .await?;
         if initial_url != "about:blank" {
             page.goto(initial_url).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
@@ -490,7 +703,14 @@ impl ChromiumoxideDriver {
 /// listener covers redirects and requests initiated by the page itself (such
 /// as fetch/XHR, iframes, images, and stylesheet resources) before Chromium
 /// is permitted to open the connection.
-async fn install_network_guard(page: &Page) -> QuarryResult<()> {
+async fn install_network_guard(
+    page: &Page,
+    session_key: String,
+    tab_id: String,
+    receipts: Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
+    sequence: Arc<Mutex<HashMap<String, u64>>>,
+    policies: Arc<Mutex<HashMap<String, BrowserEgressPolicy>>>,
+) -> QuarryResult<()> {
     let mut events = page
         .event_listener::<EventRequestPaused>()
         .await
@@ -501,35 +721,157 @@ async fn install_network_guard(page: &Page) -> QuarryResult<()> {
             )
             .with_details(json!({ "error": e.to_string() }))
         })?;
+    // Register the listener before turning interception on. Fetch.enable
+    // pauses every request by default; without this command the listener
+    // below is inert and redirects, frames, XHR, and subresources can leave
+    // the browser without the policy having a chance to decide them.
+    page.execute(
+        FetchEnableParams::builder()
+            .handle_auth_requests(true)
+            .build(),
+    )
+    .await
+    .map_err(|error| {
+        QuarryError::new(
+            ErrorCode::DriverFailed,
+            "chromiumoxide enable browser network guard failed",
+        )
+        .with_details(json!({ "error": error.to_string() }))
+    })?;
     let guarded_page = page.clone();
     tokio::spawn(async move {
         while let Some(event) = events.next().await {
             let request_id = event.request_id.clone();
             let request_url = event.request.url.clone();
-            let command_result = match guard_page_request_target(&request_url).await {
-                Ok(()) => guarded_page
-                    .execute(ContinueRequestParams::new(request_id))
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-                Err(error) => {
-                    tracing::warn!(
-                        code = ?error.code,
-                        "chromiumoxide blocked unsafe page request"
-                    );
+            let method = event.request.method.clone();
+            let policy_allows_url = policies
+                .lock()
+                .await
+                .get(&session_key)
+                .cloned()
+                // A page can start emitting Fetch events as soon as its CDP
+                // target is attached. Missing session policy must be deny-all
+                // rather than the legacy unconstrained default.
+                .unwrap_or_else(BrowserEgressPolicy::deny_all)
+                .allows_url(&request_url);
+            let (decision, policy, command_result) = if !policy_allows_url {
+                (
+                    BrowserEgressDecision::Block,
+                    "domain_grant_blocked".to_owned(),
                     guarded_page
                         .execute(FailRequestParams::new(request_id, ErrorReason::Aborted))
                         .await
                         .map(|_| ())
-                        .map_err(|failure| failure.to_string())
+                        .map_err(|failure| failure.to_string()),
+                )
+            } else {
+                match guard_page_request_target(&request_url).await {
+                    Ok(()) => (
+                        BrowserEgressDecision::Allow,
+                        "url_dns_public".to_owned(),
+                        guarded_page
+                            .execute(ContinueRequestParams::new(request_id))
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| error.to_string()),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            code = ?error.code,
+                            "chromiumoxide blocked unsafe page request"
+                        );
+                        (
+                            BrowserEgressDecision::Block,
+                            "url_or_dns_blocked".to_owned(),
+                            guarded_page
+                                .execute(FailRequestParams::new(request_id, ErrorReason::Aborted))
+                                .await
+                                .map(|_| ())
+                                .map_err(|failure| failure.to_string()),
+                        )
+                    }
                 }
             };
+            push_egress_receipt(
+                &receipts,
+                &sequence,
+                &session_key,
+                BrowserEgressReceipt {
+                    sequence: 0,
+                    tab_id: Some(tab_id.clone()),
+                    method,
+                    url: redact_egress_url(&request_url),
+                    decision,
+                    policy,
+                    timestamp_ms: now_ms(),
+                },
+            )
+            .await;
             if let Err(error) = command_result {
                 tracing::warn!(error = %error, "chromiumoxide request guard resolution failed");
             }
         }
     });
     Ok(())
+}
+
+/// Register dialog openings as observable state. The listener deliberately
+/// does not respond to the dialog: accepting an alert/confirm/prompt can
+/// change page state, so that authority remains with a later grant-bound
+/// `respond_dialog` action.
+async fn install_dialog_collector(
+    page: &Page,
+    session_key: String,
+    dialogs: Arc<Mutex<HashMap<String, Vec<BrowserDialog>>>>,
+    dialog_pages: Arc<Mutex<HashMap<String, HashMap<String, Page>>>>,
+    sequence: Arc<Mutex<u64>>,
+) {
+    let Ok(mut events) = page.event_listener::<EventJavascriptDialogOpening>().await else {
+        tracing::debug!("javascript dialog listener unavailable");
+        return;
+    };
+    let dialog_page = page.clone();
+    tokio::spawn(async move {
+        while let Some(event) = events.next().await {
+            let dialog_id = {
+                let mut sequence = sequence.lock().await;
+                *sequence = sequence.saturating_add(1);
+                format!("dlg_{}", *sequence)
+            };
+            let removed = {
+                let mut dialogs = dialogs.lock().await;
+                let active = dialogs.entry(session_key.clone()).or_default();
+                active.push(BrowserDialog {
+                    dialog_id: dialog_id.clone(),
+                    frame_id: Some(event.frame_id.inner().clone()),
+                    kind: event.r#type.as_ref().to_ascii_lowercase(),
+                    message: truncate_devtools_text(&event.message),
+                    default_prompt: event.default_prompt.as_ref().map(truncate_devtools_text),
+                    origin: url::Url::parse(&event.url)
+                        .ok()
+                        .map(|url| url.origin().ascii_serialization()),
+                    opened_at_ms: now_ms(),
+                });
+                // Chromium has at most one active JavaScript dialog per target;
+                // retaining a tiny bound is defence-in-depth if a provider emits
+                // repeated events while a page is being torn down.
+                if active.len() > 4 {
+                    active
+                        .drain(0..active.len() - 4)
+                        .map(|dialog| dialog.dialog_id)
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            };
+            let mut pages = dialog_pages.lock().await;
+            let session_pages = pages.entry(session_key.clone()).or_default();
+            for removed_id in removed {
+                session_pages.remove(&removed_id);
+            }
+            session_pages.insert(dialog_id, dialog_page.clone());
+        }
+    });
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -684,6 +1026,423 @@ async fn push_devtools_event(
     }
 }
 
+async fn push_egress_receipt(
+    buffers: &Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
+    sequence: &Arc<Mutex<HashMap<String, u64>>>,
+    session_key: &str,
+    mut receipt: BrowserEgressReceipt,
+) {
+    let mut sequences = sequence.lock().await;
+    let sequence = sequences.entry(session_key.to_owned()).or_default();
+    *sequence = sequence.saturating_add(1);
+    receipt.sequence = *sequence;
+    drop(sequences);
+
+    let mut buffers = buffers.lock().await;
+    let receipts = buffers.entry(session_key.to_owned()).or_default();
+    receipts.push(receipt);
+    if receipts.len() > DEVTOOLS_EVENT_BUFFER_LIMIT {
+        let excess = receipts.len() - DEVTOOLS_EVENT_BUFFER_LIMIT;
+        receipts.drain(0..excess);
+    }
+}
+
+/// Retain only an origin and path for the auditable policy receipt. A request
+/// URL can carry credentials or other page-controlled secrets in its query;
+/// neither belongs in a browser timeline, observation, or durable receipt.
+fn redact_egress_url(raw: &str) -> String {
+    url::Url::parse(raw)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            let port = url
+                .port()
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default();
+            Some(format!("{}://{}{}{}", url.scheme(), host, port, url.path()))
+        })
+        .unwrap_or_else(|| "unparseable_url".to_owned())
+}
+
+/// Keep browser-controlled filename metadata harmless and bounded before it
+/// becomes part of an artifact receipt. The saved file itself is GUID-named by
+/// CDP; this is display metadata only and never a filesystem target.
+fn sanitize_download_filename(raw: &str) -> String {
+    let filename = raw
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(128)
+        .collect::<String>();
+    if filename.is_empty() || filename == "." || filename == ".." {
+        "download.bin".to_owned()
+    } else {
+        filename
+    }
+}
+
+const AX_PROJECTION_NODE_LIMIT: usize = 300;
+const FRAME_PROJECTION_LIMIT: usize = 64;
+
+fn native_projection_from_cdp(
+    ax_tree: serde_json::Value,
+    frame_tree: serde_json::Value,
+) -> BrowserNativeProjection {
+    let raw_nodes = ax_tree
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let truncated = raw_nodes.len() > AX_PROJECTION_NODE_LIMIT;
+    let nodes = raw_nodes
+        .into_iter()
+        .take(AX_PROJECTION_NODE_LIMIT)
+        .filter_map(|node| {
+            let node_id = node.get("nodeId")?.as_str()?.to_owned();
+            Some(AccessibilityNode {
+                node_id,
+                role: ax_value_text(node.get("role")),
+                name: ax_value_text(node.get("name")),
+                value: ax_value_text(node.get("value")),
+                ignored: node
+                    .get("ignored")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                frame_id: node
+                    .get("frameId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                child_ids: node
+                    .get("childIds")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|children| {
+                        children
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .take(100)
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut frames = Vec::new();
+    collect_frame_projection(
+        frame_tree
+            .get("frameTree")
+            .unwrap_or(&serde_json::Value::Null),
+        &mut frames,
+    );
+
+    let targets = raw_nodes_to_native_targets(&ax_tree);
+
+    BrowserNativeProjection {
+        accessibility: Some(AccessibilityProjection {
+            source: "chromium_cdp_ax".to_owned(),
+            nodes,
+            truncated,
+        }),
+        frames,
+        targets,
+    }
+}
+
+/// Produce executable bindings for unignored AX nodes in every observed frame.
+/// CDP backend node ids are never exposed on the public observation; they stay
+/// inside Quarry until the matching snapshot action executes. Runtime requires
+/// the dedicated `frame_*_ref` contract for a child-frame binding, so observing
+/// a cross-origin iframe never grants a bare top-level ref authority.
+fn raw_nodes_to_native_targets(ax_tree: &serde_json::Value) -> Vec<BrowserNativeTarget> {
+    ax_tree
+        .get("nodes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|node| {
+            !node
+                .get("ignored")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|node| {
+            let ax_node_id = node.get("nodeId")?.as_str()?.to_owned();
+            let backend_node_id = node.get("backendDOMNodeId")?.as_i64()?;
+            let frame_id = node
+                .get("frameId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let role = ax_value_text(node.get("role"));
+            let name = ax_value_text(node.get("name"));
+            let value = ax_value_text(node.get("value"));
+            // The full AX tree is retained for observation, but executable
+            // refs are deliberately restricted to native interactive roles.
+            // Static text, document containers, and generic groups must not
+            // become click targets merely because they have a name.
+            if !is_actionable_ax_role(role.as_deref()) {
+                return None;
+            }
+            Some(BrowserNativeTarget {
+                ax_node_id,
+                backend_node_id,
+                frame_id,
+                role,
+                name,
+                value,
+            })
+        })
+        .take(AX_PROJECTION_NODE_LIMIT)
+        .collect()
+}
+
+fn is_actionable_ax_role(role: Option<&str>) -> bool {
+    matches!(
+        role.map(|role| role.to_ascii_lowercase()),
+        Some(role)
+            if matches!(
+                role.as_str(),
+                "button"
+                    | "link"
+                    | "textbox"
+                    | "searchbox"
+                    | "combobox"
+                    | "listbox"
+                    | "option"
+                    | "checkbox"
+                    | "radio"
+                    | "switch"
+                    | "slider"
+                    | "spinbutton"
+                    | "tab"
+                    | "menuitem"
+                    | "menuitemcheckbox"
+                    | "menuitemradio"
+                    | "treeitem"
+            )
+    )
+}
+
+/// Resolve the exact CDP backend node produced by an AX observation and run
+/// the effect against that object. Unlike a selector, this cannot drift to a
+/// later matching element between resolution and the effect. The remote
+/// object is always released before returning to avoid retaining page nodes
+/// across an agent session.
+async fn execute_native_target_action(
+    page: &Page,
+    target: BrowserNativeTarget,
+    operation: VerifiedTargetOperation,
+) -> QuarryResult<()> {
+    // `DOM.resolveNode` must execute in the target frame's current realm. In
+    // particular, an out-of-process child iframe cannot be safely assumed to
+    // share the top-level page's execution context. The frame id itself came
+    // from the just-validated native AX snapshot; this is not model input.
+    let execution_context_id = match target.frame_id.as_deref() {
+        Some(frame_id) => page
+            .frame_execution_context(FrameId::new(frame_id))
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::TargetRepairRequired,
+                    "observed frame is no longer live; observe again",
+                )
+                .with_details(json!({ "frame_id": frame_id, "error": error.to_string() }))
+            })?
+            .ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::TargetRepairRequired,
+                    "observed frame has no active execution context; observe again",
+                )
+                .with_details(json!({ "frame_id": frame_id }))
+            })
+            .map(Some)?,
+        None => None,
+    };
+    let mut resolve =
+        ResolveNodeParams::builder().backend_node_id(BackendNodeId::new(target.backend_node_id));
+    if let Some(execution_context_id) = execution_context_id {
+        resolve = resolve.execution_context_id(execution_context_id);
+    }
+    let resolved = page.execute(resolve.build()).await.map_err(|error| {
+        QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "native accessibility target is no longer live; observe again",
+        )
+        .with_details(json!({ "ax_node_id": target.ax_node_id, "error": error.to_string() }))
+    })?;
+    let object_id = resolved.object.object_id.clone().ok_or_else(|| {
+        QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "native accessibility target could not be resolved; observe again",
+        )
+        .with_details(json!({ "ax_node_id": target.ax_node_id }))
+    })?;
+    let operation_value = serde_json::to_value(&operation).map_err(|error| {
+        QuarryError::new(
+            ErrorCode::Internal,
+            "serialize native target operation failed",
+        )
+        .with_details(json!({ "error": error.to_string() }))
+    })?;
+    let call = CallFunctionOnParams::builder()
+        .function_declaration(
+            r#"function(request) {
+                const element = this;
+                if (!(element instanceof Element) || !element.isConnected) {
+                    return { ok: false, reason: 'native_target_not_connected' };
+                }
+                switch (request.type) {
+                    case 'click':
+                        element.click();
+                        return { ok: true };
+                    case 'type': {
+                        if (!('value' in element)) return { ok: false, reason: 'target_not_typeable' };
+                        element.focus();
+                        const proto = element instanceof HTMLTextAreaElement
+                            ? HTMLTextAreaElement.prototype
+                            : HTMLInputElement.prototype;
+                        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                        if (!setter) return { ok: false, reason: 'value_setter_unavailable' };
+                        setter.call(element, request.text);
+                        element.dispatchEvent(new InputEvent('input', {
+                            bubbles: true, inputType: 'insertText', data: request.text
+                        }));
+                        element.dispatchEvent(new Event('change', { bubbles: true }));
+                        return { ok: true };
+                    }
+                    case 'select': {
+                        if (!(element instanceof HTMLSelectElement)) {
+                            return { ok: false, reason: 'target_not_select' };
+                        }
+                        element.value = request.value;
+                        if (element.value !== request.value) {
+                            return { ok: false, reason: 'select_value_unavailable' };
+                        }
+                        element.dispatchEvent(new Event('input', { bubbles: true }));
+                        element.dispatchEvent(new Event('change', { bubbles: true }));
+                        return { ok: true };
+                    }
+                    case 'wait_for':
+                        // This ref was observed before the action began. Its
+                        // exact backend node is still connected, so a native
+                        // wait succeeds without re-querying a selector.
+                        return { ok: true };
+                    default:
+                        return { ok: false, reason: 'unsupported_native_operation' };
+                }
+            }"#,
+        )
+        .object_id(object_id.clone())
+        .argument(CallArgument::builder().value(operation_value).build())
+        .return_by_value(true)
+        .user_gesture(true)
+        .build()
+        .map_err(|error| {
+            QuarryError::new(ErrorCode::Internal, "build native target action failed")
+                .with_details(json!({ "error": error }))
+        })?;
+    let result = page.execute(call).await;
+    // A failed release is not a reason to hide the action result, but the
+    // short-lived handle must never be retained for a later action.
+    let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
+    let result = result.map_err(|error| {
+        QuarryError::new(ErrorCode::DriverFailed, "native target action failed")
+            .with_details(json!({ "ax_node_id": target.ax_node_id, "error": error.to_string() }))
+    })?;
+    if result.exception_details.is_some() {
+        return Err(QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "native target action raised a page exception; observe again",
+        )
+        .with_details(json!({ "ax_node_id": target.ax_node_id })));
+    }
+    let value = result
+        .result
+        .result
+        .value
+        .unwrap_or(serde_json::Value::Null);
+    if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err(QuarryError::new(
+            ErrorCode::TargetRepairRequired,
+            "native accessibility target changed or rejected the action",
+        )
+        .with_details(value))
+    }
+}
+
+fn ax_value_text(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?.get("value")?;
+    match value {
+        serde_json::Value::String(value) if !value.is_empty() => {
+            Some(truncate_devtools_text(value))
+        }
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn collect_frame_projection(value: &serde_json::Value, output: &mut Vec<BrowserFrame>) {
+    if output.len() >= FRAME_PROJECTION_LIMIT {
+        return;
+    }
+    let Some(frame) = value.get("frame") else {
+        return;
+    };
+    let Some(frame_id) = frame.get("id").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let child_frame_ids = value
+        .get("childFrames")
+        .and_then(serde_json::Value::as_array)
+        .map(|children| {
+            children
+                .iter()
+                .filter_map(|child| {
+                    child
+                        .get("frame")
+                        .and_then(|frame| frame.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .take(100)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    output.push(BrowserFrame {
+        frame_id: frame_id.to_owned(),
+        parent_frame_id: frame
+            .get("parentId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        origin: frame
+            .get("securityOrigin")
+            .and_then(serde_json::Value::as_str)
+            .filter(|origin| !origin.is_empty())
+            .map(str::to_owned),
+        name: frame
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+            .map(truncate_devtools_text),
+        child_frame_ids,
+    });
+    if let Some(children) = value
+        .get("childFrames")
+        .and_then(serde_json::Value::as_array)
+    {
+        for child in children {
+            collect_frame_projection(child, output);
+            if output.len() >= FRAME_PROJECTION_LIMIT {
+                break;
+            }
+        }
+    }
+}
+
 fn normalize_console_event(tab_id: &str, event: &EventConsoleApiCalled) -> BrowserDevtoolsEvent {
     let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     let method = payload
@@ -747,8 +1506,10 @@ fn normalize_log_event(tab_id: &str, event: &EventEntryAdded) -> BrowserDevtools
 }
 
 fn normalize_request_event(tab_id: &str, event: &EventRequestWillBeSent) -> BrowserDevtoolsEvent {
-    let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
-    let request = payload.get("request").unwrap_or(&serde_json::Value::Null);
+    let raw_payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+    let request = raw_payload
+        .get("request")
+        .unwrap_or(&serde_json::Value::Null);
     let method = request
         .get("method")
         .and_then(serde_json::Value::as_str)
@@ -756,7 +1517,7 @@ fn normalize_request_event(tab_id: &str, event: &EventRequestWillBeSent) -> Brow
     let url = request
         .get("url")
         .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
+        .map(redact_egress_url);
     let text = match (method.as_deref(), url.as_deref()) {
         (Some(method), Some(url)) => Some(format!("{method} {url}")),
         (Some(method), None) => Some(method.to_owned()),
@@ -769,26 +1530,35 @@ fn normalize_request_event(tab_id: &str, event: &EventRequestWillBeSent) -> Brow
         category: "network".to_owned(),
         name: "Network.requestWillBeSent".to_owned(),
         level: None,
-        method,
-        url,
+        method: method.clone(),
+        url: url.clone(),
         status: None,
         text: text.map(truncate_devtools_text),
         timestamp_ms: now_ms(),
-        payload,
+        // Do not forward DevTools' raw request payload: it can contain query
+        // secrets, headers, cookies, and POST bodies. Observability needs only
+        // the redacted request identity and method.
+        payload: json!({ "request": { "method": method.clone(), "url": url.clone() } }),
     }
 }
 
 fn normalize_response_event(tab_id: &str, event: &EventResponseReceived) -> BrowserDevtoolsEvent {
-    let payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
-    let response = payload.get("response").unwrap_or(&serde_json::Value::Null);
+    let raw_payload = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+    let response = raw_payload
+        .get("response")
+        .unwrap_or(&serde_json::Value::Null);
     let url = response
         .get("url")
         .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
+        .map(redact_egress_url);
     let status = response
         .get("status")
         .and_then(serde_json::Value::as_i64)
         .and_then(|status| u16::try_from(status).ok());
+    let mime_type = response
+        .get("mimeType")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let text = match (status, url.as_deref()) {
         (Some(status), Some(url)) => Some(format!("{status} {url}")),
         (Some(status), None) => Some(status.to_string()),
@@ -802,11 +1572,18 @@ fn normalize_response_event(tab_id: &str, event: &EventResponseReceived) -> Brow
         name: "Network.responseReceived".to_owned(),
         level: None,
         method: None,
-        url,
+        url: url.clone(),
         status,
         text: text.map(truncate_devtools_text),
         timestamp_ms: now_ms(),
-        payload,
+        // The full response object includes request/response headers and
+        // timing internals. Keep only the fields required for a compact
+        // network summary and redact the URL first.
+        payload: json!({ "response": {
+            "url": url.clone(),
+            "status": status,
+            "mimeType": mime_type.clone(),
+        } }),
     }
 }
 
@@ -868,10 +1645,11 @@ fn console_method_level(method: &str) -> String {
     .to_owned()
 }
 
-fn truncate_devtools_text(text: String) -> String {
+fn truncate_devtools_text(text: impl AsRef<str>) -> String {
     const MAX: usize = 1_000;
+    let text = text.as_ref();
     if text.len() <= MAX {
-        return text;
+        return text.to_owned();
     }
     let mut end = MAX;
     while !text.is_char_boundary(end) {
@@ -886,6 +1664,19 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// CDP performance values are floating-point counters. Reject non-finite or
+/// negative values rather than wrapping/saturating a malformed provider value
+/// into an implausible resource claim.
+fn finite_metric_u64(value: f64, scale: f64) -> Option<u64> {
+    let scaled = value * scale;
+    (scaled.is_finite() && scaled >= 0.0 && scaled <= u64::MAX as f64)
+        .then_some(scaled.round() as u64)
 }
 
 async fn page_title(page: &Page) -> Option<String> {
@@ -1079,15 +1870,75 @@ fn session_viewport(viewport: BrowserViewport) -> Viewport {
 
 #[async_trait]
 impl BrowserDriver for ChromiumoxideDriver {
+    fn capabilities(&self) -> BrowserDriverCapabilities {
+        BrowserDriverCapabilities {
+            persistent_profile: true,
+            devtools_trace: true,
+            downloads_to_artifacts: false,
+            // Native upload code exists, but it stays unavailable to agent
+            // runs until the artifact quarantine and OOPIF path have runtime
+            // proof equal to the download path.
+            uploads_from_artifacts: false,
+            full_visual_fidelity: true,
+            // The Chromium-enabled runtime proof exercises the mandatory
+            // per-session proxy plus CDP Fetch boundary for redirects,
+            // frames, XHR/fetch, subresources, and script navigation. Remote
+            // providers keep their independent fail-closed defaults.
+            isolated_egress: self.pinned_egress_proxy.is_some(),
+            security_evidence: self.pinned_egress_proxy.is_some(),
+            atomic_target_actions: true,
+        }
+    }
+
+    async fn configure_egress_policy(
+        &self,
+        session: &BrowserSession,
+        policy: BrowserEgressPolicy,
+    ) -> QuarryResult<()> {
+        let session_key = Self::session_key(session);
+        let provider = self.pinned_egress_proxy.as_ref().ok_or_else(|| {
+            QuarryError::unsupported_action(
+                "configure_egress_policy requires a pinned egress proxy",
+            )
+        })?;
+        provider
+            .configure_policy(&session_key, policy.clone())
+            .await?;
+        self.egress_policies
+            .lock()
+            .await
+            .insert(session_key, policy);
+        Ok(())
+    }
+
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+        let acquired_at = Instant::now();
+        let startup_mode = {
+            let browser = self.browser.lock().await;
+            let active_viewport = self.active_viewport.lock().await;
+            if browser.is_some() && *active_viewport == lease.viewport {
+                BrowserStartupMode::Warm
+            } else {
+                BrowserStartupMode::Cold
+            }
+        };
         self.ensure_browser(lease.viewport).await?;
-        Ok(BrowserSession {
+        let session = BrowserSession {
             lease: lease.clone(),
             inner: Arc::new(Mutex::new(SessionInner {
                 connected: true,
                 pages_served: 0,
             })),
-        })
+        };
+        self.session_telemetry.lock().await.insert(
+            Self::session_key(&session),
+            BrowserTelemetry {
+                startup_mode,
+                startup_latency_ms: Some(elapsed_ms(acquired_at)),
+                ..BrowserTelemetry::default()
+            },
+        );
+        Ok(session)
     }
 
     async fn release(&self, session: BrowserSession) -> QuarryResult<()> {
@@ -1120,12 +1971,23 @@ impl BrowserDriver for ChromiumoxideDriver {
             }
         }
         self.devtools_events.lock().await.remove(&session_key);
+        self.egress_receipts.lock().await.remove(&session_key);
+        self.egress_sequence.lock().await.remove(&session_key);
+        self.egress_policies.lock().await.remove(&session_key);
+        self.proxy_receipt_cursors.lock().await.remove(&session_key);
+        self.session_telemetry.lock().await.remove(&session_key);
+        if let Some(provider) = &self.pinned_egress_proxy {
+            provider.release_session(&session_key).await;
+        }
+        self.dialogs.lock().await.remove(&session_key);
+        self.dialog_pages.lock().await.remove(&session_key);
         self.invalidate_live_frame_cache().await;
         Ok(())
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
         guard_navigation_target(url).await?;
+        self.require_configured_egress(session).await?;
         self.ensure_browser(session.lease.viewport).await?;
         let (tab_id, page, created) = match self.active_tab_page(session).await {
             Some((tab_id, page)) => (tab_id, page, false),
@@ -1159,6 +2021,372 @@ impl BrowserDriver for ChromiumoxideDriver {
                 .with_details(json!({ "error": e.to_string() }))
         })?;
         Ok(Bytes::from(html.into_bytes()))
+    }
+
+    async fn act_on_verified_target(
+        &self,
+        session: &BrowserSession,
+        action: VerifiedTargetAction,
+    ) -> QuarryResult<()> {
+        let page = self.current_page(session).await?;
+        if let Some(native_target) = action.native_target {
+            return execute_native_target_action(&page, native_target, action.operation).await;
+        }
+        let action_json = serde_json::to_string(&action).map_err(|error| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                format!("serialize verified target action: {error}"),
+            )
+        })?;
+        let script = format!(
+            r#"(() => {{
+                const request = {action_json};
+                const normalized = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const matches = Array.from(document.querySelectorAll(request.selector)).filter((element) =>
+                    element.tagName.toLowerCase() === request.tag &&
+                    request.attributes.every(([name, value]) => element.getAttribute(name) === value) &&
+                    normalized(element.textContent) === request.normalized_text
+                );
+                if (matches.length !== 1) return {{ ok: false, reason: 'target_not_unique_or_changed', match_count: matches.length }};
+                const element = matches[0];
+                switch (request.operation.type) {{
+                    case 'click': element.click(); break;
+                    case 'type': {{
+                        if (!('value' in element)) return {{ ok: false, reason: 'target_not_typeable' }};
+                        element.focus();
+                        const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                        if (!setter) return {{ ok: false, reason: 'value_setter_unavailable' }};
+                        setter.call(element, request.operation.text);
+                        element.dispatchEvent(new InputEvent('input', {{ bubbles: true, inputType: 'insertText', data: request.operation.text }}));
+                        element.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        break;
+                    }}
+                    case 'select': {{
+                        if (!(element instanceof HTMLSelectElement)) return {{ ok: false, reason: 'target_not_select' }};
+                        element.value = request.operation.value;
+                        if (element.value !== request.operation.value) return {{ ok: false, reason: 'select_value_unavailable' }};
+                        element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        element.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        break;
+                    }}
+                    case 'wait_for':
+                        // A snapshot ref names an already-observed element.
+                        // Reaching this point means it remains uniquely bound
+                        // and connected, which is the only safe interpretation
+                        // of wait-for without degrading to a fresh selector.
+                        break;
+                    default: return {{ ok: false, reason: 'unsupported_verified_operation' }};
+                }}
+                return {{ ok: true }};
+            }})()"#,
+        );
+        let result = page.evaluate(script).await.map_err(|error| {
+            QuarryError::new(ErrorCode::DriverFailed, "verified target action failed")
+                .with_details(json!({ "error": error.to_string() }))
+        })?;
+        let value = result
+            .into_value::<serde_json::Value>()
+            .unwrap_or(serde_json::Value::Null);
+        if value.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            Ok(())
+        } else {
+            Err(QuarryError::new(
+                ErrorCode::TargetRepairRequired,
+                "verified target changed or is no longer unique",
+            )
+            .with_details(value))
+        }
+    }
+
+    async fn upload_staged_file_to_target(
+        &self,
+        session: &BrowserSession,
+        target: BrowserNativeTarget,
+        staged_file: &Path,
+    ) -> QuarryResult<()> {
+        let path = staged_file.to_str().ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "Quarry staging path is not valid UTF-8 for CDP upload",
+            )
+        })?;
+        let page = self.current_page(session).await?;
+        // Resolve and inspect the exact backend node first. This is not a
+        // selector lookup: a stale node fails rather than being rebound to a
+        // later matching input. Child frames require their own current realm;
+        // using the top-level realm here would make an iframe upload depend on
+        // CDP implementation details instead of the explicit frame contract.
+        let execution_context_id = match target.frame_id.as_deref() {
+            Some(frame_id) => page
+                .frame_execution_context(FrameId::new(frame_id))
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::TargetRepairRequired,
+                        "upload target frame is no longer live; observe again",
+                    )
+                    .with_details(json!({ "frame_id": frame_id, "error": error.to_string() }))
+                })?
+                .ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::TargetRepairRequired,
+                        "upload target frame has no active execution context; observe again",
+                    )
+                    .with_details(json!({ "frame_id": frame_id }))
+                })
+                .map(Some)?,
+            None => None,
+        };
+        let mut resolve = ResolveNodeParams::builder()
+            .backend_node_id(BackendNodeId::new(target.backend_node_id));
+        if let Some(execution_context_id) = execution_context_id {
+            resolve = resolve.execution_context_id(execution_context_id);
+        }
+        let resolved = page.execute(resolve.build()).await.map_err(|error| {
+            QuarryError::new(
+                ErrorCode::TargetRepairRequired,
+                "upload target is no longer live; observe again",
+            )
+            .with_details(json!({ "ax_node_id": target.ax_node_id, "error": error.to_string() }))
+        })?;
+        let object_id = resolved.object.object_id.clone().ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::TargetRepairRequired,
+                "upload target could not be resolved; observe again",
+            )
+            .with_details(json!({ "ax_node_id": target.ax_node_id }))
+        })?;
+        let check = CallFunctionOnParams::builder()
+            .function_declaration(
+                "function() { return this instanceof HTMLInputElement && this.type === 'file' && this.isConnected; }",
+            )
+            .object_id(object_id.clone())
+            .return_by_value(true)
+            .build()
+            .map_err(|error| {
+                QuarryError::new(ErrorCode::Internal, "build upload target check failed")
+                    .with_details(json!({ "error": error }))
+            })?;
+        let check_result = page.execute(check).await;
+        let _ = page.execute(ReleaseObjectParams::new(object_id)).await;
+        let check_result = check_result.map_err(|error| {
+            QuarryError::new(ErrorCode::DriverFailed, "upload target check failed").with_details(
+                json!({ "ax_node_id": target.ax_node_id, "error": error.to_string() }),
+            )
+        })?;
+        if check_result.exception_details.is_some()
+            || check_result
+                .result
+                .result
+                .value
+                .as_ref()
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return Err(QuarryError::new(
+                ErrorCode::TargetRepairRequired,
+                "snapshot target is not a live file input; observe again",
+            )
+            .with_details(json!({ "ax_node_id": target.ax_node_id })));
+        }
+        let set_files = SetFileInputFilesParams::builder()
+            .file(path)
+            .backend_node_id(BackendNodeId::new(target.backend_node_id))
+            .build()
+            .map_err(|error| {
+                QuarryError::new(ErrorCode::Internal, "build governed upload command failed")
+                    .with_details(json!({ "error": error }))
+            })?;
+        page.execute(set_files).await.map_err(|error| {
+            QuarryError::new(
+                ErrorCode::TargetRepairRequired,
+                "upload target changed before file attachment; observe again",
+            )
+            .with_details(json!({ "ax_node_id": target.ax_node_id, "error": error.to_string() }))
+        })?;
+        Ok(())
+    }
+
+    async fn download_from_verified_target(
+        &self,
+        session: &BrowserSession,
+        target: BrowserNativeTarget,
+    ) -> QuarryResult<BrowserDownloadedFile> {
+        let session_key = Self::session_key(session);
+        let page = self.current_page(session).await?;
+        // AX nodes normally carry their owner frame, but Chromium can omit it
+        // for a top-level node. Never turn that omission into an "accept any
+        // download in this browser context" rule: derive the active page's
+        // root frame before installing the global Browser.download listeners.
+        // This keeps a concurrent tab in the same lease from satisfying the
+        // wrong action's download receipt.
+        let expected_frame_id = match target.frame_id.clone() {
+            Some(frame_id) => frame_id,
+            None => root_frame_id(&page).await?,
+        };
+        let (context_id, download_dir) = {
+            let pages = self.pages.lock().await;
+            let session_pages = pages.get(&session_key).ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "download session context is unavailable",
+                )
+            })?;
+            let context_id = session_pages.browser_context_id.clone().ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "download browser context is unavailable",
+                )
+            })?;
+            let download_dir = session_pages.download_dir.clone().ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "download quarantine directory is unavailable",
+                )
+            })?;
+            (context_id, download_dir)
+        };
+        // Subscribe before clicking. Browser.download* events are global to the
+        // Chromium process, so the event is additionally tied to this exact
+        // target's observed frame before its GUID is accepted.
+        let (mut begins, mut progress) = {
+            let browser_guard = self.browser.lock().await;
+            let browser = browser_guard.as_ref().ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide browser is unavailable",
+                )
+            })?;
+            let begins = browser
+                .event_listener::<EventDownloadWillBegin>()
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide download-begin listener failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            let progress = browser
+                .event_listener::<EventDownloadProgress>()
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide download-progress listener failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            (begins, progress)
+        };
+
+        execute_native_target_action(&page, target, VerifiedTargetOperation::Click).await?;
+
+        let began = tokio::time::timeout(DOWNLOAD_BEGIN_TIMEOUT, async {
+            while let Some(event) = begins.next().await {
+                let event_frame_id = event.frame_id.inner();
+                if expected_frame_id == event_frame_id.as_str() {
+                    return Some(event);
+                }
+            }
+            None
+        })
+        .await
+        .map_err(|_| QuarryError::new(ErrorCode::Timeout, "browser download did not begin"))?
+        .ok_or_else(|| {
+            QuarryError::new(ErrorCode::DriverFailed, "browser download listener ended")
+        })?;
+
+        let guid = began.guid.clone();
+        let completed_path = tokio::time::timeout(DOWNLOAD_COMPLETE_TIMEOUT, async {
+            while let Some(event) = progress.next().await {
+                if event.guid != guid {
+                    continue;
+                }
+                if event.received_bytes.is_finite()
+                    && event.received_bytes > MAX_GOVERNED_DOWNLOAD_BYTES as f64
+                {
+                    if let Some(browser) = self.browser.lock().await.as_ref() {
+                        if let Ok(cancel) = CancelDownloadParams::builder()
+                            .guid(guid.clone())
+                            .browser_context_id(context_id.clone())
+                            .build()
+                        {
+                            let _ = browser.execute(cancel).await;
+                        }
+                    }
+                    return Err(QuarryError::new(
+                        ErrorCode::BadRequest,
+                        "browser download exceeds the governed size limit",
+                    ));
+                }
+                match event.state {
+                    DownloadProgressState::Completed => return Ok(event.file_path.clone()),
+                    DownloadProgressState::Canceled => {
+                        return Err(QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "browser download was canceled",
+                        ));
+                    }
+                    DownloadProgressState::InProgress => {}
+                }
+            }
+            Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                "browser download progress listener ended",
+            ))
+        })
+        .await
+        .map_err(|_| QuarryError::new(ErrorCode::Timeout, "browser download did not complete"))??;
+
+        let root = tokio::fs::canonicalize(download_dir.path())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "download quarantine directory disappeared",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })?;
+        let candidate = completed_path
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join(&guid));
+        let file = tokio::fs::canonicalize(&candidate).await.map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "browser download file is unavailable",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        if !file.starts_with(&root) {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "browser download escaped Quarry's private quarantine directory",
+            ));
+        }
+        let metadata = tokio::fs::metadata(&file).await.map_err(|error| {
+            QuarryError::new(ErrorCode::DriverFailed, "inspect browser download failed")
+                .with_details(json!({ "error": error.to_string() }))
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_GOVERNED_DOWNLOAD_BYTES {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                "browser download failed governed type or size admission",
+            ));
+        }
+        let bytes = tokio::fs::read(file).await.map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "read quarantined browser download failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        Ok(BrowserDownloadedFile {
+            bytes: Bytes::from(bytes),
+            suggested_filename: sanitize_download_filename(&began.suggested_filename),
+            source_url: redact_egress_url(&began.url),
+        })
     }
 
     async fn screenshot(&self, _session: &BrowserSession, full_page: bool) -> QuarryResult<Bytes> {
@@ -1266,6 +2494,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         session: &BrowserSession,
         url: Option<&str>,
     ) -> QuarryResult<BrowserTab> {
+        self.require_configured_egress(session).await?;
         let (tab_id, page) = self.open_tab_page(session, url).await?;
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
@@ -1305,7 +2534,7 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn close_tab(&self, session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
         let session_key = Self::session_key(session);
-        let removed = {
+        let (removed, empty_context) = {
             let mut pages = self.pages.lock().await;
             let session_pages = pages.get_mut(&session_key).ok_or_else(|| {
                 QuarryError::new(
@@ -1326,10 +2555,14 @@ impl BrowserDriver for ChromiumoxideDriver {
                 session_pages.active_tab_id =
                     session_pages.tabs.first().map(|tab| tab.tab_id.clone());
             }
-            if session_pages.tabs.is_empty() {
-                pages.remove(&session_key);
-            }
-            removed
+            let empty_context = if session_pages.tabs.is_empty() {
+                pages
+                    .remove(&session_key)
+                    .and_then(|session_pages| session_pages.browser_context_id)
+            } else {
+                None
+            };
+            (removed, empty_context)
         };
 
         if let Err(err) = removed.page.close().await {
@@ -1338,6 +2571,18 @@ impl BrowserDriver for ChromiumoxideDriver {
                 error = %err,
                 "chromiumoxide close_tab failed"
             );
+        }
+        if let Some(context_id) = empty_context {
+            let browser_guard = self.browser.lock().await;
+            if let Some(browser) = browser_guard.as_ref() {
+                if let Err(error) = browser.dispose_browser_context(context_id).await {
+                    tracing::warn!(
+                        session_key = %session_key,
+                        error = %error,
+                        "chromiumoxide dispose_browser_context after final tab close failed"
+                    );
+                }
+            }
         }
         self.invalidate_live_frame_cache().await;
         Ok(())
@@ -1364,6 +2609,192 @@ impl BrowserDriver for ChromiumoxideDriver {
             })
             .unwrap_or_default();
         Ok(events)
+    }
+
+    async fn egress_receipts(
+        &self,
+        session: &BrowserSession,
+        after_sequence: u64,
+        limit: usize,
+    ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+        let session_key = Self::session_key(session);
+        let limit = limit.clamp(1, DEVTOOLS_EVENT_BUFFER_LIMIT);
+        self.synchronize_proxy_egress_receipts(&session_key).await?;
+        let buffers = self.egress_receipts.lock().await;
+        let Some(receipts) = buffers.get(&session_key) else {
+            return Ok(Vec::new());
+        };
+        if let Some(first_pending) = receipts
+            .iter()
+            .find(|receipt| receipt.sequence > after_sequence)
+        {
+            let expected = after_sequence.saturating_add(1);
+            if first_pending.sequence != expected {
+                return Err(QuarryError::new(
+                    ErrorCode::Conflict,
+                    "browser egress receipt continuity was lost; stop and re-observe",
+                )
+                .with_details(json!({
+                    "after_sequence": after_sequence,
+                    "first_available_sequence": first_pending.sequence,
+                })));
+            }
+        }
+        Ok(receipts
+            .iter()
+            .filter(|receipt| receipt.sequence > after_sequence)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn telemetry(&self, session: &BrowserSession) -> QuarryResult<BrowserTelemetry> {
+        let session_key = Self::session_key(session);
+        let base = self
+            .session_telemetry
+            .lock()
+            .await
+            .get(&session_key)
+            .cloned()
+            .unwrap_or_default();
+        let page = self.current_page(session).await?;
+        let metrics = page.metrics().await.map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide performance metrics query failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        let scaled_metric = |name: &str, scale: f64| {
+            metrics
+                .iter()
+                .find(|metric| metric.name == name)
+                .and_then(|metric| finite_metric_u64(metric.value, scale))
+        };
+        Ok(BrowserTelemetry {
+            renderer_task_cpu_ms: scaled_metric("TaskDuration", 1_000.0),
+            renderer_js_heap_used_bytes: scaled_metric("JSHeapUsedSize", 1.0),
+            ..base
+        })
+    }
+
+    async fn native_page_projection(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<BrowserNativeProjection> {
+        let page = self.current_page(session).await?;
+        page.execute(AccessibilityEnableParams::default())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide accessibility domain enable failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })?;
+        let ax_tree = page
+            .execute(GetFullAxTreeParams::builder().depth(8).build())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide accessibility tree capture failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })?;
+        let frame_tree = page
+            .execute(GetFrameTreeParams::default())
+            .await
+            .map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide frame tree capture failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })?;
+        let ax_tree = serde_json::to_value(&ax_tree.result).map_err(|error| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "chromiumoxide accessibility tree serialization failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        let frame_tree = serde_json::to_value(&frame_tree.result).map_err(|error| {
+            QuarryError::new(
+                ErrorCode::Internal,
+                "chromiumoxide frame tree serialization failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        Ok(native_projection_from_cdp(ax_tree, frame_tree))
+    }
+
+    async fn dialogs(&self, session: &BrowserSession) -> QuarryResult<Vec<BrowserDialog>> {
+        let session_key = Self::session_key(session);
+        Ok(self
+            .dialogs
+            .lock()
+            .await
+            .get(&session_key)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn respond_dialog(
+        &self,
+        session: &BrowserSession,
+        dialog_id: &str,
+        accept: bool,
+        prompt_text: Option<&str>,
+    ) -> QuarryResult<()> {
+        let session_key = Self::session_key(session);
+        {
+            let dialogs = self.dialogs.lock().await;
+            if !dialogs
+                .get(&session_key)
+                .is_some_and(|active| active.iter().any(|dialog| dialog.dialog_id == dialog_id))
+            {
+                return Err(QuarryError::new(
+                    ErrorCode::TargetRepairRequired,
+                    "dialog is no longer active; observe the browser again",
+                ));
+            }
+        }
+        let page = self
+            .dialog_pages
+            .lock()
+            .await
+            .get(&session_key)
+            .and_then(|pages| pages.get(dialog_id))
+            .cloned()
+            .ok_or_else(|| {
+                QuarryError::new(
+                    ErrorCode::TargetRepairRequired,
+                    "dialog no longer has an owning browser target; observe again",
+                )
+            })?;
+        let mut params = HandleJavaScriptDialogParams::new(accept);
+        params.prompt_text = prompt_text.map(str::to_owned);
+        page.execute(params).await.map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide dialog response failed",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+        self.dialogs
+            .lock()
+            .await
+            .entry(session_key.clone())
+            .and_modify(|active| active.retain(|dialog| dialog.dialog_id != dialog_id));
+        self.dialog_pages
+            .lock()
+            .await
+            .entry(Self::session_key(session))
+            .and_modify(|pages| {
+                pages.remove(dialog_id);
+            });
+        Ok(())
     }
 
     async fn wait_for(
@@ -1631,6 +3062,38 @@ impl BrowserDriver for ChromiumoxideDriver {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     }
+}
+
+/// Return the opaque top-level frame id for the active page. This stays inside
+/// the driver and is used only to correlate an otherwise frame-less native AX
+/// target to the download event that its click causes.
+async fn root_frame_id(page: &Page) -> QuarryResult<String> {
+    let frame_tree = page
+        .execute(GetFrameTreeParams::default())
+        .await
+        .map_err(|error| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide root frame lookup failed for governed download",
+            )
+            .with_details(json!({ "error": error.to_string() }))
+        })?;
+    serde_json::to_value(&frame_tree.result)
+        .ok()
+        .and_then(|tree| {
+            tree.get("frameTree")
+                .and_then(|frame_tree| frame_tree.get("frame"))
+                .and_then(|frame| frame.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .filter(|frame_id| !frame_id.is_empty())
+        .ok_or_else(|| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                "chromiumoxide root frame id is unavailable for governed download",
+            )
+        })
 }
 
 impl Drop for ChromiumoxideDriver {

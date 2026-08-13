@@ -1,5 +1,12 @@
 .PHONY: bootstrap build build-rust build-go test test-rust test-go test-vision bench-browser fmt lint dev down clean tidy
 
+# Keep host-side compiler caches off the internal disk and source volume.
+CORE_SYSTEM_CACHE_ROOT ?= /Volumes/Applikasjon/Triodelab/CoreSystem-build-cache
+CARGO_TARGET_DIR ?= $(CORE_SYSTEM_CACHE_ROOT)/cargo/quarry-v2
+GOCACHE ?= $(CORE_SYSTEM_CACHE_ROOT)/go/build
+GOMODCACHE ?= $(CORE_SYSTEM_CACHE_ROOT)/go/mod
+export CARGO_TARGET_DIR GOCACHE GOMODCACHE
+
 bootstrap:
 	@command -v cargo >/dev/null || { echo "install rust toolchain: https://rustup.rs"; exit 1; }
 	@command -v go >/dev/null || { echo "install go: https://go.dev/dl/"; exit 1; }

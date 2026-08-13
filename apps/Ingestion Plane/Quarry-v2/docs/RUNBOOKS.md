@@ -78,7 +78,7 @@ This is by design — the AgentLoop enforces `max_cost_usd` and aborts gracefull
 
 1. Verify Model Plane browser-broker is reachable:
    ```bash
-   grpcurl -plaintext model-plane-broker:9090 model_plane.v1.BrowserBrokerService/Health
+   grpcurl -plaintext model-plane-broker:9090 model_plane.v1.BrowserBroker/Health
    ```
 2. Check grant TTL — default is 60 minutes. Long-running agents should refresh.
 3. If the broker is down, Quarry falls back to `NoopGrantValidator` only when configured to (dev mode) — production should NEVER set `BROWSER_BROKER_GRPC=` empty.

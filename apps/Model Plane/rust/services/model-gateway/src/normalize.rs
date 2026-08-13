@@ -19,6 +19,10 @@ pub struct NormalizedRequest {
     pub session_key: Option<String>,
     #[allow(dead_code)]
     pub thread_id: Option<String>,
+    /// Server-injected Control decision for a newly-created scoped thread.
+    /// Session Core is still the trust boundary and verifies its signature.
+    pub space_context: Option<crate::session_flow::ThreadSpaceContext>,
+    pub space_append_context: Option<crate::session_flow::ThreadSpaceContext>,
     pub structured_output_schema: Option<String>,
     pub zdr: bool,
     pub max_cost_usd: Option<f64>,
@@ -132,6 +136,8 @@ pub fn normalize(
         model,
         session_key: req.session_key.clone(),
         thread_id: req.thread_id.clone(),
+        space_context: req.space_context.clone(),
+        space_append_context: req.space_append_context.clone(),
         structured_output_schema: req.structured_output_schema.clone(),
         zdr: req.zdr,
         max_cost_usd: req.max_cost_usd,
@@ -151,6 +157,8 @@ mod tests {
             model: model.map(str::to_owned),
             session_key: None,
             thread_id: None,
+            space_context: None,
+            space_append_context: None,
             structured_output_schema: None,
             zdr: false,
             browse_web: false,

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use quarry_browser::{
     actions::{Action, ActionScript, OnError, ScrollTarget},
-    BrowserDriver, BrowserSession,
+    BrowserDriver, BrowserEgressPolicy, BrowserSession,
 };
 use quarry_core::{
     error::QuarryResult,
@@ -66,6 +66,11 @@ pub struct ActionRuntime {
     events: Option<EventSink>,
     run_id: Option<RunKind>,
     page_hash: Option<String>,
+    /// Network authority for every browser page this runtime can create. It
+    /// starts deny-all: ActionRuntime is used outside the agent-route request
+    /// type, so it must not silently invent a broader grant from an action
+    /// script's URLs.
+    egress_policy: BrowserEgressPolicy,
     /// Verified org of the owning run — stamped onto every screenshot/PDF this
     /// runtime stores so the bytes are only readable back by that tenant. Set
     /// via [`ActionRuntime::with_run_context`].
@@ -87,6 +92,7 @@ impl ActionRuntime {
             events: None,
             run_id: None,
             page_hash: None,
+            egress_policy: BrowserEgressPolicy::deny_all(),
             org_id: String::new(),
         }
     }
@@ -108,6 +114,15 @@ impl ActionRuntime {
         self
     }
 
+    /// Supply the already-authorized, canonical host policy for this action
+    /// run. Without this explicit call, browser acquisition remains deny-all
+    /// and a driver that cannot install the boundary is rejected before any
+    /// navigation can occur.
+    pub fn with_egress_policy(mut self, policy: BrowserEgressPolicy) -> Self {
+        self.egress_policy = policy;
+        self
+    }
+
     /// `org_id` must be the verified org claim of the run — it becomes the
     /// tenant of record for every artifact this runtime writes.
     pub fn with_run_context(
@@ -124,7 +139,17 @@ impl ActionRuntime {
 
     pub async fn acquire(&mut self, lease: &BrowserLease) -> QuarryResult<()> {
         if let Some(driver) = &self.browser {
-            self.session = Some(driver.acquire(lease).await?);
+            let session = driver.acquire(lease).await?;
+            if let Err(error) = driver
+                .configure_egress_policy(&session, self.egress_policy.clone())
+                .await
+            {
+                // Do not leave a session around after a boundary-install
+                // failure; a future caller must acquire a clean context.
+                let _ = driver.release(session).await;
+                return Err(error);
+            }
+            self.session = Some(session);
         }
         Ok(())
     }

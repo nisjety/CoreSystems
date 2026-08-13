@@ -1433,10 +1433,29 @@ pub(crate) async fn proxy_bearer_json(
     bearer_token: Option<&str>,
     user_id: &str,
 ) -> (StatusCode, Json<Value>) {
+    proxy_bearer_json_with_headers(state, method, url, body, bearer_token, user_id, &[]).await
+}
+
+/// As `proxy_bearer_json`, with explicitly supplied server-owned headers. This
+/// exists for target-bound authority envelopes; callers must never copy a
+/// browser header into this list.
+pub(crate) async fn proxy_bearer_json_with_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    user_id: &str,
+    extra_headers: &[(String, String)],
+) -> (StatusCode, Json<Value>) {
     let mut req = state
         .client
         .request(method, url)
         .header("x-user-id", user_id);
+
+    for (name, value) in extra_headers {
+        req = req.header(name, value);
+    }
 
     if let Some(token) = bearer_token {
         req = req.bearer_auth(token);

@@ -1,7 +1,9 @@
 package cron
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -78,7 +80,7 @@ func TestTaskConfigJSON(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := taskConfigJSON([]byte(tc.template))
+			got := taskConfigJSON([]byte(tc.template), nil)
 
 			// Mirror dispatchPlan exactly: plain Unmarshal into the dispatch
 			// template. If this errors, the dispatcher would fail the task.
@@ -105,12 +107,70 @@ func TestTaskConfigJSON(t *testing.T) {
 	}
 }
 
+func TestSweeperFailsClosedWithoutFreshFireAuthorizer(t *testing.T) {
+	_, err := NewSweeper(nil).RunOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "authorizer") {
+		t.Fatalf("unconfigured sweeper must refuse to claim schedules, got %v", err)
+	}
+}
+
 // The column is NOT NULL, so the function must never return something Postgres
 // would reject as a jsonb value.
 func TestTaskConfigJSONIsNeverEmptyBytes(t *testing.T) {
 	for _, template := range []string{``, `null`, `[]`, `"x"`, `{`, `  `} {
-		if got := taskConfigJSON([]byte(template)); len(got) == 0 {
+		if got := taskConfigJSON([]byte(template), nil); len(got) == 0 {
 			t.Errorf("taskConfigJSON(%q) returned empty bytes; NOT NULL jsonb needs a value", template)
 		}
+	}
+}
+
+func TestTaskConfigCarriesNonSecretFireIntentButNoDecisionToken(t *testing.T) {
+	intent := &FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
+		FireKey: "2026-08-13T00:00:00Z", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		IdempotencyKey: "schedule-1:2026-08-13T00:00:00Z",
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(taskConfigJSON([]byte(`{"workflow_type":"x"}`), intent), &got); err != nil {
+		t.Fatalf("decode task config: %v", err)
+	}
+	if _, ok := got["schedule_fire_intent"]; !ok {
+		t.Fatal("fired task is missing the non-secret reauthorization intent")
+	}
+	if strings.Contains(string(got["schedule_fire_intent"]), "token") {
+		t.Fatalf("task config must not retain a Control bearer: %s", got["schedule_fire_intent"])
+	}
+}
+
+func TestMalformedTemplateCannotDropFreshFireIntent(t *testing.T) {
+	intent := &FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
+		FireKey: "2026-08-13T00:00:00Z", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		IdempotencyKey: "schedule-1:2026-08-13T00:00:00Z",
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(taskConfigJSON([]byte(`{"workflow_type":`), intent), &got); err != nil {
+		t.Fatalf("decode normalized malformed template: %v", err)
+	}
+	if _, ok := got["schedule_fire_intent"]; !ok {
+		t.Fatal("malformed template erased the required fresh-fire intent")
+	}
+}
+
+func TestTemplateCannotOverrideSchedulerDerivedFireIntent(t *testing.T) {
+	intent := &FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-real",
+		FireKey: "2026-08-13T00:00:00Z", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		IdempotencyKey: "schedule-real:2026-08-13T00:00:00Z",
+	}
+	template := `{"schedule_fire_intent":{"schedule_id":"attacker"}}`
+	var got struct {
+		Intent FireIntent `json:"schedule_fire_intent"`
+	}
+	if err := json.Unmarshal(taskConfigJSON([]byte(template), intent), &got); err != nil {
+		t.Fatalf("decode task config: %v", err)
+	}
+	if got.Intent.ScheduleID != intent.ScheduleID || got.Intent.OrgID != intent.OrgID {
+		t.Fatalf("template overrode scheduler-derived fire intent: %+v", got.Intent)
 	}
 }

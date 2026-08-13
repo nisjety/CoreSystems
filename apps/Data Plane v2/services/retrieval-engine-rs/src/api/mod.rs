@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
     routing::{get, post},
@@ -555,6 +555,16 @@ fn router_inner(
         .route("/v1/retrieve/chunks", post(retrieve_chunks))
         .route("/v1/retrieve/compare", post(retrieve_compare))
         .route("/v1/index/versions", get(list_index_versions))
+        // Canonical Control Space → actual Data target mapping. This is a
+        // service/owner-plane provisioning path, never a browser action.
+        .route(
+            "/v1/internal/space-retrieval-bindings",
+            post(upsert_space_retrieval_binding),
+        )
+        .route(
+            "/v1/internal/space-retrieval-bindings/delete",
+            post(revoke_space_retrieval_binding),
+        )
         // Admin cleanup (DATA-22 / v2.2)
         .route("/v1/admin/cleanup/orphans", post(cleanup_orphans))
         // App Shell read-only knowledge API (DATA-17)
@@ -590,6 +600,10 @@ fn router_inner(
             state.clone(),
             auth_middleware,
         ))
+        // A Space decision is authority, not a hint. Until every auxiliary
+        // retrieval arm can enforce the exact resolved mapping, never allow a
+        // caller to present one to an endpoint that would otherwise ignore it.
+        .route_layer(middleware::from_fn(reject_unenforced_space_decision))
         .with_state(state.clone());
 
     let mut app = Router::new()
@@ -618,9 +632,30 @@ fn router_inner(
     .with_state(state)
 }
 
+fn space_decision_is_enforced_for_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/retrieve" | "/v1/retrieve/hybrid" | "/v1/knowledge/search"
+    )
+}
+
+async fn reject_unenforced_space_decision(
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    if request.headers().contains_key("x-space-decision")
+        && !space_decision_is_enforced_for_path(request.uri().path())
+    {
+        return AppError::forbidden("Space-scoped retrieval is not available for this endpoint")
+            .into_response();
+    }
+    next.run(request).await
+}
+
 async fn retrieve(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
     Json(mut req): Json<RetrievalRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Wave-3.1 §15-C completion: when an AuthContext was injected by the
@@ -629,6 +664,36 @@ async fn retrieve(
     // are intersected with what org-core says the user can see.
     if let Some(axum::extract::Extension(ctx)) = auth.as_ref() {
         ctx.apply_to_request(&mut req);
+    }
+    // A Space bearer is optional for legacy org-scoped retrieval, but whenever
+    // it is supplied it is verified and resolved before the pipeline can see
+    // any caller-controlled workspace/collection filter.
+    if let Some(token) = headers
+        .get("x-space-decision")
+        .and_then(|value| value.to_str().ok())
+    {
+        let ctx = auth.as_ref().ok_or_else(|| {
+            AppError::forbidden("authenticated subject required for Space retrieval")
+        })?;
+        let subject = ctx
+            .user_id
+            .as_deref()
+            .ok_or_else(|| AppError::forbidden("user subject required for Space retrieval"))?;
+        let keys = crate::space_scope::configured_retrieval_decision_keys()
+            .map_err(|_| AppError::forbidden("Space decision verification is unavailable"))?;
+        let authority = crate::space_scope::verify_retrieval_space_decision(
+            token,
+            &keys,
+            &ctx.org_id,
+            subject,
+            chrono::Utc::now(),
+        )
+        .map_err(|_| AppError::forbidden("invalid Space retrieval decision"))?;
+        req.space_scope = Some(
+            crate::space_scope::resolve_space_retrieval_scope(&pipeline.pool, authority)
+                .await
+                .map_err(|_| AppError::forbidden("Space retrieval binding is unavailable"))?,
+        );
     }
     let resp = pipeline.retrieve(req).await?;
     Ok(Json(resp))
@@ -894,6 +959,321 @@ fn default_true() -> bool {
     true
 }
 
+/// A Data-owner provisioning request for one active, canonical Space mapping.
+/// Tenant identity is deliberately absent: the verified Data JWT supplies it.
+/// The dedicated scope is issued only to the owner-plane provisioning identity,
+/// not to user/browser or Model retrieval credentials.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpsertSpaceRetrievalBindingRequest {
+    space_ref: String,
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    collection_id: Option<String>,
+    owner_resource_ref: String,
+    resource_authorization_ref: String,
+    reason: String,
+    idempotency_key: String,
+}
+
+struct AuthorizedSpaceBindingMutation {
+    actor: String,
+    idempotency_key: String,
+    reason: String,
+}
+
+fn required_space_binding_value(value: &str, _field: &'static str) -> Result<String, AppError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control) {
+        return Err(AppError::bad_request(
+            "Space binding values must be 1-512 printable characters",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn optional_space_binding_target(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<Option<String>, AppError> {
+    value
+        .map(|value| required_space_binding_value(&value, field))
+        .transpose()
+}
+
+fn authorize_space_binding_mutation(
+    ctx: &crate::authz::AuthContext,
+    req: &UpsertSpaceRetrievalBindingRequest,
+) -> Result<AuthorizedSpaceBindingMutation, AppError> {
+    if ctx.auth_method != crate::authz::AuthMethod::Jwt {
+        return Err(AppError::forbidden(
+            "Space binding requires a verified service delegation",
+        ));
+    }
+    let admin = authorize_admin_mutation(
+        ctx,
+        None,
+        "data:space-binding:write",
+        false,
+        &req.reason,
+        Some(&req.idempotency_key),
+    )?;
+    // A service token with a blank tenant can never configure a global mapping.
+    if ctx.org_id.trim().is_empty() {
+        return Err(AppError::forbidden("verified tenant is required"));
+    }
+    Ok(AuthorizedSpaceBindingMutation {
+        actor: admin.actor,
+        idempotency_key: admin
+            .idempotency_key
+            .expect("non-dry-run authorization requires idempotency key"),
+        reason: admin.reason,
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevokeSpaceRetrievalBindingRequest {
+    deletion_request_id: String,
+    space_ref: String,
+    reason: String,
+    idempotency_key: String,
+}
+
+// A Space deletion can revoke only the Space→Data mapping here. The mapped
+// workspace/collection may be a shared or private owner resource, so deleting
+// its documents from this endpoint would wrongly turn Space membership into a
+// wider resource-deletion authority.
+fn authorize_space_binding_revocation(
+    ctx: &crate::authz::AuthContext,
+    req: &RevokeSpaceRetrievalBindingRequest,
+) -> Result<AuthorizedSpaceBindingMutation, AppError> {
+    if ctx.auth_method != crate::authz::AuthMethod::Jwt {
+        return Err(AppError::forbidden(
+            "Space binding deletion requires a verified service delegation",
+        ));
+    }
+    // A scope alone is not sufficient to authorize a cross-plane data-subject
+    // deletion. Pin the reviewed Control workload exactly so a human/admin or
+    // unrelated service cannot repurpose binding revocation as Space teardown.
+    if ctx.user_id.as_deref() != Some("service:control-space-deletion") {
+        return Err(AppError::forbidden(
+            "only the Control space-deletion coordinator may revoke Space bindings",
+        ));
+    }
+    required_space_binding_value(&req.deletion_request_id, "deletion_request_id")?;
+    let admin = authorize_admin_mutation(
+        ctx,
+        None,
+        "data:space-binding:delete",
+        false,
+        &req.reason,
+        Some(&req.idempotency_key),
+    )?;
+    Ok(AuthorizedSpaceBindingMutation {
+        actor: admin.actor,
+        idempotency_key: admin
+            .idempotency_key
+            .expect("non-dry-run authorization requires idempotency key"),
+        reason: admin.reason,
+    })
+}
+
+async fn revoke_space_retrieval_binding(
+    State(pipeline): State<AppState>,
+    auth: axum::extract::Extension<crate::authz::AuthContext>,
+    Json(req): Json<RevokeSpaceRetrievalBindingRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let authorized = authorize_space_binding_revocation(&auth, &req)?;
+    let space_ref = required_space_binding_value(&req.space_ref, "space_ref")?;
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &auth.org_id).await?;
+    let lock_key = format!("space_retrieval_binding:{}:{space_ref}", auth.org_id);
+    sqlx::query_scalar::<_, ()>("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .fetch_one(&mut *tx)
+        .await?;
+    let changed = sqlx::query(
+        "UPDATE space_retrieval_bindings
+         SET binding_state = 'revoked', revoked_at = NOW(), updated_at = NOW()
+         WHERE org_id = $1 AND space_ref = $2 AND binding_state = 'active'",
+    )
+    .bind(&auth.org_id)
+    .bind(&space_ref)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    let payload = serde_json::json!({
+        "deletion_request_id": req.deletion_request_id,
+        "reason": authorized.reason,
+        "idempotency_key": authorized.idempotency_key,
+        "space_ref": space_ref,
+        "active_bindings_revoked": changed,
+        "owner_outcome": "partial",
+        "remaining_work": "resource-owner purge required for mapped workspace/collection",
+    });
+    sqlx::query(
+        "INSERT INTO admin_audit_log
+         (org_id, actor, action, target_kind, target_id, request_id, payload, outcome)
+         VALUES ($1, $2, 'space_retrieval_binding_revoke', 'space', $3, $4, $5, 'ok')",
+    )
+    .bind(&auth.org_id)
+    .bind(&authorized.actor)
+    .bind(&space_ref)
+    .bind(&auth.request_id)
+    .bind(&payload)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(serde_json::json!({
+        "request_id": req.deletion_request_id,
+        "owner_plane": "data",
+        "org_id": auth.org_id,
+        "space_ref": space_ref,
+        "active_bindings_revoked": changed,
+        "owner_outcome": "partial",
+        "remaining_work": "resource-owner purge required for mapped workspace/collection",
+    })))
+}
+
+fn is_binding_replay_for_request(
+    previous: &serde_json::Value,
+    requested: &serde_json::Value,
+) -> bool {
+    previous.get("request") == Some(requested)
+}
+
+/// Replace the one active mapping for a Space atomically. The caller may only
+/// select a Data workspace/collection as a configuration target; it cannot set
+/// tenant identity. The normal retrieval path still requires an independently
+/// signed Control decision whose current resource authorization reference
+/// matches this row, so provisioning authority cannot become read authority.
+async fn upsert_space_retrieval_binding(
+    State(pipeline): State<AppState>,
+    auth: axum::extract::Extension<crate::authz::AuthContext>,
+    Json(req): Json<UpsertSpaceRetrievalBindingRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let authorized = authorize_space_binding_mutation(&auth, &req)?;
+    let space_ref = required_space_binding_value(&req.space_ref, "space_ref")?;
+    let owner_resource_ref =
+        required_space_binding_value(&req.owner_resource_ref, "owner_resource_ref")?;
+    let resource_authorization_ref = required_space_binding_value(
+        &req.resource_authorization_ref,
+        "resource_authorization_ref",
+    )?;
+    let workspace_id = optional_space_binding_target(req.workspace_id, "workspace_id")?;
+    let collection_id = optional_space_binding_target(req.collection_id, "collection_id")?;
+    if workspace_id.is_none() && collection_id.is_none() {
+        return Err(AppError::bad_request(
+            "workspace_id or collection_id is required",
+        ));
+    }
+    // The receipt binds the exact mapping request. An idempotency replay with
+    // a changed target or authorization reference is a conflict, never an
+    // accidental successful replay of a different configuration effect.
+    let requested_mapping = serde_json::json!({
+        "space_ref": space_ref.clone(),
+        "workspace_id": workspace_id.clone(),
+        "collection_id": collection_id.clone(),
+        "owner_resource_ref": owner_resource_ref.clone(),
+        "resource_authorization_ref": resource_authorization_ref.clone(),
+    });
+
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &auth.org_id).await?;
+    let lock_key = format!("space_retrieval_binding:{}:{space_ref}", auth.org_id);
+    sqlx::query_scalar::<_, ()>("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    let previous: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT payload FROM admin_audit_log
+         WHERE org_id = $1 AND action = 'space_retrieval_binding_upsert'
+           AND target_kind = 'space' AND target_id = $2
+           AND outcome = 'ok' AND payload->>'idempotency_key' = $3
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&auth.org_id)
+    .bind(&space_ref)
+    .bind(&authorized.idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(payload) = previous {
+        if !is_binding_replay_for_request(&payload, &requested_mapping) {
+            tx.rollback().await?;
+            return Err(AppError::conflict(
+                "idempotency key belongs to a different Space binding request",
+            ));
+        }
+        tx.rollback().await?;
+        return Ok(Json(serde_json::json!({
+            "org_id": auth.org_id,
+            "space_ref": space_ref,
+            "idempotent_replay": true,
+            "binding": payload.get("binding").cloned().unwrap_or(serde_json::Value::Null),
+        })));
+    }
+
+    sqlx::query(
+        "UPDATE space_retrieval_bindings
+         SET binding_state = 'revoked', revoked_at = NOW(), updated_at = NOW()
+         WHERE org_id = $1 AND space_ref = $2 AND binding_state = 'active'",
+    )
+    .bind(&auth.org_id)
+    .bind(&space_ref)
+    .execute(&mut *tx)
+    .await?;
+    let binding_id: String = sqlx::query_scalar(
+        "INSERT INTO space_retrieval_bindings
+         (space_ref, org_id, workspace_id, collection_id, owner_resource_ref, resource_authorization_ref)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING binding_id",
+    )
+    .bind(&space_ref)
+    .bind(&auth.org_id)
+    .bind(&workspace_id)
+    .bind(&collection_id)
+    .bind(&owner_resource_ref)
+    .bind(&resource_authorization_ref)
+    .fetch_one(&mut *tx)
+    .await?;
+    let binding = serde_json::json!({
+        "binding_id": binding_id,
+        "space_ref": space_ref,
+        "workspace_id": workspace_id,
+        "collection_id": collection_id,
+        "owner_resource_ref": owner_resource_ref,
+        "resource_authorization_ref": resource_authorization_ref,
+        "binding_state": "active",
+    });
+    let payload = serde_json::json!({
+        "reason": authorized.reason,
+        "idempotency_key": authorized.idempotency_key,
+        "request": requested_mapping,
+        "binding": binding,
+    });
+    sqlx::query(
+        "INSERT INTO admin_audit_log
+         (org_id, actor, action, target_kind, target_id, request_id, payload, outcome)
+         VALUES ($1, $2, 'space_retrieval_binding_upsert', 'space', $3, $4, $5, 'ok')",
+    )
+    .bind(&auth.org_id)
+    .bind(&authorized.actor)
+    .bind(&space_ref)
+    .bind(&auth.request_id)
+    .bind(&payload)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(Json(serde_json::json!({
+        "org_id": auth.org_id,
+        "space_ref": space_ref,
+        "idempotent_replay": false,
+        "binding": binding,
+    })))
+}
+
 // D5: Graph expansion retrieval
 #[derive(serde::Deserialize)]
 struct GraphRetrieveRequest {
@@ -1126,6 +1506,7 @@ fn pack_retrieval_request(
         mode_mix: None,
         agent_id: None,
         admin_read_all: false,
+        space_scope: None,
     };
     auth.apply_to_request(&mut retrieval);
     Ok(retrieval)
@@ -2175,6 +2556,92 @@ mod admin_security_tests {
         assert_eq!(preview.org_id, "org-a");
         assert!(preview.dry_run);
     }
+
+    fn binding_request() -> UpsertSpaceRetrievalBindingRequest {
+        UpsertSpaceRetrievalBindingRequest {
+            space_ref: "space-1".to_owned(),
+            workspace_id: Some("workspace-1".to_owned()),
+            collection_id: None,
+            owner_resource_ref: "data:workspace:workspace-1".to_owned(),
+            resource_authorization_ref: "control:space-1:resource:7".to_owned(),
+            reason: "provision personal Space retrieval binding".to_owned(),
+            idempotency_key: "space-binding-op-1".to_owned(),
+        }
+    }
+
+    #[test]
+    fn space_binding_requires_its_own_jwt_scope_and_valid_targets() {
+        let request = binding_request();
+        assert!(authorize_space_binding_mutation(&ctx(&[]), &request).is_err());
+        assert!(authorize_space_binding_mutation(&ctx(&["data:admin:cleanup"]), &request).is_err());
+
+        let allowed =
+            authorize_space_binding_mutation(&ctx(&["data:space-binding:write"]), &request)
+                .expect("dedicated service scope");
+        assert_eq!(allowed.actor, "admin-user");
+        assert_eq!(allowed.idempotency_key, "space-binding-op-1");
+        assert!(optional_space_binding_target(None, "workspace_id")
+            .expect("optional target")
+            .is_none());
+        assert!(required_space_binding_value("\u{0000}", "space_ref").is_err());
+
+        let mut api_key_ctx = ctx(&["data:space-binding:write"]);
+        api_key_ctx.auth_method = AuthMethod::ApiKey;
+        assert!(authorize_space_binding_mutation(&api_key_ctx, &request).is_err());
+    }
+
+    #[test]
+    fn space_binding_deletion_requires_a_distinct_scope_and_preserves_resource_owner_boundary() {
+        let request = RevokeSpaceRetrievalBindingRequest {
+            deletion_request_id: "delete-request-1".to_owned(),
+            space_ref: "space-1".to_owned(),
+            reason: "authorized Space deletion request".to_owned(),
+            idempotency_key: "space-delete-op-1".to_owned(),
+        };
+        assert!(authorize_space_binding_revocation(&ctx(&[]), &request).is_err());
+        assert!(
+            authorize_space_binding_revocation(&ctx(&["data:space-binding:write"]), &request)
+                .is_err()
+        );
+        assert!(
+            authorize_space_binding_revocation(&ctx(&["data:space-binding:delete"]), &request)
+                .is_err(),
+            "a human/admin scope must not impersonate the deletion coordinator",
+        );
+        let mut coordinator = ctx(&["data:space-binding:delete"]);
+        coordinator.user_id = Some("service:control-space-deletion".to_owned());
+        let allowed = authorize_space_binding_revocation(&coordinator, &request)
+            .expect("exact coordinator and dedicated deletion scope");
+        assert_eq!(allowed.idempotency_key, "space-delete-op-1");
+        let mut api_key_ctx = ctx(&["data:space-binding:delete"]);
+        api_key_ctx.user_id = Some("service:control-space-deletion".to_owned());
+        api_key_ctx.auth_method = AuthMethod::ApiKey;
+        assert!(authorize_space_binding_revocation(&api_key_ctx, &request).is_err());
+    }
+
+    #[test]
+    fn space_binding_idempotency_replay_is_bound_to_the_exact_request() {
+        let original = serde_json::json!({
+            "space_ref": "space-1", "workspace_id": "workspace-1", "collection_id": null,
+            "owner_resource_ref": "resource-1", "resource_authorization_ref": "grant-1",
+        });
+        let receipt =
+            serde_json::json!({"request": original, "binding": {"binding_id": "binding-1"}});
+        assert!(is_binding_replay_for_request(
+            &receipt,
+            &serde_json::json!({
+                "space_ref": "space-1", "workspace_id": "workspace-1", "collection_id": null,
+                "owner_resource_ref": "resource-1", "resource_authorization_ref": "grant-1",
+            })
+        ));
+        assert!(!is_binding_replay_for_request(
+            &receipt,
+            &serde_json::json!({
+                "space_ref": "space-1", "workspace_id": "workspace-2", "collection_id": null,
+                "owner_resource_ref": "resource-1", "resource_authorization_ref": "grant-1",
+            })
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2197,6 +2664,32 @@ mod auxiliary_security_tests {
 
     fn pack_request(value: serde_json::Value) -> PackRequest {
         serde_json::from_value(value).expect("valid pack request")
+    }
+
+    #[test]
+    fn space_decision_is_never_silently_ignored_by_an_auxiliary_endpoint() {
+        for path in [
+            "/v1/retrieve",
+            "/v1/retrieve/hybrid",
+            "/v1/knowledge/search",
+        ] {
+            assert!(
+                space_decision_is_enforced_for_path(path),
+                "{path} has the verified Space-scope handler"
+            );
+        }
+        for path in [
+            "/v1/retrieve/graph",
+            "/v1/retrieve/wiki",
+            "/v1/retrieve/pack",
+            "/v1/knowledge/graph",
+            "/v1/context/preload",
+        ] {
+            assert!(
+                !space_decision_is_enforced_for_path(path),
+                "{path} must reject rather than ignore a Space decision"
+            );
+        }
     }
 
     #[test]

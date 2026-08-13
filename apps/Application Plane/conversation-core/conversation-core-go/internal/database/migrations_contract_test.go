@@ -93,3 +93,40 @@ func TestCSATOutcomeMigrationIsScoreOnlyAndTenantScoped(t *testing.T) {
 		}
 	}
 }
+
+func TestTicketOperationMigrationIsIdempotentAndContentFree(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("migrations", "028_ticket_operations.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(contents))
+	for _, required := range []string{
+		"conversation_ticket_operations", "unique (org_id, idempotency_key)",
+		"request_sha256", "audit_event_id", "'completed', 'unknown'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"body_text", "body_html", "payload json", "message_content"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("ticket operation ledger stores forbidden content %q", forbidden)
+		}
+	}
+}
+
+func TestTicketOperationOutboxDeliveryMigrationIsLeasedAndRetryable(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("migrations", "029_ticket_operation_outbox_delivery.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := strings.ToLower(string(contents))
+	for _, required := range []string{
+		"delivery_attempts", "lease_owner", "lease_expires_at", "next_attempt_at",
+		"last_delivery_error", "payload ? 'operation_id'",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+}

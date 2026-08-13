@@ -5,8 +5,8 @@ use quarry_core::cache::{CacheMode, CachePolicy};
 use quarry_core::contracts::{
     ActionOutcome, ActionOutcomeStatus, AgentAction, AgentActionRequest, AgentConstraints,
     BrowserObservation, ChunkRef, DataPlaneIngestRequest, DataPlaneIngestResponse, DomSummary,
-    EmbeddingStatus, ExtractionUsage, IndexStatus, InteractiveElement, SourceTrace,
-    StructuredExtractRequest, StructuredExtractResponse,
+    EmbeddingStatus, ExtractionUsage, IndexStatus, InteractiveElement, BrowserTelemetry, SemanticLocator,
+    SourceTrace, StructuredExtractRequest, StructuredExtractResponse,
 };
 use quarry_core::envelope::{Envelope, EnvelopeMeta};
 use quarry_core::error::{ErrorCode, QuarryError};
@@ -166,6 +166,7 @@ fn browser_observation_serde_roundtrip() {
         step: 3,
         url: "https://example.com".into(),
         title: Some("Example".into()),
+        snapshot: None,
         dom_summary: Some(DomSummary {
             node_count: 42,
             interactive_elements: vec![InteractiveElement {
@@ -175,14 +176,20 @@ fn browser_observation_serde_roundtrip() {
                 text: Some("Submit".into()),
                 role: Some("button".into()),
                 aria_label: Some("Submit".into()),
+                accessible_name: Some("Submit".into()),
+                placeholder: None,
+                test_id: None,
                 fingerprint: None,
             }],
             text_snippet: Some("Hello world".into()),
         }),
         screenshot_artifact_id: None,
         visual_observation_artifact_id: None,
+        evidence_delta_artifact_id: None,
         console_summary: vec![],
         network_summary: vec![],
+        egress_receipts: vec![],
+        dialogs: vec![],
         policy_denials: vec!["blocked: private IP".into()],
         action_outcome: ActionOutcome::unknown("not_verified", "test observation"),
         observation_delta: None,
@@ -190,6 +197,8 @@ fn browser_observation_serde_roundtrip() {
         extraction_profile: None,
         extraction_result: None,
         proof_bundle: None,
+        target_resolution: None,
+        telemetry: BrowserTelemetry::default(),
         observed_at: chrono::Utc::now(),
     };
     let json = serde_json::to_string(&obs).unwrap();
@@ -253,9 +262,38 @@ fn agent_action_all_variants_serialize() {
         AgentAction::Click {
             selector: "#a".into(),
         },
+        AgentAction::ClickRef {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            ref_id: "@e1".into(),
+        },
+        AgentAction::ClickSemantic {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            locator: SemanticLocator::Role {
+                role: "button".into(),
+                name: Some("Continue".into()),
+                exact: true,
+            },
+        },
         AgentAction::ClickPoint { x: 320.0, y: 240.0 },
         AgentAction::Type {
             selector: "#i".into(),
+            text: "hi".into(),
+        },
+        AgentAction::TypeRef {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            ref_id: "@e2".into(),
+            text: "hi".into(),
+        },
+        AgentAction::TypeSemantic {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            locator: SemanticLocator::Placeholder {
+                placeholder: "Email".into(),
+                exact: false,
+            },
             text: "hi".into(),
         },
         AgentAction::Press {
@@ -274,10 +312,53 @@ fn agent_action_all_variants_serialize() {
             selector: "select".into(),
             value: "opt1".into(),
         },
+        AgentAction::SelectRef {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            ref_id: "@e3".into(),
+            value: "opt1".into(),
+        },
+        AgentAction::SelectSemantic {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            locator: SemanticLocator::TestId {
+                test_id: "plan".into(),
+                exact: true,
+            },
+            value: "opt1".into(),
+        },
         AgentAction::Wait { ms: 100 },
         AgentAction::WaitFor {
             selector: ".done".into(),
             timeout_ms: 5000,
+        },
+        AgentAction::WaitForRef {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            ref_id: "@e4".into(),
+            timeout_ms: 5000,
+        },
+        AgentAction::WaitForSemantic {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            locator: SemanticLocator::Text {
+                text: "Done".into(),
+                exact: true,
+            },
+            timeout_ms: 5000,
+        },
+        AgentAction::UploadRef {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            ref_id: "@e5".into(),
+            artifact_id: quarry_core::ids::Id::new(),
+            approval_grant_id: "grant_upload_approval".into(),
+        },
+        AgentAction::DownloadRef {
+            snapshot_id: "snap_1".into(),
+            generation: 2,
+            ref_id: "@e6".into(),
+            approval_grant_id: "grant_download_approval".into(),
         },
         AgentAction::Screenshot { full_page: true },
         AgentAction::Pdf,

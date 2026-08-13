@@ -17,7 +17,7 @@ from app.db import SessionLocal
 from app.events import event_publisher
 from app.models import ImportJob, ImportJobItem
 from app.progress import progress_hub
-from app.schemas import ImportDocument, ProgressEvent
+from app.schemas import ImportDocument, ProgressEvent, SpaceImportIntent
 
 
 logger = logging.getLogger(__name__)
@@ -79,6 +79,10 @@ _DATA_PLANE_TOKEN_TTL = 240.0
 
 class QuotaCheckUnavailable(RuntimeError):
     """Raised when Control Plane cannot provide an authoritative quota decision."""
+
+
+class SpaceImportAuthorityUnavailable(RuntimeError):
+    """Raised when a Space-bound worker cannot obtain fresh write authority."""
 
 
 def _quota_cache_key(org_id: str, items: int) -> str:
@@ -200,6 +204,63 @@ class ImportService:
             )
             return token.strip()
 
+    async def _fresh_space_import_decision(self, job: ImportJob) -> str | None:
+        """Reauthorize a durable Space intent immediately before a Data write.
+
+        The job contains only a non-secret immutable intent. Control returns a
+        short-lived, target-specific signed decision which is kept in memory
+        for this one request and then discarded. The Data Plane must attest it
+        actually enforced that decision; otherwise the worker fails closed.
+        """
+        if job.space_import_intent is None:
+            return None
+        try:
+            intent = SpaceImportIntent.model_validate(job.space_import_intent)
+        except Exception as exc:
+            raise SpaceImportAuthorityUnavailable("durable Space import intent is invalid") from exc
+        if intent.source_type != job.source_type:
+            raise SpaceImportAuthorityUnavailable(
+                "durable Space import intent does not match the job source type"
+            )
+        if intent.zero_data_retention:
+            raise SpaceImportAuthorityUnavailable(
+                "Space policy forbids durable import under zero data retention"
+            )
+        base_url = self._settings.space_authority_reauthorization_url.strip()
+        service_token = self._settings.space_authority_service_token.strip()
+        if not base_url or not service_token:
+            raise SpaceImportAuthorityUnavailable("Space import authority is not configured")
+        try:
+            response = await _get_client().post(
+                f"{base_url.rstrip('/')}/api/v1/internal/spaces/import-execution-decision",
+                headers={
+                    "X-Service-Id": self._settings.ingestion_service_id,
+                    "X-Service-Token": service_token,
+                },
+                json={"intent": intent.model_dump(mode="json")},
+                timeout=5.0,
+            )
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SpaceImportAuthorityUnavailable("fresh Space import authority is unavailable") from exc
+        data = body.get("data") if isinstance(body, dict) else None
+        token = data.get("token") if isinstance(data, dict) else None
+        decision = data.get("decision") if isinstance(data, dict) else None
+        if not isinstance(token, str) or not token.strip() or not isinstance(decision, dict):
+            raise SpaceImportAuthorityUnavailable("Control returned an invalid Space import decision")
+        if (
+            decision.get("org_id") != job.org_id
+            or decision.get("space_ref") != intent.space_ref
+            or decision.get("subject_id") != intent.subject_id
+            or decision.get("action_id") != "ingestion.import.write"
+            or decision.get("service_audience") != "data-plane-import"
+            or decision.get("payload_digest") != intent.payload_digest
+            or "documents:write" not in decision.get("permissions", [])
+        ):
+            raise SpaceImportAuthorityUnavailable("Control returned a mismatched Space import decision")
+        return token.strip()
+
     async def create_job(
         self,
         org_id: str,
@@ -207,6 +268,7 @@ class ImportService:
         source_type: str,
         documents: list[ImportDocument],
         metadata: dict[str, Any] | None = None,
+        space_import_intent: SpaceImportIntent | None = None,
     ) -> UUID:
         async with SessionLocal() as session:
             job = ImportJob(
@@ -216,6 +278,11 @@ class ImportService:
                 status="queued",
                 total_items=len(documents),
                 metadata_json=metadata or {},
+                space_import_intent=(
+                    space_import_intent.model_dump(mode="json")
+                    if space_import_intent is not None
+                    else None
+                ),
             )
             session.add(job)
             await session.flush()
@@ -468,13 +535,20 @@ class ImportService:
             "idempotency_key": idempotency_key,
             "ingest_policy": {"zdr_mode": "off", "ephemeral_only": False},
         }
+        space_decision = await self._fresh_space_import_decision(job)
         token = await self._data_plane_token(job.org_id)
         headers = {
             "Authorization": f"Bearer {token}",
             "X-Org-Id": job.org_id,
         }
+        if space_decision is not None:
+            headers["X-Space-Import-Decision"] = space_decision
         response = await _get_client().post(url, json=payload, headers=headers, timeout=30.0)
         response.raise_for_status()
+        if space_decision is not None and response.headers.get("X-Space-Import-Authority-Accepted") != "true":
+            raise SpaceImportAuthorityUnavailable(
+                "Data Plane did not attest Space import authority enforcement"
+            )
 
     async def get_job(self, job_id: UUID, org_id: str | None = None) -> ImportJob | None:
         job_id = UUID(str(job_id))
@@ -484,6 +558,45 @@ class ImportService:
                 query = query.where(ImportJob.org_id == org_id)
             result = await session.execute(query)
             return result.scalar_one_or_none()
+
+    async def cancel_queued_space_jobs(self, org_id: str, space_ref: str, reason: str) -> dict[str, int]:
+        """Cancel only queued Space-scoped jobs and erase their pending input.
+
+        A running worker may already hold documents in memory, so it is counted
+        separately rather than being labelled cancelled. Its next Data write
+        reacquires Control authority and will be denied after the Space fence.
+        This service owns job payloads, not documents already accepted by Data.
+        """
+        async with SessionLocal() as session:
+            jobs_result = await session.execute(
+                select(ImportJob.id).where(
+                    ImportJob.org_id == org_id,
+                    ImportJob.status == "queued",
+                    ImportJob.space_import_intent["space_ref"].astext == space_ref,
+                )
+            )
+            job_ids = list(jobs_result.scalars().all())
+            if job_ids:
+                await session.execute(
+                    update(ImportJob)
+                    .where(ImportJob.id.in_(job_ids))
+                    .values(status="cancelled", error_message=reason, completed_at=datetime.now(timezone.utc), lease_owner=None, lease_expires_at=None)
+                )
+                await session.execute(
+                    update(ImportJobItem)
+                    .where(ImportJobItem.job_id.in_(job_ids))
+                    .values(status="cancelled", document_payload=None, completed_at=datetime.now(timezone.utc))
+                )
+            running_result = await session.execute(
+                select(ImportJob.id).where(
+                    ImportJob.org_id == org_id,
+                    ImportJob.status == "running",
+                    ImportJob.space_import_intent["space_ref"].astext == space_ref,
+                )
+            )
+            running_ids = list(running_result.scalars().all())
+            await session.commit()
+            return {"cancelled_jobs": len(job_ids), "running_jobs": len(running_ids)}
 
     async def get_job_with_items(
         self, job_id: UUID, org_id: str | None = None

@@ -348,6 +348,8 @@ async fn browser_run_start(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayBrowser,
         false,
         &session_bearer,
+        None,
+        None,
     )
     .await
     .map_err(|error| {

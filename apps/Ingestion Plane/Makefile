@@ -1,5 +1,10 @@
 COMPOSE := docker compose --env-file ../../.env --env-file .env -f docker-compose.yml
 
+# Quarry host-side builds use the external compiler cache. Docker builds keep
+# their own isolated BuildKit cache inside their builder.
+CARGO_TARGET_DIR ?= /Volumes/Applikasjon/Triodelab/CoreSystem-build-cache/cargo/quarry-v2
+export CARGO_TARGET_DIR
+
 .PHONY: help
 help:
 	@echo "Ingestion Plane - Make Commands"

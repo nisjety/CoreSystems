@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
 };
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use tracing::info;
 
 /// Process readiness shared by the gRPC and HTTP servers.
@@ -40,6 +40,7 @@ pub async fn serve(readiness: Readiness) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        .route("/capability-profile", get(capability_profile))
         .route("/metrics", get(metrics_handler))
         .with_state(readiness);
 
@@ -71,6 +72,12 @@ async fn readyz(State(readiness): State<Readiness>) -> impl IntoResponse {
     (status, body)
 }
 
+/// Measured substrate facts, intended for a Model-owned Space lease resolver.
+/// This endpoint does not grant a lease and never exposes a credential.
+async fn capability_profile() -> Json<crate::sandbox::SandboxCapabilityProfile> {
+    Json(crate::sandbox::capability_profile())
+}
+
 async fn metrics_handler() -> impl IntoResponse {
     (StatusCode::OK, "# HELP execution_core_steps_total\n")
 }
@@ -93,5 +100,14 @@ mod tests {
         readiness.set_grpc_ready(false);
         assert!(!readiness.is_ready());
         assert_eq!(ready_status(&readiness), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn capability_profile_endpoint_is_explicitly_ephemeral_and_credential_free() {
+        let Json(profile) = capability_profile().await;
+        assert_eq!(profile.persistence, "ephemeral");
+        assert!(!profile.backup);
+        assert_eq!(profile.credential_mode, "credential_free");
+        assert_eq!(profile.egress, "disabled_by_default");
     }
 }

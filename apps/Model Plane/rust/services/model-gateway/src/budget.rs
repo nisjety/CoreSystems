@@ -178,6 +178,8 @@ mod tests {
             model: String::new(),
             session_key: None,
             thread_id: None,
+            space_context: None,
+            space_append_context: None,
             structured_output_schema: None,
             zdr: true,
             max_cost_usd: Some(10.0),

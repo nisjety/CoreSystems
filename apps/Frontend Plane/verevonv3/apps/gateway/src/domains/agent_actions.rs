@@ -11,7 +11,11 @@
 //! durable org skill registry (model-gateway `/v1/skills` → capability-core),
 //! which the chat path injects into the live prompt via `MatchSkills`.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     extract::{Extension, Path, Query, State},
@@ -29,6 +33,8 @@ use crate::{
     envelope::error,
     middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
 };
+
+static CRON_CREATE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -417,7 +423,7 @@ async fn create_cron(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
     if !can_author_skills(&state, &user).await {
         return (
@@ -434,6 +440,39 @@ async fn create_cron(
         Ok(token) => token,
         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
     };
+    let Some(org_id) = user
+        .active_org_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to create a Space schedule.",
+            )),
+        )
+            .into_response();
+    };
+    let counter = CRON_CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let schedule_id = format!("cron_{}_{}_{}", user.user_id, nanos, counter);
+    let idempotency_key = format!("space-cron-create:{schedule_id}");
+    if let Err(response) = crate::domains::spaces::inject_personal_schedule_create_context(
+        &state,
+        &user,
+        org_id,
+        &mut body,
+        &schedule_id,
+        &idempotency_key,
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let url = format!("{}/v1/cron", state.model_gateway_url);
     shared::proxy_model_json_with_capability(
         &state,

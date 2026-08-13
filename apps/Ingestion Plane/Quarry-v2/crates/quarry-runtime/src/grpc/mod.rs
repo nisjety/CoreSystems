@@ -1,7 +1,7 @@
 //! gRPC clients for cross-plane RPC.
 //!
 //! Quarry calls:
-//! - `model_plane.v1.BrowserBrokerService` (grant validation/issuance/revocation)
+//! - `model_plane.v1.BrowserBroker` (grant validation/issuance/revocation)
 //! - `dataplane.documents.v2.DocumentService` (ingest path)
 //!
 //! Generated code lives in `OUT_DIR` and is included via `tonic::include_proto!`.

@@ -92,6 +92,26 @@ func serviceScopeForRequest(request *http.Request) string {
 	path := request.URL.Path
 	method := request.Method
 	switch {
+	case path == "/api/v1/internal/spaces/register":
+		return "spaces:register"
+	case path == "/api/v1/internal/spaces/deletion-authorizations":
+		return "spaces:deletion:authorize"
+	case path == "/api/v1/internal/spaces/deletion-policy":
+		return "spaces:policy:write"
+	case strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/legal-hold"):
+		return "spaces:policy:write"
+	case path == "/api/v1/internal/spaces/recipient-audiences":
+		return "spaces:audience:publish"
+	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/membership"):
+		return "spaces:resolve"
+	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision":
+		return "spaces:issue"
+	case path == "/api/v1/internal/spaces/import-execution-decision":
+		return "spaces:import:reauthorize"
+	case path == "/api/v1/internal/spaces/schedule-fire-decision":
+		return "spaces:schedule:reauthorize"
+	case path == "/api/v1/internal/spaces/effect-policy":
+		return "spaces:policy:write"
 	case strings.HasPrefix(path, "/api/v1/internal/authz/"):
 		if method == http.MethodGet || method == http.MethodHead {
 			return "authz:read"
@@ -129,7 +149,7 @@ func credentialHasScope(credential serviceCredential, required string) bool {
 // that binds those claims to the service principal, these route families must
 // remain unavailable to service credentials.
 func serviceScopeRequiresVerifiedDelegation(scope string) bool {
-	return strings.HasSuffix(scope, ":self") || strings.HasPrefix(scope, "authz:")
+	return strings.HasSuffix(scope, ":self") || strings.HasPrefix(scope, "authz:") || scope == "spaces:resolve" || scope == "spaces:issue"
 }
 
 // authenticateServicePrincipal returns (present, authorized). A presented but

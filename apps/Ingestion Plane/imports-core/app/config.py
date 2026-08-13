@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     ingestion_auth_audience: str = Field(default="ingestion", alias="INGESTION_AUTH_AUDIENCE")
     ingestion_service_id: str = Field(default="imports-core", alias="INGESTION_SERVICE_ID")
     ingestion_service_api_key: str = Field(default="", alias="INGESTION_SERVICE_API_KEY")
+    # Required only for a Space-bound import. The worker uses this narrow
+    # credential to reacquire fresh authority immediately before Data writes;
+    # it never persists a browser or Control decision bearer with a job.
+    space_authority_reauthorization_url: str = Field(
+        default="", alias="SPACE_AUTHORITY_REAUTHORIZATION_URL"
+    )
+    space_authority_service_token: str = Field(
+        default="", alias="SPACE_AUTHORITY_SERVICE_TOKEN"
+    )
     allow_legacy_tenant_key: bool = Field(default=False, alias="ALLOW_LEGACY_TENANT_KEY")
     allow_insecure_dev_defaults: bool = Field(default=False, alias="ALLOW_INSECURE_DEV_DEFAULTS")
     isolated_e2e: bool = Field(default=False, alias="ISOLATED_E2E")

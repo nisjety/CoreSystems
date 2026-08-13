@@ -27,6 +27,13 @@ var (
 )
 
 const maxAllowedDomains = 32
+const maxSensitiveScopeValues = 32
+
+var allowedSensitiveActions = map[string]struct{}{
+	"respond_dialog": {},
+	"upload_ref":     {},
+	"download_ref":   {},
+}
 
 // Grant is a trusted browser access grant.
 type Grant struct {
@@ -38,8 +45,17 @@ type Grant struct {
 	// AllowedDomains is the broker-owned, canonical navigation policy. It is
 	// copied at every storage boundary so no caller can mutate a persisted grant.
 	AllowedDomains []string
-	ExpiresAt      time.Time
-	Revoked        bool
+	// Sensitive scopes are empty for a normal run grant. When present they
+	// authorize only the exact action and observed opaque resources below.
+	AllowedActions     []string
+	AllowedFrameIDs    []string
+	AllowedDialogIDs   []string
+	AllowedArtifactIDs []string
+	// ParentGrantID binds a sensitive approval to one ordinary run grant.
+	// It is empty only for ordinary grants, never for an approval.
+	ParentGrantID string
+	ExpiresAt     time.Time
+	Revoked       bool
 }
 
 // Store is a thread-safe in-memory grant store.
@@ -53,30 +69,97 @@ func NewStore() *Store {
 	return &Store{grants: make(map[string]*Grant)}
 }
 
-// Create issues a new grant with the provided TTL. The policy is normalized at
-// the authority boundary even when callers have already validated it, so an
-// empty or malformed policy cannot become an unrestricted stored grant.
+// Create issues an ordinary run grant. Sensitive authority is intentionally
+// absent; callers must use CreateWithSensitiveScopes for a one-time approval.
 func (s *Store) Create(
 	orgID, ownerID, sessionKey, scopeURL string,
 	allowedDomains []string,
+	ttl time.Duration,
+) (*Grant, error) {
+	return s.CreateWithSensitiveScopes(
+		orgID, ownerID, sessionKey, scopeURL, allowedDomains,
+		nil, nil, nil, nil, ttl,
+	)
+}
+
+// CreateWithSensitiveScopes issues a grant with explicit, bounded authority
+// for an irreversible browser action. The policy is normalized at the
+// authority boundary even when callers have already validated it, so an empty
+// or malformed policy cannot become unrestricted stored authority.
+func (s *Store) CreateWithSensitiveScopes(
+	orgID, ownerID, sessionKey, scopeURL string,
+	allowedDomains []string,
+	allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs []string,
+	ttl time.Duration,
+) (*Grant, error) {
+	return s.createWithSensitiveScopes(
+		orgID, ownerID, sessionKey, scopeURL, allowedDomains,
+		allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
+		"", ttl,
+	)
+}
+
+// CreateScopedSensitiveApproval binds a one-time sensitive grant to an
+// already validated ordinary BrowserBroker grant.
+func (s *Store) CreateScopedSensitiveApproval(
+	orgID, ownerID, sessionKey, scopeURL string,
+	allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs []string,
+	parentGrantID string,
+	ttl time.Duration,
+) (*Grant, error) {
+	parent, err := s.GetScoped(parentGrantID, orgID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	if parent.SessionKey != sessionKey || len(parent.AllowedActions) != 0 {
+		return nil, errors.New("sensitive approval parent grant is not an ordinary matching session grant")
+	}
+	return s.createWithSensitiveScopes(
+		orgID, ownerID, sessionKey, scopeURL, allowedDomains,
+		allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
+		parentGrantID, ttl,
+	)
+}
+
+func (s *Store) createWithSensitiveScopes(
+	orgID, ownerID, sessionKey, scopeURL string,
+	allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs []string,
+	parentGrantID string,
 	ttl time.Duration,
 ) (*Grant, error) {
 	canonicalDomains, err := NormalizeAllowedDomains(allowedDomains)
 	if err != nil {
 		return nil, err
 	}
+	approvalScopes, err := NormalizeSensitiveScopes(
+		allowedActions,
+		allowedFrameIDs,
+		allowedDialogIDs,
+		allowedArtifactIDs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(approvalScopes.actions) > 0 && parentGrantID == "" {
+		return nil, errors.New("sensitive grant requires parent browser grant")
+	}
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	g := &Grant{
-		ID:             id,
-		OrgID:          orgID,
-		OwnerID:        ownerID,
-		SessionKey:     sessionKey,
-		ScopeURL:       scopeURL,
-		AllowedDomains: canonicalDomains,
-		ExpiresAt:      time.Now().Add(ttl),
+		ID:                 id,
+		OrgID:              orgID,
+		OwnerID:            ownerID,
+		SessionKey:         sessionKey,
+		ScopeURL:           scopeURL,
+		AllowedDomains:     canonicalDomains,
+		AllowedActions:     approvalScopes.actions,
+		AllowedFrameIDs:    approvalScopes.frames,
+		AllowedDialogIDs:   approvalScopes.dialogs,
+		AllowedArtifactIDs: approvalScopes.artifacts,
+		ParentGrantID:      parentGrantID,
+		ExpiresAt:          time.Now().Add(ttl),
 	}
 	s.mu.Lock()
 	s.grants[id] = clone(g)
@@ -119,7 +202,102 @@ func (s *Store) RevokeScoped(id, orgID, ownerID string) error {
 func clone(grant *Grant) *Grant {
 	copy := *grant
 	copy.AllowedDomains = append([]string(nil), grant.AllowedDomains...)
+	copy.AllowedActions = append([]string(nil), grant.AllowedActions...)
+	copy.AllowedFrameIDs = append([]string(nil), grant.AllowedFrameIDs...)
+	copy.AllowedDialogIDs = append([]string(nil), grant.AllowedDialogIDs...)
+	copy.AllowedArtifactIDs = append([]string(nil), grant.AllowedArtifactIDs...)
 	return &copy
+}
+
+type sensitiveScopes struct {
+	actions   []string
+	frames    []string
+	dialogs   []string
+	artifacts []string
+}
+
+// NormalizeSensitiveScopes makes a sensitive grant explicit and bounded. A
+// broker can issue an ordinary domain-scoped run grant with every sensitive
+// scope empty; any non-empty scope must name a recognized irreversible action
+// and its exact observed resource(s), never a wildcard.
+func NormalizeSensitiveScopes(actions, frames, dialogs, artifacts []string) (sensitiveScopes, error) {
+	if len(actions) == 0 {
+		if len(frames) != 0 || len(dialogs) != 0 || len(artifacts) != 0 {
+			return sensitiveScopes{}, errors.New("sensitive resource scope requires an action")
+		}
+		return sensitiveScopes{}, nil
+	}
+	canonicalActions, err := normalizeScopeValues(actions, "action", func(value string) bool {
+		_, ok := allowedSensitiveActions[value]
+		return ok
+	})
+	if err != nil {
+		return sensitiveScopes{}, err
+	}
+	if len(canonicalActions) != 1 {
+		return sensitiveScopes{}, errors.New("sensitive grant requires exactly one action")
+	}
+	canonicalFrames, err := normalizeScopeValues(frames, "frame", validOpaqueScopeValue)
+	if err != nil {
+		return sensitiveScopes{}, err
+	}
+	canonicalDialogs, err := normalizeScopeValues(dialogs, "dialog", validOpaqueScopeValue)
+	if err != nil {
+		return sensitiveScopes{}, err
+	}
+	canonicalArtifacts, err := normalizeScopeValues(artifacts, "artifact", func(value string) bool {
+		return strings.HasPrefix(value, "art_") && validOpaqueScopeValue(value)
+	})
+	if err != nil {
+		return sensitiveScopes{}, err
+	}
+	switch canonicalActions[0] {
+	case "respond_dialog":
+		if len(canonicalDialogs) != 1 || len(canonicalFrames) != 1 || len(canonicalArtifacts) != 0 {
+			return sensitiveScopes{}, errors.New("respond_dialog grant requires one dialog, one frame, and no artifacts")
+		}
+	case "upload_ref":
+		if len(canonicalArtifacts) != 1 || len(canonicalFrames) != 1 || len(canonicalDialogs) != 0 {
+			return sensitiveScopes{}, errors.New("upload_ref grant requires one artifact, one frame, and no dialogs")
+		}
+	case "download_ref":
+		if len(canonicalArtifacts) != 0 || len(canonicalDialogs) != 0 || len(canonicalFrames) != 1 {
+			return sensitiveScopes{}, errors.New("download_ref grant requires one frame and no dialog or artifact scopes")
+		}
+	}
+	return sensitiveScopes{canonicalActions, canonicalFrames, canonicalDialogs, canonicalArtifacts}, nil
+}
+
+func normalizeScopeValues(values []string, name string, valid func(string) bool) ([]string, error) {
+	if len(values) > maxSensitiveScopeValues {
+		return nil, errors.New("too many sensitive " + name + " scope values")
+	}
+	canonical := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if !valid(value) {
+			return nil, errors.New("invalid sensitive " + name + " scope value")
+		}
+		canonical[value] = struct{}{}
+	}
+	result := make([]string, 0, len(canonical))
+	for value := range canonical {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func validOpaqueScopeValue(value string) bool {
+	if len(value) == 0 || len(value) > 256 {
+		return false
+	}
+	for _, char := range value {
+		if char <= 0x1f || char == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // NormalizeAllowedDomains canonicalizes a bounded host-only allowlist. It

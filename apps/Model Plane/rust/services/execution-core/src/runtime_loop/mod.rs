@@ -30,11 +30,21 @@ const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
 /// Tool name that drives the live agentic browser loop through Quarry
 /// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
+/// Thin Model-Plane MCP aliases for an existing Quarry browser run. Unlike
+/// `browser_agent`, these do not plan, acquire, or expose a browser; they
+/// execute one grant-bound observation or opaque snapshot-ref action.
+const QUARRY_MCP_BROWSER_OBSERVE_TOOL: &str = "browser.observe";
+const QUARRY_MCP_BROWSER_ACT_TOOL: &str = "browser.act";
 
 /// Read-only research tools backed by the Quarry edge (`web_tools`). Async.
 /// Not in `permission::is_risky_tool`, so they run under `ask` without a gate.
 const WEB_SEARCH_TOOL: &str = "web_search";
 const WEB_FETCH_TOOL: &str = "web_fetch";
+/// First-party Quarry tool names exposed by the Model Plane MCP adapter.
+/// The underscore variants above remain compatibility aliases for existing
+/// plans; both routes use the same scoped Quarry client.
+const QUARRY_MCP_WEB_SEARCH_TOOL: &str = "web.search";
+const QUARRY_MCP_WEB_READ_TOOL: &str = "web.read";
 
 /// RAG over the org's own ingested knowledge via Data Plane v2 retrieval
 /// (`knowledge_tools`). Async, read-only. `org_id` comes from the run context.
@@ -446,13 +456,19 @@ async fn execute_step_inner(
     // every other tool keeps the deterministic tool_bridge path. The permission
     // and hook gates above apply uniformly, so a shell call is still subject to
     // the same approval/deny policy.
-    let exec = if tool_name == SHELL_TOOL {
+    let exec = if matches!(
+        tool_name,
+        QUARRY_MCP_BROWSER_OBSERVE_TOOL | QUARRY_MCP_BROWSER_ACT_TOOL
+    ) {
+        tool_bridge::execute_quarry_browser_mcp(tool_name, tool_input, org_id, zdr, browser_grant)
+            .await
+    } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
         execute_code_interpreter(tool_input, run_id, step_id).await
-    } else if tool_name == WEB_SEARCH_TOOL {
+    } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
         execute_web_search(tool_input, org_id).await
-    } else if tool_name == WEB_FETCH_TOOL {
+    } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         execute_web_fetch(tool_input, org_id).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
         execute_knowledge_search(tool_input, org_id, user_id, zdr, data_plane_bearer).await
@@ -511,7 +527,7 @@ async fn execute_step_inner(
     // successful web_fetch as a grounded use of its URL; the trigger promotes
     // the live page into the durable KB past a threshold. Fire-and-forget —
     // never alters the tool result.
-    if tool_name == WEB_FETCH_TOOL && exec.error.is_none() {
+    if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) && exec.error.is_none() {
         if let Some(url) = serde_json::from_str::<serde_json::Value>(tool_input)
             .ok()
             .and_then(|v| {
@@ -1490,9 +1506,9 @@ mod tests {
         }
     }
 
-    // "auto" mode -> Allow (even for the risky "shell" tool). The executor runs
-    // as passthrough when bwrap is absent, so these exercise the real
-    // dispatch->executor path cross-platform.
+    // "auto" mode -> Allow (even for the risky "shell" tool). A missing local
+    // isolation substrate is an honest failed execution, not permission to run
+    // the model-authored process on the host.
 
     #[tokio::test]
     async fn shell_tool_runs_a_real_process() {
@@ -1516,8 +1532,17 @@ mod tests {
             &policy,
         )
         .await;
-        assert_eq!(out.status, "completed", "outcome: {out:?}");
-        assert!(out.output.contains("hi-there"), "output: {}", out.output);
+        if crate::sandbox::is_supported() {
+            assert_eq!(out.status, "completed", "outcome: {out:?}");
+            assert!(out.output.contains("hi-there"), "output: {}", out.output);
+        } else {
+            assert_eq!(out.status, "failed", "outcome: {out:?}");
+            assert!(
+                out.error.contains("refusing unsandboxed execution"),
+                "error: {}",
+                out.error
+            );
+        }
     }
 
     #[tokio::test]

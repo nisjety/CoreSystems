@@ -1209,6 +1209,9 @@ func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 	if _, err := conversationJS.Publish("verevon.application.conversation.ai_action.reviewed", []byte(`{"fixture":true}`)); err != nil {
 		t.Fatalf("conversation publish: %v", err)
 	}
+	if _, err := conversationJS.Publish("verevon.audit.v2.application.conversation-core.ticket_created", []byte(`{"fixture":true}`)); err != nil {
+		t.Fatalf("conversation audit publish: %v", err)
+	}
 	for name, delivered := range map[string]<-chan struct{}{"conversation": reviewed, "insight": metrics} {
 		select {
 		case <-delivered:

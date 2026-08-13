@@ -778,6 +778,37 @@ async fn verify_delegated_session_bearer(
     .map(|token| token.map(|token| VerifiedSessionBearer::new(&token)))
 }
 
+const SERVICE_SCOPE_SESSION_SPACE_DELETE: &str = "session:space-delete";
+
+/// Service credentials normally cannot delegate into Session Core: a service
+/// must never turn a gateway route into user impersonation. The sole exception
+/// is the separately scoped Space deletion coordinator path, which still
+/// requires an exact service identity and a second route scope below.
+async fn verify_delegated_service_session_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedSessionBearer>, StatusCode> {
+    let Some((token, claims)) = decode_delegated_bearer(
+        headers,
+        "x-session-authorization",
+        "SESSION_CORE_AUTH_AUDIENCE",
+        "session-core",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if claims.principal_kind() != Ok(PrincipalKind::Service)
+        || claims.sub != model_claims.sub
+        || claims.service_id != model_claims.service_id
+        || claims.org_id != model_claims.org_id
+        || !claims.has_scope(SERVICE_SCOPE_SESSION_SPACE_DELETE)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Some(VerifiedSessionBearer::new(&token)))
+}
+
 async fn verify_delegated_inference_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
@@ -1080,18 +1111,32 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
             if req.headers().contains_key("x-data-plane-authorization")
                 || req.headers().contains_key("x-capability-authorization")
                 || req.headers().contains_key("x-cost-authorization")
-                || req.headers().contains_key("x-session-authorization")
                 || req.headers().contains_key("x-execution-authorization")
                 || req.headers().contains_key("x-browser-authorization")
                 || req.headers().contains_key("x-ingestion-authorization")
+                || (req.headers().contains_key("x-session-authorization")
+                    && req.headers().contains_key("x-inference-authorization"))
             {
-                warn!("service principal can delegate only its matching inference credential");
+                warn!(
+                    "service principal supplied an unauthorized or ambiguous downstream delegation"
+                );
                 return Err(StatusCode::FORBIDDEN);
             }
             let inference_bearer =
                 verify_delegated_service_inference_bearer(req.headers(), &token_data.claims)
                     .await?;
-            (None, None, None, None, inference_bearer, None, None, None)
+            let session_bearer =
+                verify_delegated_service_session_bearer(req.headers(), &token_data.claims).await?;
+            (
+                None,
+                None,
+                None,
+                session_bearer,
+                inference_bearer,
+                None,
+                None,
+                None,
+            )
         }
     };
     req.extensions_mut().insert(token_data.claims);
@@ -1125,6 +1170,8 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
 }
 
 const SERVICE_SCOPE_MODELS_INVOKE: &str = "models:invoke";
+const SERVICE_SCOPE_MODEL_SPACE_DELETE: &str = "model:space-delete";
+const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 
 /// Restrict service principals to the two non-persisting unary machine routes.
 /// Users retain the existing route policy. This must run after [`require_auth`].
@@ -1140,9 +1187,17 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
     match claims.principal_kind()? {
         PrincipalKind::User => Ok(next.run(req).await),
         PrincipalKind::Service => {
-            let route_allowed = req.method() == axum::http::Method::POST
-                && matches!(req.uri().path(), "/v1/ai/chat" | "/v1/ai/embeddings");
-            if !route_allowed || !claims.has_scope(SERVICE_SCOPE_MODELS_INVOKE) {
+            let allowed = match (req.method(), req.uri().path()) {
+                (&axum::http::Method::POST, "/v1/ai/chat" | "/v1/ai/embeddings") => {
+                    claims.has_scope(SERVICE_SCOPE_MODELS_INVOKE)
+                }
+                (&axum::http::Method::POST, "/v1/internal/space-deletion/threads") => {
+                    claims.sub == CONTROL_SPACE_DELETION_SERVICE
+                        && claims.has_scope(SERVICE_SCOPE_MODEL_SPACE_DELETE)
+                }
+                _ => false,
+            };
+            if !allowed {
                 warn!(
                     service = %claims.sub,
                     method = %req.method(),
@@ -2429,5 +2484,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn only_the_exact_deletion_coordinator_reaches_the_internal_space_delete_route() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+
+        fn service(service_id: &str, scopes: &[&str]) -> Claims {
+            Claims {
+                sub: service_id.to_owned(),
+                iss: "auth-core".to_owned(),
+                exp: now_secs() + 60,
+                org_id: "org-test".to_owned(),
+                user_id: String::new(),
+                nbf: None,
+                aud: Some("model-gateway".to_owned()),
+                scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+                zdr: false,
+                principal_type: Some("service".to_owned()),
+                service_id: Some(service_id.to_owned()),
+                reason: Some("execute Control-authorized Space deletion".to_owned()),
+            }
+        }
+
+        fn app(claims: Claims) -> Router {
+            Router::new()
+                .route(
+                    "/v1/internal/space-deletion/threads",
+                    axum::routing::post(ok_handler),
+                )
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+        }
+
+        let allowed = app(service(
+            CONTROL_SPACE_DELETION_SERVICE,
+            &[SERVICE_SCOPE_MODEL_SPACE_DELETE],
+        ))
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/v1/internal/space-deletion/threads")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        for claims in [
+            service(
+                "service:control-space-deletion-copy",
+                &[SERVICE_SCOPE_MODEL_SPACE_DELETE],
+            ),
+            service(CONTROL_SPACE_DELETION_SERVICE, &[]),
+            service(
+                CONTROL_SPACE_DELETION_SERVICE,
+                &[SERVICE_SCOPE_MODELS_INVOKE],
+            ),
+        ] {
+            let response = app(claims)
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/v1/internal/space-deletion/threads")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
     }
 }

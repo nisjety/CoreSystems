@@ -25,6 +25,17 @@ func main() {
 	slog.SetDefault(logger)
 
 	slog.Info("sandbox-manager starting")
+	// The current lease and snapshot stores are deliberately in-memory test
+	// doubles. Starting this binary as though they were a durable Space
+	// computer would make a restart silently discard a lease/snapshot that a
+	// caller may rely on for an effect. A real backend-pinned durable store is
+	// required before this service may run in a normal deployment. The explicit
+	// development switch keeps unit/manual experiments possible without letting
+	// an accidental default become production behaviour.
+	if !ephemeralDevelopmentEnabled(os.Getenv("SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT")) {
+		slog.Error("refusing to start sandbox-manager with in-memory lease/snapshot stores", "required", "durable backend-pinned store", "development_override", "SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT=true")
+		os.Exit(1)
+	}
 	verifier, err := authz.NewVerifierFromEnv()
 	if err != nil {
 		slog.Error("sandbox-manager authentication configuration is invalid", "error", err)
@@ -80,4 +91,8 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+func ephemeralDevelopmentEnabled(value string) bool {
+	return value == "true"
 }

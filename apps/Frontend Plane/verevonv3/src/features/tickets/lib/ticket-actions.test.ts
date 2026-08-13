@@ -113,12 +113,13 @@ describe('executeTicketCreate', () => {
       severity: 'high',
       category: 'delivery',
       intent: 'customer_follow_up',
-    })
+    }, { idempotencyKey: 'ticket-create-retry-safe-1' })
 
     expect(created.id).toBe('ticket_new')
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/actions/execute')
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
       actionId: 'tickets.create',
+      idempotencyKey: 'ticket-create-retry-safe-1',
       input: {
         conversationId: 'conv-1',
         priority: 'high',
@@ -156,10 +157,11 @@ describe('audited ticket work helpers', () => {
       .filter(([url]) => url === '/api/v1/actions/execute')
       .map(([, init]) => JSON.parse(String((init as RequestInit).body)))
     expect(executions).toEqual([
-      { actionId: 'tickets.run_macro', input: { ticketId: 'ticket-1', macroId: 'macro-1' } },
-      { actionId: 'tickets.create_checklist', input: { ticketId: 'ticket-1', name: 'Resolution', items: ['Confirm owner'] } },
-      { actionId: 'tickets.update_checklist_item', input: { ticketId: 'ticket-1', checklistId: 'checklist-1', itemId: 'item-1', completed: true } },
+      expect.objectContaining({ actionId: 'tickets.run_macro', idempotencyKey: expect.any(String), input: { ticketId: 'ticket-1', macroId: 'macro-1' } }),
+      expect.objectContaining({ actionId: 'tickets.create_checklist', idempotencyKey: expect.any(String), input: { ticketId: 'ticket-1', name: 'Resolution', items: ['Confirm owner'] } }),
+      expect.objectContaining({ actionId: 'tickets.update_checklist_item', idempotencyKey: expect.any(String), input: { ticketId: 'ticket-1', checklistId: 'checklist-1', itemId: 'item-1', completed: true } }),
     ])
+    expect(executions.every((execution) => execution.idempotencyKey.length > 0)).toBe(true)
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/v1/tickets/ticket-1')).toHaveLength(3)
   })
 })

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Data Plane v2 schema migrator — one-shot deploy-time migration runner.
 #
 # Built and run as a compose service (`migrate`) that executes `migrator up`
@@ -12,15 +13,17 @@
 # migrations are NOT baked in — the compose service bind-mounts
 # infra/postgres/migrations read-only at /app/infra/postgres/migrations, so
 # adding a migration needs no image rebuild.
-# syntax=docker/dockerfile:1.7
 FROM golang:1.26.5-alpine3.24 AS build
 WORKDIR /src
 # Module cache layer: copy manifests first so dependency download is cached
 # independently of source changes.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download
 COPY main.go ./
-RUN CGO_ENABLED=0 go build -trimpath -o /out/migrator ./...
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 go build -trimpath -o /out/migrator ./...
 
 FROM alpine:3.24
 ARG SOURCE_REVISION=unverified

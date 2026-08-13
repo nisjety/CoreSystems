@@ -5,6 +5,7 @@ use axum::{
 };
 use reqwest::Method;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::domains::inbox::require_support_ai_review;
 use crate::{
@@ -13,10 +14,103 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
-    upstream::{proxy_bearer_json, proxy_conversation_json, proxy_json},
+    upstream::{
+        proxy_bearer_json, proxy_bearer_json_with_headers, proxy_conversation_json, proxy_json,
+    },
 };
 
 use super::shared::{cookie_header, quarry_token};
+
+/// Fetch the Conversation Core catalog through the same signed delegation
+/// boundary used by its effects. Only a structurally complete human contract
+/// is returned: malformed or agent-only entries are unavailable rather than
+/// being optimistically advertised by the BFF.
+pub(super) async fn list_owner_action_contracts(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Response {
+    match human_owner_action_catalog_for(state, user).await {
+        Ok(catalog) => (StatusCode::OK, Json(ok(catalog))).into_response(),
+        Err((status, payload)) => (status, Json(payload)).into_response(),
+    }
+}
+
+/// Reusable human-only owner-contract projection. Its caller must independently
+/// establish current Space/resource predicates before exposing this catalog;
+/// this function never makes Model eligibility or effect authority decisions.
+pub(crate) async fn human_owner_action_catalog_for(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Result<Value, (StatusCode, Value)> {
+    let url = format!("{}/api/v1/action-contracts", state.conversation_core_url);
+    let (status, Json(payload)) =
+        proxy_conversation_json(state, Method::GET, &url, None, user, None).await;
+    if !status.is_success() {
+        return Err((status, payload));
+    }
+    let Some(catalog) = human_owner_action_catalog(&payload) else {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            error(
+                "owner_action_contract_invalid",
+                "Conversation Core returned no valid human action contracts.",
+            ),
+        ));
+    };
+    Ok(catalog)
+}
+
+fn human_owner_action_catalog(payload: &Value) -> Option<Value> {
+    let data = payload.get("data")?;
+    let catalog_version = data.get("catalog_version")?.as_str()?;
+    if catalog_version.trim().is_empty() {
+        return None;
+    }
+    let actions = data.get("actions")?.as_array()?;
+    let verified: Vec<Value> = actions
+        .iter()
+        .filter(|action| owner_contract_is_human_executable(action))
+        .cloned()
+        .collect();
+    if verified.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "catalogVersion": catalog_version,
+        "actorType": "human",
+        "actions": verified,
+    }))
+}
+
+fn owner_contract_is_human_executable(action: &Value) -> bool {
+    let has_human_actor = action
+        .get("eligible_actor_types")
+        .and_then(Value::as_array)
+        .is_some_and(|actors| actors.iter().any(|actor| actor.as_str() == Some("human")));
+    has_human_actor
+        && action.get("action_id").and_then(Value::as_str) == Some("tickets.create")
+        && action.get("owner_plane").and_then(Value::as_str) == Some("application")
+        && action
+            .get("required_service_identity")
+            .and_then(Value::as_str)
+            == Some("verevon-gateway")
+        && action.get("required_delegation").and_then(Value::as_str)
+            == Some("verified_user_org_role")
+        && action.get("idempotency").and_then(Value::as_str) == Some("caller_supplied")
+        && action.get("receipt_contract").and_then(Value::as_str) == Some("durable_owner_receipt")
+        && action
+            .get("input_schema")
+            .filter(|schema| schema.is_object())
+            .and_then(canonical_schema_sha256)
+            .is_some_and(|digest| {
+                action.get("schema_sha256").and_then(Value::as_str) == Some(digest.as_str())
+            })
+}
+
+fn canonical_schema_sha256(schema: &Value) -> Option<String> {
+    let canonical = serde_json::to_vec(schema).ok()?;
+    Some(format!("sha256:{:x}", Sha256::digest(canonical)))
+}
 
 pub(super) async fn dispatch_recrawl(
     state: &AppState,
@@ -244,6 +338,7 @@ pub(super) async fn dispatch_connect_source(
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     input: &Value,
+    idempotency_key: &str,
 ) -> Response {
     let source_type = input
         .get("sourceType")
@@ -274,21 +369,38 @@ pub(super) async fn dispatch_connect_source(
             .into_response();
     };
 
+    let mut clean_input = input.clone();
+    let import_decision = match crate::domains::spaces::personal_import_ingress_decision(
+        state,
+        user,
+        &org_id,
+        &mut clean_input,
+        idempotency_key,
+    )
+    .await
+    {
+        Ok(token) => token,
+        Err((status, body)) => return (status, body).into_response(),
+    };
     let body = json!({
         "org_id": org_id.clone(),
         "source_type": source_type,
-        "connection": input.get("connection").cloned().unwrap_or_else(|| json!({})),
-        "options": input.get("options").cloned().unwrap_or_else(|| json!({})),
+        "connection": clean_input.get("connection").cloned().unwrap_or_else(|| json!({})),
+        "options": clean_input.get("options").cloned().unwrap_or_else(|| json!({})),
     });
 
     let url = format!("{}/api/v1/import/jobs/source", state.imports_api_url);
-    let (status, Json(resp)) = proxy_bearer_json(
+    let extra_headers = import_decision
+        .map(|token| vec![("X-Space-Import-Ingress-Decision".to_owned(), token)])
+        .unwrap_or_default();
+    let (status, Json(resp)) = proxy_bearer_json_with_headers(
         state,
         Method::POST,
         &url,
         Some(body),
         Some(&token),
         &user.user_id,
+        &extra_headers,
     )
     .await;
 
@@ -909,6 +1021,100 @@ async fn forward_ticket_action(
         .into_response()
 }
 
+// `tickets.create` is the first action migrated to an owner-issued operation
+// receipt. The gateway validates and routes; it does not manufacture a run or
+// audit identifier from the browser actor.
+async fn forward_ticket_create_operation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    body: Value,
+) -> Response {
+    let url = format!("{}/api/v1/tickets", state.conversation_core_url);
+    let (status, Json(resp)) =
+        proxy_conversation_json(state, Method::POST, &url, Some(body), user, None).await;
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+    ticket_operation_receipt_response(resp)
+}
+
+fn ticket_operation_receipt_response(resp: Value) -> Response {
+    let operation_id = resp
+        .pointer("/data/operation/operation_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let audit_event_id = resp
+        .pointer("/data/operation/audit_event_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let operation_status = resp
+        .pointer("/data/operation/status")
+        .and_then(Value::as_str)
+        .filter(|value| *value == "completed");
+    let (Some(operation_id), Some(audit_event_id), Some(operation_status)) =
+        (operation_id, audit_event_id, operation_status)
+    else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "ticket_operation_receipt_invalid",
+                "Conversation Core returned no valid durable ticket operation receipt.",
+            )),
+        )
+            .into_response();
+    };
+    let ticket_id = resp
+        .pointer("/data/ticket/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let replayed = resp
+        .pointer("/data/operation/replayed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (
+        StatusCode::OK,
+        Json(ok(json!({
+            "actionId": "tickets.create",
+            "runId": operation_id,
+            "status": operation_status,
+            "auditId": audit_event_id,
+            "operationId": operation_id,
+            "auditEventId": audit_event_id,
+            "replayed": replayed,
+            "ticketId": ticket_id,
+            "result": resp,
+        }))),
+    )
+        .into_response()
+}
+
+/// Reconcile an ambiguous ticket-create response through Conversation Core's
+/// actor-bound owner receipt lookup. No create endpoint is called here.
+pub(super) async fn reconcile_ticket_create(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    idempotency_key: &str,
+) -> Response {
+    let idempotency_key = idempotency_key.trim();
+    if idempotency_key.is_empty()
+        || idempotency_key.len() > 200
+        || idempotency_key.chars().any(char::is_control)
+    {
+        return ticket_bad_request("tickets.create requires a bounded idempotencyKey");
+    }
+    let url = format!(
+        "{}/api/v1/ticket-operations/{}",
+        state.conversation_core_url,
+        urlencoding::encode(idempotency_key),
+    );
+    let (status, Json(resp)) =
+        proxy_conversation_json(state, Method::GET, &url, None, user, None).await;
+    if !status.is_success() {
+        return (status, Json(resp)).into_response();
+    }
+    ticket_operation_receipt_response(resp)
+}
+
 /// Most ticket actions return the ticket itself as `data`. Ticket
 /// classification is intentionally different: it returns a classification
 /// record with the newly-created suggested ticket nested at `data.ticket`.
@@ -927,6 +1133,7 @@ pub(super) async fn dispatch_ticket_create(
     state: &AppState,
     user: &AuthenticatedUser,
     input: &Value,
+    idempotency_key: &str,
 ) -> Response {
     let conversation_id = input
         .get("conversationId")
@@ -936,10 +1143,20 @@ pub(super) async fn dispatch_ticket_create(
     if conversation_id.is_empty() {
         return ticket_bad_request("tickets.create requires a non-empty 'conversationId'");
     }
-    let body = ticket_remap(
+    let idempotency_key = idempotency_key.trim();
+    if idempotency_key.is_empty() || idempotency_key.len() > 200 {
+        return ticket_bad_request("tickets.create requires a bounded idempotencyKey");
+    }
+    let body = ticket_create_body(input, idempotency_key);
+    forward_ticket_create_operation(state, user, Value::Object(body)).await
+}
+
+fn ticket_create_body(input: &Value, idempotency_key: &str) -> serde_json::Map<String, Value> {
+    let mut body = ticket_remap(
         input,
         &[
             ("conversationId", "conversation_id"),
+            ("workType", "work_type"),
             ("priority", "priority"),
             ("severity", "severity"),
             ("category", "category"),
@@ -949,15 +1166,11 @@ pub(super) async fn dispatch_ticket_create(
             ("snoozedUntil", "snoozed_until"),
         ],
     );
-    forward_ticket_action(
-        state,
-        user,
-        "tickets.create",
-        Method::POST,
-        "/api/v1/tickets",
-        Some(Value::Object(body)),
-    )
-    .await
+    body.insert(
+        "idempotency_key".to_owned(),
+        Value::String(idempotency_key.trim().to_owned()),
+    );
+    body
 }
 
 pub(super) async fn dispatch_ticket_classify(
@@ -1661,6 +1874,83 @@ mod tests {
     }
 
     #[test]
+    fn owner_catalog_keeps_only_complete_human_contracts() {
+        let schema = json!({"type": "object"});
+        let digest = canonical_schema_sha256(&schema).expect("schema digest");
+        let payload = json!({
+            "data": {
+                "catalog_version": "conversation-core/v1",
+                "actions": [
+                    {
+                        "action_id": "tickets.create",
+                        "owner_plane": "application",
+                        "eligible_actor_types": ["human"],
+                        "required_service_identity": "verevon-gateway",
+                        "required_delegation": "verified_user_org_role",
+                        "idempotency": "caller_supplied",
+                        "receipt_contract": "durable_owner_receipt",
+                        "schema_sha256": digest,
+                        "input_schema": schema
+                    },
+                    {
+                        "action_id": "tickets.create",
+                        "owner_plane": "application",
+                        "eligible_actor_types": ["model"],
+                        "required_service_identity": "verevon-gateway",
+                        "required_delegation": "verified_user_org_role",
+                        "idempotency": "caller_supplied",
+                        "receipt_contract": "durable_owner_receipt",
+                        "schema_sha256": digest,
+                        "input_schema": schema
+                    }
+                ]
+            }
+        });
+
+        let catalog = human_owner_action_catalog(&payload).expect("valid catalog");
+        assert_eq!(catalog["actorType"], "human");
+        assert_eq!(catalog["actions"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn owner_catalog_fails_closed_when_the_contract_is_incomplete() {
+        let payload = json!({
+            "data": {
+                "catalog_version": "conversation-core/v1",
+                "actions": [{
+                    "action_id": "tickets.create",
+                    "owner_plane": "application",
+                    "eligible_actor_types": ["human"]
+                }]
+            }
+        });
+
+        assert!(human_owner_action_catalog(&payload).is_none());
+    }
+
+    #[test]
+    fn owner_catalog_rejects_a_schema_with_a_forged_digest() {
+        let payload = json!({
+            "data": {
+                "catalog_version": "conversation-core/v1",
+                "actions": [{
+                    "action_id": "tickets.create",
+                    "owner_plane": "application",
+                    "eligible_actor_types": ["human"],
+                    "required_service_identity": "verevon-gateway",
+                    "required_delegation": "verified_user_org_role",
+                    "idempotency": "caller_supplied",
+                    "receipt_contract": "durable_owner_receipt",
+                    "schema_sha256": "sha256:forged",
+                    "input_schema": {"type": "object"}
+                }]
+            }
+        });
+
+        assert!(human_owner_action_catalog(&payload).is_none());
+    }
+
+    #[test]
     fn ticket_remap_maps_camel_to_snake_and_omits_absent_or_null() {
         let input = json!({
             "conversationId": "conv_1",
@@ -1709,6 +1999,29 @@ mod tests {
         assert!(!out.contains_key("severity"));
         // ...and an explicit null is omitted too, so it never clobbers upstream state.
         assert!(!out.contains_key("category"));
+    }
+
+    #[test]
+    fn ticket_create_body_preserves_every_current_catalog_field() {
+        let body = ticket_create_body(
+            &json!({
+                "conversationId": "conv_1",
+                "workType": "incident",
+                "priority": "urgent",
+                "severity": "critical",
+                "category": "outage",
+                "intent": "restore service",
+            }),
+            "ticket-create-1",
+        );
+
+        assert_eq!(body.get("conversation_id"), Some(&json!("conv_1")));
+        assert_eq!(body.get("work_type"), Some(&json!("incident")));
+        assert_eq!(body.get("priority"), Some(&json!("urgent")));
+        assert_eq!(body.get("severity"), Some(&json!("critical")));
+        assert_eq!(body.get("category"), Some(&json!("outage")));
+        assert_eq!(body.get("intent"), Some(&json!("restore service")));
+        assert_eq!(body.get("idempotency_key"), Some(&json!("ticket-create-1")));
     }
 
     #[test]

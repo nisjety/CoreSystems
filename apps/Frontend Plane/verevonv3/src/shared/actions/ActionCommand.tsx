@@ -1,5 +1,6 @@
 import { createSignal, Show, type JSX } from 'solid-js'
 import { previewAction, executeAction } from '@/shared/actions/action-client'
+import { actionExecutionSummary } from '@/shared/actions/action-execution-summary'
 import type { ActionId } from '@/shared/actions/action-registry'
 import type { ActionActor, ActionExecution, ActionPreview } from '@/shared/actions/types'
 import { Badge } from '@/shared/ui/Badge'
@@ -74,9 +75,9 @@ export function ActionCommand(props: ActionCommandProps) {
       </Show>
 
       <Show when={execution()}>
-        {(run) => (
+        {(actionExecution) => (
           <p class="action-command__result">
-            Run {run().runId} is {run().status}. Audit {run().auditId} reserved.
+            {actionExecutionSummary(actionExecution())}
           </p>
         )}
       </Show>

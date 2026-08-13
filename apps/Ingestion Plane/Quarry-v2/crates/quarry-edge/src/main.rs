@@ -118,14 +118,21 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false);
     let require_browser_grants =
         cfg.require_browser_grants || matches!(environment.as_str(), "prod" | "production");
-    if require_browser_grants
-        && cfg
-            .browser_grant_validator_url
-            .as_deref()
-            .is_none_or(|url| url.trim().is_empty())
-    {
+    let browser_grant_http_configured = cfg
+        .browser_grant_validator_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty());
+    let browser_grant_grpc_configured = cfg
+        .browser_grant_validator_grpc_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty());
+    #[cfg(not(feature = "grpc"))]
+    if browser_grant_grpc_configured {
+        anyhow::bail!("QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL requires the grpc feature");
+    }
+    if require_browser_grants && !browser_grant_http_configured && !browser_grant_grpc_configured {
         anyhow::bail!(
-            "browser grants are required but QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_URL is unset"
+            "browser grants are required but no BrowserBroker validation endpoint is configured"
         );
     }
     if durability_required
@@ -176,6 +183,12 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Every local Chromium instance is forced through the loopback proxy.
+    // The proxy resolves once and dials the vetted IP directly; this is the
+    // transport complement to the per-request Fetch policy listener.
+    #[cfg(feature = "browser-agent")]
+    let browser_egress_proxy = Arc::new(quarry_runtime::PinnedBrowserEgressProxy::new());
 
     let timeout = Duration::from_secs(cfg.fetch_timeout_s);
     // Proxy pool — `QUARRY_PROXY_POOL` is a `;`-separated list of
@@ -243,8 +256,10 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "browser-agent")]
     if !drivers.has(DriverKind::Browser) {
-        let browser_driver: Arc<dyn quarry_browser::BrowserDriver> =
-            Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new());
+        let browser_driver: Arc<dyn quarry_browser::BrowserDriver> = Arc::new(
+            quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
+                .with_pinned_egress_proxy(browser_egress_proxy.clone()),
+        );
         let pool = Arc::new(RuntimeLeasePool::new(2));
         let adapter = BrowserDriverAdapter::new(browser_driver, pool);
         drivers.register(Arc::new(adapter));
@@ -567,13 +582,14 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    let grant_validator: Arc<dyn quarry_runtime::GrantValidator> = match cfg
-        .browser_grant_validator_url
-        .as_deref()
-        .filter(|url| !url.trim().is_empty())
-    {
-        Some(url) => {
-            let validator = quarry_runtime::HttpGrantValidator::new(url)?;
+    let grant_validator: Arc<dyn quarry_runtime::GrantValidator> = {
+        #[cfg(feature = "grpc")]
+        if let Some(url) = cfg
+            .browser_grant_validator_grpc_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        {
+            let validator = quarry_runtime::GrpcGrantValidator::connect(url).await?;
             let validator = match cfg.model_plane_token.as_deref() {
                 Some(token) if cfg.cross_plane_auth_dev_bypass => {
                     validator.with_bearer_token(token.to_owned())
@@ -581,8 +597,13 @@ async fn main() -> anyhow::Result<()> {
                 _ => validator,
             };
             Arc::new(validator)
+        } else {
+            browser_grant_http_validator(&cfg)?
         }
-        None => Arc::new(quarry_runtime::NoopGrantValidator),
+        #[cfg(not(feature = "grpc"))]
+        {
+            browser_grant_http_validator(&cfg)?
+        }
     };
 
     let durable_history_configured = cfg.durable_event_history;
@@ -1063,6 +1084,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "browser-agent")]
     let agent_driver: Arc<dyn quarry_browser::BrowserDriver> = Arc::new(
         quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(browser_egress_proxy.clone())
             .with_profile_store(profiles.clone()),
     );
     #[cfg(feature = "browser-agent")]
@@ -1236,6 +1258,8 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "browser-agent")]
         agent_driver,
         #[cfg(feature = "browser-agent")]
+        browser_egress_proxy: Some(browser_egress_proxy),
+        #[cfg(feature = "browser-agent")]
         agent_runs,
     };
 
@@ -1252,6 +1276,29 @@ fn env_flag(name: &str) -> bool {
     std::env::var(name)
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false)
+}
+
+/// Build the compatibility HTTP BrowserBroker validator. The gRPC path is
+/// selected earlier when configured; keeping this construction in one helper
+/// prevents the two transports from drifting in their auth treatment.
+fn browser_grant_http_validator(
+    cfg: &config::EdgeConfig,
+) -> anyhow::Result<Arc<dyn quarry_runtime::GrantValidator>> {
+    let Some(url) = cfg
+        .browser_grant_validator_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    else {
+        return Ok(Arc::new(quarry_runtime::NoopGrantValidator));
+    };
+    let validator = quarry_runtime::HttpGrantValidator::new(url)?;
+    let validator = match cfg.model_plane_token.as_deref() {
+        Some(token) if cfg.cross_plane_auth_dev_bypass => {
+            validator.with_bearer_token(token.to_owned())
+        }
+        _ => validator,
+    };
+    Ok(Arc::new(validator))
 }
 
 pub fn routes_for_test(state: state::AppState) -> Router {

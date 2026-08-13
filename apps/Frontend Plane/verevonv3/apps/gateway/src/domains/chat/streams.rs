@@ -47,6 +47,16 @@ pub(super) async fn stream_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message).into_response();
     }
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
+        &state,
+        &user,
+        &org_id,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     let mut outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     // Before the turn goes out, not after: a ZDR turn that fails midway is still

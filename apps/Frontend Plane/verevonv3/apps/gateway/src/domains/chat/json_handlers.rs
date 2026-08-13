@@ -41,6 +41,16 @@ pub(super) async fn invoke_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message);
     }
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
+        &state,
+        &user,
+        &org_id,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body);
+    }
     let mut outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;

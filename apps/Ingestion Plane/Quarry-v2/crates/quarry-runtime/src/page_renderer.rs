@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use quarry_browser::BrowserDriver;
+use quarry_browser::{BrowserDriver, BrowserEgressPolicy};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::ids::kinds;
 use quarry_core::lease::{BrowserLease, ProxyAffinity};
@@ -143,11 +143,29 @@ impl PageRenderer {
             org_id: org_id.to_string(),
         };
 
-        // Acquire → navigate → full-page screenshot, releasing the session in all
-        // paths (borrows of `&session` end before `release` takes it by value).
+        // Acquire → install the narrow destination policy → navigate →
+        // full-page screenshot, releasing the session in all paths (borrows
+        // of `&session` end before `release` takes it by value). Rendering a
+        // page image is not allowed to become an ungoverned browser egress
+        // path merely because its output is an internal artifact.
         let session = self.browser.acquire(&lease).await?;
-        let shot = match self.browser.goto(&session, url).await {
-            Ok(()) => self.browser.screenshot(&session, true).await,
+        let allowed_domains = url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let shot = match self
+            .browser
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&allowed_domains),
+            )
+            .await
+        {
+            Ok(()) => match self.browser.goto(&session, url).await {
+                Ok(()) => self.browser.screenshot(&session, true).await,
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
         let _ = self.browser.release(session).await;

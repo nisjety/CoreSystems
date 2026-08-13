@@ -263,6 +263,15 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.OrgID = orgID
+	spaceImportAuthority, err := verifySpaceImportDecision(r)
+	if err != nil {
+		writeError(w, http.StatusForbidden, "invalid Space import authority")
+		return
+	}
+	if spaceImportAuthority != nil && !spaceImportAuthority.matchesDocumentInputType(input.Type) {
+		writeError(w, http.StatusForbidden, "Space import authority does not match document source type")
+		return
+	}
 	if pinDocumentOwner(&input, principalID(r)) {
 		writeError(w, http.StatusForbidden, "owner_id must match the verified principal")
 		return
@@ -306,6 +315,9 @@ func (h *DocumentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusCreated
 	if result.Reused || result.Updated {
 		status = http.StatusOK
+	}
+	if spaceImportAuthority != nil {
+		w.Header().Set(spaceImportAcceptedHeader, "true")
 	}
 	writeJSON(w, status, result.Document)
 }

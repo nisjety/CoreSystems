@@ -141,6 +141,11 @@ pub fn is_risky_tool(tool_name: &str) -> bool {
         // above matches it, so gate it explicitly; under `ask` it pauses for a
         // human, under `auto` (chat) it runs as before.
         "browser_agent",
+        // The Model-Plane MCP facade is intentionally split: observation is
+        // read-only and stays ungated, while an opaque snapshot-ref action can
+        // still submit a form, disclose an approved artifact, or accept a
+        // dialog. Keep the effectful half behind the normal `ask` posture.
+        "browser.act",
         // publish_social_post creates a REAL workspace post and requests its
         // publish to connected platforms. The "post" keyword above already
         // matches it, but list it explicitly so the gate is intent-visible

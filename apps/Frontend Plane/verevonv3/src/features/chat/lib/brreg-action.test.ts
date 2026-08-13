@@ -24,18 +24,10 @@ describe('Brreg chat action detection', () => {
     expect(withBrregLookupAction([BRREG_LOOKUP_ACTION], 'Brreg Aquatiq')).toEqual([BRREG_LOOKUP_ACTION])
   })
 
-  it('attaches the canonical registry action with its required lookup schema', () => {
+  it('does not advertise the browser-only registry lookup as a Model tool', () => {
     const actions = withBrregLookupAction([], 'Find Aquatiq in Brreg')
-    const [tool] = createSelectedAgentToolSpecs({ actions })
+    const tools = createSelectedAgentToolSpecs({ actions })
 
-    expect(tool?.name).toBe('brreg.lookup_organization')
-    expect(JSON.parse(tool?.parametersJson ?? '{}')).toMatchObject({
-      type: 'object',
-      properties: {
-        q: { type: 'string' },
-        size: { type: 'integer' },
-      },
-      required: ['q', 'size'],
-    })
+    expect(tools).toEqual([])
   })
 })

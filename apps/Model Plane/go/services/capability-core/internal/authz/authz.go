@@ -26,6 +26,10 @@ const (
 	// that attests process-wide execution-dispatch capability health. It never
 	// grants catalog mutation and tenant health reporters cannot use it.
 	GlobalHealthWriteScope = "capability:health:global:write"
+	// SpaceDeletionScope is held only by the Control-coordinated deletion
+	// workload. It permits the narrow internal cancellation adapter below; it
+	// is intentionally not interchangeable with general capability writes.
+	SpaceDeletionScope = "capability:space-delete"
 	// RiskOverrideScope is required, in addition to WriteScope, to lower the
 	// risk_level of a "floored" capability — one whose seed or currently
 	// persisted risk_level is high (registry.CapabilitiesStore.Upsert enforces
@@ -61,6 +65,12 @@ func AuthorizeHTTP(principal authctx.Principal, request *http.Request) error {
 		if request.Method == http.MethodPost &&
 			principal.PrincipalType == "service" &&
 			(principal.HasScope(HealthWriteScope) || principal.HasScope(GlobalHealthWriteScope)) {
+			return nil
+		}
+		return errDenied
+	}
+	if request.URL.Path == "/api/v1/internal/space-deletion/cron" {
+		if request.Method == http.MethodPost && principal.PrincipalType == "service" && principal.HasScope(SpaceDeletionScope) {
 			return nil
 		}
 		return errDenied

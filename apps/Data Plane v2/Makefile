@@ -6,6 +6,13 @@ COMPOSE_BUILD_ENV = SOURCE_REVISION="$(SOURCE_REVISION)" BUILD_DATE="$(BUILD_DAT
 INTER_PLANE_BUS_NETWORK ?= inter-plane-bus
 export INTER_PLANE_BUS_NETWORK
 
+# Keep host-side compiler caches off the internal disk and source volume.
+CORE_SYSTEM_CACHE_ROOT ?= /Volumes/Applikasjon/Triodelab/CoreSystem-build-cache
+CARGO_TARGET_DIR ?= $(CORE_SYSTEM_CACHE_ROOT)/cargo/data-plane-v2
+GOCACHE ?= $(CORE_SYSTEM_CACHE_ROOT)/go/build
+GOMODCACHE ?= $(CORE_SYSTEM_CACHE_ROOT)/go/mod
+export CARGO_TARGET_DIR GOCACHE GOMODCACHE
+
 # ── Environment ────────────────────────────────────────────────────────────────
 
 cp-env:

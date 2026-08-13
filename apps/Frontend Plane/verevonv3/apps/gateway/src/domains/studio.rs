@@ -1,6 +1,8 @@
 //! Studio project persistence for the Verevon v3 canvas.
 //!
 //! This is a narrow gateway-local repository for canvas projects and blocks.
+//! Its data is intentionally ephemeral and is lost when the gateway restarts;
+//! it is not a durable or shared Space workspace.
 //! It enforces the same session-derived org scope as the rest of the v3
 //! gateway and delegates Social draft creation to the existing social domain.
 
@@ -30,6 +32,7 @@ use crate::{
 
 const DEFAULT_PROJECT_ID: &str = "studio_project_default";
 const MAX_BLOCKS: usize = 80;
+const STUDIO_PERSISTENCE: &str = "ephemeral";
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
@@ -74,6 +77,7 @@ struct StudioProject {
     updated_by_user_id: String,
     title: String,
     status: &'static str,
+    persistence: &'static str,
     blocks: Vec<StudioBlock>,
     selected_block_id: Option<String>,
     social_draft_id: Option<String>,
@@ -184,6 +188,7 @@ impl StudioStore {
             updated_by_user_id: scope.user_id.clone(),
             title,
             status: "draft",
+            persistence: STUDIO_PERSISTENCE,
             blocks,
             selected_block_id,
             social_draft_id: None,
@@ -310,6 +315,7 @@ async fn update_project(
         updated_by_user_id: scope.user_id.clone(),
         title,
         status: current.status,
+        persistence: current.persistence,
         blocks,
         selected_block_id,
         social_draft_id: current.social_draft_id,
@@ -599,6 +605,7 @@ fn default_project(scope: &StudioScope, now: DateTime<Utc>) -> StudioProject {
         updated_by_user_id: scope.user_id.clone(),
         title: "Launch canvas".to_owned(),
         status: "draft",
+        persistence: STUDIO_PERSISTENCE,
         blocks: default_canvas_blocks(),
         selected_block_id: None,
         social_draft_id: None,
@@ -761,6 +768,7 @@ mod tests {
         let project = default_project(&scope("org_a", "user_a"), Utc::now());
         assert!(project.blocks.is_empty());
         assert!(project.selected_block_id.is_none());
+        assert_eq!(project.persistence, STUDIO_PERSISTENCE);
 
         let input = build_social_draft_input(
             &project,

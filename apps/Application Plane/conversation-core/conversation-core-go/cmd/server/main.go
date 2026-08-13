@@ -151,6 +151,18 @@ func main() {
 	reconciler.Start(ctx)
 	defer reconciler.Stop()
 
+	// The ticket action operation receipt writes a transactionally coupled
+	// conversation_events row. A separate leased dispatcher is the only path
+	// that publishes it, preserving an at-least-once recovery path when the
+	// service dies after committing the owner effect.
+	if publisher != nil {
+		ticketOperationOutbox := consumers.NewTicketOperationOutboxDispatcher(
+			repository, publisher, cfg.ServiceName+"-ticket-operation-outbox", 5*time.Second,
+		)
+		ticketOperationOutbox.Start(ctx)
+		defer ticketOperationOutbox.Stop()
+	}
+
 	// Semantic support-recurrence corpus builder (preview): maintains a
 	// bounded per-org ticket-similarity embedding corpus. Disabled — not
 	// fatal — when org-core or embedding-engine-rs aren't configured, since

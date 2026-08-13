@@ -811,11 +811,11 @@ export type CreateApprovalRequest = Message<"model_plane.v1.CreateApprovalReques
 
   /**
    * Optional canonical JSON descriptor for the exact suspended action. It is
-   * validated, scope-bound, and written with the approval record; it contains
-   * no bearer, refresh token, or provider credential. The application does not
-   * provide field-level encryption for this value: deployments must enforce
-   * encrypted database-at-rest storage or leave this field empty. Empty means
-   * this approval is proposal-only and can never be resumed by a worker.
+   * validated, scope-bound, and encrypted into the dedicated continuation
+   * descriptor table; it contains no bearer, refresh token, or provider
+   * credential. The session-core deployment key is required whenever this
+   * field is non-empty. Empty means this approval is proposal-only and can
+   * never be resumed by a worker.
    *
    * Descriptors are removed when the approval expires/denies or its delivery
    * reaches terminal/settled state. ZDR callers must leave this empty:
@@ -1231,8 +1231,8 @@ export type GetApprovalContinuationResponse = Message<"model_plane.v1.GetApprova
 
   /**
    * Canonical descriptor JSON. Set only when available is true. This is
-   * sensitive action data; transport callers must use authenticated TLS and
-   * deployments must protect the backing approval metadata at rest.
+   * sensitive action data; transport callers must use authenticated TLS. The
+   * backing descriptor is encrypted at rest and removed on terminal cleanup.
    *
    * @generated from field: string continuation_descriptor_json = 2;
    */

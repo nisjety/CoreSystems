@@ -318,7 +318,14 @@ impl ExecutionCore for ExecutionService {
             .auth
             .authenticate_delegated_inference(&request, &caller)
             .await?;
-        let browser_bearer = if request.get_ref().tool_name == "browser_agent" {
+        // Every route that can reach Quarry's stateful browser surface needs a
+        // separately verified BrowserBroker audience credential. The MCP
+        // aliases are not read-only HTTP tools: `browser.observe` exposes a
+        // live leased context and `browser.act` can cause external effects.
+        let browser_bearer = if matches!(
+            request.get_ref().tool_name.as_str(),
+            "browser_agent" | "browser.observe" | "browser.act"
+        ) {
             Some(
                 self.auth
                     .authenticate_delegated_browser(&request, &caller)

@@ -85,6 +85,15 @@ describe('StudioPage', () => {
 
     expect(screen.getByText(/Sosialt utkast opprettet/)).toBeTruthy()
   })
+
+  it('labels gateway-local Studio persistence as temporary', async () => {
+    stubStudioFetch()
+    renderWithRouter(() => <StudioPage section="canvas" />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Midlertidig Studio-prosjekt/)).toBeTruthy()
+    })
+  })
 })
 
 function stubStudioFetch() {
@@ -95,6 +104,7 @@ function stubStudioFetch() {
     updatedByUserId: 'user_acme',
     title: 'Launch canvas',
     status: 'draft',
+    persistence: 'ephemeral',
     blocks: [],
     selectedBlockId: null,
     createdAt: '2026-06-16T10:00:00Z',

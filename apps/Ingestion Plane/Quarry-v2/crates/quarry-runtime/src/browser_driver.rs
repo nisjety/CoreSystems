@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 
-use quarry_browser::BrowserDriver as BrowserDriverTrait;
+use quarry_browser::{BrowserDriver as BrowserDriverTrait, BrowserEgressPolicy};
 use quarry_core::output::DriverKind;
 use quarry_core::{
     ids::kinds,
@@ -143,6 +143,28 @@ impl BrowserDriverAdapter {
             }
         };
 
+        // The ordinary scrape pipeline is not an exemption from Quarry's
+        // browser egress authority. A fresh Chromium context begins deny-all;
+        // derive the narrow public-fetch grant from the already-parsed request
+        // URL before the first navigation so redirects and subresources remain
+        // behind the same DNS-pinning/proof boundary as agent runs.
+        let allowed_domains = url
+            .host_str()
+            .map(|host| vec![host.to_owned()])
+            .unwrap_or_default();
+        if let Err(e) = self
+            .inner
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&allowed_domains),
+            )
+            .await
+        {
+            guard.poison();
+            let _ = self.inner.release(session).await;
+            return Err(e);
+        }
+
         if let Err(e) = self.inner.goto(&session, url.as_str()).await {
             guard.poison();
             let _ = self.inner.release(session).await;
@@ -230,6 +252,13 @@ mod tests {
 
     #[async_trait]
     impl BrowserDriverTrait for MockBrowserDriver {
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
         async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
             self.acquire_count.fetch_add(1, Ordering::SeqCst);
             self.call_order.lock().await.push("acquire");

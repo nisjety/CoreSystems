@@ -23,6 +23,13 @@ func (p *Publisher) Publish(ctx context.Context, subject string, payload any) er
 	if err != nil {
 		return err
 	}
-	_, err = p.js.Publish(subject, bytes)
+	message := nats.NewMsg(subject)
+	message.Data = bytes
+	if identified, ok := payload.(interface{ EventID() string }); ok {
+		if eventID := identified.EventID(); eventID != "" {
+			message.Header.Set(nats.MsgIdHdr, eventID)
+		}
+	}
+	_, err = p.js.PublishMsg(message)
 	return err
 }

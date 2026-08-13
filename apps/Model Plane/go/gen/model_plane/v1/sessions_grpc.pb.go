@@ -37,6 +37,9 @@ const (
 	SessionCore_UpdateThreadPresentation_FullMethodName = "/model_plane.v1.SessionCore/UpdateThreadPresentation"
 	SessionCore_ArchiveThread_FullMethodName            = "/model_plane.v1.SessionCore/ArchiveThread"
 	SessionCore_ArchiveThreads_FullMethodName           = "/model_plane.v1.SessionCore/ArchiveThreads"
+	SessionCore_DeleteThread_FullMethodName             = "/model_plane.v1.SessionCore/DeleteThread"
+	SessionCore_DeleteThreads_FullMethodName            = "/model_plane.v1.SessionCore/DeleteThreads"
+	SessionCore_DeleteSpaceThreads_FullMethodName       = "/model_plane.v1.SessionCore/DeleteSpaceThreads"
 	SessionCore_SetRunMode_FullMethodName               = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
@@ -112,6 +115,18 @@ type SessionCoreClient interface {
 	// Archive every currently visible thread for one authenticated user. This is
 	// the durable equivalent of "clear chat history" in a client sidebar.
 	ArchiveThreads(ctx context.Context, in *ArchiveThreadsRequest, opts ...grpc.CallOption) (*ArchiveThreadsResponse, error)
+	// Permanently erase one thread and its thread-owned durable evidence. This is
+	// owner-bound: Session Core checks the verified caller against the thread's
+	// user (or exact system owner) before deleting any row.
+	DeleteThread(ctx context.Context, in *DeleteThreadRequest, opts ...grpc.CallOption) (*DeleteThreadResponse, error)
+	// Permanently erase every thread owned by one authenticated user. This is
+	// the durable equivalent of a destructive "clear chat history" action.
+	DeleteThreads(ctx context.Context, in *DeleteThreadsRequest, opts ...grpc.CallOption) (*DeleteThreadsResponse, error)
+	// Permanently erase the threads explicitly bound to a Space for its owner.
+	// This is a Control-authorized data-subject deletion operation, available
+	// only to the exact deletion coordinator service; it is not a general
+	// service-user impersonation API.
+	DeleteSpaceThreads(ctx context.Context, in *DeleteSpaceThreadsRequest, opts ...grpc.CallOption) (*DeleteSpaceThreadsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -316,6 +331,36 @@ func (c *sessionCoreClient) ArchiveThreads(ctx context.Context, in *ArchiveThrea
 	return out, nil
 }
 
+func (c *sessionCoreClient) DeleteThread(ctx context.Context, in *DeleteThreadRequest, opts ...grpc.CallOption) (*DeleteThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteThreadResponse)
+	err := c.cc.Invoke(ctx, SessionCore_DeleteThread_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) DeleteThreads(ctx context.Context, in *DeleteThreadsRequest, opts ...grpc.CallOption) (*DeleteThreadsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteThreadsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_DeleteThreads_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) DeleteSpaceThreads(ctx context.Context, in *DeleteSpaceThreadsRequest, opts ...grpc.CallOption) (*DeleteSpaceThreadsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteSpaceThreadsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_DeleteSpaceThreads_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sessionCoreClient) SetRunMode(ctx context.Context, in *SetRunModeRequest, opts ...grpc.CallOption) (*SetRunModeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetRunModeResponse)
@@ -398,6 +443,18 @@ type SessionCoreServer interface {
 	// Archive every currently visible thread for one authenticated user. This is
 	// the durable equivalent of "clear chat history" in a client sidebar.
 	ArchiveThreads(context.Context, *ArchiveThreadsRequest) (*ArchiveThreadsResponse, error)
+	// Permanently erase one thread and its thread-owned durable evidence. This is
+	// owner-bound: Session Core checks the verified caller against the thread's
+	// user (or exact system owner) before deleting any row.
+	DeleteThread(context.Context, *DeleteThreadRequest) (*DeleteThreadResponse, error)
+	// Permanently erase every thread owned by one authenticated user. This is
+	// the durable equivalent of a destructive "clear chat history" action.
+	DeleteThreads(context.Context, *DeleteThreadsRequest) (*DeleteThreadsResponse, error)
+	// Permanently erase the threads explicitly bound to a Space for its owner.
+	// This is a Control-authorized data-subject deletion operation, available
+	// only to the exact deletion coordinator service; it is not a general
+	// service-user impersonation API.
+	DeleteSpaceThreads(context.Context, *DeleteSpaceThreadsRequest) (*DeleteSpaceThreadsResponse, error)
 	// Set a run's mode (execute | plan | reactive | research) durably on the
 	// run record (ROADMAP P3). The gateway's in-memory plan-mode cache
 	// write-throughs here so plan mode survives restart — auditability/resume
@@ -466,6 +523,15 @@ func (UnimplementedSessionCoreServer) ArchiveThread(context.Context, *ArchiveThr
 }
 func (UnimplementedSessionCoreServer) ArchiveThreads(context.Context, *ArchiveThreadsRequest) (*ArchiveThreadsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ArchiveThreads not implemented")
+}
+func (UnimplementedSessionCoreServer) DeleteThread(context.Context, *DeleteThreadRequest) (*DeleteThreadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteThread not implemented")
+}
+func (UnimplementedSessionCoreServer) DeleteThreads(context.Context, *DeleteThreadsRequest) (*DeleteThreadsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteThreads not implemented")
+}
+func (UnimplementedSessionCoreServer) DeleteSpaceThreads(context.Context, *DeleteSpaceThreadsRequest) (*DeleteSpaceThreadsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteSpaceThreads not implemented")
 }
 func (UnimplementedSessionCoreServer) SetRunMode(context.Context, *SetRunModeRequest) (*SetRunModeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetRunMode not implemented")
@@ -808,6 +874,60 @@ func _SessionCore_ArchiveThreads_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SessionCore_DeleteThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).DeleteThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_DeleteThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).DeleteThread(ctx, req.(*DeleteThreadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_DeleteThreads_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteThreadsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).DeleteThreads(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_DeleteThreads_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).DeleteThreads(ctx, req.(*DeleteThreadsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_DeleteSpaceThreads_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteSpaceThreadsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).DeleteSpaceThreads(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_DeleteSpaceThreads_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).DeleteSpaceThreads(ctx, req.(*DeleteSpaceThreadsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SessionCore_SetRunMode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SetRunModeRequest)
 	if err := dec(in); err != nil {
@@ -900,6 +1020,18 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ArchiveThreads",
 			Handler:    _SessionCore_ArchiveThreads_Handler,
+		},
+		{
+			MethodName: "DeleteThread",
+			Handler:    _SessionCore_DeleteThread_Handler,
+		},
+		{
+			MethodName: "DeleteThreads",
+			Handler:    _SessionCore_DeleteThreads_Handler,
+		},
+		{
+			MethodName: "DeleteSpaceThreads",
+			Handler:    _SessionCore_DeleteSpaceThreads_Handler,
 		},
 		{
 			MethodName: "SetRunMode",

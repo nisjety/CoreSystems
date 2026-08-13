@@ -1215,6 +1215,8 @@ mod tests {
             #[cfg(feature = "browser-agent")]
             agent_driver: Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new()),
             #[cfg(feature = "browser-agent")]
+            browser_egress_proxy: None,
+            #[cfg(feature = "browser-agent")]
             agent_runs: crate::agent_routes::new_runs(),
         }
     }

@@ -62,6 +62,7 @@ const (
 	SubjectModelActionProposed         = "verevon.model.action.proposed"
 	SubjectTicketSuggested             = "verevon.application.conversation.ticket.suggested"
 	SubjectTicketCreated               = "verevon.application.conversation.ticket.created"
+	SubjectTicketCreatedAudit          = "verevon.audit.v2.application.conversation-core.ticket_created"
 	SubjectTicketUpdated               = "verevon.application.conversation.ticket.updated"
 	SubjectTicketAssigned              = "verevon.application.conversation.ticket.assigned"
 	SubjectTicketLinked                = "verevon.application.conversation.ticket.linked"
@@ -125,6 +126,46 @@ type EventPublisher interface {
 	Publish(ctx context.Context, subject string, payload any) error
 }
 
+// TicketOperationOutboxEvent contains the bounded, content-free event used to
+// project a durable ticket operation. It is claimed by a lease before publish
+// and acknowledged only after the broker accepts its stable event ID.
+type TicketOperationOutboxEvent struct {
+	ID             string
+	OrgID          string
+	ConversationID string
+	ActorUserID    string
+	Payload        map[string]any
+	CreatedAt      time.Time
+}
+
+// AuditObservation is the content-minimized, stable-id event accepted by the
+// Control Audit stream. The Conversation owner produces it only from a
+// committed owner receipt; `Details` contains correlation identifiers rather
+// than ticket content.
+type AuditObservation struct {
+	ID         string         `json:"event_id"`
+	OccurredAt time.Time      `json:"occurred_at"`
+	OrgID      string         `json:"org_id"`
+	UserID     string         `json:"user_id,omitempty"`
+	Plane      string         `json:"plane"`
+	Producer   string         `json:"producer"`
+	Event      string         `json:"event"`
+	Subject    string         `json:"subject,omitempty"`
+	ResourceID string         `json:"resource_id,omitempty"`
+	Outcome    string         `json:"outcome"`
+	Details    map[string]any `json:"details,omitempty"`
+}
+
+func (event AuditObservation) EventID() string { return event.ID }
+
+// TicketOperationOutboxStore is intentionally narrower than Repository so the
+// delivery worker cannot create or modify support records.
+type TicketOperationOutboxStore interface {
+	ClaimTicketOperationOutbox(ctx context.Context, workerID string, now time.Time, lease time.Duration, limit int) ([]TicketOperationOutboxEvent, error)
+	AcknowledgeTicketOperationOutbox(ctx context.Context, eventID, workerID string, now time.Time) error
+	ReleaseTicketOperationOutbox(ctx context.Context, eventID, workerID, reason string, retryAt time.Time) error
+}
+
 type Repository interface {
 	ListInboxes(ctx context.Context, orgID string) ([]Inbox, error)
 	ListConversations(ctx context.Context, filter ListFilter) ([]ConversationSummary, error)
@@ -177,6 +218,12 @@ type Repository interface {
 	GetTicket(ctx context.Context, orgID, ticketID string) (*Ticket, error)
 	GetTicketByConversation(ctx context.Context, orgID, conversationID string) (*Ticket, error)
 	CreateTicket(ctx context.Context, input CreateTicketInput) (*Ticket, error)
+	// CreateTicketOperation is the durable owner-plane operation boundary for
+	// the generic human action surface. Unlike the legacy CreateTicket method,
+	// it persists the exact idempotency/request binding, ticket, audit event,
+	// and transactional-outbox event together before returning a receipt.
+	CreateTicketOperation(ctx context.Context, input CreateTicketInput) (*TicketOperationReceipt, error)
+	GetTicketOperation(ctx context.Context, orgID, actorUserID, idempotencyKey string) (*TicketOperationReceipt, error)
 	UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error)
 	LinkTicketResource(ctx context.Context, input LinkTicketResourceInput) (*TicketLinkedResource, error)
 	RecordTicketClassification(ctx context.Context, input TicketClassificationInput, payload map[string]any) (*TicketClassification, error)
@@ -1057,6 +1104,24 @@ type CreateTicketInput struct {
 	EscalationAt        *time.Time
 	Labels              []string
 	ActorUserID         string
+	// Operation fields are set by the owning Service, never trusted from HTTP.
+	// The durable repository binds them to one normalized ticket request.
+	ActionID       string
+	IdempotencyKey string
+	OperationID    string
+	RequestSHA256  string
+}
+
+// TicketOperationReceipt is the durable result of the owner-plane
+// `tickets.create` operation. It deliberately distinguishes a replay from a
+// new write and exposes stable owner identifiers rather than gateway-derived
+// run/audit strings.
+type TicketOperationReceipt struct {
+	OperationID  string  `json:"operation_id"`
+	AuditEventID string  `json:"audit_event_id"`
+	Status       string  `json:"status"`
+	Ticket       *Ticket `json:"ticket"`
+	Replayed     bool    `json:"replayed"`
 }
 
 type UpdateTicketInput struct {
@@ -1380,3 +1445,7 @@ type LifecycleEvent struct {
 	Data           map[string]any `json:"data,omitempty"`
 	OccurredAt     time.Time      `json:"occurred_at"`
 }
+
+// EventID lets transport publishers apply broker-side de-duplication without
+// importing the conversation package or depending on a concrete event type.
+func (event LifecycleEvent) EventID() string { return event.ID }

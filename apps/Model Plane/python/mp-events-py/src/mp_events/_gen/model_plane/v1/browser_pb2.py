@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from google.protobuf import timestamp_pb2 as google_dot_protobuf_dot_timestamp__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x8a\x01\n\x13\x41\x63quireGrantRequest\x12\x1f\n\x0bsession_key\x18\x01 \x01(\tR\nsessionKey\x12\x12\n\x04mode\x18\x02 \x01(\tR\x04mode\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\'\n\x0f\x61llowed_domains\x18\x04 \x03(\tR\x0e\x61llowedDomains\"\xb1\x01\n\x14\x41\x63quireGrantResponse\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\x12\x1a\n\x08\x65ndpoint\x18\x02 \x01(\tR\x08\x65ndpoint\x12\x39\n\nexpires_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\'\n\x0f\x61llowed_domains\x18\x04 \x03(\tR\x0e\x61llowedDomains\"G\n\x12RevokeGrantRequest\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"/\n\x13RevokeGrantResponse\x12\x18\n\x07revoked\x18\x01 \x01(\x08R\x07revoked\"\x16\n\x14\x42rowserHealthRequest\"/\n\x15\x42rowserHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\"1\n\x14ValidateGrantRequest\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\"\xae\x01\n\x15ValidateGrantResponse\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\x12\x16\n\x06\x61\x63tive\x18\x02 \x01(\x08R\x06\x61\x63tive\x12\x39\n\nexpires_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\'\n\x0f\x61llowed_domains\x18\x04 \x03(\tR\x0e\x61llowedDomains2\xf7\x02\n\rBrowserBroker\x12Y\n\x0c\x41\x63quireGrant\x12#.model_plane.v1.AcquireGrantRequest\x1a$.model_plane.v1.AcquireGrantResponse\x12V\n\x0bRevokeGrant\x12\".model_plane.v1.RevokeGrantRequest\x1a#.model_plane.v1.RevokeGrantResponse\x12\\\n\rValidateGrant\x12$.model_plane.v1.ValidateGrantRequest\x1a%.model_plane.v1.ValidateGrantResponse\x12U\n\x06Health\x12$.model_plane.v1.BrowserHealthRequest\x1a%.model_plane.v1.BrowserHealthResponseB\xb4\x01\n\x12\x63om.model_plane.v1B\x0c\x42rowserProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe7\x02\n\x13\x41\x63quireGrantRequest\x12\x1f\n\x0bsession_key\x18\x01 \x01(\tR\nsessionKey\x12\x12\n\x04mode\x18\x02 \x01(\tR\x04mode\x12\x15\n\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\'\n\x0f\x61llowed_domains\x18\x04 \x03(\tR\x0e\x61llowedDomains\x12\'\n\x0f\x61llowed_actions\x18\x05 \x03(\tR\x0e\x61llowedActions\x12*\n\x11\x61llowed_frame_ids\x18\x06 \x03(\tR\x0f\x61llowedFrameIds\x12,\n\x12\x61llowed_dialog_ids\x18\x07 \x03(\tR\x10\x61llowedDialogIds\x12\x30\n\x14\x61llowed_artifact_ids\x18\x08 \x03(\tR\x12\x61llowedArtifactIds\x12&\n\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\"\x8e\x03\n\x14\x41\x63quireGrantResponse\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\x12\x1a\n\x08\x65ndpoint\x18\x02 \x01(\tR\x08\x65ndpoint\x12\x39\n\nexpires_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\'\n\x0f\x61llowed_domains\x18\x04 \x03(\tR\x0e\x61llowedDomains\x12\'\n\x0f\x61llowed_actions\x18\x05 \x03(\tR\x0e\x61llowedActions\x12*\n\x11\x61llowed_frame_ids\x18\x06 \x03(\tR\x0f\x61llowedFrameIds\x12,\n\x12\x61llowed_dialog_ids\x18\x07 \x03(\tR\x10\x61llowedDialogIds\x12\x30\n\x14\x61llowed_artifact_ids\x18\x08 \x03(\tR\x12\x61llowedArtifactIds\x12&\n\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\"G\n\x12RevokeGrantRequest\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\x12\x16\n\x06reason\x18\x02 \x01(\tR\x06reason\"/\n\x13RevokeGrantResponse\x12\x18\n\x07revoked\x18\x01 \x01(\x08R\x07revoked\"\x16\n\x14\x42rowserHealthRequest\"/\n\x15\x42rowserHealthResponse\x12\x16\n\x06status\x18\x01 \x01(\tR\x06status\"1\n\x14ValidateGrantRequest\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\"\x8b\x03\n\x15ValidateGrantResponse\x12\x19\n\x08grant_id\x18\x01 \x01(\tR\x07grantId\x12\x16\n\x06\x61\x63tive\x18\x02 \x01(\x08R\x06\x61\x63tive\x12\x39\n\nexpires_at\x18\x03 \x01(\x0b\x32\x1a.google.protobuf.TimestampR\texpiresAt\x12\'\n\x0f\x61llowed_domains\x18\x04 \x03(\tR\x0e\x61llowedDomains\x12\'\n\x0f\x61llowed_actions\x18\x05 \x03(\tR\x0e\x61llowedActions\x12*\n\x11\x61llowed_frame_ids\x18\x06 \x03(\tR\x0f\x61llowedFrameIds\x12,\n\x12\x61llowed_dialog_ids\x18\x07 \x03(\tR\x10\x61llowedDialogIds\x12\x30\n\x14\x61llowed_artifact_ids\x18\x08 \x03(\tR\x12\x61llowedArtifactIds\x12&\n\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId2\xf7\x02\n\rBrowserBroker\x12Y\n\x0c\x41\x63quireGrant\x12#.model_plane.v1.AcquireGrantRequest\x1a$.model_plane.v1.AcquireGrantResponse\x12V\n\x0bRevokeGrant\x12\".model_plane.v1.RevokeGrantRequest\x1a#.model_plane.v1.RevokeGrantResponse\x12\\\n\rValidateGrant\x12$.model_plane.v1.ValidateGrantRequest\x1a%.model_plane.v1.ValidateGrantResponse\x12U\n\x06Health\x12$.model_plane.v1.BrowserHealthRequest\x1a%.model_plane.v1.BrowserHealthResponseB\xb4\x01\n\x12\x63om.model_plane.v1B\x0c\x42rowserProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,21 +34,21 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'\n\022com.model_plane.v1B\014BrowserProtoP\001Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\242\002\003MXX\252\002\rModelPlane.V1\312\002\rModelPlane\\V1\342\002\031ModelPlane\\V1\\GPBMetadata\352\002\016ModelPlane::V1'
   _globals['_ACQUIREGRANTREQUEST']._serialized_start=82
-  _globals['_ACQUIREGRANTREQUEST']._serialized_end=220
-  _globals['_ACQUIREGRANTRESPONSE']._serialized_start=223
-  _globals['_ACQUIREGRANTRESPONSE']._serialized_end=400
-  _globals['_REVOKEGRANTREQUEST']._serialized_start=402
-  _globals['_REVOKEGRANTREQUEST']._serialized_end=473
-  _globals['_REVOKEGRANTRESPONSE']._serialized_start=475
-  _globals['_REVOKEGRANTRESPONSE']._serialized_end=522
-  _globals['_BROWSERHEALTHREQUEST']._serialized_start=524
-  _globals['_BROWSERHEALTHREQUEST']._serialized_end=546
-  _globals['_BROWSERHEALTHRESPONSE']._serialized_start=548
-  _globals['_BROWSERHEALTHRESPONSE']._serialized_end=595
-  _globals['_VALIDATEGRANTREQUEST']._serialized_start=597
-  _globals['_VALIDATEGRANTREQUEST']._serialized_end=646
-  _globals['_VALIDATEGRANTRESPONSE']._serialized_start=649
-  _globals['_VALIDATEGRANTRESPONSE']._serialized_end=823
-  _globals['_BROWSERBROKER']._serialized_start=826
-  _globals['_BROWSERBROKER']._serialized_end=1201
+  _globals['_ACQUIREGRANTREQUEST']._serialized_end=441
+  _globals['_ACQUIREGRANTRESPONSE']._serialized_start=444
+  _globals['_ACQUIREGRANTRESPONSE']._serialized_end=842
+  _globals['_REVOKEGRANTREQUEST']._serialized_start=844
+  _globals['_REVOKEGRANTREQUEST']._serialized_end=915
+  _globals['_REVOKEGRANTRESPONSE']._serialized_start=917
+  _globals['_REVOKEGRANTRESPONSE']._serialized_end=964
+  _globals['_BROWSERHEALTHREQUEST']._serialized_start=966
+  _globals['_BROWSERHEALTHREQUEST']._serialized_end=988
+  _globals['_BROWSERHEALTHRESPONSE']._serialized_start=990
+  _globals['_BROWSERHEALTHRESPONSE']._serialized_end=1037
+  _globals['_VALIDATEGRANTREQUEST']._serialized_start=1039
+  _globals['_VALIDATEGRANTREQUEST']._serialized_end=1088
+  _globals['_VALIDATEGRANTRESPONSE']._serialized_start=1091
+  _globals['_VALIDATEGRANTRESPONSE']._serialized_end=1486
+  _globals['_BROWSERBROKER']._serialized_start=1489
+  _globals['_BROWSERBROKER']._serialized_end=1864
 # @@protoc_insertion_point(module_scope)

@@ -46,7 +46,11 @@ const ACTION_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "action": {"type": "string", "enum": ["navigate","click","type","scroll","wait","extract","done"]},
-    "selector": {"type": "string"},
+    "selector": {"type": "string", "description": "Legacy compatibility selector; prefer ref_id from the current Quarry snapshot."},
+    "snapshot_id": {"type": "string"},
+    "generation": {"type": "integer", "minimum": 0},
+    "ref_id": {"type": "string", "description": "Opaque Quarry target ref such as @e1 from the current observation."},
+    "frame_id": {"type": "string", "description": "Required only when the selected snapshot target reports a child-frame id; echo it exactly and never invent one."},
     "value": {"type": "string"},
     "url": {"type": "string"},
     "reason": {"type": "string"},
@@ -118,9 +122,30 @@ impl LlmPlanner {
         let observation_text = observation.map_or_else(
             || "No observation yet — this is the first step.".to_owned(),
             |o| {
+                let targets = o
+                    .snapshot_targets
+                    .iter()
+                    .take(40)
+                    .map(|target| {
+                        format!(
+                            "  {} role={} name={} text={} frame_id={}",
+                            target.ref_id,
+                            target.role.as_deref().unwrap_or(""),
+                            target.name.as_deref().unwrap_or(""),
+                            target.text.as_deref().unwrap_or(""),
+                            target.frame_id.as_deref().unwrap_or(""),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 format!(
-                    "Current page:\n  url: {}\n  title: {}\n  extracted_text: {}",
-                    o.page_url, o.page_title, o.extracted_text
+                    "Current page:\n  url: {}\n  title: {}\n  extracted_text: {}\n  snapshot_id: {}\n  generation: {}\n  targets:\n{}",
+                    o.page_url,
+                    o.page_title,
+                    o.extracted_text,
+                    o.dom_snapshot_ref,
+                    o.snapshot_generation.map_or_else(String::new, |generation| generation.to_string()),
+                    targets,
                 )
             },
         );
@@ -128,7 +153,7 @@ impl LlmPlanner {
             "You are an autonomous web-browsing agent. Goal: {}\n\
              Choose the SINGLE next browser action and return ONLY JSON matching the schema. \
              Use action=\"done\" when the goal is satisfied. \
-             For navigate set url; for click/type set a CSS selector; for type also set value.",
+             For navigate set url. For click/type, prefer the exact snapshot_id, generation, and ref_id from the latest observation; these opaque refs are the only safe way to target a dynamic page. When a target reports a child frame_id, echo that exact frame_id too; Quarry will reject a cross-frame action without it. Use CSS selector only as legacy compatibility when no current snapshot target can express the intent. For type also set value.",
             config.system_prompt
         );
 
@@ -185,6 +210,14 @@ struct NextAction {
     #[serde(default)]
     selector: String,
     #[serde(default)]
+    snapshot_id: String,
+    #[serde(default)]
+    generation: Option<u32>,
+    #[serde(default)]
+    ref_id: String,
+    #[serde(default)]
+    frame_id: String,
+    #[serde(default)]
     value: String,
     #[serde(default)]
     url: String,
@@ -216,14 +249,40 @@ impl NextAction {
             // Unknown / "observe" → look at the page again.
             _ => ActionType::Observe,
         };
+        let target_components_present = !self.snapshot_id.is_empty()
+            || self.generation.is_some()
+            || !self.ref_id.is_empty()
+            || !self.frame_id.is_empty();
+        let target = match (
+            self.generation,
+            self.snapshot_id.is_empty(),
+            self.ref_id.is_empty(),
+        ) {
+            (Some(generation), false, false) => Some(crate::browser_agent::BrowserTargetRef {
+                snapshot_id: self.snapshot_id,
+                generation,
+                ref_id: self.ref_id,
+                frame_id: (!self.frame_id.trim().is_empty()).then(|| self.frame_id),
+            }),
+            _ => None,
+        };
+        // A planner that supplied a partial opaque binding must not silently
+        // fall back to a CSS action that might affect a different element.
+        // An empty selector makes the legacy driver reject/re-observe instead.
+        let selector = if target_components_present && target.is_none() {
+            String::new()
+        } else {
+            self.selector
+        };
         Some(BrowserAction {
             action_id: String::new(),
             grant_id: String::new(),
             action_type,
-            selector: self.selector,
+            selector,
             value: self.value,
             url: self.url,
             max_wait_ms: 5000,
+            target,
             reason: self.reason,
             risk_category: RiskCategory::from_wire(&self.risk_category),
         })

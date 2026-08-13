@@ -1,4 +1,4 @@
-import { executeAction } from '@/shared/actions/action-client'
+import { executeAction, type ActionExecutionOptions } from '@/shared/actions/action-client'
 import type { ActionActor } from '@/shared/actions/types'
 import {
   getTicket,
@@ -24,6 +24,7 @@ type TicketCreateInput = Pick<
 export async function executeTicketCreate(
   actor: ActionActor,
   input: TicketCreateInput,
+  options?: ActionExecutionOptions,
 ): Promise<SupportTicket> {
   const execution = await executeAction('tickets.create', actor, {
     conversationId: input.conversation_id,
@@ -31,7 +32,7 @@ export async function executeTicketCreate(
     severity: input.severity,
     category: input.category,
     intent: input.intent,
-  })
+  }, options)
   if (!execution.ticketId) {
     throw new Error('tickets.create completed without a durable ticket identifier.')
   }

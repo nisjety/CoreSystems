@@ -547,8 +547,11 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // capability-core governs it as a LOW-risk capability while arbitrary
         // host commands stay behind the high-risk shell capability.
         "code_interpreter" => "cap.command.sandbox",
-        "browser_agent" => "cap.browser.open",
-        "web_search" | "web_fetch" => "cap.tool.http",
+        // The granular MCP facade never creates raw browser authority. It is
+        // governed by the same browser capability as the agent loop, while
+        // BrowserBroker separately binds its opaque run grant.
+        "browser_agent" | "browser.observe" | "browser.act" => "cap.browser.open",
+        "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         "knowledge_search" => "cap.retrieval.query",
         "yr_weather" | "traffic" | "news" | "company_lookup" => "cap.tool.information.read",
         "track_shipment" => "cap.tool.shipping.track",

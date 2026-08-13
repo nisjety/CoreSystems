@@ -20,6 +20,7 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 anyhow = "1"
 bytes = "1"
+tempfile = "3"
 # 0.9 reorganized features: tokio runtime is built-in, and rustls/native-tls/fetcher
 # only exist for the optional Chrome downloader (which we don't use — the image
 # ships Chromium). Core CDP driver only → no fetcher, no zip backend needed.

@@ -2,6 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 
 use crate::context_pack::pack_context;
@@ -49,6 +50,51 @@ impl RetrievalSvc {
             None => Vec::new(),
         }
     }
+
+    /// Apply a Space authority only after the gRPC caller's normal identity is
+    /// verified. This mirrors the HTTP retrieval boundary: metadata can carry
+    /// the signed decision, but it can never choose a workspace/collection or
+    /// substitute for a verified subject.
+    async fn apply_space_decision(
+        &self,
+        ctx: &crate::authz::AuthContext,
+        token: Option<&str>,
+        pipeline_req: &mut PipelineReq,
+    ) -> Result<(), Status> {
+        let Some(token) = token else {
+            return Ok(());
+        };
+        let subject = ctx.user_id.as_deref().ok_or_else(|| {
+            Status::permission_denied("user subject required for Space retrieval")
+        })?;
+        let keys = crate::space_scope::configured_retrieval_decision_keys()
+            .map_err(|_| Status::permission_denied("Space decision verification is unavailable"))?;
+        let authority = crate::space_scope::verify_retrieval_space_decision(
+            token,
+            &keys,
+            &ctx.org_id,
+            subject,
+            chrono::Utc::now(),
+        )
+        .map_err(|_| Status::permission_denied("invalid Space retrieval decision"))?;
+        pipeline_req.space_scope = Some(
+            crate::space_scope::resolve_space_retrieval_scope(&self.pipeline.pool, authority)
+                .await
+                .map_err(|_| Status::permission_denied("Space retrieval binding is unavailable"))?,
+        );
+        Ok(())
+    }
+}
+
+fn space_decision_from_metadata(metadata: &MetadataMap) -> Result<Option<&str>, Status> {
+    metadata
+        .get("x-space-decision")
+        .map(|value| {
+            value
+                .to_str()
+                .map_err(|_| Status::invalid_argument("invalid Space retrieval decision metadata"))
+        })
+        .transpose()
 }
 
 #[tonic::async_trait]
@@ -65,6 +111,7 @@ impl RetrievalService for RetrievalSvc {
         request: Request<RetrieveRequest>,
     ) -> Result<Response<Self::RetrieveStreamStream>, Status> {
         let pipeline = self.pipeline.clone();
+        let space_decision = space_decision_from_metadata(request.metadata())?.map(str::to_owned);
         let ctx = self
             .authorize(
                 &request,
@@ -75,6 +122,8 @@ impl RetrievalService for RetrievalSvc {
         let inner = request.into_inner();
         let mut pipeline_req = grpc_to_pipeline(inner).map_err(Status::invalid_argument)?;
         apply_verified_context(&ctx, &mut pipeline_req);
+        self.apply_space_decision(&ctx, space_decision.as_deref(), &mut pipeline_req)
+            .await?;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<RetrievalChunk, Status>>(32);
         tokio::spawn(async move {
@@ -125,6 +174,7 @@ impl RetrievalService for RetrievalSvc {
         &self,
         request: Request<RetrieveRequest>,
     ) -> Result<Response<RetrieveResponse>, Status> {
+        let space_decision = space_decision_from_metadata(request.metadata())?.map(str::to_owned);
         let ctx = self
             .authorize(
                 &request,
@@ -173,8 +223,11 @@ impl RetrievalService for RetrievalSvc {
             // §16.1.4 — agent_id now on the proto contract (field 13).
             agent_id: req.agent_id,
             admin_read_all: ctx.scopes.iter().any(|scope| scope == "org:data:read_all"),
+            space_scope: None,
         };
         apply_verified_context(&ctx, &mut pipeline_req);
+        self.apply_space_decision(&ctx, space_decision.as_deref(), &mut pipeline_req)
+            .await?;
 
         let resp = self.pipeline.retrieve(pipeline_req).await.map_err(|e| {
             // The anyhow chain (e.g. "model-plane embedding failed: status:
@@ -598,15 +651,18 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
         context_format: req.context_format,
         agent_id: req.agent_id,
         admin_read_all: false,
+        space_scope: None,
     })
 }
 
 #[cfg(test)]
 mod zdr_boundary_tests {
     use super::{
-        apply_verified_context, grpc_to_pipeline, parse_zdr_mode, RetrieveRequest, ZdrMode,
+        apply_verified_context, grpc_to_pipeline, parse_zdr_mode, space_decision_from_metadata,
+        RetrieveRequest, ZdrMode,
     };
     use crate::authz::{AuthContext, AuthMethod, EffectiveAcl};
+    use tonic::metadata::{MetadataMap, MetadataValue};
     use tonic::{Code, Status};
 
     fn ctx(zdr: bool) -> AuthContext {
@@ -629,6 +685,23 @@ mod zdr_boundary_tests {
             zdr_mode: zdr_mode.map(str::to_owned),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn grpc_space_decision_is_an_explicit_metadata_authority() {
+        let mut metadata = MetadataMap::new();
+        assert_eq!(
+            space_decision_from_metadata(&metadata).expect("no metadata is legacy"),
+            None
+        );
+        metadata.insert(
+            "x-space-decision",
+            MetadataValue::try_from("signed-control-decision").expect("valid ascii metadata"),
+        );
+        assert_eq!(
+            space_decision_from_metadata(&metadata).expect("metadata parses"),
+            Some("signed-control-decision")
+        );
     }
 
     #[test]

@@ -9,6 +9,9 @@ Name | Type
 `runId` | string
 `leaseId` | string
 `profileId` | string
+`driverCapabilities` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
+`executionTier` | string
+`executionEngine` | string
 
 ## Example
 
@@ -20,6 +23,9 @@ const example = {
   "runId": null,
   "leaseId": null,
   "profileId": null,
+  "driverCapabilities": null,
+  "executionTier": null,
+  "executionEngine": null,
 } satisfies EnvelopeStartAgentRunData
 
 console.log(example)
@@ -34,5 +40,3 @@ console.log(exampleParsed)
 ```
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
-
-

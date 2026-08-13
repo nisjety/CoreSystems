@@ -49,6 +49,15 @@ pub(crate) struct DreamMemoryCandidate {
     pub inferred: bool,
 }
 
+/// A durable memory identifier paired with the input candidate that produced
+/// it. Only thread-scoped entries are eligible for semantic mirroring: their
+/// `session_id` is the exact thread boundary required for later Space erasure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PersistedMemoryId {
+    pub(crate) candidate_index: usize,
+    pub(crate) memory_id: String,
+}
+
 /// How a memory came to exist.
 ///
 /// Three-valued on purpose. A bool would force pre-provenance rows into one of
@@ -188,7 +197,7 @@ pub(crate) async fn dream_once(
             }
 
             let mut tx = pool.begin().await?;
-            let saved = persist_candidates(
+            let (saved, persisted) = persist_candidates(
                 &mut tx,
                 &message.org_id,
                 &message.user_id,
@@ -208,12 +217,13 @@ pub(crate) async fn dream_once(
             )
             .await?;
             tx.commit().await?;
-            sync_candidates_to_letta(
+            sync_persisted_candidates_to_letta(
                 letta,
                 &message.org_id,
                 &message.user_id,
                 &message.thread_id,
                 &candidates,
+                &persisted,
             )
             .await;
             processed += 1;
@@ -282,37 +292,43 @@ fn merge_extracted(candidates: &mut Vec<DreamMemoryCandidate>, extracted: &[Drea
     }
 }
 
-pub(crate) async fn sync_candidates_to_letta(
+pub(crate) async fn sync_persisted_candidates_to_letta(
     letta: Option<&LettaMemoryAdapter>,
     org_id: &str,
     user_id: &str,
     thread_id: &str,
     candidates: &[DreamMemoryCandidate],
+    persisted: &[PersistedMemoryId],
 ) {
     let Some(letta) = letta else {
         return;
     };
 
-    for candidate in candidates {
-        // Mirrors persist_candidates' ownership rule: only `scope == "user"`
-        // candidates are tagged with an owner. No memory_id is threaded
-        // through here, so the durable and semantic copies of a
-        // background-dreamed candidate are not id-correlated -- only the
-        // explicit IndexMemory RPC path (memory_grpc::index_memory) gets
-        // that. Acceptable today because background dreaming has not yet
-        // produced any real candidates.
-        let owner = (candidate.scope == "user").then_some(user_id);
+    for (candidate, memory_id) in correlated_thread_candidates(candidates, persisted) {
         letta
             .index(
                 org_id,
                 thread_id,
                 memory_topic(candidate.scope, candidate.kind),
                 &candidate.content,
-                owner,
-                None,
+                Some(user_id),
+                Some(memory_id),
             )
             .await;
     }
+}
+
+fn correlated_thread_candidates<'a>(
+    candidates: &'a [DreamMemoryCandidate],
+    persisted: &'a [PersistedMemoryId],
+) -> Vec<(&'a DreamMemoryCandidate, &'a str)> {
+    persisted
+        .iter()
+        .filter_map(|entry| {
+            let candidate = candidates.get(entry.candidate_index)?;
+            (candidate.scope == "thread").then_some((candidate, entry.memory_id.as_str()))
+        })
+        .collect()
 }
 
 pub(crate) fn extract_memory_candidates(
@@ -340,9 +356,9 @@ pub(crate) async fn persist_candidates(
     thread_id: &str,
     message_id: &str,
     candidates: &[DreamMemoryCandidate],
-) -> Result<i64, sqlx::Error> {
+) -> Result<(i64, Vec<PersistedMemoryId>), sqlx::Error> {
     if candidates.is_empty() {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
 
     let base_source_links = vec![
@@ -350,8 +366,9 @@ pub(crate) async fn persist_candidates(
         format!("message:{message_id}"),
     ];
     let mut saved = 0i64;
+    let mut persisted = Vec::with_capacity(candidates.len());
 
-    for candidate in candidates {
+    for (candidate_index, candidate) in candidates.iter().enumerate() {
         // The upsert REPLACES source_links rather than appending, so the marker
         // has to be rebuilt per candidate: a re-extraction that dropped it would
         // silently relabel an inferred memory as a stated one.
@@ -369,9 +386,15 @@ pub(crate) async fn persist_candidates(
         };
         let memory_id = upsert_agent_memory(tx, org_id, owner, candidate, &source_links).await?;
         saved += i64::from(!memory_id.is_empty());
+        if !memory_id.is_empty() {
+            persisted.push(PersistedMemoryId {
+                candidate_index,
+                memory_id,
+            });
+        }
     }
 
-    Ok(saved)
+    Ok((saved, persisted))
 }
 
 pub(crate) async fn record_dream_run(
@@ -1059,6 +1082,45 @@ fn memory_topic(scope: &str, kind: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn candidate(scope: &'static str) -> DreamMemoryCandidate {
+        DreamMemoryCandidate {
+            scope,
+            session_id: (scope == "thread").then_some("thread-a".to_owned()),
+            key: format!("key-{scope}"),
+            content: "content".to_owned(),
+            kind: "fact",
+            confidence: 0.9,
+            inferred: false,
+        }
+    }
+
+    #[test]
+    fn semantic_mirroring_keeps_only_exact_thread_memory_ids() {
+        let candidates = vec![candidate("user"), candidate("thread"), candidate("org")];
+        let persisted = vec![
+            PersistedMemoryId {
+                candidate_index: 0,
+                memory_id: "user-memory".to_owned(),
+            },
+            PersistedMemoryId {
+                candidate_index: 1,
+                memory_id: "thread-memory".to_owned(),
+            },
+            PersistedMemoryId {
+                candidate_index: 2,
+                memory_id: "org-memory".to_owned(),
+            },
+            PersistedMemoryId {
+                candidate_index: 99,
+                memory_id: "forged-index".to_owned(),
+            },
+        ];
+        let mirrored = correlated_thread_candidates(&candidates, &persisted);
+        assert_eq!(mirrored.len(), 1);
+        assert_eq!(mirrored[0].0.scope, "thread");
+        assert_eq!(mirrored[0].1, "thread-memory");
+    }
 
     #[test]
     fn durable_user_memory_is_owner_scoped_in_queries_and_uniqueness() {

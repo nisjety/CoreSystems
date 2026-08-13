@@ -88,6 +88,17 @@ describe('chat-client tool wiring', () => {
     ])
   })
 
+  it('sends only a requested Space reference for a new thread, never authority metadata', () => {
+    const body = buildChatWireBody({
+      content: 'Plan my work',
+      spaceRef: 'personal-space-1',
+    })
+
+    expect(body.space_ref).toBe('personal-space-1')
+    expect(body).not.toHaveProperty('space_context')
+    expect(body).not.toHaveProperty('space_decision_token')
+  })
+
   it('keeps a Support-derived thread read-only on every later Chat turn', () => {
     bindSupportChatThread({ userId: 'user-1', orgId: 'org-1', conversationId: 'conversation-1' }, 'support_thread')
 
@@ -201,6 +212,7 @@ describe('chat-client server thread history', () => {
               title: 'Server saved chat',
               preview: 'Last answer',
               updatedAt: '2026-06-17T10:00:00.000Z',
+              spaceRef: 'space_1',
             },
           ],
         },
@@ -216,6 +228,7 @@ describe('chat-client server thread history', () => {
         // Absent from the payload -> false. A gateway index written before pins
         // existed must decode as unpinned, not fail the whole listing.
         pinned: false,
+        spaceRef: 'space_1',
       },
     ])
   })

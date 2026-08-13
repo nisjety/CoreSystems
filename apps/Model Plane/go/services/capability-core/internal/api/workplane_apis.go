@@ -2,8 +2,10 @@
 package api
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -691,12 +693,18 @@ func writeTaskCancellationMutation(w http.ResponseWriter, r *http.Request, datab
 
 // CronHandler handles CRUD for cron_schedules.
 type CronHandler struct {
-	pool registryDatabase
+	pool     registryDatabase
+	verifier *cron.ControlDecisionVerifier
 }
 
 // NewCronHandler constructs the handler.
 func NewCronHandler(pool registryDatabase) *CronHandler {
 	return &CronHandler{pool: pool}
+}
+
+func (h *CronHandler) WithSpaceDecisionVerifier(verifier *cron.ControlDecisionVerifier) *CronHandler {
+	h.verifier = verifier
+	return h
 }
 
 // Register mounts routes.
@@ -730,6 +738,12 @@ type cronScheduleRow struct {
 	NextFireAt   *time.Time `json:"next_fire_at,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	UpdatedAt    time.Time  `json:"updated_at"`
+	SpaceRef     string     `json:"space_ref"`
+	CreatorID    string     `json:"creator_subject_id"`
+	// SpaceDecisionToken is accepted only at creation and never stored or
+	// returned. Capability Core verifies it before extracting durable claims.
+	SpaceDecisionToken string `json:"space_schedule_create_decision,omitempty"`
+	IdempotencyKey     string `json:"idempotency_key,omitempty"`
 }
 
 func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
@@ -738,7 +752,7 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		orgID := verifiedOrganizationID(r)
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
-			       enabled, last_fire_at, next_fire_at, created_at, updated_at
+			       enabled, last_fire_at, next_fire_at, created_at, updated_at, space_ref, creator_subject_id
 			FROM cron_schedules WHERE org_id=$1 AND deleted_at IS NULL ORDER BY name
 		`, orgID)
 		if err != nil {
@@ -751,7 +765,7 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			var s cronScheduleRow
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.ScheduleExpr,
 				&s.Timezone, &s.TaskTemplate, &s.Enabled, &s.LastFireAt, &s.NextFireAt,
-				&s.CreatedAt, &s.UpdatedAt); err != nil {
+				&s.CreatedAt, &s.UpdatedAt, &s.SpaceRef, &s.CreatorID); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
@@ -765,13 +779,31 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.OrgID = verifiedOrganizationID(r)
-		if s.ID == "" {
-			s.ID = "cron_" + uuid.New().String()
+		if strings.TrimSpace(s.ID) == "" {
+			jsonErr(w, "a caller-generated schedule id is required for scoped authorization", http.StatusBadRequest)
+			return
 		}
 		if s.Timezone == "" {
 			s.Timezone = "UTC"
 		}
 		tplJSON, _ := json.Marshal(s.TaskTemplate)
+		if h.verifier == nil {
+			jsonErr(w, "Space schedule authorization is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if strings.TrimSpace(s.SpaceRef) == "" || strings.TrimSpace(s.CreatorID) == "" || strings.TrimSpace(s.SpaceDecisionToken) == "" || strings.TrimSpace(s.IdempotencyKey) == "" {
+			jsonErr(w, "space_ref, creator_subject_id, schedule decision, and idempotency_key are required", http.StatusBadRequest)
+			return
+		}
+		templateDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(tplJSON))
+		binding, err := h.verifier.VerifyScheduleCreate(s.SpaceDecisionToken, cron.CreateIntent{
+			OrgID: verifiedOrganizationID(r), SpaceRef: s.SpaceRef, SubjectID: s.CreatorID,
+			ScheduleID: s.ID, TemplateDigest: templateDigest, IdempotencyKey: s.IdempotencyKey,
+		}, time.Now().UTC())
+		if err != nil {
+			jsonErr(w, "Space schedule creation is not authorized", http.StatusForbidden)
+			return
+		}
 		now := time.Now().UTC()
 		// Validate the cron expression up front and seed next_fire_at so the UI
 		// shows the next run and the sweeper advances it correctly.
@@ -780,12 +812,18 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "invalid cron expression: "+nerr.Error(), http.StatusBadRequest)
 			return
 		}
-		_, err := h.pool.Exec(r.Context(), `
+		_, err = h.pool.Exec(r.Context(), `
 			INSERT INTO cron_schedules (id, org_id, name, description, schedule_expr, timezone,
-			    task_template, enabled, next_fire_at, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			    task_template, enabled, next_fire_at, created_at, updated_at, space_ref, creator_subject_id,
+			    recipient_audience_ref, recipient_audience_hash, resource_authorization_ref, privacy_policy_ref,
+			    authority_revision, membership_revision, privacy_revision, recipient_audience_revision,
+			    entitlement_revision, template_digest)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 		`, s.ID, s.OrgID, s.Name, s.Description, s.ScheduleExpr, s.Timezone,
-			tplJSON, s.Enabled, next, now, now)
+			tplJSON, s.Enabled, next, now, now, binding.SpaceRef, binding.SubjectID,
+			binding.RecipientAudienceRef, binding.RecipientAudienceHash, binding.ResourceAuthorizationRef, binding.PrivacyPolicyRef,
+			binding.AuthorityRevision, binding.MembershipRevision, binding.PrivacyRevision, binding.RecipientAudienceRevision,
+			binding.EntitlementRevision, templateDigest)
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -801,11 +839,11 @@ func (h *CronHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	var s cronScheduleRow
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
-		       enabled, last_fire_at, next_fire_at, created_at, updated_at
+		       enabled, last_fire_at, next_fire_at, created_at, updated_at, space_ref, creator_subject_id
 		FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL
 	`, id, verifiedOrganizationID(r)).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.ScheduleExpr,
 		&s.Timezone, &s.TaskTemplate, &s.Enabled, &s.LastFireAt, &s.NextFireAt,
-		&s.CreatedAt, &s.UpdatedAt)
+		&s.CreatedAt, &s.UpdatedAt, &s.SpaceRef, &s.CreatorID)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return

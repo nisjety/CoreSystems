@@ -1,10 +1,14 @@
+# syntax=docker/dockerfile:1.7
 FROM golang:1.24-alpine3.21 AS build
 
 WORKDIR /src
 COPY go.mod ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    go mod download
 COPY . ./
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w -X main.version=local' -o /out/core-infra-gateway ./cmd/core-infra-gateway
+RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,target=/root/.cache/go-build,sharing=locked \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w -X main.version=local' -o /out/core-infra-gateway ./cmd/core-infra-gateway
 
 FROM alpine:3.21
 

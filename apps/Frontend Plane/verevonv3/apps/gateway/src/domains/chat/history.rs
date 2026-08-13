@@ -31,6 +31,11 @@ struct ChatThreadSummary {
     /// thread summary. The gateway only relays that authority to the SPA.
     #[serde(default)]
     pinned: bool,
+    /// A non-secret durable routing reference. It lets the client request a
+    /// fresh append decision after reload; it is never an audience list or
+    /// bearer and Control still resolves current authority.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    space_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +103,8 @@ struct DurableThreadSummary {
     created_at: String,
     #[serde(default)]
     pinned: bool,
+    #[serde(default, alias = "spaceId")]
+    space_id: String,
 }
 
 pub(super) async fn list_threads(
@@ -309,6 +316,7 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         preview: item.preview,
         updated_at,
         pinned: item.pinned,
+        space_ref: item.space_id.trim().to_owned(),
     })
 }
 
@@ -617,6 +625,7 @@ mod tests {
                 updated_at: "2026-08-11T10:00:00Z".to_owned(),
                 created_at: "2026-08-10T10:00:00Z".to_owned(),
                 pinned: true,
+                space_id: "space_1".to_owned(),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -625,6 +634,7 @@ mod tests {
         assert_eq!(summary.title, "Customer shipping follow-up");
         assert_eq!(summary.preview, "Waiting on the carrier receipt");
         assert!(summary.pinned);
+        assert_eq!(summary.space_ref, "space_1");
     }
 
     #[test]

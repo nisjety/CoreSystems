@@ -21,7 +21,7 @@ pub use enabled::*;
 
 #[cfg(feature = "browser-agent")]
 mod enabled {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::convert::Infallible;
     use std::fmt::Display;
     use std::str::FromStr;
@@ -42,10 +42,12 @@ mod enabled {
     #[cfg(test)]
     use quarry_browser::SessionInner;
     use quarry_browser::{
-        BrowserDevtoolsEvent, BrowserSession, BrowserTab, LiveFrameFormat, LiveFrameOptions,
+        BrowserDevtoolsEvent, BrowserDriverCapabilities, BrowserEgressPolicy, BrowserSession,
+        BrowserTab, LiveFrameFormat, LiveFrameOptions,
     };
     use quarry_core::contracts::{
-        AgentAction, AgentActionRequest, AgentConstraints, BrowserObservation, ExtractionProfile,
+        AgentAction, AgentActionRequest, AgentConstraints, BrowserEgressReceipt,
+        BrowserObservation, BrowserTelemetry, ExtractionProfile,
     };
     use quarry_core::envelope::Envelope;
     use quarry_core::error::{ErrorCode, QuarryError};
@@ -88,9 +90,14 @@ mod enabled {
         pub grant_id: Option<String>,
         pub control_mode: BrowserControlMode,
         pub profile_scope: BrowserProfileScope,
+        pub execution_tier: BrowserExecutionTier,
         /// Current live observation. It is intentionally process-local for a
         /// ZDR run, while non-ZDR proof remains in immutable receipts.
         pub last_observation: Option<BrowserObservation>,
+        /// A sensitive approval grant can authorize one irreversible action
+        /// only. It is deliberately process-local: a resumed run must obtain
+        /// fresh authority instead of replaying a prior approval.
+        pub used_sensitive_approval_grants: HashSet<String>,
     }
 
     /// run_id → entry. Outer std-Mutex guards the map (held only for the O(1)
@@ -120,6 +127,211 @@ mod enabled {
         }
         if !security.allow_private_hosts() {
             quarry_runtime::dns_guard::guard_url(&parsed).await?;
+        }
+        Ok(())
+    }
+
+    struct SensitiveApproval {
+        grant_id: String,
+        parent_grant_id: String,
+        action: &'static str,
+        frame_id: Option<String>,
+        dialog_id: Option<String>,
+        artifact_id: Option<String>,
+    }
+
+    fn sensitive_approval_for_action(
+        entry: &RunEntry,
+        action: &AgentAction,
+    ) -> QuarryResult<Option<SensitiveApproval>> {
+        match action {
+            AgentAction::RespondDialog {
+                dialog_id,
+                approval_grant_id,
+                ..
+            } => {
+                let parent_grant_id = entry.grant_id.clone().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Forbidden,
+                        "sensitive browser action requires a parent BrowserBroker run grant",
+                    )
+                })?;
+                let dialog = entry
+                    .last_observation
+                    .as_ref()
+                    .and_then(|observation| {
+                        observation
+                            .dialogs
+                            .iter()
+                            .find(|candidate| candidate.dialog_id == *dialog_id)
+                    })
+                    .ok_or_else(|| {
+                        QuarryError::new(
+                            ErrorCode::TargetRepairRequired,
+                            "dialog is no longer observed; observe again before responding",
+                        )
+                    })?;
+                Ok(Some(SensitiveApproval {
+                    grant_id: approval_grant_id.clone(),
+                    parent_grant_id: parent_grant_id.clone(),
+                    action: "respond_dialog",
+                    frame_id: dialog.frame_id.clone(),
+                    dialog_id: Some(dialog_id.clone()),
+                    artifact_id: None,
+                }))
+            }
+            AgentAction::UploadRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                artifact_id,
+                approval_grant_id,
+            }
+            | AgentAction::FrameUploadRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                artifact_id,
+                approval_grant_id,
+                ..
+            } => {
+                let parent_grant_id = entry.grant_id.clone().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Forbidden,
+                        "sensitive browser action requires a parent BrowserBroker run grant",
+                    )
+                })?;
+                let target = entry
+                    .last_observation
+                    .as_ref()
+                    .and_then(|observation| observation.snapshot.as_ref())
+                    .filter(|snapshot| {
+                        snapshot.snapshot_id == *snapshot_id && snapshot.generation == *generation
+                    })
+                    .and_then(|snapshot| {
+                        snapshot
+                            .targets
+                            .iter()
+                            .find(|target| target.ref_id == *ref_id)
+                    })
+                    .ok_or_else(|| {
+                        QuarryError::new(
+                            ErrorCode::TargetRepairRequired,
+                            "upload target is stale or absent; observe again before uploading",
+                        )
+                    })?;
+                Ok(Some(SensitiveApproval {
+                    grant_id: approval_grant_id.clone(),
+                    parent_grant_id,
+                    action: "upload_ref",
+                    frame_id: target.frame_id.clone(),
+                    dialog_id: None,
+                    artifact_id: Some(artifact_id.to_string()),
+                }))
+            }
+            AgentAction::DownloadRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                approval_grant_id,
+            }
+            | AgentAction::FrameDownloadRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                approval_grant_id,
+                ..
+            } => {
+                let parent_grant_id = entry.grant_id.clone().ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::Forbidden,
+                        "sensitive browser action requires a parent BrowserBroker run grant",
+                    )
+                })?;
+                let target = entry
+                    .last_observation
+                    .as_ref()
+                    .and_then(|observation| observation.snapshot.as_ref())
+                    .filter(|snapshot| {
+                        snapshot.snapshot_id == *snapshot_id && snapshot.generation == *generation
+                    })
+                    .and_then(|snapshot| {
+                        snapshot
+                            .targets
+                            .iter()
+                            .find(|target| target.ref_id == *ref_id)
+                    })
+                    .ok_or_else(|| {
+                        QuarryError::new(
+                            ErrorCode::TargetRepairRequired,
+                            "download target is stale or absent; observe again before downloading",
+                        )
+                    })?;
+                Ok(Some(SensitiveApproval {
+                    grant_id: approval_grant_id.clone(),
+                    parent_grant_id,
+                    action: "download_ref",
+                    frame_id: target.frame_id.clone(),
+                    dialog_id: None,
+                    artifact_id: None,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    async fn validate_sensitive_approval(
+        state: &AppState,
+        approval: &SensitiveApproval,
+    ) -> QuarryResult<()> {
+        let grant = state.grant_validator.validate(&approval.grant_id).await?;
+        if !grant.is_usable() {
+            Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "sensitive browser approval grant is inactive or expired",
+            ))
+        } else if !grant.authorizes_exact_sensitive_action(
+            approval.action,
+            &approval.parent_grant_id,
+            approval.frame_id.as_deref(),
+            approval.dialog_id.as_deref(),
+            approval.artifact_id.as_deref(),
+        ) {
+            Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "sensitive browser approval grant does not match the observed action scope",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Revalidate the per-run BrowserBroker grant and, in governed mode,
+    /// prove that the live run is still using the broker's exact canonical
+    /// host authority. This prevents a caller from presenting a valid grant
+    /// while retaining a broader client-supplied `allowed_domains` list.
+    async fn validate_run_grant(
+        state: &AppState,
+        grant_id: &str,
+        run_domains: &[String],
+    ) -> QuarryResult<()> {
+        let grant = state.grant_validator.validate(grant_id).await?;
+        if !grant.is_usable() {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "browser grant is inactive or expired",
+            ));
+        }
+        if state.require_browser_grants {
+            let broker_domains =
+                BrowserEgressPolicy::canonical_broker_domains(&grant.allowed_domains)
+                    .map_err(|reason| QuarryError::new(ErrorCode::SecurityBlocked, reason))?;
+            if broker_domains != run_domains {
+                return Err(QuarryError::new(
+                    ErrorCode::SecurityBlocked,
+                    "browser run domain policy no longer matches its broker grant",
+                ));
+            }
         }
         Ok(())
     }
@@ -157,6 +369,64 @@ mod enabled {
         /// authoritative; a new/renewed grant may be supplied explicitly.
         #[serde(default)]
         pub resume_run_id: Option<String>,
+        /// Optional requirements for the selected execution driver. Quarry
+        /// fails closed instead of silently beginning a run with a driver that
+        /// cannot supply a capability the caller needs.
+        #[serde(default)]
+        pub driver_requirements: BrowserDriverRequirements,
+        /// `ephemeral_evidence` is an opt-in experimental contract for public,
+        /// disposable evidence acquisition. It is never an alias for a normal
+        /// authenticated browser run.
+        #[serde(default)]
+        pub execution_tier: BrowserExecutionTier,
+    }
+
+    /// Browser execution contract selected at run creation. The renderer
+    /// implementation is intentionally separate from the contract: the Lite
+    /// experiment currently transparently falls back to Chromium while a
+    /// lightweight renderer earns capability evidence on its own corpus.
+    #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BrowserExecutionTier {
+        #[default]
+        Chromium,
+        EphemeralEvidence,
+    }
+
+    impl BrowserExecutionTier {
+        const fn is_ephemeral_evidence(self) -> bool {
+            matches!(self, Self::EphemeralEvidence)
+        }
+
+        const fn engine_label(self) -> &'static str {
+            match self {
+                Self::Chromium => "chromium",
+                // Do not imply a Boa/Blitz renderer exists merely because its
+                // contract is exposed. This run is a constrained Chromium
+                // fallback until a Lite engine supplies independent evidence.
+                Self::EphemeralEvidence => "chromium_fallback",
+            }
+        }
+    }
+
+    #[derive(Debug, Default, Deserialize)]
+    pub struct BrowserDriverRequirements {
+        #[serde(default)]
+        pub persistent_profile: bool,
+        #[serde(default)]
+        pub devtools_trace: bool,
+        #[serde(default)]
+        pub downloads_to_artifacts: bool,
+        #[serde(default)]
+        pub uploads_from_artifacts: bool,
+        #[serde(default)]
+        pub full_visual_fidelity: bool,
+        #[serde(default)]
+        pub isolated_egress: bool,
+        #[serde(default)]
+        pub security_evidence: bool,
+        #[serde(default)]
+        pub atomic_target_actions: bool,
     }
 
     fn default_constraints() -> AgentConstraints {
@@ -169,24 +439,7 @@ mod enabled {
     }
 
     fn domain_allowed(url: &str, allowed_domains: &[String]) -> bool {
-        if allowed_domains.is_empty() {
-            return true;
-        }
-        let Ok(parsed) = Url::parse(url) else {
-            return false;
-        };
-        let Some(host) = parsed.host_str().map(|value| value.to_ascii_lowercase()) else {
-            return false;
-        };
-        allowed_domains.iter().any(|candidate| {
-            let candidate = candidate
-                .trim()
-                .to_ascii_lowercase()
-                .trim_start_matches("*.")
-                .trim_start_matches('.')
-                .to_owned();
-            !candidate.is_empty() && (host == candidate || host.ends_with(&format!(".{candidate}")))
-        })
+        BrowserEgressPolicy::from_allowed_domains(allowed_domains).allows_url(url)
     }
 
     fn enforce_step_budget(entry: &RunEntry) -> Result<(), &'static str> {
@@ -283,6 +536,14 @@ mod enabled {
         pub run_id: String,
         pub lease_id: String,
         pub profile_id: String,
+        /// What the selected driver can actually supply for this lease. This
+        /// is evidence-backed routing metadata, not a promise inferred from a
+        /// provider name.
+        pub driver_capabilities: BrowserDriverCapabilities,
+        pub execution_tier: BrowserExecutionTier,
+        /// Actual engine used for this run. `chromium_fallback` is explicit so
+        /// callers never infer Lite throughput/fidelity from a request alone.
+        pub execution_engine: &'static str,
     }
 
     #[derive(Debug, Serialize)]
@@ -300,6 +561,7 @@ mod enabled {
         pub live: bool,
         pub zdr: bool,
         pub control_mode: BrowserControlMode,
+        pub execution_tier: BrowserExecutionTier,
         pub tabs: Vec<BrowserSessionTab>,
         pub last_observation: Option<BrowserObservation>,
     }
@@ -364,6 +626,7 @@ mod enabled {
             live: true,
             zdr: entry.zdr.is_active(),
             control_mode: entry.control_mode,
+            execution_tier: entry.execution_tier,
             tabs: tabs.into_iter().map(browser_session_tab).collect(),
             last_observation: entry.last_observation.clone(),
         }
@@ -389,6 +652,8 @@ mod enabled {
             live: false,
             zdr: checkpoint.zdr.is_active(),
             control_mode: checkpoint.control_mode,
+            // Ephemeral evidence runs are ZDR and never checkpointed.
+            execution_tier: BrowserExecutionTier::Chromium,
             tabs: Vec::new(),
             last_observation: None,
         }
@@ -398,14 +663,31 @@ mod enabled {
         match action {
             AgentAction::Navigate { .. } => "navigate",
             AgentAction::Click { .. } => "click",
+            AgentAction::ClickRef { .. } => "click_ref",
+            AgentAction::FrameClickRef { .. } => "frame_click_ref",
+            AgentAction::ClickSemantic { .. } => "click_semantic",
             AgentAction::ClickPoint { .. } => "click_point",
             AgentAction::Type { .. } => "type",
+            AgentAction::TypeRef { .. } => "type_ref",
+            AgentAction::FrameTypeRef { .. } => "frame_type_ref",
+            AgentAction::TypeSemantic { .. } => "type_semantic",
             AgentAction::Press { .. } => "press",
             AgentAction::Scroll { .. } => "scroll",
             AgentAction::MouseWheel { .. } => "mouse_wheel",
             AgentAction::Select { .. } => "select",
+            AgentAction::SelectRef { .. } => "select_ref",
+            AgentAction::FrameSelectRef { .. } => "frame_select_ref",
+            AgentAction::SelectSemantic { .. } => "select_semantic",
             AgentAction::Wait { .. } => "wait",
             AgentAction::WaitFor { .. } => "wait_for",
+            AgentAction::WaitForRef { .. } => "wait_for_ref",
+            AgentAction::FrameWaitForRef { .. } => "frame_wait_for_ref",
+            AgentAction::WaitForSemantic { .. } => "wait_for_semantic",
+            AgentAction::RespondDialog { .. } => "respond_dialog",
+            AgentAction::UploadRef { .. } => "upload_ref",
+            AgentAction::FrameUploadRef { .. } => "frame_upload_ref",
+            AgentAction::DownloadRef { .. } => "download_ref",
+            AgentAction::FrameDownloadRef { .. } => "frame_download_ref",
             AgentAction::Screenshot { .. } => "screenshot",
             AgentAction::Pdf => "pdf",
             AgentAction::Evaluate { .. } => "evaluate",
@@ -413,6 +695,21 @@ mod enabled {
             AgentAction::Forward => "forward",
             AgentAction::GetContent => "get_content",
         }
+    }
+
+    /// Step receipts retain a provider-authoritative action cost whenever the
+    /// driver supplied one. `None` remains a zero *known Quarry charge* for
+    /// legacy receipt compatibility; callers must inspect observation
+    /// telemetry to distinguish unknown external billing from a true zero.
+    fn observation_receipt_cost_usd(observation: &BrowserObservation) -> f64 {
+        telemetry_receipt_cost_usd(&observation.telemetry)
+    }
+
+    fn telemetry_receipt_cost_usd(telemetry: &BrowserTelemetry) -> f64 {
+        telemetry
+            .verified_action_cost_micro_usd
+            .map(|micro_usd| micro_usd as f64 / 1_000_000.0)
+            .unwrap_or(0.0)
     }
 
     fn browser_timeline_action(receipt: StepReceipt) -> BrowserTimelineItem {
@@ -677,6 +974,17 @@ mod enabled {
         pub zdr: bool,
     }
 
+    /// Bounded, redacted decisions made by the browser egress boundary. This
+    /// contains neither resolved IPs nor request secrets; it is safe to read
+    /// during a live ZDR session but is never a substitute for the immutable
+    /// step receipt retained under the run's ZDR policy.
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct EgressReceiptsData {
+        pub receipts: Vec<BrowserEgressReceipt>,
+        pub zdr: bool,
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     pub struct NewTabBody {
@@ -715,6 +1023,154 @@ mod enabled {
         )
     }
 
+    /// An interactive run gives a remote page the ability to initiate further
+    /// network activity after the initial URL has been admitted. Entry-point
+    /// URL checks are not sufficient for that authority: the selected driver
+    /// must prove that every redirect and subresource request remains behind
+    /// Quarry's isolated egress boundary. Do this before acquiring a session
+    /// so an unsafe provider cannot create durable browser state merely by
+    /// starting an agent run.
+    fn require_isolated_agent_egress(state: &AppState) -> QuarryResult<()> {
+        let capabilities = state.agent_driver.capabilities();
+        if capabilities.isolated_egress && capabilities.security_evidence {
+            return Ok(());
+        }
+
+        Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "agent browser execution requires verified isolated egress and current security evidence",
+        ))
+    }
+
+    fn experimental_lite_enabled() -> bool {
+        std::env::var("QUARRY_LITE_EXPERIMENTAL")
+            .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false)
+    }
+
+    /// Enforce the Lite contract independently of whichever renderer is used.
+    /// It admits anonymous evidence acquisition and bounded snapshot-based DOM
+    /// interaction only; it cannot carry auth state, transfer files, resolve a
+    /// host path, or expose a raw page scripting channel.
+    fn require_ephemeral_evidence_action(action: &AgentAction) -> QuarryResult<()> {
+        if matches!(
+            action,
+            AgentAction::Navigate { .. }
+                | AgentAction::ClickRef { .. }
+                | AgentAction::FrameClickRef { .. }
+                | AgentAction::TypeRef { .. }
+                | AgentAction::FrameTypeRef { .. }
+                | AgentAction::SelectRef { .. }
+                | AgentAction::FrameSelectRef { .. }
+                | AgentAction::Wait { .. }
+                | AgentAction::WaitForRef { .. }
+                | AgentAction::FrameWaitForRef { .. }
+                | AgentAction::Scroll { .. }
+                | AgentAction::Screenshot { .. }
+                | AgentAction::Pdf
+                | AgentAction::GetContent
+        ) {
+            Ok(())
+        } else {
+            Err(QuarryError::new(
+                ErrorCode::Forbidden,
+                "action is unavailable in the ephemeral_evidence execution tier",
+            ))
+        }
+    }
+
+    fn require_driver_capabilities(
+        requirements: &BrowserDriverRequirements,
+        capabilities: BrowserDriverCapabilities,
+    ) -> QuarryResult<()> {
+        let mut missing = Vec::new();
+        if requirements.persistent_profile && !capabilities.persistent_profile {
+            missing.push("persistent_profile");
+        }
+        if requirements.devtools_trace && !capabilities.devtools_trace {
+            missing.push("devtools_trace");
+        }
+        if requirements.downloads_to_artifacts && !capabilities.downloads_to_artifacts {
+            missing.push("downloads_to_artifacts");
+        }
+        if requirements.uploads_from_artifacts && !capabilities.uploads_from_artifacts {
+            missing.push("uploads_from_artifacts");
+        }
+        if requirements.full_visual_fidelity && !capabilities.full_visual_fidelity {
+            missing.push("full_visual_fidelity");
+        }
+        if requirements.isolated_egress && !capabilities.isolated_egress {
+            missing.push("isolated_egress");
+        }
+        if requirements.security_evidence && !capabilities.security_evidence {
+            missing.push("security_evidence");
+        }
+        if requirements.atomic_target_actions && !capabilities.atomic_target_actions {
+            missing.push("atomic_target_actions");
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(QuarryError::new(
+                ErrorCode::Unsupported,
+                "selected browser driver does not satisfy the requested capabilities",
+            )
+            .with_details(serde_json::json!({ "missing": missing })))
+        }
+    }
+
+    fn require_action_capabilities(
+        action: &AgentAction,
+        capabilities: BrowserDriverCapabilities,
+    ) -> QuarryResult<()> {
+        let uses_snapshot_target = matches!(
+            action,
+            AgentAction::ClickRef { .. }
+                | AgentAction::FrameClickRef { .. }
+                | AgentAction::TypeRef { .. }
+                | AgentAction::FrameTypeRef { .. }
+                | AgentAction::SelectRef { .. }
+                | AgentAction::FrameSelectRef { .. }
+                | AgentAction::WaitForRef { .. }
+                | AgentAction::FrameWaitForRef { .. }
+                | AgentAction::ClickSemantic { .. }
+                | AgentAction::TypeSemantic { .. }
+                | AgentAction::SelectSemantic { .. }
+                | AgentAction::WaitForSemantic { .. }
+                | AgentAction::UploadRef { .. }
+                | AgentAction::FrameUploadRef { .. }
+                | AgentAction::DownloadRef { .. }
+                | AgentAction::FrameDownloadRef { .. }
+        );
+        if uses_snapshot_target && !capabilities.atomic_target_actions {
+            return Err(QuarryError::new(
+                ErrorCode::Unsupported,
+                "selected browser driver cannot execute snapshot targets atomically",
+            ));
+        }
+        if matches!(
+            action,
+            AgentAction::DownloadRef { .. } | AgentAction::FrameDownloadRef { .. }
+        ) && !capabilities.downloads_to_artifacts
+        {
+            return Err(QuarryError::new(
+                ErrorCode::Unsupported,
+                "selected browser driver cannot provide governed artifact-only downloads",
+            ));
+        }
+        if matches!(
+            action,
+            AgentAction::UploadRef { .. } | AgentAction::FrameUploadRef { .. }
+        ) && !capabilities.uploads_from_artifacts
+        {
+            return Err(QuarryError::new(
+                ErrorCode::Unsupported,
+                "selected browser driver cannot provide governed artifact-only uploads",
+            ));
+        }
+        Ok(())
+    }
+
     /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
     pub async fn start_run(
         State(state): State<AppState>,
@@ -724,6 +1180,32 @@ mod enabled {
         let request_id = RequestKind::new().to_string();
         let org_id = claims.org_id.clone();
         let actor_id = claims.actor_id().to_owned();
+        let execution_tier = body.execution_tier;
+
+        if execution_tier.is_ephemeral_evidence() && !experimental_lite_enabled() {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "ephemeral_evidence is disabled; set QUARRY_LITE_EXPERIMENTAL=1 for the lab",
+            ));
+        }
+        if execution_tier.is_ephemeral_evidence()
+            && (body.persist_profile || body.profile_id.is_some() || body.resume_run_id.is_some())
+        {
+            return Err(status_err(
+                StatusCode::BAD_REQUEST,
+                &request_id,
+                "ephemeral_evidence forbids profiles, persistence, and resume",
+            ));
+        }
+
+        // Do not treat a provider's top-level navigation guard as proof that
+        // page-controlled redirects, frames, fetch/XHR, or DNS rebinding are
+        // contained. Until a driver can prove the stronger boundary, agent
+        // execution remains unavailable rather than silently unsafe.
+        require_isolated_agent_egress(&state).map_err(|error| driver_err(&request_id, error))?;
+        require_driver_capabilities(&body.driver_requirements, state.agent_driver.capabilities())
+            .map_err(|error| driver_err(&request_id, error))?;
 
         let resume_run_id = body
             .resume_run_id
@@ -782,7 +1264,7 @@ mod enabled {
         // A resumed run's persisted constraints are authoritative. This
         // prevents a caller from widening a budget or allowed-domain set after
         // an edge restart.
-        let constraints = resume_checkpoint
+        let mut constraints = resume_checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.constraints.clone())
             .unwrap_or_else(|| body.constraints.clone());
@@ -819,6 +1301,22 @@ mod enabled {
                     "browser grant is inactive or expired",
                 ));
             }
+            if state.require_browser_grants {
+                let broker_domains = BrowserEgressPolicy::canonical_broker_domains(
+                    &grant.allowed_domains,
+                )
+                .map_err(|reason| status_err(StatusCode::FORBIDDEN, &request_id, &reason))?;
+                if resume_checkpoint.is_some() && constraints.allowed_domains != broker_domains {
+                    return Err(status_err(
+                        StatusCode::FORBIDDEN,
+                        &request_id,
+                        "resumed run domain policy no longer matches its broker grant",
+                    ));
+                }
+                // At first acquisition, authority is strictly broker-owned:
+                // never use domains carried in the Model/client request.
+                constraints.allowed_domains = broker_domains;
+            }
         }
 
         let run_id: RunKind = resume_run_id.unwrap_or_else(Id::new);
@@ -842,7 +1340,7 @@ mod enabled {
         let zdr = resume_checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.zdr)
-            .unwrap_or_else(|| ZdrMode::from(body.zdr));
+            .unwrap_or_else(|| ZdrMode::from(body.zdr || execution_tier.is_ephemeral_evidence()));
         let ttl_s = constraints.max_runtime_s.unwrap_or(120);
         let viewport = normalize_viewport(
             resume_checkpoint
@@ -855,15 +1353,32 @@ mod enabled {
         let persist_profile = resume_checkpoint
             .as_ref()
             .map(|checkpoint| checkpoint.persist_profile)
-            .unwrap_or(body.persist_profile || body.profile_id.is_some());
-        let profile_scope = resume_checkpoint
-            .as_ref()
-            .map_or(body.profile_scope, |checkpoint| checkpoint.profile_scope);
+            .unwrap_or(
+                !execution_tier.is_ephemeral_evidence()
+                    && (body.persist_profile || body.profile_id.is_some()),
+            );
+        let profile_scope = resume_checkpoint.as_ref().map_or(
+            if execution_tier.is_ephemeral_evidence() {
+                BrowserProfileScope::Ephemeral
+            } else {
+                body.profile_scope
+            },
+            |checkpoint| checkpoint.profile_scope,
+        );
         if zdr_forbids_persistent_profile(zdr, persist_profile, body.profile_id.is_some()) {
             return Err(status_err(
                 StatusCode::BAD_REQUEST,
                 &request_id,
                 "zdr_persistent_profile_forbidden: a ZDR run cannot request a persistent profile or profile_id",
+            ));
+        }
+        if persist_profile && !state.agent_driver.capabilities().persistent_profile {
+            return Err(driver_err(
+                &request_id,
+                QuarryError::new(
+                    ErrorCode::Unsupported,
+                    "selected browser driver cannot provide a persistent profile",
+                ),
             ));
         }
 
@@ -889,6 +1404,22 @@ mod enabled {
             .acquire(&lease)
             .await
             .map_err(|e| driver_err(&request_id, e))?;
+
+        // Recovery navigation happens before the first ObservationRunner
+        // action. Install the broker-derived boundary immediately after lease
+        // acquisition so a resumed checkpoint cannot create its first CDP
+        // context with the proxy's default, unconstrained policy.
+        if let Err(error) = state
+            .agent_driver
+            .configure_egress_policy(
+                &session,
+                BrowserEgressPolicy::from_allowed_domains(&constraints.allowed_domains),
+            )
+            .await
+        {
+            let _ = state.agent_driver.release(session).await;
+            return Err(driver_err(&request_id, error));
+        }
 
         // Rehydrate the last known location when resuming. This is a recovery
         // navigation, not a claimed business action; the next explicit step
@@ -945,6 +1476,11 @@ mod enabled {
                     .and_then(|cp| (!cp.current_url.is_empty()).then(|| cp.current_url.clone())),
                 previous_title: None,
                 previous_dom_node_count: None,
+                previous_network_keys: vec![],
+                last_egress_sequence: 0,
+                active_snapshot: None,
+                observed_action_count: 0,
+                challenge_observation_count: 0,
             },
             lease,
             constraints,
@@ -956,7 +1492,9 @@ mod enabled {
                     checkpoint.control_mode
                 }),
             profile_scope,
+            execution_tier,
             last_observation: None,
+            used_sensitive_approval_grants: HashSet::new(),
         };
 
         if !zdr.is_active() {
@@ -1002,6 +1540,9 @@ mod enabled {
                 run_id: run_id.to_string(),
                 lease_id: lease_id.to_string(),
                 profile_id,
+                driver_capabilities: state.agent_driver.capabilities(),
+                execution_tier,
+                execution_engine: execution_tier.engine_label(),
             },
         )))
     }
@@ -1332,6 +1873,19 @@ mod enabled {
         }
 
         #[test]
+        fn provider_meter_cost_is_copied_exactly_and_unknown_remains_unknown_in_telemetry() {
+            let unknown = BrowserTelemetry::default();
+            assert_eq!(unknown.verified_action_cost_micro_usd, None);
+            assert_eq!(telemetry_receipt_cost_usd(&unknown), 0.0);
+
+            let metered = BrowserTelemetry {
+                verified_action_cost_micro_usd: Some(12_345),
+                ..BrowserTelemetry::default()
+            };
+            assert!((telemetry_receipt_cost_usd(&metered) - 0.012_345).abs() < f64::EPSILON);
+        }
+
+        #[test]
         fn zdr_forbids_persistent_profile_when_profile_id_supplied() {
             assert!(zdr_forbids_persistent_profile(ZdrMode::On, false, true));
         }
@@ -1422,6 +1976,11 @@ mod enabled {
                     previous_url: None,
                     previous_title: None,
                     previous_dom_node_count: None,
+                    previous_network_keys: vec![],
+                    last_egress_sequence: 0,
+                    active_snapshot: None,
+                    observed_action_count: 0,
+                    challenge_observation_count: 0,
                 },
                 lease: BrowserLease {
                     lease_id: Id::new(),
@@ -1448,7 +2007,9 @@ mod enabled {
                 grant_id: None,
                 control_mode: BrowserControlMode::AgentControl,
                 profile_scope: BrowserProfileScope::Ephemeral,
+                execution_tier: BrowserExecutionTier::Chromium,
                 last_observation: None,
+                used_sensitive_approval_grants: HashSet::new(),
             };
             assert!(enforce_step_budget(&entry).is_err());
             entry.constraints.max_steps = 0;
@@ -1587,24 +2148,40 @@ mod enabled {
         }
 
         if let Some(grant_id) = entry.grant_id.as_deref() {
-            let grant = state
-                .grant_validator
-                .validate(grant_id)
+            validate_run_grant(&state, grant_id, &entry.constraints.allowed_domains)
                 .await
                 .map_err(|error| driver_err(&request_id, error))?;
-            if !grant.is_usable() {
-                return Err(status_err(
-                    StatusCode::FORBIDDEN,
-                    &request_id,
-                    "browser grant is inactive or expired",
-                ));
-            }
         } else if state.require_browser_grants {
             return Err(status_err(
                 StatusCode::FORBIDDEN,
                 &request_id,
                 "browser grant is required for every action",
             ));
+        }
+
+        require_action_capabilities(&body.action, state.agent_driver.capabilities())
+            .map_err(|error| driver_err(&request_id, error))?;
+        if entry.execution_tier.is_ephemeral_evidence() {
+            require_ephemeral_evidence_action(&body.action)
+                .map_err(|error| driver_err(&request_id, error))?;
+        }
+
+        if let Some(approval) = sensitive_approval_for_action(&entry, &body.action)
+            .map_err(|error| driver_err(&request_id, error))?
+        {
+            validate_sensitive_approval(&state, &approval)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+            if !entry
+                .used_sensitive_approval_grants
+                .insert(approval.grant_id)
+            {
+                return Err(status_err(
+                    StatusCode::CONFLICT,
+                    &request_id,
+                    "sensitive browser approval grant has already been used by this run",
+                ));
+            }
         }
 
         enforce_step_budget(&entry)
@@ -1661,7 +2238,11 @@ mod enabled {
                 let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
-                    .complete(receipt_action, Some(obs.clone()), 0.0);
+                    .complete(
+                        receipt_action,
+                        Some(obs.clone()),
+                        observation_receipt_cost_usd(&obs),
+                    );
                 if !entry.zdr.is_active() {
                     state
                         .receipts
@@ -1850,6 +2431,15 @@ mod enabled {
         Query(query): Query<FrameQuery>,
     ) -> Result<Json<Envelope<LiveFrameData>>, ApiErr> {
         let request_id = RequestKind::new().to_string();
+        if !state.agent_driver.capabilities().full_visual_fidelity {
+            return Err(driver_err(
+                &request_id,
+                QuarryError::new(
+                    ErrorCode::Unsupported,
+                    "selected browser driver cannot produce governed full-fidelity live frames",
+                ),
+            ));
+        }
         let entry_arc = {
             let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
             map.get(&run_id).cloned()
@@ -1901,6 +2491,15 @@ mod enabled {
         Query(query): Query<FrameStreamQuery>,
     ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiErr> {
         let request_id = RequestKind::new().to_string();
+        if !state.agent_driver.capabilities().full_visual_fidelity {
+            return Err(driver_err(
+                &request_id,
+                QuarryError::new(
+                    ErrorCode::Unsupported,
+                    "selected browser driver cannot produce governed full-fidelity live frames",
+                ),
+            ));
+        }
         let entry_arc = {
             let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
             map.get(&run_id).cloned()
@@ -1992,6 +2591,15 @@ mod enabled {
         ws: WebSocketUpgrade,
     ) -> Result<impl IntoResponse, ApiErr> {
         let request_id = RequestKind::new().to_string();
+        if !state.agent_driver.capabilities().full_visual_fidelity {
+            return Err(driver_err(
+                &request_id,
+                QuarryError::new(
+                    ErrorCode::Unsupported,
+                    "selected browser driver cannot produce governed full-fidelity live frames",
+                ),
+            ));
+        }
         let entry_arc = {
             let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
             map.get(&run_id).cloned()
@@ -2162,6 +2770,30 @@ mod enabled {
     ) -> QuarryResult<BrowserObservation> {
         validate_navigation(&action, state.security.as_ref()).await?;
         let mut entry = entry_arc.lock().await;
+        if let Some(grant_id) = entry.grant_id.as_deref() {
+            validate_run_grant(state, grant_id, &entry.constraints.allowed_domains).await?;
+        } else if state.require_browser_grants {
+            return Err(QuarryError::new(
+                ErrorCode::Forbidden,
+                "browser grant is required for every action",
+            ));
+        }
+        require_action_capabilities(&action, state.agent_driver.capabilities())?;
+        if entry.execution_tier.is_ephemeral_evidence() {
+            require_ephemeral_evidence_action(&action)?;
+        }
+        if let Some(approval) = sensitive_approval_for_action(&entry, &action)? {
+            validate_sensitive_approval(state, &approval).await?;
+            if !entry
+                .used_sensitive_approval_grants
+                .insert(approval.grant_id)
+            {
+                return Err(QuarryError::new(
+                    ErrorCode::Conflict,
+                    "sensitive browser approval grant has already been used by this run",
+                ));
+            }
+        }
         enforce_step_budget(&entry)
             .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
         if let AgentAction::Navigate { url } = &action {
@@ -2203,7 +2835,11 @@ mod enabled {
                     let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                         .org_id(entry.org_id.clone())
                         .actor_id(entry.actor_id.clone())
-                        .complete(receipt_action.clone(), Some(observation.clone()), 0.0);
+                        .complete(
+                            receipt_action.clone(),
+                            Some(observation.clone()),
+                            observation_receipt_cost_usd(&observation),
+                        );
                     state.receipts.append(receipt).await?;
                 }
                 observation
@@ -2307,6 +2943,60 @@ mod enabled {
                 "agent run not found",
             ));
         }
+
+        if entry.execution_tier.is_ephemeral_evidence() {
+            return Err(status_err(
+                StatusCode::FORBIDDEN,
+                &request_id,
+                "the ephemeral_evidence execution tier does not permit creating browser tabs",
+            ));
+        }
+
+        // Opening a tab is an effectful browser operation in its own right;
+        // do not let it bypass the per-action broker revalidation that normal
+        // REST/WebSocket steps receive.
+        if let Some(grant_id) = entry.grant_id.as_deref() {
+            validate_run_grant(&state, grant_id, &entry.constraints.allowed_domains)
+                .await
+                .map_err(|error| driver_err(&request_id, error))?;
+        } else if state.require_browser_grants {
+            return Err(status_err(
+                StatusCode::FORBIDDEN,
+                &request_id,
+                "browser grant is required for tab creation",
+            ));
+        }
+
+        if let Some(url) = body.url.as_deref() {
+            if !domain_allowed(url, &entry.constraints.allowed_domains) {
+                return Err(status_err(
+                    StatusCode::FORBIDDEN,
+                    &request_id,
+                    "browser tab navigation is outside the run's allowed domains",
+                ));
+            }
+            validate_navigation(
+                &AgentAction::Navigate {
+                    url: url.to_owned(),
+                },
+                state.security.as_ref(),
+            )
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+        }
+
+        // Tab creation bypasses ObservationRunner, so explicitly apply the
+        // same run-scoped policy before this browser-owned navigation. The
+        // Chromium Fetch listener then enforces it for redirects and every
+        // request the new page initiates.
+        state
+            .agent_driver
+            .configure_egress_policy(
+                &entry.session,
+                BrowserEgressPolicy::from_allowed_domains(&entry.constraints.allowed_domains),
+            )
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
 
         let tab = state
             .agent_driver
@@ -2499,6 +3189,54 @@ mod enabled {
         )))
     }
 
+    /// `GET /v1/agent/runs/{run_id}/egress-receipts` — retrieve the
+    /// driver-authored, redacted request decisions for a live browser run.
+    pub async fn egress_receipts(
+        State(state): State<AppState>,
+        Extension(claims): Extension<crate::auth::Claims>,
+        Path(run_id): Path<String>,
+        Query(query): Query<DevtoolsQuery>,
+    ) -> Result<Json<Envelope<EgressReceiptsData>>, ApiErr> {
+        let request_id = RequestKind::new().to_string();
+        let entry_arc = {
+            let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
+            map.get(&run_id).cloned()
+        };
+        let Some(entry_arc) = entry_arc else {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        };
+
+        let entry = entry_arc.lock().await;
+        if !caller_owns_live_run(&entry, &claims) {
+            return Err(status_err(
+                StatusCode::NOT_FOUND,
+                &request_id,
+                "agent run not found",
+            ));
+        }
+        let receipts = state
+            .agent_driver
+            .egress_receipts(
+                &entry.session,
+                query.after_sequence.unwrap_or(0),
+                query.limit.unwrap_or(100).clamp(1, 512),
+            )
+            .await
+            .map_err(|error| driver_err(&request_id, error))?;
+
+        Ok(Json(Envelope::ok(
+            request_id,
+            EgressReceiptsData {
+                receipts,
+                zdr: matches!(entry.zdr, ZdrMode::On),
+            },
+        )))
+    }
+
     /// `DELETE /v1/agent/runs/{run_id}` — release the leased session.
     pub async fn close_run(
         State(state): State<AppState>,
@@ -2616,6 +3354,10 @@ mod enabled {
             .route(
                 "/v1/agent/runs/:run_id/browser-session/timeline",
                 get(browser_session_timeline),
+            )
+            .route(
+                "/v1/agent/runs/:run_id/egress-receipts",
+                get(egress_receipts),
             )
             .route("/v1/agent/runs/:run_id/receipts", get(list_receipts))
             .route(

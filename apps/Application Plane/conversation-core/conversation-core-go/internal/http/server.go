@@ -60,6 +60,7 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	admins := gateway.Group("/", requireAnyRole("owner", "admin"))
 
 	readers.GET("/inboxes", handler.ListInboxes)
+	readers.GET("/action-contracts", handler.ListActionContracts)
 	readers.GET("/inboxes/:id/queue", handler.ListInboxQueue)
 	readers.GET("/conversations", handler.ListConversations)
 	readers.GET("/conversations/:id", handler.GetConversation)
@@ -72,6 +73,7 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	readers.GET("/conversations/:id/draft", handler.GetConversationDraft)
 	readers.POST("/conversations/search", handler.SearchConversations)
 	readers.GET("/tickets", handler.ListTickets)
+	readers.GET("/ticket-operations/:idempotency_key", handler.GetTicketOperation)
 	readers.GET("/tickets/:id/activity", handler.ListTicketActivity)
 	readers.GET("/tickets/:id/csat-outcome", handler.GetTicketCSATOutcome)
 	readers.GET("/tickets/:id", handler.GetTicket)

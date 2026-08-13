@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -240,6 +240,45 @@ export const SessionCore = {
       name: "ArchiveThreads",
       I: ArchiveThreadsRequest,
       O: ArchiveThreadsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Permanently erase one thread and its thread-owned durable evidence. This is
+     * owner-bound: Session Core checks the verified caller against the thread's
+     * user (or exact system owner) before deleting any row.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.DeleteThread
+     */
+    deleteThread: {
+      name: "DeleteThread",
+      I: DeleteThreadRequest,
+      O: DeleteThreadResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Permanently erase every thread owned by one authenticated user. This is
+     * the durable equivalent of a destructive "clear chat history" action.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.DeleteThreads
+     */
+    deleteThreads: {
+      name: "DeleteThreads",
+      I: DeleteThreadsRequest,
+      O: DeleteThreadsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Permanently erase the threads explicitly bound to a Space for its owner.
+     * This is a Control-authorized data-subject deletion operation, available
+     * only to the exact deletion coordinator service; it is not a general
+     * service-user impersonation API.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.DeleteSpaceThreads
+     */
+    deleteSpaceThreads: {
+      name: "DeleteSpaceThreads",
+      I: DeleteSpaceThreadsRequest,
+      O: DeleteSpaceThreadsResponse,
       kind: MethodKind.Unary,
     },
     /**

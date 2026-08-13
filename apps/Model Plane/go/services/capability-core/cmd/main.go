@@ -21,6 +21,7 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/pkg/natsx"
 	"github.com/triodelab/model-plane/pkg/publisher"
+	"github.com/triodelab/model-plane/pkg/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
@@ -31,7 +32,6 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
-	"github.com/triodelab/model-plane/pkg/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"google.golang.org/grpc"
@@ -241,14 +241,26 @@ func main() {
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMemoryHandler(pool).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
-	api.NewCronHandler(pool).Register(protectedMux)
+	cronHandler := api.NewCronHandler(pool)
+	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
+		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
+	} else {
+		cronHandler.WithSpaceDecisionVerifier(cronVerifier)
+	}
+	cronHandler.Register(protectedMux)
+	cronHandler.RegisterDeletionAdapter(protectedMux)
 
 	// Cron sweeper: fires due cron_schedules — creates a task per fire, records
 	// cron_fires, and advances next_fire_at, single-flight across replicas via
 	// FOR UPDATE SKIP LOCKED. Opt out with CRON_SWEEPER_ENABLED=false.
+	cronAuthorizer, cronAuthErr := cronFireAuthorizerFromEnv(os.Getenv)
 	if os.Getenv("CRON_SWEEPER_ENABLED") != "false" {
-		go cron.NewSweeper(pool).Start(ctx)
-		slog.Info("cron sweeper started")
+		if cronAuthErr != nil {
+			slog.Warn("cron sweeper not started; fresh Control authorization is required", "error", cronAuthErr)
+		} else {
+			go cron.NewSweeper(pool, cronAuthorizer).Start(ctx)
+			slog.Info("cron sweeper started with fresh Control authorization")
+		}
 	}
 
 	// Task executor: claims `created` tasks (single-flight), marks them running,
@@ -260,7 +272,11 @@ func main() {
 	// workflow dispatcher the hand-off is synchronous: a failure to start is
 	// recorded as a task failure with a reason instead of a silent stall, so the
 	// executor now defaults ON whenever that dispatcher is available.
-	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub)
+	var taskFireAuthorizer taskexec.ScheduleFireAuthorizer
+	if cronAuthErr == nil {
+		taskFireAuthorizer = cronAuthorizer
+	}
+	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub, taskFireAuthorizer)
 	if taskExecutorEnabled(workflowBacked) {
 		go taskexec.NewExecutor(pool, dispatcher).Start(ctx)
 		slog.Info("task executor started", "workflow_backed", workflowBacked)
@@ -351,6 +367,32 @@ func authConfigFromEnv() (authctx.Config, error) {
 	return authctx.Config{Audiences: []string{audience}, Issuer: issuer, JWKSURL: jwksURL}, nil
 }
 
+// cronFireAuthorizerFromEnv keeps the scheduler's service identity and
+// Control verification key deployment-managed. Missing configuration disables
+// the sweeper rather than allowing an older org-wide schedule to execute.
+func cronFireAuthorizerFromEnv(getenv func(string) string) (*cron.ControlFireAuthorizer, error) {
+	if getenv == nil {
+		return nil, fmt.Errorf("cron environment reader is required")
+	}
+	return cron.NewControlFireAuthorizer(
+		getenv("CONTROL_USER_CORE_URL"),
+		getenv("CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN"),
+		getenv("CONTROL_SPACE_DECISION_KEY_ID"),
+		getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64"),
+		nil,
+	)
+}
+
+func cronDecisionVerifierFromEnv(getenv func(string) string) (*cron.ControlDecisionVerifier, error) {
+	if getenv == nil {
+		return nil, fmt.Errorf("cron environment reader is required")
+	}
+	return cron.NewControlDecisionVerifier(
+		getenv("CONTROL_SPACE_DECISION_KEY_ID"),
+		getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64"),
+	)
+}
+
 // startTaskCompletionConsumer closes a task when the run it started finishes.
 //
 // It is the other half of the executor's safety story: buildTaskDispatcher makes
@@ -384,7 +426,7 @@ func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpo
 // of stranding it, unless TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true
 // acknowledges that this deployment runs its own consumer of the published
 // subject (see NatsDispatcher's doc comment).
-func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (taskexec.Dispatcher, bool) {
+func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireAuthorizer taskexec.ScheduleFireAuthorizer) (taskexec.Dispatcher, bool) {
 	fallback := taskexec.NewNatsDispatcher(pub, acceptsPublishOnlyDispatch())
 
 	addr := strings.TrimSpace(os.Getenv("ORCHESTRATOR_WORKFLOW_ADDR"))
@@ -430,6 +472,7 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (task
 		token,
 		pub,
 		os.Getenv("TASK_DEFAULT_WORKFLOW_TYPE"),
+		fireAuthorizer,
 	)
 	if err != nil {
 		slog.Error("task workflow dispatcher unavailable", "error", err)
@@ -575,8 +618,8 @@ var (
 )
 
 const (
-	sessionCoreTokenReason   = "capability-core learning review: read a completed run's transcript and upsert learned skills"
-	inferenceCoreTokenReason = "capability-core learning review: extract skill candidates from a completed run"
+	sessionCoreTokenReason      = "capability-core learning review: read a completed run's transcript and upsert learned skills"
+	inferenceCoreTokenReason    = "capability-core learning review: extract skill candidates from a completed run"
 	orchestratorCoreTokenReason = "capability-core task executor: start the durable workflow for a fired cron task"
 )
 

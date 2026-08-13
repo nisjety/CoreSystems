@@ -10,11 +10,15 @@ Name | Type
 `step` | number
 `url` | string
 `title` | string
+`snapshot` | { [key: string]: any; }
 `domSummary` | { [key: string]: any; }
 `screenshotArtifactId` | string
 `visualObservationArtifactId` | string
+`evidenceDeltaArtifactId` | string
 `consoleSummary` | Array&lt;{ [key: string]: any; }&gt;
 `networkSummary` | Array&lt;{ [key: string]: any; }&gt;
+`egressReceipts` | Array&lt;{ [key: string]: any; }&gt;
+`dialogs` | Array&lt;{ [key: string]: any; }&gt; — observed JavaScript dialogs; none is accepted automatically.
 `policyDenials` | Array&lt;string&gt;
 `actionOutcome` | [ActionOutcome](ActionOutcome.md)
 `observationDelta` | [ObservationDelta](ObservationDelta.md)
@@ -22,6 +26,8 @@ Name | Type
 `extractionProfile` | { [key: string]: any; }
 `extractionResult` | { [key: string]: any; }
 `proofBundle` | { [key: string]: any; }
+`targetResolution` | { [key: string]: any; }
+`telemetry` | { [key: string]: any; } — renderer-scoped browser telemetry; missing resource/cost fields are unknown rather than zero.
 `observedAt` | Date
 
 ## Example
@@ -35,11 +41,15 @@ const example = {
   "step": null,
   "url": null,
   "title": null,
+  "snapshot": null,
   "domSummary": null,
   "screenshotArtifactId": null,
   "visualObservationArtifactId": null,
+  "evidenceDeltaArtifactId": null,
   "consoleSummary": null,
   "networkSummary": null,
+  "egressReceipts": null,
+  "dialogs": null,
   "policyDenials": null,
   "actionOutcome": null,
   "observationDelta": null,
@@ -47,6 +57,8 @@ const example = {
   "extractionProfile": null,
   "extractionResult": null,
   "proofBundle": null,
+  "targetResolution": null,
+  "telemetry": {},
   "observedAt": null,
 } satisfies BrowserObservation
 
@@ -62,5 +74,3 @@ console.log(exampleParsed)
 ```
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
-
-

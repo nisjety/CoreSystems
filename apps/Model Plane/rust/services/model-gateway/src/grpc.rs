@@ -3500,6 +3500,16 @@ mod tests {
         {
             Err(Status::unimplemented("delete_threads not needed in test"))
         }
+
+        async fn delete_space_threads(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::DeleteSpaceThreadsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::DeleteSpaceThreadsResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "delete_space_threads not needed in test",
+            ))
+        }
     }
 
     #[derive(Clone, Default)]

@@ -1,0 +1,235 @@
+// Package spaces defines Control Plane's registered-Space authority contract.
+//
+// Application owns a Space's identity and lifecycle projection. Control records
+// that immutable reference, owns membership/privacy/audience revisions, and
+// later issues signed access decisions from this state. This package never
+// treats an Application event or a browser request as authorization by itself.
+package spaces
+
+import (
+	"fmt"
+	"strings"
+)
+
+type Kind string
+
+const (
+	KindPersonal Kind = "personal"
+	KindRoom     Kind = "room"
+	KindProject  Kind = "project"
+	KindCase     Kind = "case"
+)
+
+// SpaceLifecycle is Application's canonical lifecycle vocabulary. Control
+// records the mapped access state, but never lets an unrecognized producer
+// value become an authorization state.
+type SpaceLifecycle string
+
+const (
+	LifecyclePendingRegistration SpaceLifecycle = "pending_registration"
+	LifecycleActive              SpaceLifecycle = "active"
+	LifecycleSuspended           SpaceLifecycle = "suspended"
+	LifecycleDeleting            SpaceLifecycle = "deleting"
+	LifecycleDeleted             SpaceLifecycle = "deleted"
+	LifecycleFailedRegistration  SpaceLifecycle = "failed_registration"
+)
+
+// Registration is the Application-issued immutable reference that Control
+// accepts only through its future authenticated registration endpoint.
+type Registration struct {
+	SpaceRef          string         `json:"space_ref"`
+	OrgID             string         `json:"org_id"`
+	OwnerPrincipalID  string         `json:"owner_principal_id"`
+	Kind              Kind           `json:"kind"`
+	Lifecycle         SpaceLifecycle `json:"lifecycle"`
+	LifecycleRevision int64          `json:"lifecycle_revision"`
+}
+
+// RegistrationState maps an Application lifecycle event into Control's
+// fail-closed authorization state. Pending registration is active only after
+// Control has accepted the immutable reference; failed registration cannot
+// revoke a previously registered Space by itself.
+func (r Registration) RegistrationState() (string, error) {
+	switch r.Lifecycle {
+	case LifecyclePendingRegistration, LifecycleActive:
+		return "active", nil
+	case LifecycleSuspended:
+		return "suspended", nil
+	case LifecycleDeleting:
+		return "deleting", nil
+	case LifecycleDeleted:
+		return "deleted", nil
+	case LifecycleFailedRegistration:
+		return "active", nil
+	default:
+		return "", fmt.Errorf("unknown Space lifecycle %q", r.Lifecycle)
+	}
+}
+
+// RecipientAudienceRegistration is Application's product-level participant
+// snapshot. Control recomputes the hash and checks every principal against
+// current Space/org membership before it records the snapshot; this request
+// itself is never an authority decision or browser payload.
+type RecipientAudienceRegistration struct {
+	SpaceRef     string   `json:"space_ref"`
+	OrgID        string   `json:"org_id"`
+	AudienceRef  string   `json:"audience_ref"`
+	AudienceHash string   `json:"audience_hash"`
+	Revision     int64    `json:"revision"`
+	Recipients   []string `json:"recipients"`
+}
+
+func (r RecipientAudienceRegistration) Validate() error {
+	for name, value := range map[string]string{
+		"space_ref": r.SpaceRef, "org_id": r.OrgID,
+		"audience_ref": r.AudienceRef, "audience_hash": r.AudienceHash,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("recipient audience %s is required", name)
+		}
+	}
+	if r.Revision <= 0 || len(r.Recipients) == 0 || len(r.Recipients) > 512 {
+		return fmt.Errorf("recipient audience revision or recipient count is invalid")
+	}
+	hash, err := RecipientAudienceHash(r.Recipients...)
+	if err != nil {
+		return err
+	}
+	if r.AudienceHash != hash {
+		return fmt.Errorf("recipient audience hash does not match recipients")
+	}
+	return nil
+}
+
+func (r Registration) Validate() error {
+	if strings.TrimSpace(r.SpaceRef) == "" || strings.TrimSpace(r.OrgID) == "" || strings.TrimSpace(r.OwnerPrincipalID) == "" {
+		return fmt.Errorf("Space registration identity is required")
+	}
+	switch r.Kind {
+	case KindPersonal, KindRoom, KindProject, KindCase:
+	default:
+		return fmt.Errorf("unknown Space kind %q", r.Kind)
+	}
+	if r.LifecycleRevision <= 0 {
+		return fmt.Errorf("Space lifecycle revision must be positive")
+	}
+	if _, err := r.RegistrationState(); err != nil {
+		return err
+	}
+	return nil
+}
+
+type AuthorityChange string
+
+const (
+	ChangeMembership        AuthorityChange = "membership"
+	ChangePrivacy           AuthorityChange = "privacy"
+	ChangeRecipientAudience AuthorityChange = "recipient_audience"
+	ChangeEntitlement       AuthorityChange = "entitlement"
+)
+
+// AuthorityRevision travels in every future Space access decision. Authority
+// always advances for any effective-access change; the component revision
+// pinpoints why cached or resumed work must be rejected.
+type AuthorityRevision struct {
+	Authority         int64 `json:"authority_revision"`
+	Membership        int64 `json:"membership_revision"`
+	Privacy           int64 `json:"privacy_revision"`
+	RecipientAudience int64 `json:"recipient_audience_revision"`
+	Entitlement       int64 `json:"entitlement_revision"`
+}
+
+// EffectPolicy is Control's processing and entitlement floor for the first
+// scoped Model effect. It is written only by a dedicated Control workload; it
+// is never reconstructed from a browser request or a Space projection.
+type EffectPolicy struct {
+	OrgID                       string `json:"org_id"`
+	PrivacyPolicyRef            string `json:"privacy_policy_ref"`
+	Purpose                     string `json:"purpose"`
+	LawfulBasis                 string `json:"lawful_basis"`
+	PrivacyClass                string `json:"privacy_class"`
+	ThirdPartyProcessingAllowed bool   `json:"third_party_processing_allowed"`
+	RetentionClass              string `json:"retention_class"`
+	Residency                   string `json:"residency"`
+	DeletionScope               string `json:"deletion_scope"`
+	ZeroDataRetention           bool   `json:"zero_data_retention"`
+	ThreadCreateEntitled        bool   `json:"thread_create_entitled"`
+	RetrievalReadEntitled       bool   `json:"retrieval_read_entitled"`
+	ImportWriteEntitled         bool   `json:"import_write_entitled"`
+	// ScheduleFireEntitled is deliberately separate from thread creation. A
+	// recurring effect must be explicitly allowed at *each* fire; a schedule
+	// cannot inherit an old chat/creation entitlement.
+	ScheduleFireEntitled bool `json:"schedule_fire_entitled"`
+}
+
+func (p EffectPolicy) Validate() error {
+	for name, value := range map[string]string{
+		"org_id": p.OrgID, "privacy_policy_ref": p.PrivacyPolicyRef,
+		"purpose": p.Purpose, "lawful_basis": p.LawfulBasis,
+		"privacy_class": p.PrivacyClass, "retention_class": p.RetentionClass,
+		"residency": p.Residency, "deletion_scope": p.DeletionScope,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("Space effect policy %s is required", name)
+		}
+	}
+	return nil
+}
+
+// CurrentMembership is a current Control-owned membership fact. It is useful
+// to a resolver only as one component of effective access: callers must still
+// intersect recipient, policy, and owner-resource authorization before an
+// effect. The database result is deliberately not a signed access decision.
+type CurrentMembership struct {
+	SpaceRef  string            `json:"space_ref"`
+	OrgID     string            `json:"org_id"`
+	SubjectID string            `json:"subject_id"`
+	Kind      Kind              `json:"kind"`
+	Role      string            `json:"role"`
+	Revisions AuthorityRevision `json:"revisions"`
+}
+
+func (m CurrentMembership) Validate() error {
+	if strings.TrimSpace(m.SpaceRef) == "" || strings.TrimSpace(m.OrgID) == "" || strings.TrimSpace(m.SubjectID) == "" {
+		return fmt.Errorf("current Space membership identity is required")
+	}
+	switch m.Kind {
+	case KindPersonal, KindRoom, KindProject, KindCase:
+	default:
+		return fmt.Errorf("unknown Space kind %q", m.Kind)
+	}
+	switch m.Role {
+	case "viewer", "editor", "manager", "owner":
+	default:
+		return fmt.Errorf("unknown Space membership role %q", m.Role)
+	}
+	return m.Revisions.Validate()
+}
+
+func (r AuthorityRevision) Validate() error {
+	if r.Authority <= 0 || r.Membership <= 0 || r.Privacy <= 0 || r.RecipientAudience <= 0 || r.Entitlement <= 0 {
+		return fmt.Errorf("Space authority revisions must be positive")
+	}
+	return nil
+}
+
+func (r AuthorityRevision) Advance(change AuthorityChange) (AuthorityRevision, error) {
+	if err := r.Validate(); err != nil {
+		return AuthorityRevision{}, err
+	}
+	next := r
+	next.Authority++
+	switch change {
+	case ChangeMembership:
+		next.Membership++
+	case ChangePrivacy:
+		next.Privacy++
+	case ChangeRecipientAudience:
+		next.RecipientAudience++
+	case ChangeEntitlement:
+		next.Entitlement++
+	default:
+		return AuthorityRevision{}, fmt.Errorf("unknown Space authority change %q", change)
+	}
+	return next, nil
+}

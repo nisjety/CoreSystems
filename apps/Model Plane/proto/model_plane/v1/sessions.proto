@@ -102,6 +102,12 @@ service SessionCore {
   // the durable equivalent of a destructive "clear chat history" action.
   rpc DeleteThreads(DeleteThreadsRequest) returns (DeleteThreadsResponse);
 
+  // Permanently erase the threads explicitly bound to a Space for its owner.
+  // This is a Control-authorized data-subject deletion operation, available
+  // only to the exact deletion coordinator service; it is not a general
+  // service-user impersonation API.
+  rpc DeleteSpaceThreads(DeleteSpaceThreadsRequest) returns (DeleteSpaceThreadsResponse);
+
   // Set a run's mode (execute | plan | reactive | research) durably on the
   // run record (ROADMAP P3). The gateway's in-memory plan-mode cache
   // write-throughs here so plan mode survives restart — auditability/resume
@@ -140,6 +146,47 @@ message CreateThreadRequest {
 
   // Optional metadata.
   google.protobuf.Struct metadata = 4;
+
+  // Canonical Control-registered Space reference. This is distinct from a
+  // workspace/content-selection ID and is accepted only with the complete
+  // authority envelope below.
+  string space_id = 5;
+
+  // Opaque, short-lived Control decision reference that authorized creation.
+  string space_decision_ref = 6;
+
+  // Server-owned recipient audience reference for the conversation/case.
+  string recipient_audience_ref = 7;
+
+  // Versioned privacy policy reference resolved by Control.
+  string privacy_policy_ref = 8;
+
+  // Aggregate Control authority revision observed for this request.
+  uint64 authority_revision = 9;
+
+  // Exact owner-plane resource authorization bound to this thread. Space
+  // membership may narrow a resource decision but may never replace it.
+  string resource_authorization_ref = 10;
+
+  // Complete Ed25519-signed Control decision envelope. Empty only when every
+  // Space-context field above is empty (legacy/unscoped thread).
+  string space_decision_token = 11;
+
+  // Exact operation binding copied from the signed Control decision. Session
+  // Core rechecks these against the token before it persists a Space thread.
+  string action_schema_hash = 12;
+  string payload_digest = 13;
+  string idempotency_key = 14;
+
+  // Revision of the server-owned recipient audience captured for this thread.
+  // This is distinct from the aggregate authority revision so replay, share,
+  // and fork paths can detect a participant-set change directly.
+  uint64 recipient_audience_revision = 15;
+
+  // Opaque commitment to the exact server-resolved recipient set for the
+  // revision above. It prevents a reference/revision from being reused for a
+  // different participant set during share, replay, or fork.
+  string recipient_audience_hash = 16;
 }
 
 message CreateThreadResponse {
@@ -164,6 +211,22 @@ message AppendMessageRequest {
 
   // Optional metadata (tool call results, citations, etc.).
   google.protobuf.Struct metadata = 4;
+
+  // Complete Control-issued authority for an existing scoped thread append.
+  // It is required by Session Core for subsequent messages in a Space-bound
+  // thread and is never persisted as a bearer.
+  string space_id = 5;
+  string space_decision_ref = 6;
+  string recipient_audience_ref = 7;
+  uint64 recipient_audience_revision = 8;
+  string recipient_audience_hash = 9;
+  string privacy_policy_ref = 10;
+  uint64 authority_revision = 11;
+  string resource_authorization_ref = 12;
+  string space_decision_token = 13;
+  string action_schema_hash = 14;
+  string payload_digest = 15;
+  string idempotency_key = 16;
 }
 
 message AppendMessageResponse {
@@ -587,6 +650,11 @@ message ListThreadsRequest {
   string user_id = 2;
   // Optional. 0 means server default.
   uint32 limit = 3;
+
+  // Optional canonical Space filter. Session Core applies it inside the same
+  // owner-bound query as org_id/user_id; callers never filter a broader
+  // thread result in another plane.
+  string space_id = 4;
 }
 
 message ThreadSummary {
@@ -599,6 +667,17 @@ message ThreadSummary {
 
   // Whether the user has pinned this thread in the cross-device chat list.
   bool pinned = 7;
+
+  // Canonical Space persisted on the thread. This is presentation metadata,
+  // not authority; scoped callers use it to reject a mismatched upstream list.
+  string space_id = 8;
+
+  // Latest durable Model run for this owner-bound thread. Empty when the
+  // thread has not run an agent. These are receipts for the Space Activity
+  // shell, not a substitute for the complete run-event stream.
+  string latest_run_id = 9;
+  string latest_run_status = 10;
+  google.protobuf.Timestamp latest_run_updated_at = 11;
 }
 
 message ListThreadsResponse {
@@ -683,6 +762,30 @@ message DeleteThreadsRequest {
 // Receipt for a bulk durable thread erasure.
 message DeleteThreadsResponse {
   uint32 deleted_count = 1;
+}
+
+// Request to erase one owner's threads bound to one canonical Space. All
+// identity fields are independently checked against the authenticated
+// workload credential; callers cannot broaden the query by supplying another
+// owner or tenant.
+message DeleteSpaceThreadsRequest {
+  string org_id = 1;
+  string space_id = 2;
+  string owner_principal_id = 3;
+  // Durable Application/Control deletion request reference retained in logs
+  // and owner receipts, never used as an authorization substitute.
+  string deletion_request_id = 4;
+}
+
+// Receipt for the local Session Core portion of a Space deletion.
+message DeleteSpaceThreadsResponse {
+  uint32 deleted_count = 1;
+  // Exact correlated semantic-memory IDs observed before the canonical local
+  // erase. This is a receipt fact, not an authorization claim.
+  uint32 semantic_memory_attempted_count = 2;
+  // Remote semantic deletes that could not be confirmed. A nonzero value
+  // keeps the owning Model receipt partial and requires reconciliation.
+  uint32 semantic_memory_unconfirmed_count = 3;
 }
 
 // --- SetRunMode (ROADMAP P3 run modes) ---
