@@ -17,7 +17,7 @@ func newReg(t *testing.T) *Registry {
 
 func TestNewRegistry_SeedsAllCapabilities(t *testing.T) {
 	r := newReg(t)
-	items, hasMore := r.List("", "", "", 200)
+	items, hasMore := r.ListForOrg("triodelab", "", "", "", 200)
 	// Seed set has grown past the original 8; assert we have at least the
 	// minimum catalog (browser/sandbox/memory/retrieval/tool/inference/skill/plugin)
 	// plus the newer kinds (mcp/model/policy/memory_adapter/safety/command).
@@ -235,26 +235,26 @@ func TestGet_EmptyConstraint_ReturnsAnyVersion(t *testing.T) {
 	}
 }
 
-func TestList_DefaultLimit_ZeroClampsTo50(t *testing.T) {
+func TestListForOrg_DefaultLimit_ZeroClampsTo50(t *testing.T) {
 	r := newReg(t)
-	items, _ := r.List("", "", "", 0)
+	items, _ := r.ListForOrg("triodelab", "", "", "", 0)
 	if len(items) == 0 || len(items) > 50 {
 		t.Fatalf("expected seed count in (0, 50] with zero-clamped default limit, got %d", len(items))
 	}
 }
 
-func TestList_ExcessiveLimit_ClampsTo50(t *testing.T) {
+func TestListForOrg_ExcessiveLimit_ClampsTo50(t *testing.T) {
 	r := newReg(t)
-	items, _ := r.List("", "", "", 500)
+	items, _ := r.ListForOrg("triodelab", "", "", "", 500)
 	// Clamp is max 50; seed count is ≤ 50 so we should receive all seeds.
 	if len(items) == 0 || len(items) > 50 {
 		t.Fatalf("expected seed count in (0, 50] with excessive-limit clamp, got %d", len(items))
 	}
 }
 
-func TestList_KindFilter_Memory(t *testing.T) {
+func TestListForOrg_KindFilter_Memory(t *testing.T) {
 	r := newReg(t)
-	items, _ := r.List(string(models.KindMemory), "", "", 200)
+	items, _ := r.ListForOrg("triodelab", string(models.KindMemory), "", "", 200)
 	if len(items) != 2 {
 		t.Fatalf("expected 2 memory capabilities, got %d", len(items))
 	}
@@ -265,9 +265,9 @@ func TestList_KindFilter_Memory(t *testing.T) {
 	}
 }
 
-func TestList_Query_MatchesNameCaseInsensitive(t *testing.T) {
+func TestListForOrg_Query_MatchesNameCaseInsensitive(t *testing.T) {
 	r := newReg(t)
-	items, _ := r.List("", "MEMORY", "", 200)
+	items, _ := r.ListForOrg("triodelab", "", "MEMORY", "", 200)
 	if len(items) == 0 {
 		t.Fatalf("expected case-insensitive query to match memory capabilities")
 	}
@@ -281,9 +281,9 @@ func TestList_Query_MatchesNameCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestList_Query_MatchesDescription(t *testing.T) {
+func TestListForOrg_Query_MatchesDescription(t *testing.T) {
 	r := newReg(t)
-	items, _ := r.List("", "sandbox", "", 200)
+	items, _ := r.ListForOrg("triodelab", "", "sandbox", "", 200)
 	found := false
 	for _, c := range items {
 		if c.ID == "cap.sandbox.exec" {
@@ -295,16 +295,16 @@ func TestList_Query_MatchesDescription(t *testing.T) {
 	}
 }
 
-func TestList_Pagination_LimitOne_AfterID(t *testing.T) {
+func TestListForOrg_Pagination_LimitOne_AfterID(t *testing.T) {
 	r := newReg(t)
-	page1, hasMore := r.List("", "", "", 1)
+	page1, hasMore := r.ListForOrg("triodelab", "", "", "", 1)
 	if len(page1) != 1 {
 		t.Fatalf("expected page1 len=1, got %d", len(page1))
 	}
 	if !hasMore {
 		t.Fatalf("expected hasMore=true on first page")
 	}
-	page2, _ := r.List("", "", page1[0].ID, 1)
+	page2, _ := r.ListForOrg("triodelab", "", "", page1[0].ID, 1)
 	if len(page2) != 1 {
 		t.Fatalf("expected page2 len=1, got %d", len(page2))
 	}
@@ -313,9 +313,9 @@ func TestList_Pagination_LimitOne_AfterID(t *testing.T) {
 	}
 }
 
-func TestList_Query_NoMatch_ReturnsEmpty(t *testing.T) {
+func TestListForOrg_Query_NoMatch_ReturnsEmpty(t *testing.T) {
 	r := newReg(t)
-	items, hasMore := r.List("", "zzznevermatch", "", 200)
+	items, hasMore := r.ListForOrg("triodelab", "", "zzznevermatch", "", 200)
 	if len(items) != 0 {
 		t.Fatalf("expected empty result, got %d", len(items))
 	}
@@ -470,7 +470,8 @@ func TestRegistry_Reload_ConcurrentReadsSafe(t *testing.T) {
 				case <-stop:
 					return
 				default:
-					_, _ = r.List("", "", "", 100)
+					// Fixtures are OrgID="global", so any tenant sees them.
+					_, _ = r.ListForOrg("triodelab", "", "", "", 100)
 				}
 			}
 		}()

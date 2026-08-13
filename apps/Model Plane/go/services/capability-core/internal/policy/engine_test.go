@@ -215,7 +215,7 @@ func TestEngine_ScopeWildcardAllowsSupportedScope(t *testing.T) {
 	// that way; otherwise test asserts on an existing entry with "*" (none
 	// today — this is a regression guard for when wildcard seeds are added).
 	reg := registry.NewRegistry()
-	items, _ := reg.List("", "", "", 200)
+	items, _ := reg.ListForOrg("triodelab", "", "", "", 200)
 	var wildcardCap string
 	for _, c := range items {
 		for _, s := range c.EnabledForScopes {
