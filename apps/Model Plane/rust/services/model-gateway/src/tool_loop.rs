@@ -18,6 +18,7 @@ use mp_contracts::model_plane::v1::{
     ChatMessage, FinalizeToolActionRequest, IndexMemoryRequest, InferRequest,
     ReserveToolActionRequest, SearchMemoryRequest, ToolCall, ToolDefinition, WebSearchRequest,
 };
+use mp_events::publisher::EventPublisher;
 use serde_json::Value;
 
 use crate::{
@@ -3435,6 +3436,28 @@ pub async fn run_tool_rounds(
                 tool_successes = tool_successes.saturating_add(1);
             } else {
                 tool_failures = tool_failures.saturating_add(1);
+            }
+            // Security audit (§5): fire-and-forget, exactly like
+            // `implicit_feedback`'s call site — a missing NATS connection
+            // must never fail or slow the turn the model is waiting on.
+            // `envelope_for` itself decides whether this outcome is
+            // audit-worthy at all; most (clean, org-internal) results build
+            // nothing here.
+            if let Some(envelope) = crate::security_events::envelope_for(
+                &outcome.provenance,
+                org_id,
+                user_id,
+                run_id,
+                &outcome.name,
+                zdr,
+            ) {
+                let publisher = state.publisher.clone();
+                let subject = mp_events::subjects::security_subject(org_id);
+                tokio::spawn(async move {
+                    if let Err(error) = publisher.publish(&subject, &envelope).await {
+                        tracing::warn!(%error, "security screening event not published");
+                    }
+                });
             }
             outcomes.push(outcome);
         }

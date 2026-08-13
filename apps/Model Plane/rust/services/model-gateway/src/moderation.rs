@@ -355,6 +355,30 @@ impl ToolProvenance {
             },
         }
     }
+
+    /// Whether this provenance is worth a security audit event
+    /// (`crate::security_events`): a detected injection marker, a screening
+    /// posture that degraded under its bounds, or externally-sourced content
+    /// that reached the model with no real scan at all. A clean, screened,
+    /// or org-internal result is not an event — those are the expected
+    /// common case, and flagging every one of them would drown the signal
+    /// an investigator actually needs.
+    #[must_use]
+    pub fn is_audit_worthy(&self) -> bool {
+        match self.screening.posture {
+            ScreeningPosture::Flagged | ScreeningPosture::Degraded => true,
+            // An org can legitimately turn `injection_defense` off (that is
+            // `PolicyDisabled`, not uncertainty), and internal content is
+            // never screened at all (`NotApplicable` is its expected
+            // posture) — but EITHER posture on content this untrusted means
+            // it reached the model with no real scan, which is exactly what
+            // an investigator needs visibility into.
+            ScreeningPosture::PolicyDisabled | ScreeningPosture::NotApplicable => {
+                self.trust.is_external()
+            }
+            ScreeningPosture::Clean => false,
+        }
+    }
 }
 
 /// Screening bounds ("bounded screening with size/deadline/concurrency
@@ -785,6 +809,86 @@ mod tests {
             content_hash(b"hello world")
         );
         assert!(!provenance.screening.posture.requires_read_only());
+    }
+
+    #[test]
+    fn only_org_internal_clean_or_screened_content_is_audit_silent() {
+        // Org-internal content is never screened at all — its expected
+        // posture (NotApplicable) must not fire an event for every ordinary
+        // tool call.
+        assert!(!ToolProvenance::unscreened("create_artifact", "x").is_audit_worthy());
+
+        let clean = ToolProvenance {
+            trust: TrustClass::ExternalWeb,
+            screening: ScreeningOutcome {
+                posture: ScreeningPosture::Clean,
+                content_hash: content_hash(b"x"),
+            },
+        };
+        assert!(!clean.is_audit_worthy());
+    }
+
+    #[test]
+    fn flagged_and_degraded_are_always_audit_worthy_regardless_of_trust() {
+        for trust in [
+            TrustClass::OrgInternal,
+            TrustClass::ExternalWeb,
+            TrustClass::BrowserScraped,
+            TrustClass::ThirdPartyMcp,
+        ] {
+            for posture in [ScreeningPosture::Flagged, ScreeningPosture::Degraded] {
+                let provenance = ToolProvenance {
+                    trust,
+                    screening: ScreeningOutcome {
+                        posture,
+                        content_hash: content_hash(b"x"),
+                    },
+                };
+                assert!(
+                    provenance.is_audit_worthy(),
+                    "{trust:?}/{posture:?} must be audit-worthy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unscreened_external_content_is_audit_worthy_but_unscreened_internal_is_not() {
+        for trust in [
+            TrustClass::ExternalWeb,
+            TrustClass::BrowserScraped,
+            TrustClass::ThirdPartyMcp,
+        ] {
+            for posture in [
+                ScreeningPosture::PolicyDisabled,
+                ScreeningPosture::NotApplicable,
+            ] {
+                let provenance = ToolProvenance {
+                    trust,
+                    screening: ScreeningOutcome {
+                        posture,
+                        content_hash: content_hash(b"x"),
+                    },
+                };
+                assert!(
+                    provenance.is_audit_worthy(),
+                    "unscreened {trust:?}/{posture:?} must be audit-worthy"
+                );
+            }
+        }
+        for posture in [
+            ScreeningPosture::PolicyDisabled,
+            ScreeningPosture::NotApplicable,
+        ] {
+            let provenance = ToolProvenance {
+                trust: TrustClass::OrgInternal,
+                screening: ScreeningOutcome {
+                    posture,
+                    content_hash: content_hash(b"x"),
+                },
+            };
+            assert!(!provenance.is_audit_worthy());
+        }
     }
 
     // --- screen_tool_payload ----------------------------------------------

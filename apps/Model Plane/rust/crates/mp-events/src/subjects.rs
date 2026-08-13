@@ -111,6 +111,18 @@ pub fn stream_subject(kind: &str) -> String {
 /// Wildcard for all usage events: `mp.v1.usage.*`
 pub const USAGE_WILDCARD: &str = "mp.v1.usage.*";
 
+/// Subject for security/safety screening events (injection markers,
+/// unscreened content, degraded screening): `mp.v1.security.{org_id}`.
+/// Metadata and content hashes only — never the flagged content itself, per
+/// ZDR discipline. See `model-gateway::security_events`.
+#[must_use]
+pub fn security_subject(org_id: &str) -> String {
+    format!("{PREFIX}.security.{org_id}")
+}
+
+/// Wildcard for all security events: `mp.v1.security.*`
+pub const SECURITY_WILDCARD: &str = "mp.v1.security.*";
+
 /// Wildcard for all stream events: `mp.v1.stream.*`
 pub const STREAM_WILDCARD: &str = "mp.v1.stream.*";
 
@@ -579,5 +591,11 @@ mod tests {
             "mp.v1.retrieval.low_confidence.org_acme"
         );
         assert_eq!(RETRIEVAL_WILDCARD, "mp.v1.retrieval.>");
+    }
+
+    #[test]
+    fn security_subject_format() {
+        assert_eq!(security_subject("org_acme"), "mp.v1.security.org_acme");
+        assert_eq!(SECURITY_WILDCARD, "mp.v1.security.*");
     }
 }

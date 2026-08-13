@@ -48,6 +48,7 @@ pub mod readiness;
 pub mod relevance;
 pub mod retrieval;
 pub mod runtime_registries;
+pub mod security_events;
 pub mod session_flow;
 mod session_terminal_auth;
 pub mod skills;
