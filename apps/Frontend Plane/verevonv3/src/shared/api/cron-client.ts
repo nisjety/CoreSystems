@@ -1,6 +1,34 @@
 import { requestJson } from './http'
 
 /**
+ * What a schedule fires. Stored as the schedule's `task_template` and carried
+ * by the sweeper into the created task's `config_json`, which is where
+ * capability-core's WorkflowDispatcher reads `workflow_type` / `workflow_input`
+ * to pick the workflow.
+ *
+ * `workflow_type` must be one of orchestrator-core's allowlisted types
+ * (`workflowAllowlist` in internal/orchestration/workflowreg.go). Omitting it
+ * falls back to InteractiveRunSupervision.
+ *
+ * `workflow_input` matters more than it looks: when it is absent the dispatcher
+ * derives `{goal, policy}` from the task's title/description, and every
+ * workflow EXCEPT InteractiveRunSupervision rejects that shape — their input
+ * decoders use DisallowUnknownFields and none of them declare a `goal` field.
+ * So for any other type an explicit `workflow_input` matching that workflow's
+ * own contract is required, not optional.
+ */
+export interface CronTaskTemplate {
+  kind?: string
+  title?: string
+  description?: string
+  assignee?: string
+  priority?: number
+  workflow_type?: string
+  workflow_input?: Record<string, unknown>
+  policy?: string
+}
+
+/**
  * A durable cron schedule, mirroring capability-core's `cron_schedules` row
  * (fronted by model-gateway `/v1/cron`). The capability-core sweeper fires due
  * schedules: it creates a task from `task_template`, records a cron_fires row,
@@ -39,7 +67,7 @@ export function createCronSchedule(
     schedule_expr: string
     timezone?: string
     description?: string
-    task_template?: unknown
+    task_template?: CronTaskTemplate
     enabled?: boolean
   },
 ): Promise<{ id: string }> {

@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -123,6 +124,43 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	return fired, nil
 }
 
+// taskConfigJSON carries the schedule's template into the created task's
+// config_json.
+//
+// This is load-bearing, not bookkeeping. taskexec's WorkflowDispatcher reads
+// tasks.config_json to decide which workflow a fired task starts
+// (taskTemplate.workflow_type / workflow_input / policy in
+// internal/taskexec/workflow_dispatcher.go). Until this column was populated,
+// the sweeper wrote the template's title/description/assignee/priority into
+// their own columns and dropped everything else on the floor, so
+// dispatchPlan always fell through to DefaultWorkflowType — a cron schedule
+// could not select a workflow no matter what the API or UI stored on it, and
+// six of orchestrator-core's seven allowlisted workflows were unreachable
+// from a schedule.
+//
+// The template is passed through VERBATIM rather than as a hand-picked subset:
+// dispatchPlan uses a plain json.Unmarshal (unknown fields ignored), so
+// forwarding everything means a new dispatch field starts working without a
+// matching change here. A hand-picked list is exactly the kind of lockstep
+// coupling that let this drift go unnoticed.
+//
+// An absent or non-object template yields `{}` so the NOT NULL column keeps a
+// valid JSON object.
+func taskConfigJSON(template []byte) []byte {
+	trimmed := bytes.TrimSpace(template)
+	if len(trimmed) == 0 {
+		return []byte("{}")
+	}
+	// Only a JSON object is a usable template; an array or scalar would make
+	// dispatchPlan's unmarshal fail and turn every fire of this schedule into a
+	// failed task.
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return []byte("{}")
+	}
+	return trimmed
+}
+
 // fireOne creates a task from the schedule's template and records a cron_fires
 // row. Failures are recorded on the fire row (status=failed) rather than
 // aborting the whole sweep.
@@ -145,9 +183,10 @@ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now tim
 	fireID := "cronfire_" + uuid.New().String()
 	_, terr := tx.Exec(ctx, `
 		INSERT INTO tasks (id, org_id, kind, title, description, assignee, status,
-		    priority, scheduled_at, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$8,$8)
-	`, taskID, d.orgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority, now)
+		    priority, config_json, scheduled_at, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$9,$9)
+	`, taskID, d.orgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
+		taskConfigJSON(d.template), now)
 	if terr != nil {
 		slog.Warn("cron task creation failed", "schedule", d.id, "error", terr)
 		_, _ = tx.Exec(ctx,
