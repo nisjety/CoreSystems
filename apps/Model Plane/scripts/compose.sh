@@ -123,7 +123,26 @@ if [[ "${MODEL_PLANE_BRIDGES:-0}" == "1" ]]; then
   compose_files+=(-f "$ROOT_DIR/deploy/docker-compose.bridges.yml")
 fi
 
-env_files=(--env-file "$ENV_FILE")
+env_files=()
+# Control Plane owns the org-core service credential model-gateway presents to
+# read each org's spend ceiling. Load Control's persisted development store
+# FIRST, so the value has one canonical local home instead of being copied into
+# this plane's .env where the two copies drift apart on the next rotation --
+# and a drifted copy is silent, because fetch_org_limits fails open and simply
+# stops applying the ceiling.
+#
+# Same source build-verevon-services.sh reads for the orchestrated multi-plane
+# bring-up (its plane_env_files), so both entry points now resolve the identical
+# value. First, not last: $ENV_FILE follows and still wins, so a deliberate
+# plane-local override remains possible.
+#
+# Absent is fine and stays quiet: without it model-gateway simply applies no org
+# ceiling, exactly as it did before the credential existed.
+control_secrets="$ROOT_DIR/../Control Plane/.env.generated-secrets"
+if [[ -r "$control_secrets" ]]; then
+  env_files+=(--env-file "$control_secrets")
+fi
+env_files+=(--env-file "$ENV_FILE")
 release_lock="${MODEL_PLANE_RELEASE_LOCK:-}"
 if [[ -n "$release_lock" ]]; then
   if [[ "$release_lock" != /* ]]; then
