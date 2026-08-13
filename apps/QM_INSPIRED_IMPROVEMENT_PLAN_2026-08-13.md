@@ -577,3 +577,78 @@ drift fails a test instead of passing silently. Both modules' doc comments
 now name which one is the boundary. The test was validated by injecting a
 synthetic violation, confirming the failure, then removing it — not merely
 observed to pass.
+
+---
+
+# Status as of 2026-08-13 evening
+
+The headline finding above still stands, but several of its examples are now
+closed. Recording that here rather than leaving the document claiming gaps that
+no longer exist.
+
+## Landed
+
+| Item | What changed |
+|---|---|
+| **AUTO-1** | A cron schedule can select its workflow. The plan called this frontend-only; that was wrong — the sweeper never wrote `config_json`, so `dispatchPlan` always fell through to the default and the UI field would have been inert. Both halves fixed. |
+| **ADM-1** | Org spend/token ceilings are settable from a new Forbrukstak settings section through an org-admin-gated gateway route. Enforcement was already live; only the way to set a number was missing. |
+| **POL-1/2/3** | `cap.command.shell` can no longer be downgraded to `low` by any caller holding plain `capability:write` — which silently disabled human approval for shell execution. The org-blind last-write-wins `Registry.Get` chain is gone. Limitations disclosed in the service README. |
+| **AUTO-3** | The task executor's fallback dispatcher no longer strands claimed tasks in `running` forever with no per-task signal. |
+| **SSRF-1** | integration-corev2 has a real DNS-pinning egress guard. Microsoft Graph's `nextLink` pagination followed a URL out of an API response with **no guard of any kind** — that is now closed. |
+| **SSRF-2** | Resolved as a documented contract rather than a shared crate; see the correction section above for why. The gateway's forward-don't-fetch invariant is now enforced by a test instead of being incidental. |
+| **INJ-1/2/4** | Provenance and fail-closed screening on the tool-result path, built against S2.7's vocabulary. |
+| *(bonus)* | Verb/Object/Outcome activity grammar and the six-tab Space cockpit shell, from the UI research document. |
+
+## The INJ finding that was worse than this plan said
+
+Section 2 said `scan_injection` had one call site and the rest of the
+tool-result path had none. True — but it missed that **the one call site was
+itself defeated by the attack it existed to catch**. `add_context_entry`
+scanned the already-truncated 600-character snippet, so a marker planted past
+the cutoff sailed through unflagged. The only injection defence in the codebase
+was effectively inert against middle-of-payload. Fixed, with a regression test
+that plants a marker past the truncation point.
+
+## SSRF-4: closed by investigation, not by code
+
+This plan claimed model-gateway had "no SSRF guard of any kind beyond a
+CONNECT_TIMEOUT". Verified false — `tools.rs::is_egress_safe` and
+`runtime_registries.rs::endpoint_host_is_forbidden` both exist and are wired.
+More importantly, `grpc.rs`'s `remote_trigger` RPC does not call its guard at
+all; it returns
+`failed_precondition("remote_trigger is quarantined until hostname DNS
+rebinding defenses are enforced by Quarry")`. A direct-dial capability
+deliberately disabled, with the reason in the error the caller receives. No
+further work needed.
+
+## Deliberately not started, and why
+
+- **SKILL-1** (personal skill scope, grants, org promotion), **MEM-1** (shared
+  room memory), **ADM-2** (HKDF keychain), **AUTO-2** (watch/notify): each is a
+  leaf in the Space adoption plan's dependency graph (S3.5, S3.x, S3.4, S4.2).
+  Building them org/user-scoped now would become migration debt the moment
+  Space lands. They wait on that workstream, not on capacity.
+- **HARN-1/2** (one tool-execution module, then a turn-loop trait): the right
+  refactor, wrong week. It touches the three hottest paths in Model Plane
+  Rust — exactly where another workstream is actively landing large changes.
+  It needs a quiet tree, not a race.
+- **ADM-3/ADM-4**: product decisions, not engineering items.
+
+## Still blocking a shipped feature
+
+`model-gateway` is absent from Control Plane's `ORG_CORE_SERVICE_CREDENTIALS`,
+and `MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN` defaults to empty. Until that pair
+is registered with `org:read:any` plus settings-write, an admin can set a spend
+ceiling in the UI that model-gateway cannot read — so the cap does not enforce.
+The code is honest about it (unset is a supported state that stops enforcing
+rather than erroring), but the net effect is a configured limit that does
+nothing. This needs an operator to generate the secret.
+
+## The pattern that keeps recurring
+
+Three times today a proto addition compiled cleanly for its own service and
+broke a *test-only* trait implementation in another — `delete_thread` /
+`delete_threads`, then `DeleteSpaceThreads`, both in execution-core's
+`MockSession`. A per-service `cargo build` never catches it because the library
+builds; only the test target fails. After any session-core proto change, run a
+workspace-wide `cargo test`, not a build.
