@@ -39625,3 +39625,112 @@ textarea:focus-visible {
   .verevon-ai-review-outcomes__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .verevon-ai-review-queue__item { align-items: flex-start; flex-direction: column; gap: 12px; }
 }
+
+/* ---------------------------------------------------------------------------
+   Space activity feed — Verb/Object/Outcome rows.
+
+   Salience carries the meaning here, not colour alone: a failed or
+   approval-blocked run is heavier and higher-contrast, a completed one recedes.
+   Tone is paired with the outcome word itself so the row still reads correctly
+   for anyone who cannot separate the hues.
+   --------------------------------------------------------------------------- */
+.verevon-activity-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.verevon-activity-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+}
+
+.verevon-activity-row:hover {
+  background: rgb(0 0 0 / 3%);
+}
+
+.dark .verevon-activity-row:hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+/* Needs a human. Given a border so it stays distinguishable in a dense list
+   even before colour is perceived. */
+.verevon-activity-row--critical {
+  border-color: var(--verevon-border);
+  background: rgb(0 0 0 / 2%);
+}
+
+.dark .verevon-activity-row--critical {
+  border-color: rgb(255 255 255 / 14%);
+  background: rgb(255 255 255 / 6%);
+}
+
+/* Reads recede: done-and-unremarkable work stays legible but stops competing. */
+.verevon-activity-row--muted {
+  opacity: 0.72;
+}
+
+.verevon-activity-link {
+  color: inherit;
+  text-decoration: none;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.verevon-activity-link:hover .verevon-activity-object {
+  text-decoration: underline;
+}
+
+.verevon-activity-verb {
+  font-weight: 600;
+}
+
+.verevon-activity-object {
+  overflow-wrap: anywhere;
+}
+
+.verevon-activity-outcome {
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-activity-outcome--failure {
+  font-weight: 600;
+}
+
+.verevon-activity-outcome--pending {
+  font-style: italic;
+}
+
+.verevon-activity-when {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+
+.verevon-activity-empty {
+  opacity: 0.7;
+  margin: 0;
+}
+
+/* A live row pulses gently so "still moving" is visible without a spinner per
+   item. Respects reduced-motion: the state is already carried by the outcome
+   word, so removing the animation loses nothing. */
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-activity-row--live .verevon-activity-outcome {
+    animation: verevon-activity-pulse 2s ease-in-out infinite;
+  }
+}
+
+@keyframes verevon-activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
