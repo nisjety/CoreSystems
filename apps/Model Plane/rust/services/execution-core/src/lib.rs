@@ -23,6 +23,7 @@ pub mod permission;
 pub mod policy;
 pub mod postcondition;
 pub mod promote_on_use;
+pub mod provenance;
 pub mod quarry_agent;
 mod quarry_auth;
 pub mod runtime_loop;
