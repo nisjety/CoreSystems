@@ -2,8 +2,8 @@ go 1.25.1
 
 use (
 	./gen
-	./pkg/cibuf
 	./pkg/authctx
+	./pkg/cibuf
 	./pkg/envelope
 	./pkg/idempotency
 	./pkg/jetstream
@@ -17,6 +17,7 @@ use (
 	./services/capability-core
 	./services/cost-core
 	./services/letta-bridge
+	./services/nats-provisioner
 	./services/orchestrator-core
 	./services/sandbox-manager
 )
