@@ -167,7 +167,14 @@ type PromotionGateOutput struct {
 	Passed bool
 	Checks []string
 }
-type RegistryUpdateInput struct{ SkillID, FromScope, NewScope, OrgID string }
+
+// RegistryUpdateInput and UpdateRegistryActivity were removed per
+// QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md SKILL-2: they called
+// capability-core's PromoteSkill RPC, which was itself removed (always
+// FailedPrecondition in production; see its doc comment in
+// capability-core/internal/server/server.go). SkillPromotionWorkflow's step 3
+// now fails explicitly with workflows.ErrRegistryUpdateNotSupported instead
+// of invoking an activity that no longer exists.
 
 // ── Struct + constructor ─────────────────────────────────────────────────────
 
@@ -655,19 +662,6 @@ func (a *Activities) RunPromotionGateActivity(ctx context.Context, input Promoti
 		return PromotionGateOutput{}, err
 	}
 	return PromotionGateOutput{Passed: resp.Passed, Checks: resp.Checks}, nil
-}
-
-func (a *Activities) UpdateRegistryActivity(ctx context.Context, input RegistryUpdateInput) error {
-	if a.clients == nil || a.clients.CapabilityCore == nil {
-		return status.Error(codes.Unavailable, "capability-core unavailable")
-	}
-	ctx = servicecred.WithOrg(ctx, input.OrgID)
-	_, err := mpv1.NewCapabilityCoreClient(a.clients.CapabilityCore).PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
-		SkillId:   input.SkillID,
-		FromScope: input.FromScope,
-		ToScope:   input.NewScope,
-	})
-	return err
 }
 
 // ── Feedback aggregation (feedback → skill-promotion loop) ───────────────────

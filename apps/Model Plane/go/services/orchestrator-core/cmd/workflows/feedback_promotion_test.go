@@ -20,12 +20,19 @@ func newFeedbackEnv() *testsuite.TestWorkflowEnvironment {
 	env.RegisterActivity(a.AggregateFeedbackActivity)
 	env.RegisterActivity(a.ValidateSkillBundleActivity)
 	env.RegisterActivity(a.RunPromotionGateActivity)
-	env.RegisterActivity(a.UpdateRegistryActivity)
 	env.RegisterWorkflow(SkillPromotionWorkflow)
 	return env
 }
 
-func TestFeedbackPromotionWorkflow_PromotesPassingCandidate(t *testing.T) {
+// TestFeedbackPromotionWorkflow_GateSuccessStillSkipsAtRegistryUpdate replaces
+// the old "promotes passing candidate" case. SKILL-2 removed
+// UpdateRegistryActivity (it called capability-core's now-removed PromoteSkill
+// RPC), so the child SkillPromotionWorkflow's step 3 now always fails
+// explicitly (ErrRegistryUpdateNotSupported) even when validation and the
+// gate both pass. The parent's existing `err == nil && result.Promoted`
+// check already treats that as a skip, not a crash — this pins down that a
+// candidate that clears every real check still cannot be promoted today.
+func TestFeedbackPromotionWorkflow_GateSuccessStillSkipsAtRegistryUpdate(t *testing.T) {
 	env := newFeedbackEnv()
 
 	env.OnActivity("AggregateFeedbackActivity", mock.Anything, mock.Anything).
@@ -34,13 +41,10 @@ func TestFeedbackPromotionWorkflow_PromotesPassingCandidate(t *testing.T) {
 				{SkillID: "cap.skill.summarize", FromScope: "agent", ToScope: "workspace", Good: 9, Total: 10, Score: 0.9},
 			},
 		}, nil).Once()
-	// Child SkillPromotionWorkflow's activities all pass → promoted.
 	env.OnActivity("ValidateSkillBundleActivity", mock.Anything, mock.Anything).
 		Return(activities.SkillValidationOutput{Valid: true}, nil).Once()
 	env.OnActivity("RunPromotionGateActivity", mock.Anything, mock.Anything).
 		Return(activities.PromotionGateOutput{Passed: true, Checks: []string{"ok"}}, nil).Once()
-	env.OnActivity("UpdateRegistryActivity", mock.Anything, mock.Anything).
-		Return(nil).Once()
 
 	env.ExecuteWorkflow(FeedbackPromotionWorkflow, FeedbackPromotionInput{MinSamples: 5, PromoteThreshold: 0.8})
 
@@ -50,8 +54,8 @@ func TestFeedbackPromotionWorkflow_PromotesPassingCandidate(t *testing.T) {
 	var out FeedbackPromotionOutput
 	require.NoError(t, env.GetWorkflowResult(&out))
 	require.Equal(t, 1, out.Evaluated)
-	require.Equal(t, []string{"cap.skill.summarize"}, out.Promoted)
-	require.Empty(t, out.Skipped)
+	require.Empty(t, out.Promoted)
+	require.Equal(t, []string{"cap.skill.summarize"}, out.Skipped)
 }
 
 func TestFeedbackPromotionWorkflow_SkipsWhenGateFails(t *testing.T) {

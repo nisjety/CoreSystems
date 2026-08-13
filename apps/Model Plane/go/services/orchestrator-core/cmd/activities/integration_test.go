@@ -34,8 +34,6 @@ type fakeCapabilityCore struct {
 
 	checkResp *mpv1.CheckSkillPromotionResponse
 	checkErr  error
-
-	promoteErr error
 }
 
 func (f *fakeCapabilityCore) ValidateSkillBundle(
@@ -52,12 +50,10 @@ func (f *fakeCapabilityCore) CheckSkillPromotion(
 	return f.checkResp, f.checkErr
 }
 
-func (f *fakeCapabilityCore) PromoteSkill(
-	_ context.Context,
-	_ *mpv1.PromoteSkillRequest,
-) (*mpv1.PromoteSkillResponse, error) {
-	return &mpv1.PromoteSkillResponse{}, f.promoteErr
-}
+// No PromoteSkill override: capability-core removed that RPC (SKILL-2), and
+// orchestrator-core no longer calls it (UpdateRegistryActivity was removed
+// too), so fakeCapabilityCore falls back to the embedded
+// UnimplementedCapabilityCoreServer default like the real server does.
 
 type fakeMemoryService struct {
 	mpv1.UnimplementedMemoryServiceServer
@@ -229,46 +225,10 @@ func TestRunPromotionGateActivity(t *testing.T) {
 	})
 }
 
-// ─── UpdateRegistryActivity ───────────────────────────────────────────────────
-
-func TestUpdateRegistryActivity(t *testing.T) {
-	t.Run("success", func(t *testing.T) {
-		fake := &fakeCapabilityCore{promoteErr: nil}
-		conn := newCapabilityCoreConn(t, fake)
-		a := activities.NewActivities(testLogger(), &grpcclient.Clients{CapabilityCore: conn})
-
-		err := a.UpdateRegistryActivity(
-			context.Background(),
-			activities.RegistryUpdateInput{SkillID: "s1", FromScope: "dev", NewScope: "staging"},
-		)
-		require.NoError(t, err)
-	})
-
-	t.Run("gRPC error is propagated", func(t *testing.T) {
-		fake := &fakeCapabilityCore{
-			promoteErr: status.Error(codes.NotFound, "skill not found"),
-		}
-		conn := newCapabilityCoreConn(t, fake)
-		a := activities.NewActivities(testLogger(), &grpcclient.Clients{CapabilityCore: conn})
-
-		err := a.UpdateRegistryActivity(
-			context.Background(),
-			activities.RegistryUpdateInput{SkillID: "missing", FromScope: "dev", NewScope: "staging"},
-		)
-		require.Error(t, err)
-		assert.Equal(t, codes.NotFound, status.Code(err))
-	})
-
-	t.Run("nil conn returns error", func(t *testing.T) {
-		a := activities.NewActivities(testLogger(), &grpcclient.Clients{CapabilityCore: nil})
-		err := a.UpdateRegistryActivity(
-			context.Background(),
-			activities.RegistryUpdateInput{SkillID: "s1", FromScope: "dev", NewScope: "staging"},
-		)
-		require.Error(t, err)
-		assert.Equal(t, codes.Unavailable, status.Code(err))
-	})
-}
+// UpdateRegistryActivity and its tests were removed per SKILL-2: the activity
+// called capability-core's now-removed PromoteSkill RPC. See activities.go's
+// comment where the type used to be defined, and
+// workflows.ErrRegistryUpdateNotSupported for what replaced it.
 
 // ─── QueryMemoryEntriesActivity ───────────────────────────────────────────────
 
