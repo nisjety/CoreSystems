@@ -221,7 +221,7 @@ default, and none was added.
 | ID | Effort | Impact | What |
 |---|---|---|---|
 | SSRF-1 | M | High | Give integration-corev2 a general SSRF/DNS-pinning guard — zero exists today on a service CLAUDE.md explicitly names as owning this class of outbound call. |
-| SSRF-2 | M | High | Extract Quarry's DNS-pinning into a shared crate; add a regression test pinning verevonv3 gateway's forward-don't-fetch invariant (QM has exactly this test: `test/egress-proxy-config.test.ts` asserts the anti-re-resolution design directly). Today that invariant is incidental, not enforced. |
+| SSRF-2 | M | High | **DONE 2026-08-13** — resolved as a documented contract, NOT a shared crate; see correction below. |
 | SSRF-3 | L | Medium | Evaluate a QM-style centralized decision service for polyglot reuse instead of N independent guards — real leverage for whichever Go/TS service comes next, since Quarry's Rust-native pinning doesn't port. |
 | SSRF-4 | S | Low | Audit model-gateway's outbound calls for any caller-influenced host — it has a `CONNECT_TIMEOUT` (this session) but no SSRF guard, currently acceptable only if it never dials outward on caller/model input. |
 
@@ -517,3 +517,63 @@ questions last.
   and the Slack/portal/chassis plugins were not explored — the 8 topics were
   chosen for where the two systems' *design intent* overlaps most, not for
   exhaustive coverage of QM's surface area.
+
+---
+
+## Correction to section 3, and how SSRF-2 actually resolved (2026-08-13)
+
+**This plan was wrong about model-gateway.** Section 3 stated it "has no
+SSRF guard of any kind beyond a CONNECT_TIMEOUT." Verified false — it has
+two, both live:
+
+- `tools.rs::is_egress_safe` (literal-IP check for the RemoteTrigger webhook helper)
+- `runtime_registries.rs::endpoint_host_is_forbidden` (hostname/IP blocklist
+  for MCP server registration, actively wired)
+
+So the repo had **four** independent Rust SSRF checks, not three. SSRF-4's
+"audit model-gateway's outbound calls" is therefore partly already answered.
+
+**More importantly, the codebase had already reached this plan's conclusion
+on its own.** `grpc.rs`'s `remote_trigger` RPC does not call its own guard —
+it unconditionally returns:
+
+> `failed_precondition("remote_trigger is quarantined until hostname DNS rebinding defenses are enforced by Quarry")`
+
+That is a direct-dial capability deliberately disabled because a
+literal-IP-only check was judged insufficient, with the reason stated in the
+error a caller receives. Fail closed and say why, rather than paper over the
+gap. That is precedent for the decision below, arrived at independently and
+earlier.
+
+### SSRF-2's recommendation was overruled, deliberately
+
+This plan asked for Quarry's DNS-pinning to be "extracted into a shared
+primitive." That was written before the packaging constraints were known and
+is the wrong answer:
+
+- The three consumers sit in **three separate Cargo workspaces**; the
+  verevonv3 gateway crate is standalone with no path dependencies outside
+  itself at all.
+- Across all 41 `Cargo.toml` files in the repo, **every** `path = "../..."`
+  dependency stays inside one plane's own workspace. There is no precedent
+  for crossing plane directories, and CLAUDE.md's plane-ownership rules
+  discourage it.
+- The implementations differ in kind, not just polish: Quarry resolves and
+  pins (coupled to `quarry_core`/`quarry_security`, so "extracting" is closer
+  to rewriting); the gateway is deliberately a pre-filter because its job is
+  to forward, not to dial.
+
+Creating the repo's first cross-plane Rust coupling to deduplicate a guard
+whose users have different threat models would cost more than it saves.
+
+**What landed instead:** the invariant the gateway's safety silently rested
+on is now written down and enforced. `public_url.rs` never resolves DNS and
+is sufficient only because every call site forwards the URL to Quarry as
+content rather than dialing it — add one direct-dial call site and that weak
+check silently becomes the whole defense.
+`gateway/tests/ssrf_forward_not_fetch.rs` scans every `src/**.rs` dial and
+requires its target be anchored to a fixed `AppState` config field, so the
+drift fails a test instead of passing silently. Both modules' doc comments
+now name which one is the boundary. The test was validated by injecting a
+synthetic violation, confirming the failure, then removing it — not merely
+observed to pass.
