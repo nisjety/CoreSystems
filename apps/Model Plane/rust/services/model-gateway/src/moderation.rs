@@ -384,8 +384,8 @@ impl ToolProvenance {
 /// Screening bounds ("bounded screening with size/deadline/concurrency
 /// controls"). A payload outside these bounds cannot be positively asserted
 /// as screened, so it degrades explicitly rather than skipping silently.
-const SCREENING_MAX_BYTES: usize = 4 * 1024 * 1024;
-const SCREENING_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+pub(crate) const SCREENING_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const SCREENING_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
 /// Default width of the process-wide screening semaphore (`AppState::new`'s
 /// `screening_semaphore`). Generous relative to `max_tool_rounds`' own
 /// concurrent-call fan-out — this bounds a pathological burst, not normal
@@ -574,6 +574,79 @@ pub fn redact_pii(text: &str) -> (String, usize) {
         .collect::<Vec<_>>()
         .join(" ");
     (sanitized, count)
+}
+
+fn content_safety_explicitly_disabled(policies: &[SafetyPolicy]) -> bool {
+    policies
+        .iter()
+        .any(|policy| !policy.enabled && policy.kind.trim().eq_ignore_ascii_case("content_safety"))
+}
+
+/// `content_safety` policy gate for [`crate::semantic_screening`]'s shadow
+/// pass — same shape as [`injection_defense_enabled`] (an absent row keeps
+/// the sampled shadow pass running; only an explicit `enabled: false` row
+/// turns it off), reusing the SAME `/api/v1/safety` projection rather than
+/// widening it with a new field. Defaulting "on" under any read failure is
+/// deliberately the opposite trade-off from `pii_redaction_required` and
+/// `injection_defense_enabled`: this gate only ever affects an out-of-band,
+/// non-enforcing SHADOW signal (see that module's docs), so erring toward
+/// keeping the calibration signal flowing carries no enforcement risk, unlike
+/// erring toward redaction/screening which protects real content crossing a
+/// boundary.
+pub(crate) async fn content_safety_semantic_enabled(
+    http_client: &reqwest::Client,
+    capability_core_base_url: &str,
+    capability_bearer: Option<&str>,
+) -> bool {
+    let Some(capability_bearer) = capability_bearer
+        .map(str::trim)
+        .filter(|bearer| !bearer.is_empty())
+    else {
+        tracing::warn!(
+            "capability-core bearer absent while resolving content_safety policy; semantic shadow pass stays on"
+        );
+        return true;
+    };
+
+    let mut url = match reqwest::Url::parse(capability_core_base_url.trim()) {
+        Ok(url) => url,
+        Err(_) => {
+            tracing::warn!(
+                "capability-core URL invalid while resolving content_safety policy; semantic shadow pass stays on"
+            );
+            return true;
+        }
+    };
+    url.set_path("/api/v1/safety");
+    url.set_query(None);
+
+    let response = match http_client
+        .get(url)
+        .bearer_auth(capability_bearer)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => {
+            tracing::warn!(
+                status = %response.status(),
+                "capability-core rejected content_safety policy read; semantic shadow pass stays on"
+            );
+            return true;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "capability-core content_safety policy read failed; semantic shadow pass stays on");
+            return true;
+        }
+    };
+
+    match response.json::<SafetyPolicyList>().await {
+        Ok(policies) => !content_safety_explicitly_disabled(&policies.policies),
+        Err(error) => {
+            tracing::warn!(%error, "capability-core content_safety policy response was malformed; semantic shadow pass stays on");
+            true
+        }
+    }
 }
 
 #[cfg(test)]

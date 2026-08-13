@@ -29,6 +29,7 @@ use crate::moderation::ToolProvenance;
 /// subject as forward-compatible (log + skip), matching the convention
 /// documented on `mp_events::subjects`' other event families.
 pub const EVENT_TYPE_TOOL_RESULT_SCREENING: &str = "TOOL_RESULT_SCREENING_FLAGGED";
+pub const EVENT_TYPE_SEMANTIC_SHADOW: &str = "TOOL_RESULT_SEMANTIC_SHADOW";
 
 /// Build a security event envelope for one tool outcome's provenance, if and
 /// only if it is audit-worthy. Returns `None` for a clean/screened/
@@ -88,10 +89,67 @@ pub fn envelope_for(
     })
 }
 
+pub fn shadow_envelope_for(
+    provenance: &ToolProvenance,
+    shadow: &crate::semantic_screening::ShadowScreeningOutcome,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    tool_name: &str,
+    zdr: bool,
+) -> Option<Envelope> {
+    let crate::semantic_screening::ShadowScreeningOutcome::Completed {
+        verdict,
+        agrees_with_deterministic,
+    } = shadow
+    else {
+        return None;
+    };
+    if org_id.trim().is_empty() || run_id.trim().is_empty() {
+        return None;
+    }
+    Some(Envelope {
+        event_id: new_ulid(),
+        event_type: EVENT_TYPE_SEMANTIC_SHADOW.to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: run_id.to_owned(),
+        causation_id: String::new(),
+        // Namespaced exactly like `envelope_for`'s screening event, plus a
+        // `shadow_` prefix so the two event kinds for the same
+        // (run, tool, hash) triple never collide on idempotency key.
+        idempotency_key: format!(
+            "security_shadow_{run_id}_{tool_name}_{}",
+            provenance.screening.content_hash
+        ),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        resource_ref: format!("run/{run_id}"),
+        payload: json!({
+            "tool": tool_name,
+            "trust_class": provenance.trust.label(),
+            "deterministic_posture": provenance.screening.posture.label(),
+            "semantic_flagged": verdict.flagged,
+            "semantic_categories": {
+                "hate": verdict.categories.hate,
+                "harassment": verdict.categories.harassment,
+                "violence": verdict.categories.violence,
+                "self_harm": verdict.categories.self_harm,
+                "sexual": verdict.categories.sexual,
+            },
+            "agreement": agrees_with_deterministic,
+            "content_hash": provenance.screening.content_hash,
+        }),
+        zdr,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::moderation::{ScreeningOutcome, ScreeningPosture, TrustClass};
+    use crate::semantic_screening::{SemanticCategories, SemanticVerdict, ShadowScreeningOutcome};
 
     fn provenance(trust: TrustClass, posture: ScreeningPosture) -> ToolProvenance {
         ToolProvenance {
@@ -180,5 +238,104 @@ mod tests {
         // a retried identical call dedupes on replay.
         let c = envelope_for(&p, "org-1", "user-1", "run-1", "fetch_url", false).unwrap();
         assert_eq!(a.idempotency_key, c.idempotency_key);
+    }
+
+    // --- shadow_envelope_for ------------------------------------------------
+
+    fn completed_shadow(flagged: bool, agrees: bool) -> ShadowScreeningOutcome {
+        ShadowScreeningOutcome::Completed {
+            verdict: SemanticVerdict {
+                flagged,
+                categories: SemanticCategories {
+                    hate: 0.1,
+                    harassment: 0.0,
+                    violence: 0.0,
+                    self_harm: 0.0,
+                    sexual: 0.0,
+                },
+            },
+            agrees_with_deterministic: agrees,
+        }
+    }
+
+    #[test]
+    fn a_completed_shadow_evaluation_produces_an_event_with_agreement() {
+        let p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Flagged);
+        let shadow = completed_shadow(true, true);
+        let envelope =
+            shadow_envelope_for(&p, &shadow, "org-1", "user-1", "run-1", "fetch_url", false)
+                .expect("a completed shadow pass must be audited");
+        assert_eq!(envelope.event_type, EVENT_TYPE_SEMANTIC_SHADOW);
+        assert_eq!(envelope.payload["semantic_flagged"], true);
+        assert_eq!(envelope.payload["agreement"], true);
+        assert_eq!(envelope.payload["deterministic_posture"], "flagged");
+        assert_eq!(envelope.payload["semantic_categories"]["hate"], 0.1);
+        // Never the raw text, only its hash — same ZDR contract as
+        // `envelope_for`.
+        assert_eq!(
+            envelope.payload["content_hash"],
+            crate::moderation::content_hash(b"some payload")
+        );
+    }
+
+    #[test]
+    fn a_disagreeing_shadow_evaluation_is_still_audited() {
+        let p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Clean);
+        let shadow = completed_shadow(true, false);
+        let envelope =
+            shadow_envelope_for(&p, &shadow, "org-1", "user-1", "run-1", "fetch_url", false)
+                .expect("disagreement is exactly the signal an operator needs");
+        assert_eq!(envelope.payload["agreement"], false);
+        assert_eq!(envelope.payload["deterministic_posture"], "clean");
+        assert_eq!(envelope.payload["semantic_flagged"], true);
+    }
+
+    #[test]
+    fn a_skipped_or_unavailable_shadow_pass_produces_no_event() {
+        use crate::semantic_screening::{ShadowSkipReason, ShadowUnavailableReason};
+        let p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Clean);
+        for shadow in [
+            ShadowScreeningOutcome::Skipped(ShadowSkipReason::Zdr),
+            ShadowScreeningOutcome::Skipped(ShadowSkipReason::NotSampled),
+            ShadowScreeningOutcome::Skipped(ShadowSkipReason::NotExternalTrust),
+            ShadowScreeningOutcome::Unavailable(ShadowUnavailableReason::Timeout),
+            ShadowScreeningOutcome::Unavailable(ShadowUnavailableReason::ConcurrencyExhausted),
+        ] {
+            assert!(
+                shadow_envelope_for(&p, &shadow, "org-1", "user-1", "run-1", "fetch_url", false)
+                    .is_none(),
+                "{shadow:?} must not produce a shadow event"
+            );
+        }
+    }
+
+    #[test]
+    fn shadow_event_missing_org_or_run_scope_produces_no_event() {
+        let p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Clean);
+        let shadow = completed_shadow(false, true);
+        assert!(
+            shadow_envelope_for(&p, &shadow, "", "user-1", "run-1", "fetch_url", false).is_none()
+        );
+        assert!(
+            shadow_envelope_for(&p, &shadow, "org-1", "user-1", "", "fetch_url", false).is_none()
+        );
+    }
+
+    #[test]
+    fn shadow_idempotency_key_never_collides_with_the_deterministic_event() {
+        let p = provenance(TrustClass::ExternalWeb, ScreeningPosture::Flagged);
+        let deterministic =
+            envelope_for(&p, "org-1", "user-1", "run-1", "fetch_url", false).unwrap();
+        let shadow_env = shadow_envelope_for(
+            &p,
+            &completed_shadow(true, true),
+            "org-1",
+            "user-1",
+            "run-1",
+            "fetch_url",
+            false,
+        )
+        .unwrap();
+        assert_ne!(deterministic.idempotency_key, shadow_env.idempotency_key);
     }
 }
