@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/triodelab/integration-corev2/internal/config"
+	"github.com/triodelab/integration-corev2/internal/egress"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -45,7 +46,10 @@ type ExecuteResult struct {
 
 func NewService(cfg config.Config, httpClient *http.Client) *Service {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultActionTimeout}
+		// executeShopify below dials "https://"+shop+"/..." where shop comes
+		// from the connection's stored providerContext, not a fixed config
+		// URL; egress.SafeClient vets that host before connecting.
+		httpClient = egress.SafeClient(egress.ClientConfig{RequestTimeout: defaultActionTimeout})
 	}
 	return &Service{cfg: cfg, httpClient: httpClient}
 }

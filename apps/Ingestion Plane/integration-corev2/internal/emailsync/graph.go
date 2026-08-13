@@ -72,6 +72,22 @@ func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 			return FetchResult{}, fmt.Errorf("graph delta page: %w", err)
 		}
 
+		// Both link kinds are provider-response-derived URLs that get
+		// re-dialed (NextLink, on the next loop iteration) or persisted and
+		// re-dialed later (either one, as the next cycle's starting cursor
+		// on line ~43). Confining them to the configured Graph origin here —
+		// once per page, immediately after decoding — covers every later use
+		// in this function, including the cursor persisted when maxMessages
+		// is reached below.
+		nextLink, err := f.safeNextLink(response.NextLink)
+		if err != nil {
+			return FetchResult{}, fmt.Errorf("graph delta pagination: %w", err)
+		}
+		deltaLink, err := f.safeNextLink(response.DeltaLink)
+		if err != nil {
+			return FetchResult{}, fmt.Errorf("graph delta pagination: %w", err)
+		}
+
 		for _, raw := range response.Value {
 			msg, ok := raw.normalize()
 			if !ok {
@@ -81,13 +97,13 @@ func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 		}
 
 		// Graph cursors only identify page boundaries. Stopping in the middle
-		// of response.Value and saving response.NextLink would permanently skip
-		// the unprocessed remainder of this page. Finish the provider page, then
+		// of response.Value and saving nextLink would permanently skip the
+		// unprocessed remainder of this page. Finish the provider page, then
 		// allow a bounded overshoot of maxMessages before resuming next cycle.
 		if len(messages) >= maxMessages {
-			cursorOut := response.NextLink
+			cursorOut := nextLink
 			if cursorOut == "" {
-				cursorOut = response.DeltaLink
+				cursorOut = deltaLink
 			}
 			if cursorOut == "" {
 				cursorOut = nextURL
@@ -95,15 +111,15 @@ func (f *GraphFetcher) Fetch(ctx context.Context, accessToken, cursor string, ba
 			return FetchResult{Messages: messages, NextCursor: cursorOut}, nil
 		}
 
-		if response.DeltaLink != "" {
-			return FetchResult{Messages: messages, NextCursor: response.DeltaLink}, nil
+		if deltaLink != "" {
+			return FetchResult{Messages: messages, NextCursor: deltaLink}, nil
 		}
-		if response.NextLink == "" {
+		if nextLink == "" {
 			// Defensive: a page without either link should not happen per the
 			// contract; keep the current URL so the next cycle retries.
 			return FetchResult{Messages: messages, NextCursor: nextURL}, nil
 		}
-		nextURL = response.NextLink
+		nextURL = nextLink
 	}
 	// Page budget exhausted: persist the pending nextLink and continue later.
 	return FetchResult{Messages: messages, NextCursor: nextURL}, nil
@@ -144,6 +160,30 @@ func (f *GraphFetcher) baseURL() string {
 		return graphDefaultBaseURL
 	}
 	return strings.TrimRight(f.BaseURL, "/")
+}
+
+// safeNextLink confines a Graph-returned @odata.nextLink/@odata.deltaLink to
+// the configured Graph origin before it is dialed on a later call. Graph is
+// expected to hand back pagination links on the same host it was called on;
+// a value that is not an absolute URL on that same scheme+host — or isn't a
+// valid URL at all — is refused here instead of being handed to
+// providerGetJSON, which would otherwise dial whatever host the response
+// named. An empty link (nothing to follow) passes through unchanged.
+func (f *GraphFetcher) safeNextLink(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	base, err := url.Parse(f.baseURL())
+	if err != nil {
+		return "", fmt.Errorf("parse Graph base URL: %w", err)
+	}
+	next, err := url.Parse(raw)
+	if err != nil || !next.IsAbs() || next.Scheme != base.Scheme || next.Host != base.Host || next.User != nil {
+		return "", fmt.Errorf("graph returned an off-origin pagination URL")
+	}
+	next.Fragment = ""
+	return next.String(), nil
 }
 
 type graphMessage struct {

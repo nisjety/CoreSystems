@@ -20,6 +20,7 @@ import (
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
 	"github.com/triodelab/integration-corev2/internal/db"
 	"github.com/triodelab/integration-corev2/internal/discovery"
+	"github.com/triodelab/integration-corev2/internal/egress"
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
 	"github.com/triodelab/integration-corev2/internal/oauth"
@@ -91,17 +92,23 @@ func main() {
 	auditOutbox.Start()
 	defer auditOutbox.Close()
 	app := api.NewServer(api.ServerConfig{
-		Config:            cfg,
-		Repo:              repo,
-		OAuth:             service,
-		Auth:              controlplane.NewAuthClient(cfg, controlPlaneClient),
-		Org:               controlplane.NewOrgClient(cfg, controlPlaneClient),
-		Billing:           controlplane.NewBillingClient(cfg, controlPlaneClient),
-		Audit:             auditClient,
-		AuditOutbox:       auditOutbox,
-		Events:            publisher,
-		Discovery:         discovery.NewService(cfg, &http.Client{Timeout: 8 * time.Second}),
-		Actions:           actions.NewService(cfg, &http.Client{Timeout: 15 * time.Second}),
+		Config:      cfg,
+		Repo:        repo,
+		OAuth:       service,
+		Auth:        controlplane.NewAuthClient(cfg, controlPlaneClient),
+		Org:         controlplane.NewOrgClient(cfg, controlPlaneClient),
+		Billing:     controlplane.NewBillingClient(cfg, controlPlaneClient),
+		Audit:       auditClient,
+		AuditOutbox: auditOutbox,
+		Events:      publisher,
+		// Discovery and Actions both dial Shopify hosts assembled from a
+		// connection's stored providerContext ("https://"+shop+"/...");
+		// egress.SafeClient vets that host instead of trusting net/http's
+		// independent second DNS resolution. Every other provider these two
+		// services call gets the same connect-timeout/DNS-pinning hardening
+		// for free since the client is shared.
+		Discovery:         discovery.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 8 * time.Second})),
+		Actions:           actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
 		WriteAttestations: writeAttestations,
 		HotPath:           hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
 		WebhookOrg: &webhookorg.Resolver{
@@ -110,7 +117,9 @@ func main() {
 				BaseURL:          cfg.FacebookAPIBaseURL,
 				InstagramBaseURL: cfg.InstagramAPIBaseURL,
 				Tokens:           service,
-				HTTP:             &http.Client{Timeout: 15 * time.Second},
+				// Feeds meta_assets.go's Paging.Next-following calls, which
+				// dial a URL taken from Meta's own API response.
+				HTTP: egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second}),
 			},
 			Logger: &logger,
 		},

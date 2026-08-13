@@ -21,6 +21,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/config"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
 	"github.com/triodelab/integration-corev2/internal/db"
+	"github.com/triodelab/integration-corev2/internal/egress"
 	"github.com/triodelab/integration-corev2/internal/emailsync"
 	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/oauth"
@@ -67,7 +68,15 @@ func main() {
 		HTTPClient:       &http.Client{Timeout: 15 * time.Second},
 	}))
 
-	providerHTTP := &http.Client{Timeout: 20 * time.Second}
+	// Shared across every inbound-message provider fetcher below. Graph's
+	// delta sync in particular follows @odata.nextLink/@odata.deltaLink
+	// pagination URLs taken from Microsoft's own API response (see
+	// GraphFetcher.safeNextLink for the same-origin check that runs before
+	// one is followed); egress.SafeClient adds the resolve+vet+pin layer
+	// underneath that check so a rebound connection for that same origin
+	// still lands on a vetted, non-private address. Gmail/Teams/Slack/XDM/
+	// Discord get the same connect-timeout hardening for free.
+	providerHTTP := egress.SafeClient(egress.ClientConfig{RequestTimeout: 20 * time.Second})
 	worker := emailsync.Worker{
 		Store:       repo,
 		Tokens:      tokens,

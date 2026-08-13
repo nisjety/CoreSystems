@@ -7,11 +7,20 @@ import (
 	"strings"
 
 	"github.com/triodelab/integration-corev2/internal/config"
+	"github.com/triodelab/integration-corev2/internal/egress"
 )
 
 func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClient *http.Client) map[string]ProviderOAuthClient {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: defaultHTTPTimeout}
+		// Several of the clients built below dial a host assembled from
+		// caller-influenced data rather than a fixed config URL — most
+		// notably Shopify, whose ExchangeCode/Profile calls target
+		// "https://"+shop+"/..." where shop comes from the connection's
+		// stored providerContext (see ShopifyShop in provider_context.go).
+		// egress.SafeClient resolves, vets, and pins that host instead of
+		// trusting net/http's independent second resolution; it is a
+		// harmless upgrade for the remaining fixed-vendor-host clients too.
+		httpClient = egress.SafeClient(egress.ClientConfig{RequestTimeout: defaultHTTPTimeout})
 	}
 	// Config.Load always resolves these fallbacks, but preserving them here
 	// keeps explicitly constructed test and embedded configurations compatible.
