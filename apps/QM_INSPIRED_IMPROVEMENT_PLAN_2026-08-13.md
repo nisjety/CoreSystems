@@ -1,0 +1,519 @@
+# QM-Inspired Improvement Plan (2026-08-13)
+
+## What this is
+
+A full comparison of [yc-software/qm](https://github.com/yc-software/qm) ("a
+multiplayer agent harness for work," 13.3k stars / 1557 forks two weeks after
+launch) against Verevon v3 + CoreSystem, across the 8 subsystems where the two
+projects genuinely overlap. Produced by an 8-topic, 24-agent research pass
+(3.7M tokens, 743 tool calls, ~17 minutes) — one agent explored the QM side of
+a topic, a second verified CoreSystem's *current* code against it (not memory,
+which is stale in several places this pass corrected), a third synthesized a
+gap assessment and recommendations. This document is the human synthesis of
+those 24 results, not a pass-through — every claim below was either re-checked
+against the raw findings or, in one case, caught as a synthesis error and
+dropped (see Methodology notes at the end).
+
+**Read the headline finding first — it matters more than any single topic.**
+
+## Headline finding: the gap is rarely "we don't have this," it's "we built it and never finished wiring it in"
+
+Independently, across 5 of the 8 topics, the research surfaced the exact same
+failure shape that has recurred all session (§23.6 result handles, the
+fine-tune cost cap, the DNS-pinning connect timeout): a real, tested,
+production-grade implementation exists, and something in the last mile —a
+caller, a UI field, an admin route — was never added.
+
+- **`PromoteSkill`** (capability-core) unconditionally returns
+  `FailedPrecondition` in every real deployment, because `main.go` always
+  wires a durable store and the RPC only supports the no-store path. This
+  strands `orchestrator-core`'s `SkillPromotionWorkflow`, which has real
+  callers waiting on a dead RPC.
+- **6 of orchestrator-core's 7 registered Temporal workflows** have zero
+  production callers. The 7th (`InteractiveRunSupervision`) now does —
+  cron sweeper → task executor → `WorkflowDispatcher` → `StartWorkflow` gRPC
+  → real `Temporal.ExecuteWorkflow` — but the cron **creation form in the
+  frontend has no field to pick a workflow type**, so even a fully configured
+  deployment can only ever fire the one default.
+- **`inference-core`'s `ContentSafety` classifier** — a complete, LLM-based
+  moderation operation, merged into the gRPC contract — has zero callers
+  anywhere outside its own tests.
+- **capability-core's resource-scoped memory** (`run`/`thread`/`workspace`/
+  `session`) is declared, validated, and referenced throughout
+  `workplane_apis.go` — and hard-blocked on both the write path (503,
+  "requires Session Core authorization") and the read path (501, "not
+  implemented"), referencing a Session Core capability that doesn't exist in
+  Session Core's actual contract.
+- **org-core's settable spend/token-quota API** (`GET`/`PUT
+  /organizations/:id/quotas`) is fully built — migration, repository,
+  service, routes — and **is** a live caller of `model-gateway`'s cost-budget
+  check (`org_quota.rs`, built this session). What's missing is the last
+  mile again: no admin route, no frontend form, so an operator cannot
+  actually *set* a limit today even though the enforcement path is real.
+
+None of these need new architecture. Every one of them is a connection, not a
+feature. They're the cheapest, highest-confidence items in the prioritized
+backlog below for exactly that reason.
+
+## Corrections to earlier findings (this session and prior)
+
+Two things this pass found that update statements made earlier — stated
+plainly rather than left for you to notice the discrepancy:
+
+1. **Data Plane v2's `data-orchestrator-go` does not use Temporal at all.**
+   It runs its own hand-rolled Postgres lease/claim job queue
+   (`internal/jobs/worker.go`). The 2026-07-30 memory note "7 Temporal
+   workflows have zero prod callers" conflated this with Model Plane's
+   `orchestrator-core` — the two are unrelated durable-work systems in
+   different planes. That memory note is now split: DPv2's queue was never a
+   Temporal home, and orchestrator-core is now 6-of-7-uncalled, not 7-of-7.
+2. **org-core's quota API is a live, wired enforcement path**, confirmed
+   independently in this pass (`model-gateway/src/org_quota.rs` calls
+   `GET /organizations/:id/quotas` and enforces the ceiling in the cost budget
+   check). This does not contradict the earlier note in this session that the
+   gateway's *service credential* for that call still needs registering in
+   `ORG_CORE_SERVICE_CREDENTIALS` for a real deployment — that's a separate,
+   still-open operational step, not a code gap. The two claims are about
+   different things and both stand.
+
+## Scorecard
+
+| # | Topic | Verdict | One line |
+|---|---|---|---|
+| 1 | [Command/tool policy floor](#1-commandtool-execution-policy-floor) | Partial gap | CoreSystem's HITL/evidence/posture machinery is stronger than QM's in several ways; one undisclosed self-service floor-erasure gap on the highest-risk capability |
+| 2 | [Injection screening](#2-content-security-screening-prompt-injection) | Partial gap | One real scanner, one call site (RAG only) — the largest untrusted-content surface (web fetch, browser scrape, MCP) has zero screening |
+| 3 | [Egress / SSRF](#3-network-egress-control) | Partial gap | Quarry-v2 is at or above QM's rigor; one Go service (integration-corev2) has *zero* protection on outbound calls it owns |
+| 4 | [Harness abstraction](#4-swappable-agent-loop-harness) | **Clear gap** | The turn-loop is hand-written three times with drifting behavior instead of once behind a boundary |
+| 5 | [Skill ownership & sharing](#5-skillcapability-ownership--sharing) | **Clear gap** | No personal skill scope, no sharing, dead promotion RPC — but CoreSystem's own `mcp_servers` code already solves this pattern for a sibling entity |
+| 6 | [Scoped memory](#6-per-scope-memory--durable-session-state) | **Clear gap** | Strictly single-owner-per-thread by schema; no room/channel-shared notebook concept exists — may be a deliberate boundary, treat as additive |
+| 7 | [Automation & collaboration](#7-background-automation--proactive-collaboration) | Partial gap | Cron is at parity with QM; no watch/notify mechanism and no delivery-queue equivalent exist at all |
+| 8 | [Deployment, admin, secrets](#8-deployment-admin-config--credential-keychain) | Partial gap | Real 15-section admin UI, and it's honest about its own fakes — but two flat credential vaults instead of one keychain, and org allow-listed models don't exist |
+
+---
+
+## 1. Command/tool execution policy floor
+
+**QM.** Five hardcoded org-floor rules (`rm -rf`, force-push, `DROP/TRUNCATE
+TABLE`, fork-bomb, pipe-to-shell) that a narrower scope's rules can never
+outrank, because `composePolicy` puts them first in the array and
+`firstMatch` returns on the first regex hit — no priority field, the *order*
+is the policy. ~700 lines of shell canonicalization
+(`scannableCommand`/`scanShell`) unwrap quoting, heredocs, `$()`/backticks,
+ANSI-C escapes, and pipe-to-shell recursively (depth-capped at 8) before any
+rule ever sees the text, so evasion has to beat one shared preprocessor, not
+five independent regexes.
+
+QM's own `SECURITY.md` admits the floor is bypassable in practice: an org
+admin can `PUT` an empty command-policy at org scope through a generic admin
+setter with no floor-reinjection, permanently erasing the five rules for that
+org. Invalid stored regexes fail *open* (skipped, scan continues) in denylist
+mode.
+
+**CoreSystem.** No regex denylist exists anywhere — command governance is
+risk-tier dispatch, not pattern matching. `trusted_capability_id()`
+(`execution-core/capability_policy.rs:538-566`) binds a fixed set of tool
+names to capability IDs and fails **closed** on anything unrecognized (`None`
+→ `permission_denied`) — stronger than QM's fail-through-to-allow. Verified
+strengths beyond that: `cap.command.shell`'s `RiskLevel=High` is a compile-time
+constant separate from the sandboxed code-interpreter's lower tier; decision
+evidence is Ed25519-signed and durably verified before an `Allow` is trusted
+(`decision_proof.go` + `DecisionEvidenceVerifier`); capability availability is
+gated by a live, fail-closed health attestation with an anti-fabrication test.
+QM has no equivalent to any of the last two.
+
+**The gap, verified independently, live:** `capabilities.go`'s upsert handler
+(lines 103-130) validates only that `risk_level ∈ {low, medium, high}` before
+`capabilities_store.go`'s `Upsert` runs `ON CONFLICT (org_id,kind,name) DO
+UPDATE SET risk_level = EXCLUDED.risk_level` — and `authz.go`'s
+`AuthorizeHTTP` (lines 72-74) gates the whole write path on holding the plain
+`capability:write` scope, no separate admin check. Any write-scoped caller for
+an org can set `cap.command.shell`'s `risk_level` to `low`, flipping
+`policy/engine.go`'s `High → Ask` to `Low → Allow` — silently disabling HITL
+for shell execution, for that org, going forward. Same shape as QM's own
+documented bug. Confirmed per-org self-inflicted, not cross-tenant.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| POL-1 | M | High | Add a floor to capability-core's write path: `cap.command.shell` (and any future `RiskLevel=High` seed) should require a separate, harder-to-obtain scope to *lower*, not just `capability:write` to touch at all. Do not route the fix through a generic setter the way QM's own `admin-resources.ts` does — that's the exact shape of QM's bug. |
+| POL-2 | S | Medium | Close `registry.Get(id, "")`'s org-blind, last-write-wins in-memory index (`registry.go:280`, fed by `main.go:107`'s `orgID=''` load) — not currently exploitable (no confirmed live caller wires it into `EvaluatePolicy`), but a landmine for whoever wires it next. |
+| POL-3 | S | Medium | Disclose the risk-downgrade limitation in capability-core's docs the way QM's `SECURITY.md` discloses its own bypassable floor — an honest limitation is better than a silent one. |
+| POL-4 | M | Low | Consider a narrow, explicitly-non-boundary content check on capability auto-allow paths as defense-in-depth, on QM's `ORG_FLOOR_RULES` model — capability-core never inspects command/argument text at all today. |
+
+---
+
+## 2. Content security screening (prompt injection)
+
+**QM.** *No verified findings this pass* — the exploration agent for this
+side returned an empty placeholder. Not represented here; see Methodology.
+
+**CoreSystem.** One real, wired scanner: `scan_injection()`
+(`model-gateway/src/moderation.rs:161`), a case-insensitive match against 16
+hardcoded English phrases. Its **one call site in the entire codebase** is
+`retrieval.rs::add_context_entry` — RAG/knowledge-base snippets only. It
+doesn't block or strip anything; a hit appends one shared warning to the
+prompt, in-band, and the model has to honor it itself. It's unconditionally
+on with no policy gate and, having no external dependency, no failure mode at
+all.
+
+**The gap:** the tool-result path that carries the largest actual
+untrusted-content surface — `execute_web_fetch`, `execute_web_search`,
+`execute_mcp` in `execution-core/runtime_loop/mod.rs`, and browser-scraped
+text via `quarry_agent.rs::observation_from_wire` — has **zero** screening.
+`ToolOutcome` (`tool_loop.rs:125-130`) has exactly four fields (`call_id`,
+`name`, `output`, `error`) — no source/trust field, so provenance can't even
+be *represented*, let alone rendered, in what the model sees.
+`append_tool_outcomes` flattens internal APIs, live web fetches,
+browser-scraped text, and third-party MCP output into one undifferentiated
+block. Quarry's own text extraction (`observation.rs`) is a bare
+`strip_tags()` capped at 500 chars — no entity-decoding safety, no
+hidden-text handling.
+
+Two things exist but aren't this: `pii_redaction_required()`
+(`moderation.rs:101-135`) *is* a real, working fail-closed contract for a
+sibling concern (redacts on missing bearer, unreachable capability-core, or
+malformed response) — the template to build the injection gate on.
+`conversation-core`'s `AllowAIProposal(ctx, orgID)` (this session's work) has
+no content parameter at all — it's an entitlement gate, not a classifier.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| INJ-1 | M | High | Add a provenance field to `ToolOutcome`, populated at each `execution-core` call site, threaded through to what the model actually reads. This is the prerequisite for everything else — right now the model cannot tell a scraped webpage from its own org's internal API. |
+| INJ-2 | M | High | Give `scan_injection` a real fail-closed policy contract on the `pii_redaction_required` template, and extend its one call site to cover `web_fetch`/`web_search`/browser-scrape/MCP output, not just RAG. |
+| INJ-3 | M | Medium | Wire `inference-core`'s already-built `ContentSafety`/`content_safety_json` operation as a semantic second pass — it exists, is merged, has zero callers. Needs an async/sampling design, not a blocking call inline in the tool loop. |
+| INJ-4 | S | Low | Emit an audit event when injection markers fire or unscreened content is let through — today a hit only appends an in-band string; nothing is logged or surfaced as a security event. |
+
+---
+
+## 3. Network egress control
+
+**QM.** Two cooperating pieces: pure host-matching config
+(`egress-policy.ts`), and a standalone decision service
+(`egress-authz-main.ts`) any proxy calls per request — it does the DNS lookup
+itself, SSRF-checks the *resolved* IP (link-local, AWS IMDSv6
+`fd00:ec2::254`, opt-in private-range blocking with per-host exceptions), and
+hands the vetted IP back in a response header for the proxy's own routing
+config to pin to (`ORIGINAL_DST` + `x-egress-upstream-address` in the
+reference Envoy config — deliberately *not* `dynamic_forward_proxy`, which
+re-resolves per connection). The pin is enforced by the proxy's own
+config/contract, not by the wire protocol — QM's own docs flag that a
+differently-wired caller could silently lose it.
+
+**CoreSystem.** No centralized service; three independent implementations at
+uneven rigor. **Quarry-v2** (`dns_guard.rs`/`fetch.rs`/`driver.rs`) is at or
+above QM's rigor — it resolves DNS itself, checks resolved IPs, and pins the
+connection **in-process** (`TlsDnsPin`), which never crosses a process/header
+boundary the way QM's proxy handoff does. **verevonv3 gateway**
+(`public_url.rs`) is much lighter — string/blocklist only, never resolves DNS
+— and is safe today only because every call site forwards to Quarry-v2 for
+the actual fetch instead of dialing directly (confirmed across `quarry.rs`,
+`monitoring.rs`, `browser.rs`). **integration-corev2** — the Go service
+CLAUDE.md names as owner of provider-action outbound HTTP — has **no general
+guard at all**; the only related code is a single-provider same-origin check
+for Meta webhook assets. Go's `net/http` has no DNS-pinning primitive by
+default, and none was added.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| SSRF-1 | M | High | Give integration-corev2 a general SSRF/DNS-pinning guard — zero exists today on a service CLAUDE.md explicitly names as owning this class of outbound call. |
+| SSRF-2 | M | High | Extract Quarry's DNS-pinning into a shared crate; add a regression test pinning verevonv3 gateway's forward-don't-fetch invariant (QM has exactly this test: `test/egress-proxy-config.test.ts` asserts the anti-re-resolution design directly). Today that invariant is incidental, not enforced. |
+| SSRF-3 | L | Medium | Evaluate a QM-style centralized decision service for polyglot reuse instead of N independent guards — real leverage for whichever Go/TS service comes next, since Quarry's Rust-native pinning doesn't port. |
+| SSRF-4 | S | Low | Audit model-gateway's outbound calls for any caller-influenced host — it has a `CONNECT_TIMEOUT` (this session) but no SSRF guard, currently acceptable only if it never dials outward on caller/model input. |
+
+---
+
+## 4. Swappable agent-loop / harness
+
+**QM.** One interface (`Harness` = `{profile, turns, models, tools}` in
+`harness.ts`) implemented five ways — Pi in-process, Claude Code via
+in-process MCP, Codex over a spawned JSON-RPC subprocess, OpenCode over a
+spawned HTTP server + plugin, and a Mock used across 11+ test files with zero
+model calls. All four real backends share **one** tool-definition factory
+(`createPiTools` in `pi-tools.ts`) — names, schemas, wording, truncation
+limits, and security-screening banners live once, so a prompt or guardrail
+change propagates to every backend automatically. `HarnessTurnInput` hands a
+backend plain callbacks (`emit`, `screenExternalContent`,
+`toolApprovalGate`...), not a live core handle — a backend structurally
+cannot reach state it wasn't given for that turn. No ADRs are committed for
+this design; it was reconstructed from code.
+
+**CoreSystem.** The turn loop is a hand-written Rust implementation, and
+worse — three independently hand-written copies, not one, with drifting
+behavior. `execution-core::run_rounds` (managed/durable RunAgent — sequential
+per-call dispatch), `model-gateway::run_tool_rounds` (inline chat/SSE —
+concurrent per-round dispatch via `join_all`, its own compaction, its own
+dedup set), and `deep_research.rs`'s driver, whose own comment says it
+mirrors `run_tool_rounds`. A repo-wide grep for `trait Harness`/`AgentLoop`/
+`Runtime`/`TurnController` returns nothing outside an unrelated SLO-benchmark
+harness. `inference-core`'s `routing_policy.rs`/`intent.rs` (VerevonMode ×
+Complexity × BudgetPosture → model) is a real, genuinely pluggable axis — but
+it answers a different question (which LLM answers *one* call) than QM's
+Harness boundary (what turn-execution semantics wrap the call). Don't
+conflate the two in future roadmap language.
+
+Correction to the 2026-07-30 memory note "capability-gated tools inert:
+nobody calls the attestation API": no longer true for the
+`execute_step_inner` dispatch path — `GrpcCapabilityPolicy::evaluate_with_evidence`
+is live-wired at server startup (`grpc.rs:696`) with real gRPC calls and
+Ed25519 evidence verification.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| HARN-1 | M | High | Extract one canonical tool-execution module before touching the loop — collapse `execute_step_inner` and `dispatch_tool` into one crate owning naming, schemas, capability gating, hooks, permission checks, and result formatting. This is QM's `primitives.ts`/`pi-tools.ts` split, and it's the prerequisite for #2. |
+| HARN-2 | L | High | Define a Rust turn-loop trait (`run_turn(ctx, goal, tools, budget) -> TurnOutcome`) and refactor the three existing loops into three named strategies behind it, instead of three drifting functions. Do this *after* HARN-1. |
+| HARN-3 | S | Medium | Record an ADR for the split (or the decision not to split) — neither repo has one today; write it alongside HARN-2 so the next surface (a batch/offline runner) has a recorded rationale instead of a fourth hand-copy. |
+
+---
+
+## 5. Skill/capability ownership & sharing
+
+**QM.** Three real, wired layers. **Ownership**: a `Skill` is a signed,
+versioned record scoped to `personal:<id>`/`channel:<ref>`/`group:<ref>`/
+`team:<ref>`/`org:<id>`, with a `draft → reviewed → published → archived`
+lifecycle; personal creation is direct, org/team never is. **Sharing**:
+`shareArtifact` routes to a plain ACL grant (`AclStore.grant`, gated by
+`canManage` — owner-only, or a manager for channel/group, explicitly *no
+transitive re-share*). **Promotion**: `SkillStore.promote()` requires
+`org_admin` **and** a `liveActor === true` flag — a distinct axis from
+role, so an autonomous cron/trigger can never promote a skill org-wide even
+if it could otherwise impersonate an admin's principal. `review()` and
+`promote()` both re-verify the signature before acting, defending against a
+tampered durable record. On top of all this: a fully built git-repo skill-pack
+importer with path-collision detection before anything materializes, and a
+DNS-pinned, redirect-and-proxy-disabled git fetch (resolves the host itself,
+rejects private addresses, pins git's HTTP layer to the resolved IP,
+`followRedirects=false`) — closing the SSRF-via-redirect-after-check gap a
+naive "validate then let git resolve again" approach would leave open.
+
+**CoreSystem.** `agent_skills` (capability-core, fronted by model-gateway's
+`/v1/skills`, surfaced in Verevon v3's `SkillsSection.tsx`) is scoped by
+`org_id` alone — no owner column, no `ScopeId`, no lifecycle beyond an
+`enabled` boolean. The UI's own comment states plainly: org-wide,
+admin-only. `capability-core`'s `PromoteSkill` gRPC handler unconditionally
+returns `FailedPrecondition` in every real deployment (`main.go` always wires
+a durable store; the RPC only has a no-store path) — dead in production, and
+it strands `orchestrator-core`'s real `SkillPromotionWorkflow`. `git`-imported
+skill packs don't exist at all — capability-core's own roadmap tracker
+already honestly marks this unbuilt.
+
+**The pattern to steal is already in the codebase.** `capability-core`'s
+handling of `mcp_servers` — a *different* resource — already implements
+personal-scope + owner + explicit-share (`scope ∈ {'user','org'}`, an
+`OwnerUserID` and `SharedWith` list, owner-only-may-share enforcement). This
+is QM's shape, already built, just not applied to `agent_skills`.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| SKILL-1 | M | High | Extend the existing `mcp_servers` ownership/sharing pattern to `agent_skills` instead of building a new ACL layer — the personal + owner + share model is already solved once in this codebase. |
+| SKILL-2 | M | High | Fix or remove the dead `PromoteSkill` RPC before building any admin-gated promotion flow on top of it — `orchestrator-core`'s `SkillPromotionWorkflow` already has real callers waiting. |
+| SKILL-3 | S | Medium | If SKILL-1 lands, check whether `capability_registry`'s taxonomy entry (currently `team_shared` in `resource_taxonomy.json`, mirrored in `retrieval-engine-rs`) needs reclassifying so per-user grants aren't hard-rejected — currently unused as a resource type, so not a live bug, just a landmine to check. |
+| SKILL-4 | L | Low | Treat git-imported skill packs as an explicit, separately-scoped item — large, security-sensitive (SSRF-hardened fetch, path-collision detection, sync engine), and capability-core's own roadmap already marks it honestly as unbuilt. Don't let it ride in as a byproduct of SKILL-1/2. |
+
+---
+
+## 6. Per-scope memory & durable session state
+
+**QM.** Every memory notebook keys off one opaque `ScopeId` (`kind:ref`,
+`kind ∈ personal/channel/team/org/group`). `scopeFor()` computes exactly one
+writable scope per turn — a room/group turn writes to the room's own
+notebook, **never** to any member's personal one; a room's recall default
+(`recallMemoryScopes`) is `[room scope, org scope]`, never a member's
+personal scope. The one bridge is explicit and one-directional:
+`ccCaptureToPersonal()` mirrors facts spoken in a room into the *speaking*
+actor's own personal notebook, tagged `(said in <room>)` for provenance.
+Postgres storage is append-only per scope with `pg_advisory_xact_lock`
+serialization — history and restore fall out of the same log for free.
+
+**CoreSystem.** Strictly single-user at the layer that actually feeds chat.
+`threads` (session-core) has exactly one `user_id NOT NULL` column — no
+participants table, no array. `authorize_thread` resolves that single owner
+and rejects any other caller. A migration comment states the intent
+explicitly: *"user-owned durable state must never collide or read across
+users that happen to share one organization."* **This may be a deliberate
+security boundary, not an oversight** — treat it that way. A second, separate
+system exists in capability-core (`agent_memory`, scopes `run/thread/
+workspace/session/user/org/global`) with genuinely cross-user `org`/`global`
+tiers — but that's all-or-nothing tenant-wide broadcast, not bounded room
+membership, and its finer scopes (`run`/`thread`/`workspace`/`session`) are
+hard-blocked on both read (501) and write (503) referencing a Session Core
+capability that doesn't exist. The two memory systems never talk to each
+other — `model-gateway`'s live chat path only calls session-core's.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| MEM-1 | L | High | Add a shared-scope memory tier to session-core (nullable `room_ref`/`scope_kind` alongside the existing `user_id NOT NULL`), extending `authorize_thread` to accept "any authorized member of this room" as a second valid caller shape — additive, not a replacement for the single-owner default. |
+| MEM-2 | M | Medium | Finish or formally kill capability-core's resource-scoped memory instead of leaving it half-wired — right now it declares scopes it 501s and 503s against a Session Core contract that was never built. |
+| MEM-3 | S | Medium | If MEM-1 ships, add an explicit, visible capture-to-personal mirror (QM's `ccCaptureToPersonal`) rather than a silent one — CLAUDE.md's ZDR-propagation rule means any new cross-boundary content flow needs the same provenance discipline QM applies. |
+
+---
+
+## 7. Background automation & proactive collaboration
+
+**QM.** Two user-configurable mechanisms and one purely internal. Crons
+(`src/cron`) and job watches/monitors (`src/monitors`) are first-class agent
+tools *and* have a dedicated REST API and web-UI screen — a user can set one
+up just by asking in chat, or from the UI directly. Every out-of-turn message
+(a cron fire, a monitor fire, a live turn's proactive `reach`) goes through
+one durable, idempotency-keyed delivery queue (`reachEnqueue` → a separate
+async poller per surface with retry) rather than posting directly from the
+code path that decided to send it — decoupling "what to say" from "when/how
+it's actually delivered." `runTrigger()` is the one shared execution path for
+every non-live-chat wake (authz, consent, notice composition), so a new
+background-work type is a spec plus one call, not a reimplementation.
+Monitor patterns are literal-alternative-only (no regex metacharacters) to
+avoid ReDoS from a user-supplied watch pattern in a long-lived poller.
+
+**CoreSystem.** Cron is at genuine parity, arguably ahead: capability-core's
+real `/api/v1/cron` REST API is fronted by a real, mounted UI screen
+(`CronSchedulesSection.tsx`), and the full pipeline — sweeper → task row →
+executor claim → `WorkflowDispatcher` → `orchestrator-core`'s `StartWorkflow`
+gRPC → real `Temporal.ExecuteWorkflow` — is live, not a stub, for
+`InteractiveRunSupervision`. But: **no watch/monitor mechanism exists at
+all** — nothing lets a user say "notify me when this finishes"; task/run
+completion produces only a DB status update, never a message. **No
+delivery-queue equivalent** — every confirmed outbound send is either a live
+turn's own response or a direct call, with no durable queue and no async
+channel poller. `notification-core` — the plane's dedicated notification
+service — has **zero consumers wired to task/run lifecycle events**, so a
+cron-fired run's outcome is invisible to it entirely. The entire scheduled
+pipeline is silently config-gated: if the Temporal address/credential is
+unset, capability-core falls back to a `NatsDispatcher` whose own source
+comment documents that it strands every claimed task in `running` forever.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| AUTO-1 | S | High | Add a `workflow_type` field to `CronSchedulesSection.tsx`'s creation form — `dispatchPlan` already reads `task_template.workflow_type` and only falls back to the default when it's empty; the frontend already threads `task_template` through as opaque JSON. Nearly free, unlocks 6 already-built workflows. |
+| AUTO-2 | M | High | Build a background-job "notify me" path reusing the already-durable run-event stream (`mp.v1.run.*.event` is JetStream-retained with existing consumers) — the trigger source already exists; QM's `monitor-poller.ts` → `runTrigger` → `reachEnqueue` is the shape to follow. |
+| AUTO-3 | S | Medium | Close the `NatsDispatcher` silent-degradation gap before building notifications on top of it — today an unconfigured Temporal credential means tasks strand in `running` forever with no signal. |
+| AUTO-4 | M | Medium | Decide whether org-wide sharing is sufficient or a QM-style bounded Project scope (`project-store.ts`: explicit owner + member list, narrower than the whole org) is actually needed — CoreSystem's only sharing granularity today is full org membership. |
+
+---
+
+## 8. Deployment, admin config & credential ("keychain") management
+
+**QM.** Three layers. `qm init` scaffolds a versioned, git-committed
+deployment repo (config, pinned package version, a config-shape-derived
+secret catalog that only surfaces the secrets *this* deployment actually
+needs) and `deployment.md` is written as an executable runbook with hard,
+independently-verifiable gates ("the task is complete only after `check
+--live` passes"). The admin panel is a stateless proxy trusting a
+portal-signed cookie; core alone enforces admin-ness. Security posture,
+command policy, and egress lists are each stored per-scope and composed
+org-floor-then-scope — **tighten-only**, same shape as the raise-never-lower
+ZDR rule landed in this session's own gateway work. The keychain: one root
+secret, HKDF-derived purpose-separated subkeys per subsystem
+(`deriveConnectorKey`); for broker-delivered credentials the agent's sandbox
+**never sees the decrypted secret** — it asks core to make the call by
+`{credential, url, method, body}`, and core checks entitlement, a pinned
+host (suffix match), allowed methods, allowed path prefixes; for personal
+credentials, an ask/grant/approve workflow (once vs. standing, audience-scoped)
+gates decryption entirely.
+
+**CoreSystem.** A real, role-gated admin surface exists —
+`WorkspaceSettingsPage.tsx`, 15 sections, not API-only. ZDR and
+Support-AI-mode are genuinely live-wired end to end with optimistic UI and
+plan-gating. Per-org router policy (model routing table, complexity
+thresholds) is real and live. And — worth noting as a *positive* parallel to
+QM's own `SECURITY.md` honesty — the UI **discloses on-screen** that
+MFA/domain-restriction/admin-audit are permanently disabled placeholders
+("Phase 4 PR-2 de-fake"), rather than silently faking them. What's missing:
+**no unified keychain** — two independently-built, single-symmetric-key
+AES-256-GCM vaults (`integration-corev2`'s `Vault`, `auth-core`'s
+`internal-oauth.service.ts`), no HKDF purpose separation, no credential
+broker (confirmed callers receive the plaintext token directly), no
+ask/grant/approve workflow. **No org-scoped model allow-listing** —
+`model-gateway`'s `unowned_policy_fields()` *explicitly and permanently
+refuses* to honor `OrgPolicy.allowed_models` by name, with a code comment
+saying accepting it would falsely tell an operator they'd restricted models
+when they hadn't. That's good defensive engineering (fail loud, not silently
+inert) — but it leaves a real capability gap, not a bug. And the quota
+UI-wiring gap from the headline finding: the backend enforcement is real, the
+admin form to actually set a limit doesn't exist. **No self-host/`qm init`
+motion exists anywhere** — and CoreSystem's architecture (one shared
+multi-tenant deployment, Postgres RLS-based org isolation across planes)
+actively works against that pivot; this is a product/strategy question, not
+an engineering backlog item.
+
+**Recommendations**
+
+| ID | Effort | Impact | What |
+|---|---|---|---|
+| ADM-1 | M | High | Wire org-core's existing settable-quota API into an admin route and UI form — the backend (migration, service, enforcement) is real; only the "let an admin set it" surface is missing. |
+| ADM-2 | L | High | Consolidate the two flat credential vaults into one HKDF purpose-separated keychain, modeled on `deriveConnectorKey` — one root secret, distinct derived subkey per subsystem, instead of two independent single-key AES-GCM stores. |
+| ADM-3 | M | Medium | Make an explicit, recorded decision on org-scoped model allow-listing rather than leaving it a repeatedly-rediscoverable gap — `unowned_policy_fields()`'s refusal is the right instinct; the missing feature behind it is the open question. |
+| ADM-4 | L | Low | Treat self-host/`qm init`-style deployment as a product/ADR decision, not an engineering item — the multi-tenant RLS architecture is a real structural obstacle, and this bears directly on the EU-residency competitive positioning question flagged when QM was first reviewed this session. |
+
+---
+
+## Prioritized backlog (cross-topic, my judgment)
+
+Ordered by leverage — cheap/high-impact first, structural work after, product
+questions last.
+
+**Do first (cheap, high-confidence, no architecture change):**
+1. AUTO-1 — cron `workflow_type` field (S/High)
+2. ADM-1 — wire org-core quota UI (M/High)
+3. INJ-1 + INJ-2 — provenance field + real fail-closed injection gate on the tool-result path (M/High, do together)
+4. POL-1 — floor capability-core's risk-level write path (M/High)
+5. INJ-3 — wire `ContentSafety` as a second pass (M/Medium, cheap since it's already built)
+
+**Medium-term (apply an existing pattern, or close a specific dead path):**
+6. SKILL-1 — extend `mcp_servers`' sharing pattern to `agent_skills` (M/High)
+7. SKILL-2 — fix or kill `PromoteSkill` (M/High)
+8. SSRF-1 — SSRF guard for integration-corev2 (M/High)
+9. SSRF-2 — extract Quarry's DNS-pinning into a shared crate + regression test (M/High)
+10. AUTO-2 — background-job "notify me" path (M/High)
+11. AUTO-3 — close the `NatsDispatcher` silent-strand gap (S/Medium) — do before AUTO-2
+
+**Structural (needs an ADR; sequence matters):**
+12. HARN-1 → HARN-2 — one tool-execution module, then one loop trait (M then L, in that order)
+13. MEM-1 — shared-scope memory tier, additive to the single-owner default (L/High)
+14. ADM-2 — one HKDF keychain instead of two flat vaults (L/High)
+
+**Product/strategic (not a sprint item):**
+15. ADM-4 — self-host deployment motion vs. EU-residency positioning
+16. ADM-3 — decide on org-scoped model allow-listing
+
+---
+
+## Methodology notes
+
+- 8 topics, 24 agents (3 per topic: QM explore → CoreSystem explore → synth),
+  running against a full local clone of QM at commit-current-as-of
+  2026-08-13 and this repo's `main` at `6c951c6e`.
+- **One exploration returned no findings**: the QM-side agent for
+  "injection-screening" returned an empty placeholder rather than real
+  findings. Topic 2 above is therefore a CoreSystem-only assessment, not a
+  QM comparison — there may be real QM patterns on this topic this document
+  doesn't reflect.
+- **One synthesis claim was caught and dropped**: policy-floor's synthesis
+  initially cited `composeSecurityPosture` (a QM file/function) as evidence
+  of something QM lacks — a mis-citation, not a substantive error. Corrected
+  by re-reading the underlying verified-findings array directly; the four
+  "CoreSystem ahead" points kept in section 1 are the ones independently
+  confirmed there.
+- The research agents did real independent verification — most synthesis
+  sections include phrases like "verified live," "confirmed via grep,"
+  "independently re-read the source" — and caught genuine errors in their
+  own inputs (the DPv2/Temporal misattribution, the org-core quota
+  correction). Treat this document with the same standard applied to any
+  audit this session: real, but re-check a specific claim before acting on
+  it if a lot rides on it.
+- Not covered: QM's `src/sandbox`, `src/files`, `src/insights`,
+  `src/surface-cache`, `src/onboarding`, `src/environments`, `src/directory`,
+  and the Slack/portal/chassis plugins were not explored — the 8 topics were
+  chosen for where the two systems' *design intent* overlaps most, not for
+  exhaustive coverage of QM's surface area.
