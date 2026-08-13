@@ -2,6 +2,20 @@
 //!
 //! Called before any outbound request leaves the runtime so that an attacker
 //! cannot coerce the scraper into probing internal infrastructure.
+//!
+//! This is the SSRF security *boundary* referenced by verevonv3 gateway's
+//! `public_url.rs` (`apps/Frontend Plane/verevonv3/apps/gateway/src/public_url.rs`):
+//! that module is a string/literal-IP pre-filter only, safe today solely
+//! because every gateway call site forwards the normalized URL here (to
+//! Quarry) instead of dialing it directly. `ResolvedTarget` /
+//! `PinnedDnsResolver` below is what actually resolves DNS, vets the
+//! resolved addresses, and pins the connection — closing the check-then-rebind
+//! gap a string-only check cannot. The gateway's own
+//! `tests/ssrf_forward_not_fetch.rs` enforces its half of that contract; there
+//! is deliberately no shared crate between the two (see
+//! `apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md` section 3, SSRF-2) — the
+//! two modules have different threat models and this doc comment plus that
+//! test are the documented contract instead.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
