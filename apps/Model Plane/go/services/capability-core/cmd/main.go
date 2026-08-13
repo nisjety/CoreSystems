@@ -377,10 +377,15 @@ func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpo
 // ORCHESTRATOR_INTERNAL_SERVICE_TOKEN (the Model-Plane-local credential that
 // side accepts, org-bound there by ORCHESTRATOR_INTERNAL_SERVICE_ORGS). Missing
 // either, we fall back to the publish-only NatsDispatcher and report false, and
-// the caller leaves the executor OFF — the honest outcome, since a publish that
-// nobody consumes would leave every task in `running`.
+// the caller leaves the executor OFF by default — the honest outcome, since a
+// publish that nobody consumes would leave every task in `running`. An operator
+// can still force the executor on regardless (TASK_EXECUTOR_ENABLED=true); in
+// that case the fallback dispatcher fails each task with a clear reason instead
+// of stranding it, unless TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true
+// acknowledges that this deployment runs its own consumer of the published
+// subject (see NatsDispatcher's doc comment).
 func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (taskexec.Dispatcher, bool) {
-	fallback := taskexec.NewNatsDispatcher(pub)
+	fallback := taskexec.NewNatsDispatcher(pub, acceptsPublishOnlyDispatch())
 
 	addr := strings.TrimSpace(os.Getenv("ORCHESTRATOR_WORKFLOW_ADDR"))
 	token := strings.TrimSpace(os.Getenv("ORCHESTRATOR_INTERNAL_SERVICE_TOKEN"))
@@ -438,22 +443,36 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher) (task
 	return dispatcher, true
 }
 
+// acceptsPublishOnlyDispatch reports whether this deployment has explicitly
+// acknowledged that it runs its own consumer of
+// mp.v1.capability.task.dispatched, so NatsDispatcher's publish-then-fail
+// safety net (see its doc comment) should stand down and let a published
+// task remain `running` for that consumer to complete. Defaults to false:
+// this repository ships no such consumer, so the safe default is to fail a
+// task loudly rather than assume one exists.
+func acceptsPublishOnlyDispatch() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH")), "true")
+}
+
 // taskExecutorEnabled resolves the executor's on/off decision.
 //
 // Unset defaults to the safe answer: on only when the dispatcher can complete a
 // hand-off. "false" always wins. An explicit "true" is honoured even without the
 // workflow dispatcher, because a deployment may run its own consumer of
-// mp.v1.capability.task.dispatched — but it is warned that this repository does
-// not ship one.
+// mp.v1.capability.task.dispatched — but that combination is logged loudly
+// because, absent TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true, every claimed
+// task will now fail immediately (with a clear reason) rather than execute or
+// silently strand.
 func taskExecutorEnabled(workflowBacked bool) bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("TASK_EXECUTOR_ENABLED"))) {
 	case "false":
 		return false
 	case "true":
-		if !workflowBacked {
-			slog.Warn("TASK_EXECUTOR_ENABLED=true without a workflow dispatcher: " +
-				"claimed tasks will stay in `running` unless this deployment runs its own " +
-				"mp.v1.capability.task.dispatched consumer")
+		if !workflowBacked && !acceptsPublishOnlyDispatch() {
+			slog.Error("TASK_EXECUTOR_ENABLED=true without a workflow dispatcher and without " +
+				"TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true: the executor will start, but every " +
+				"claimed task will fail immediately with an explicit reason instead of running — this " +
+				"repository ships no consumer of mp.v1.capability.task.dispatched")
 		}
 		return true
 	default:

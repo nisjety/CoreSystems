@@ -55,11 +55,21 @@ func IsSupportedScope(scope string) bool {
 }
 
 // Engine evaluates capability invocation requests against the registry.
+//
+// reg is unused by any exported method today: the two methods that used to
+// read it (Evaluate, which resolved a capability by ID through the registry's
+// org-blind, last-write-wins index, and Enforce, an RBAC check with the same
+// org-blind lookup) were removed as POL-2 — neither had a live production
+// caller (every gRPC/HTTP entry point already resolves capabilities through a
+// tenant-scoped registry.GetForOrg/ListForOrg first and calls
+// EvaluateCapability directly with the resolved snapshot), so they were a
+// cross-tenant landmine for whoever wired them in next rather than a
+// reachable vulnerability. The field is kept, rather than changing New's
+// signature, so existing callers that also use reg for their own org-aware
+// lookups are unaffected. See apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md.
 type Engine struct {
-	reg          *registry.Registry
-	subjectRoles map[string][]string
-	roleCaps     map[string][]string
-	scopes       ScopeResolver
+	reg    *registry.Registry
+	scopes ScopeResolver
 }
 
 // WithScopeResolver attaches a durable scope-grant resolver. Returns the same
@@ -70,32 +80,6 @@ func (e *Engine) WithScopeResolver(r ScopeResolver) *Engine {
 	return e
 }
 
-// NewWithRBAC constructs an Engine with RBAC bindings for Enforce.
-func NewWithRBAC(reg *registry.Registry, subjectRoles, roleCaps map[string][]string) *Engine {
-	return &Engine{reg: reg, subjectRoles: subjectRoles, roleCaps: roleCaps}
-}
-
-// Enforce authorizes a subject to invoke a capability based on RBAC bindings.
-func (e *Engine) Enforce(ctx context.Context, subject, capID string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if subject == "" || capID == "" {
-		return domain.ErrInvalidArgument
-	}
-	if _, err := e.reg.Get(capID, ""); err != nil {
-		return err
-	}
-	for _, role := range e.subjectRoles[subject] {
-		for _, allowed := range e.roleCaps[role] {
-			if allowed == capID {
-				return nil
-			}
-		}
-	}
-	return domain.ErrPermissionDenied
-}
-
 // New constructs an Engine backed by the provided registry.
 func New(reg *registry.Registry) *Engine { return &Engine{reg: reg} }
 
@@ -104,28 +88,6 @@ type Result struct {
 	Decision      string
 	Reason        string
 	BudgetContext string
-}
-
-// Evaluate returns a Result for the (capability, run, agent, org, scope) tuple.
-// The engine never returns ErrPolicyDenied — denials are modelled as a
-// populated Result. Errors are only surfaced for argument or lookup failures.
-//
-// Scope is mandatory and must currently be global or org. The
-// capability must explicitly authorize the kind through EnabledForScopes (or
-// the wildcard), so omission and resource scopes without trusted IDs fail
-// closed at both evaluation boundaries.
-func (e *Engine) Evaluate(ctx context.Context, capID, runID, agentID, orgID, scope string) (*Result, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if capID == "" || runID == "" || agentID == "" || orgID == "" || !IsSupportedScope(scope) {
-		return nil, domain.ErrInvalidArgument
-	}
-	capEntry, err := e.reg.Get(capID, "")
-	if err != nil {
-		return nil, err
-	}
-	return e.EvaluateCapability(ctx, capEntry, runID, agentID, orgID, scope)
 }
 
 // EvaluateCapability evaluates a capability snapshot that the caller has

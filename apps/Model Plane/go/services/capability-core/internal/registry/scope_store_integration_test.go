@@ -74,7 +74,7 @@ func seedCap(t *testing.T, store *CapabilitiesStore, id, name, kind string) {
 	if err := store.Upsert(context.Background(), &CapabilityRow{
 		ID: id, OrgID: "global", Kind: kind, Name: name, Version: "1.0.0",
 		RiskLevel: "low", Scope: "org", Enabled: true,
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("seed cap %s: %v", id, err)
 	}
 }

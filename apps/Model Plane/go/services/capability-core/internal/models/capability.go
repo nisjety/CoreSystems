@@ -41,6 +41,40 @@ func IsSupportedRiskLevel(raw string) bool {
 	}
 }
 
+// seededHighRiskCapabilityIDs enumerates capability ids whose risk_level is
+// set to RiskHigh by a database migration (a "seed"), never by a tenant write
+// through the HTTP/store API. It is the fail-closed backstop for the
+// risk-level floor enforced in registry.CapabilitiesStore.Upsert: a write
+// targeting one of these ids is always treated as protected even if the row's
+// current persisted state cannot be read (see POL-1 in
+// apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md).
+//
+// Sourced by grepping `risk_level` ... 'high' across migrations/*.sql:
+//   - migrations/0004_seed_self_owned_systems.up.sql
+//   - migrations/0008_execution_dispatch_capabilities.up.sql
+//
+// Any future migration that seeds a RiskHigh capability MUST add its id here.
+// This list is a floor, not the whole mechanism: Upsert also floors any
+// capability (seeded or tenant-created) whose *currently persisted*
+// risk_level is already high, so a future seed added here late is still
+// protected from the moment its row exists.
+var seededHighRiskCapabilityIDs = map[string]bool{
+	"cap.command.shell":                          true,
+	"cap.browser.open":                           true,
+	"cap.tool.shipping.book":                     true,
+	"cap.tool.social.publish":                    true,
+	"cap.tool.provider.execute":                  true,
+	"cap.self_owned.misp_opencti":                true,
+	"cap.self_owned.quarry_url_reputation_feeds": true,
+	"cap.self_owned.opensanctions_yente":         true,
+}
+
+// IsSeededHighRiskCapability reports whether id is one of the statically
+// seeded RiskHigh capabilities (see seededHighRiskCapabilityIDs).
+func IsSeededHighRiskCapability(id string) bool {
+	return seededHighRiskCapabilityIDs[id]
+}
+
 // Capability describes a single capability entry in the registry.
 type Capability struct {
 	ID               string

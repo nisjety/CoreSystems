@@ -26,6 +26,15 @@ const (
 	// that attests process-wide execution-dispatch capability health. It never
 	// grants catalog mutation and tenant health reporters cannot use it.
 	GlobalHealthWriteScope = "capability:health:global:write"
+	// RiskOverrideScope is required, in addition to WriteScope, to lower the
+	// risk_level of a "floored" capability — one whose seed or currently
+	// persisted risk_level is high (registry.CapabilitiesStore.Upsert enforces
+	// the floor; api.CapabilitiesHandler's upsert handler pre-checks it for
+	// statically seeded ids). Kept deliberately separate from WriteScope so an
+	// ordinary catalog writer cannot silently disable the human-approval gate
+	// on a high-risk capability such as cap.command.shell. See POL-1 in
+	// apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md.
+	RiskOverrideScope = "capability:risk:override"
 )
 
 var errDenied = errors.New("capability-core authorization denied")

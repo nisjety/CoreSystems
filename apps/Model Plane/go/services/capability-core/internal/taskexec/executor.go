@@ -12,10 +12,12 @@
 //     orchestrator-core's StartWorkflow RPC and returns synchronously, so a
 //     failure is a failure the executor can record. This is what makes the
 //     executor safe to enable.
-//   - NatsDispatcher only publishes mp.v1.capability.task.dispatched and calls
-//     that success. If nothing consumes the subject the task stays in `running`
-//     forever, which is precisely why the executor shipped disabled. It remains
-//     for deployments that run their own consumer of that subject.
+//   - NatsDispatcher only publishes mp.v1.capability.task.dispatched. Nothing
+//     in this repository consumes that subject, so unless a deployment has
+//     built its own consumer and explicitly acknowledged that
+//     (TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true), Dispatch treats the
+//     publish as a failed hand-off rather than a completed one, so the task
+//     fails with a clear reason instead of stranding in `running` forever.
 //
 // Consequently the executor's default is gated on having a dispatcher that can
 // actually complete the hand-off — see cmd/main.go.
@@ -24,6 +26,7 @@ package taskexec
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -51,20 +54,49 @@ type Dispatcher interface {
 // NatsDispatcher publishes a task-dispatch event (mp.v1.capability.task.dispatched)
 // for a downstream Model-Plane runner to execute and complete.
 //
-// WARNING: a successful publish is NOT a successful dispatch. Nothing in the
-// Model Plane consumes this subject as a work request, so on its own this
-// dispatcher leaves every claimed task in `running` indefinitely. Use
-// WorkflowDispatcher unless the deployment supplies its own consumer.
-type NatsDispatcher struct{ pub publisher.EventPublisher }
-
-// NewNatsDispatcher wraps a publisher.
-func NewNatsDispatcher(pub publisher.EventPublisher) *NatsDispatcher {
-	return &NatsDispatcher{pub: pub}
+// WARNING: a successful publish is NOT a successful dispatch. This
+// repository ships no consumer of that subject (see
+// docs/system-run-context.md §5, "The dispatch consumer" — a documented but
+// not-yet-built future component), so on its own this dispatcher cannot
+// complete a task. Use WorkflowDispatcher instead whenever possible.
+//
+// Unless externalConsumerAcknowledged is true, Dispatch fails every task
+// immediately with an explicit reason after publishing, so a cron-fired
+// task's failure is visible in its own row instead of the task silently
+// stranding in `running` forever (see cmd/main.go's
+// TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH). Set it true only once this
+// deployment actually runs its own consumer of the subject; the flag exists
+// so this dispatcher's honest "publish is not completion" limitation does
+// not silently regress once a real consumer starts existing.
+type NatsDispatcher struct {
+	pub                          publisher.EventPublisher
+	externalConsumerAcknowledged bool
 }
 
-// Dispatch publishes the task-dispatch event.
+// NewNatsDispatcher wraps a publisher. externalConsumerAcknowledged must be
+// true only when this deployment runs its own consumer of
+// mp.v1.capability.task.dispatched; otherwise Dispatch fails every task with
+// a clear reason rather than leaving it in `running` forever — see the type
+// doc.
+func NewNatsDispatcher(pub publisher.EventPublisher, externalConsumerAcknowledged bool) *NatsDispatcher {
+	return &NatsDispatcher{pub: pub, externalConsumerAcknowledged: externalConsumerAcknowledged}
+}
+
+// Dispatch publishes the task-dispatch event, then — unless an external
+// consumer of the subject has been explicitly acknowledged — returns an
+// error so the executor marks the task failed with a clear reason instead of
+// assuming the publish alone completed the work.
 func (d *NatsDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
-	return reconcile.Emit(ctx, d.pub, reconcile.KindTask, reconcile.ActionDispatched, task.ID, task.OrgID)
+	if err := reconcile.Emit(ctx, d.pub, reconcile.KindTask, reconcile.ActionDispatched, task.ID, task.OrgID); err != nil {
+		return err
+	}
+	if !d.externalConsumerAcknowledged {
+		return fmt.Errorf(
+			"no workflow dispatcher is configured and no external consumer of %s is acknowledged (set TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true if this deployment runs one): task cannot be completed automatically",
+			reconcile.Subject(reconcile.KindTask, reconcile.ActionDispatched),
+		)
+	}
+	return nil
 }
 
 // Executor is the claim + lifecycle worker.

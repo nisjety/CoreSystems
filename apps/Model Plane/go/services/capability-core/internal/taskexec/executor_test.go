@@ -25,20 +25,46 @@ func TestIsAutoExecutable(t *testing.T) {
 	}
 }
 
+// TestNatsDispatcherPublishesDispatchEvent covers AUTO-3: without an
+// acknowledged external consumer, NatsDispatcher must still publish (so
+// anything watching the subject sees the attempt) but must fail the
+// dispatch, so the executor marks the task failed with a clear reason
+// instead of leaving it stranded in `running` forever. Acknowledging an
+// external consumer restores the original publish-and-succeed behavior for a
+// deployment that has actually built one.
 func TestNatsDispatcherPublishesDispatchEvent(t *testing.T) {
-	pub := publisher.NewInMemoryPublisher()
-	d := NewNatsDispatcher(pub)
-	if err := d.Dispatch(context.Background(), TaskRef{ID: "task_1", OrgID: "org_1", Kind: "cron"}); err != nil {
-		t.Fatalf("Dispatch error: %v", err)
-	}
-	records := pub.Drain()
-	if len(records) != 1 {
-		t.Fatalf("expected 1 published record, got %d", len(records))
-	}
-	want := reconcile.Subject(reconcile.KindTask, reconcile.ActionDispatched)
-	if records[0].Subject != want {
-		t.Fatalf("dispatch subject = %q, want %q", records[0].Subject, want)
-	}
+	t.Run("no acknowledged consumer: publishes then fails", func(t *testing.T) {
+		pub := publisher.NewInMemoryPublisher()
+		d := NewNatsDispatcher(pub, false)
+		err := d.Dispatch(context.Background(), TaskRef{ID: "task_1", OrgID: "org_1", Kind: "cron"})
+		if err == nil {
+			t.Fatal("expected Dispatch to fail without an acknowledged external consumer")
+		}
+		records := pub.Drain()
+		if len(records) != 1 {
+			t.Fatalf("expected 1 published record even on failure, got %d", len(records))
+		}
+		want := reconcile.Subject(reconcile.KindTask, reconcile.ActionDispatched)
+		if records[0].Subject != want {
+			t.Fatalf("dispatch subject = %q, want %q", records[0].Subject, want)
+		}
+	})
+
+	t.Run("acknowledged consumer: publishes and succeeds", func(t *testing.T) {
+		pub := publisher.NewInMemoryPublisher()
+		d := NewNatsDispatcher(pub, true)
+		if err := d.Dispatch(context.Background(), TaskRef{ID: "task_2", OrgID: "org_1", Kind: "cron"}); err != nil {
+			t.Fatalf("Dispatch error: %v", err)
+		}
+		records := pub.Drain()
+		if len(records) != 1 {
+			t.Fatalf("expected 1 published record, got %d", len(records))
+		}
+		want := reconcile.Subject(reconcile.KindTask, reconcile.ActionDispatched)
+		if records[0].Subject != want {
+			t.Fatalf("dispatch subject = %q, want %q", records[0].Subject, want)
+		}
+	})
 }
 
 // failDispatcher always errors — documents the Dispatcher contract used by the

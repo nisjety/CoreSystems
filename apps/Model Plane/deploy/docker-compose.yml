@@ -1024,11 +1024,21 @@ services:
       #             otherwise. This is the safe default: the executor runs only
       #             when it can actually complete the hand-off.
       #   "false" -> always OFF.
-      #   "true"  -> always ON, even publish-only. Only for a deployment that
-      #             runs its own mp.v1.capability.task.dispatched consumer; this
-      #             repository does not ship one, and without it claimed tasks
-      #             stay in `running`.
+      #   "true"  -> always ON, even publish-only. Forcing this on without the
+      #             workflow dispatcher above no longer strands claimed tasks in
+      #             `running`: this repository ships no consumer of
+      #             mp.v1.capability.task.dispatched, so each claimed task now
+      #             fails immediately with an explicit reason instead (loud
+      #             ERROR-level startup log too). Only set
+      #             TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true below once
+      #             this deployment actually runs its own consumer of that
+      #             subject — that is what restores publish-and-leave-`running`
+      #             behavior.
       TASK_EXECUTOR_ENABLED: ${TASK_EXECUTOR_ENABLED:-}
+      # See TASK_EXECUTOR_ENABLED above. Leave unset/false unless this
+      # deployment has built and deployed its own consumer of
+      # mp.v1.capability.task.dispatched.
+      TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH: ${TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH:-}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
     depends_on:

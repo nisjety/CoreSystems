@@ -295,7 +295,7 @@ func TestCapabilityUpsertInvalidatesHealthWhenExecutableContractChanges(t *testi
 	err := store.Upsert(context.Background(), &CapabilityRow{
 		ID: "cap.read", OrgID: "org-a", Kind: "tool", Name: "Read",
 		Version: "2", Enabled: true, RiskLevel: "low", CreatedBy: "service:registry",
-	})
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,11 +319,126 @@ func TestCapabilityUpsertRejectsUnknownRiskBeforeDatabaseWrite(t *testing.T) {
 	err := store.Upsert(context.Background(), &CapabilityRow{
 		ID: "cap.invalid", OrgID: "org-a", Kind: "tool", Name: "Invalid",
 		Version: "1", Enabled: true, RiskLevel: "critical-ish", CreatedBy: "service:registry",
-	})
+	}, false)
 	if err == nil || !strings.Contains(err.Error(), "risk") {
 		t.Fatalf("Upsert error = %v, want invalid risk", err)
 	}
 	if database.query != "" {
 		t.Fatalf("invalid risk reached database: %s", database.query)
+	}
+}
+
+// TestCapabilityUpsertEnforcesRiskFloor covers POL-1: a plain capability:write
+// caller must never be able to silently lower a high-risk capability's
+// risk_level (the shape of the flip that would disable policy/engine.go's
+// High -> Ask human-approval gate), while ordinary, non-floored risk
+// management keeps working exactly as before.
+func TestCapabilityUpsertEnforcesRiskFloor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		id                 string
+		priorRow           pgx.Row // nil => pgx.ErrNoRows (ON CONFLICT target has no existing row)
+		requestRisk        string
+		hasRiskOverride    bool
+		wantErr            bool
+		wantFloorViolation bool // when wantErr: is it specifically ErrRiskFloorViolation?
+		wantWrite          bool // whether the INSERT/upsert Exec should have been reached
+	}{
+		{
+			name:               "downgrade with plain write scope is rejected",
+			id:                 "cap.command.shell",
+			priorRow:           availabilityRow{values: []any{"high"}},
+			requestRisk:        "low",
+			hasRiskOverride:    false,
+			wantErr:            true,
+			wantFloorViolation: true,
+			wantWrite:          false,
+		},
+		{
+			name:            "downgrade with risk override scope is allowed",
+			id:              "cap.command.shell",
+			priorRow:        availabilityRow{values: []any{"high"}},
+			requestRisk:     "low",
+			hasRiskOverride: true,
+			wantErr:         false,
+			wantWrite:       true,
+		},
+		{
+			name:            "upgrade from low to high is always allowed",
+			id:              "cap.tenant.custom",
+			priorRow:        availabilityRow{values: []any{"low"}},
+			requestRisk:     "high",
+			hasRiskOverride: false,
+			wantErr:         false,
+			wantWrite:       true,
+		},
+		{
+			name:            "non-floored medium to low change is unaffected",
+			id:              "cap.tenant.custom",
+			priorRow:        availabilityRow{values: []any{"medium"}},
+			requestRisk:     "low",
+			hasRiskOverride: false,
+			wantErr:         false,
+			wantWrite:       true,
+		},
+		{
+			name:               "unknown seeded-high capability with no readable prior state is refused",
+			id:                 "cap.browser.open",
+			priorRow:           availabilityRow{err: pgx.ErrNoRows},
+			requestRisk:        "low",
+			hasRiskOverride:    false,
+			wantErr:            true,
+			wantFloorViolation: true,
+			wantWrite:          false,
+		},
+		{
+			name:            "genuinely new, unseeded capability is unaffected",
+			id:              "cap.tenant.brand-new",
+			priorRow:        availabilityRow{err: pgx.ErrNoRows},
+			requestRisk:     "low",
+			hasRiskOverride: false,
+			wantErr:         false,
+			wantWrite:       true,
+		},
+		{
+			// A real lookup failure (not "no rows") is a distinct, generic
+			// error, not ErrRiskFloorViolation: the HTTP handler must surface
+			// it as a 500 (infrastructure failure), not a 403 (policy
+			// decision). Either way, the write must never proceed on it.
+			name:            "a floor-check database error fails closed",
+			id:              "cap.tenant.custom",
+			priorRow:        availabilityRow{err: errors.New("connection reset")},
+			requestRisk:     "low",
+			hasRiskOverride: false,
+			wantErr:         true,
+			wantWrite:       false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database := &availabilityDatabase{tag: pgconn.NewCommandTag("INSERT 0 1"), row: test.priorRow}
+			store := &CapabilitiesStore{pool: database}
+			err := store.Upsert(context.Background(), &CapabilityRow{
+				ID: test.id, OrgID: "org-a", Kind: "tool", Name: "thing",
+				Version: "1", Enabled: true, RiskLevel: test.requestRisk, CreatedBy: "service:registry",
+			}, test.hasRiskOverride)
+
+			switch {
+			case test.wantErr && test.wantFloorViolation && !errors.Is(err, ErrRiskFloorViolation):
+				t.Fatalf("Upsert error = %v, want ErrRiskFloorViolation", err)
+			case test.wantErr && err == nil:
+				t.Fatalf("Upsert error = nil, want an error")
+			case !test.wantErr && err != nil:
+				t.Fatalf("Upsert error = %v, want nil", err)
+			}
+
+			wroteRow := strings.Contains(database.query, "INSERT INTO capabilities")
+			if wroteRow != test.wantWrite {
+				t.Fatalf("wrote row = %v, want %v (query: %s)", wroteRow, test.wantWrite, database.query)
+			}
+		})
 	}
 }
