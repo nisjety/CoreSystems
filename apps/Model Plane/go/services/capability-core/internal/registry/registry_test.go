@@ -534,9 +534,10 @@ func TestRegistryTenantViewsRejectForeignCapabilities(t *testing.T) {
 	if _, _, err := r.CheckPromotionForOrg("cap.foreign", "agent", "workspace", "org-a"); !errors.Is(err, domain.ErrCapabilityNotFound) {
 		t.Fatalf("foreign CheckPromotionForOrg error = %v", err)
 	}
-	if _, _, err := r.PromoteSkillForOrg("cap.foreign", "agent", "workspace", "org-a"); !errors.Is(err, domain.ErrCapabilityNotFound) {
-		t.Fatalf("foreign PromoteSkillForOrg error = %v", err)
-	}
+	// No PromoteSkillForOrg case: it was removed per SKILL-2 (see registry.go
+	// and server.go's PromoteSkill doc comment) since Capability.Scope is a
+	// rollout/routing label with no runtime-authorization effect, not an
+	// ownership field durable promotion could act on.
 	validated, validationErrors, err := r.ValidateSkillForOrg("cap.owned-skill", "org-a")
 	if err != nil || len(validationErrors) != 0 || validated.OrgID != "org-a" {
 		t.Fatalf("owned ValidateSkillForOrg = capability=%+v errors=%v err=%v", validated, validationErrors, err)
@@ -544,17 +545,6 @@ func TestRegistryTenantViewsRejectForeignCapabilities(t *testing.T) {
 	checked, checks, err := r.CheckPromotionForOrg("cap.owned-skill", "agent", "workspace", "org-a")
 	if err != nil || checked.OrgID != "org-a" || !containsAll(checks, "skill_valid", "source_scope_matches", "target_scope_valid") {
 		t.Fatalf("owned CheckPromotionForOrg = capability=%+v checks=%v err=%v", checked, checks, err)
-	}
-	if unchanged, failedChecks, err := r.PromoteSkillForOrg("cap.owned-skill", "workspace", "user", "org-a"); err != nil || unchanged.Scope != "agent" || !containsAll(failedChecks, "source_scope_mismatch") {
-		t.Fatalf("mismatched PromoteSkillForOrg = capability=%+v checks=%v err=%v", unchanged, failedChecks, err)
-	}
-	promoted, promotionChecks, err := r.PromoteSkillForOrg("cap.owned-skill", "agent", "workspace", "org-a")
-	if err != nil || promoted.Scope != "workspace" || !containsAll(promotionChecks, "registry_updated") {
-		t.Fatalf("owned PromoteSkillForOrg = capability=%+v checks=%v err=%v", promoted, promotionChecks, err)
-	}
-	reloaded, err := r.GetForOrg("cap.owned-skill", "", "org-a")
-	if err != nil || reloaded.Scope != "workspace" {
-		t.Fatalf("promoted tenant capability was not retained: capability=%+v err=%v", reloaded, err)
 	}
 
 	items, _ := r.ListForOrg("org-a", "", "", "", 200)
@@ -595,7 +585,5 @@ func TestRegistryTenantViewsRequireOrganization(t *testing.T) {
 	if _, _, err := r.CheckPromotionForOrg("cap.skill.summarize", "agent", "workspace", ""); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("CheckPromotionForOrg missing org error = %v", err)
 	}
-	if _, _, err := r.PromoteSkillForOrg("cap.skill.summarize", "agent", "workspace", ""); !errors.Is(err, domain.ErrInvalidArgument) {
-		t.Fatalf("PromoteSkillForOrg missing org error = %v", err)
-	}
+	// No PromoteSkillForOrg case: removed per SKILL-2 (see registry.go).
 }

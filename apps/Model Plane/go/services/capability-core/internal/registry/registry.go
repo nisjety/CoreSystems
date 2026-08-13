@@ -528,45 +528,12 @@ func (r *Registry) PromoteSkill(id, fromScope, toScope string) (*models.Capabili
 	return &updated, checks, nil
 }
 
-// PromoteSkillForOrg atomically rechecks ownership and promotion invariants
-// under the registry lock before changing the tenant/global entry. A reload
-// cannot swap in a foreign entry between authorization and mutation.
-func (r *Registry) PromoteSkillForOrg(id, fromScope, toScope, orgID string) (*models.Capability, []string, error) {
-	if strings.TrimSpace(orgID) == "" {
-		return nil, nil, domain.ErrInvalidArgument
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	capability, err := r.getForOrgLocked(id, "", strings.TrimSpace(orgID))
-	if err != nil {
-		return nil, nil, err
-	}
-	capability, checks, err := checkPromotion(capability, fromScope, toScope)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !containsAll(checks,
-		"skill_exists",
-		"skill_valid",
-		"source_scope_matches",
-		"target_scope_valid",
-		"scope_changes",
-	) {
-		return capability, checks, nil
-	}
-
-	updated := *capability
-	updated.Scope = toScope
-	for index, entry := range r.items {
-		if entry == capability {
-			r.items[index] = &updated
-			break
-		}
-	}
-	if indexed := r.index[id]; indexed == capability {
-		r.index[id] = &updated
-	}
-	checks = append(checks, "registry_updated")
-	return &updated, checks, nil
-}
+// PromoteSkillForOrg was removed per QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md
+// SKILL-2: it mutated Capability.Scope, a rollout/routing label that
+// policy.Engine.EvaluateCapability never reads (it reads EnabledForScopes and,
+// when configured, the durable capability_scopes grant table via
+// registry.ScopeStore — the actual "who is granted it" authority). A durable
+// version of this mutation would have been a convincing no-op, not a working
+// feature. See internal/server/server.go's PromoteSkill doc comment for the
+// full writeup. CheckPromotionForOrg (below) and ValidateSkillForOrg remain:
+// they are read-only checks over the same fields and stay useful on their own.
