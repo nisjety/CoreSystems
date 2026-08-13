@@ -43,7 +43,7 @@ func TestNewRegistry_SeedsV2ParityInferenceCapabilities(t *testing.T) {
 		"cap.inference.video":              true,
 	}
 	for id, enabled := range required {
-		capability, err := r.Get(id, "")
+		capability, err := r.GetForOrg(id, "", "triodelab")
 		if err != nil {
 			t.Fatalf("expected seeded capability %s: %v", id, err)
 		}
@@ -58,7 +58,7 @@ func TestNewRegistry_SeedsV2ParityInferenceCapabilities(t *testing.T) {
 
 func TestNewRegistry_SeedsOperatingMapGenerateCapability(t *testing.T) {
 	r := newReg(t)
-	capability, err := r.Get("operating_map.generate", "")
+	capability, err := r.GetForOrg("operating_map.generate", "", "triodelab")
 	if err != nil {
 		t.Fatalf("expected seeded operating map capability: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestNewRegistry_SeedsOperatingMapGenerateCapability(t *testing.T) {
 func TestNewRegistry_SeedsSandboxCommandCapabilitySeparatelyFromShell(t *testing.T) {
 	r := newReg(t)
 
-	sandbox, err := r.Get("cap.command.sandbox", "")
+	sandbox, err := r.GetForOrg("cap.command.sandbox", "", "triodelab")
 	if err != nil {
 		t.Fatalf("expected seeded cap.command.sandbox: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestNewRegistry_SeedsSandboxCommandCapabilitySeparatelyFromShell(t *testing
 		t.Fatalf("unexpected idempotency key %q", sandbox.IdempotencyKey)
 	}
 
-	shell, err := r.Get("cap.command.shell", "")
+	shell, err := r.GetForOrg("cap.command.shell", "", "triodelab")
 	if err != nil {
 		t.Fatalf("expected seeded cap.command.shell: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestNewRegistry_SeedsSandboxCommandCapabilitySeparatelyFromShell(t *testing
 
 func TestValidateSkill_SkillExistsAndIsValid(t *testing.T) {
 	r := newReg(t)
-	capability, errs, err := r.ValidateSkill("cap.skill.summarize")
+	capability, errs, err := r.ValidateSkillForOrg("cap.skill.summarize", "triodelab")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestValidateSkill_SkillExistsAndIsValid(t *testing.T) {
 
 func TestValidateSkill_RejectsNonSkill(t *testing.T) {
 	r := newReg(t)
-	_, errs, err := r.ValidateSkill("cap.tool.http")
+	_, errs, err := r.ValidateSkillForOrg("cap.tool.http", "triodelab")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestValidateSkill_RejectsNonSkill(t *testing.T) {
 
 func TestCheckPromotion_ValidatesScopeTransition(t *testing.T) {
 	r := newReg(t)
-	capability, checks, err := r.CheckPromotion("cap.skill.summarize", "agent", "workspace")
+	capability, checks, err := r.CheckPromotionForOrg("cap.skill.summarize", "agent", "workspace", "triodelab")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestCheckPromotion_ValidatesScopeTransition(t *testing.T) {
 
 func TestPromoteSkill_UpdatesScope(t *testing.T) {
 	r := newReg(t)
-	updated, checks, err := r.PromoteSkill("cap.skill.summarize", "agent", "workspace")
+	updated, checks, err := r.PromoteSkillForOrg("cap.skill.summarize", "agent", "workspace", "triodelab")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestPromoteSkill_UpdatesScope(t *testing.T) {
 		t.Fatalf("expected registry_updated check, got %v", checks)
 	}
 
-	reloaded, err := r.Get("cap.skill.summarize", "")
+	reloaded, err := r.GetForOrg("cap.skill.summarize", "", "triodelab")
 	if err != nil {
 		t.Fatalf("reload promoted skill: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestPromoteSkill_UpdatesScope(t *testing.T) {
 
 func TestGet_EmptyID_ReturnsInvalidArgument(t *testing.T) {
 	r := newReg(t)
-	_, err := r.Get("", "")
+	_, err := r.GetForOrg("", "", "triodelab")
 	if !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument, got %v", err)
 	}
@@ -199,7 +199,7 @@ func TestGet_EmptyID_ReturnsInvalidArgument(t *testing.T) {
 
 func TestGet_UnknownID_ReturnsNotFound(t *testing.T) {
 	r := newReg(t)
-	_, err := r.Get("cap.does.not.exist", "")
+	_, err := r.GetForOrg("cap.does.not.exist", "", "triodelab")
 	if !errors.Is(err, domain.ErrCapabilityNotFound) {
 		t.Fatalf("expected ErrCapabilityNotFound, got %v", err)
 	}
@@ -207,7 +207,7 @@ func TestGet_UnknownID_ReturnsNotFound(t *testing.T) {
 
 func TestGet_ExactVersionMatch(t *testing.T) {
 	r := newReg(t)
-	c, err := r.Get("cap.memory.search", "1.1.0")
+	c, err := r.GetForOrg("cap.memory.search", "1.1.0", "triodelab")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestGet_ExactVersionMatch(t *testing.T) {
 
 func TestGet_VersionMismatch(t *testing.T) {
 	r := newReg(t)
-	_, err := r.Get("cap.memory.search", "9.9.9")
+	_, err := r.GetForOrg("cap.memory.search", "9.9.9", "triodelab")
 	if !errors.Is(err, domain.ErrVersionMismatch) {
 		t.Fatalf("expected ErrVersionMismatch, got %v", err)
 	}
@@ -226,7 +226,7 @@ func TestGet_VersionMismatch(t *testing.T) {
 
 func TestGet_EmptyConstraint_ReturnsAnyVersion(t *testing.T) {
 	r := newReg(t)
-	c, err := r.Get("cap.memory.search", "")
+	c, err := r.GetForOrg("cap.memory.search", "", "triodelab")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -350,6 +350,12 @@ func (f *fakeSource) SetCaps(caps []*models.Capability) {
 	f.caps = caps
 }
 
+// newCap builds a synthetic capability seeded with OrgID "global" so any
+// caller org resolves it through GetForOrg's global-fallback branch — these
+// reload tests exercise Reload/Get mechanics, not tenant ownership, which
+// TestRegistryTenantViewsRejectForeignCapabilities and
+// TestRegistryTenantViewsRequireOrganization cover separately and always
+// override OrgID explicitly regardless of this default.
 func newCap(id, name, kind string) *models.Capability {
 	return &models.Capability{
 		ID:          id,
@@ -360,6 +366,7 @@ func newCap(id, name, kind string) *models.Capability {
 		RiskLevel:   models.RiskLow,
 		LazyLoad:    false,
 		Scope:       "global",
+		OrgID:       "global",
 		Enabled:     true,
 	}
 }
@@ -370,7 +377,7 @@ func TestRegistry_Reload_AddsNewCapability(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromSource: %v", err)
 	}
-	if _, err := r.Get("cap.test.b", ""); !errors.Is(err, domain.ErrCapabilityNotFound) {
+	if _, err := r.GetForOrg("cap.test.b", "", "test-org"); !errors.Is(err, domain.ErrCapabilityNotFound) {
 		t.Fatalf("expected not-found pre-reload, got %v", err)
 	}
 	src.SetCaps([]*models.Capability{
@@ -380,7 +387,7 @@ func TestRegistry_Reload_AddsNewCapability(t *testing.T) {
 	if err := r.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if _, err := r.Get("cap.test.b", ""); err != nil {
+	if _, err := r.GetForOrg("cap.test.b", "", "test-org"); err != nil {
 		t.Fatalf("expected cap.test.b after reload, got %v", err)
 	}
 }
@@ -398,7 +405,7 @@ func TestRegistry_Reload_RemovesDeletedCapability(t *testing.T) {
 	if err := r.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if _, err := r.Get("cap.test.b", ""); !errors.Is(err, domain.ErrCapabilityNotFound) {
+	if _, err := r.GetForOrg("cap.test.b", "", "test-org"); !errors.Is(err, domain.ErrCapabilityNotFound) {
 		t.Fatalf("expected cap.test.b removed after reload, got %v", err)
 	}
 }
@@ -416,7 +423,7 @@ func TestRegistry_Reload_AppliesModifiedFields(t *testing.T) {
 	if err := r.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	got, err := r.Get("cap.test.a", "")
+	got, err := r.GetForOrg("cap.test.a", "", "test-org")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -438,7 +445,7 @@ func TestRegistry_ReloadRejectsUnknownRiskWithoutReplacingCurrentCatalog(t *test
 	if err := registry.Reload(); !errors.Is(err, domain.ErrInvalidArgument) {
 		t.Fatalf("Reload error = %v, want ErrInvalidArgument", err)
 	}
-	if _, err := registry.Get("cap.test.safe", ""); err != nil {
+	if _, err := registry.GetForOrg("cap.test.safe", "", "test-org"); err != nil {
 		t.Fatalf("failed reload replaced prior safe catalog: %v", err)
 	}
 }

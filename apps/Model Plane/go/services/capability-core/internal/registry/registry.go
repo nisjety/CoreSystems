@@ -275,24 +275,6 @@ func (r *Registry) ListForOrg(orgID, kindFilter, query, afterID string, limit ui
 	return filtered[start:end], hasMore
 }
 
-// Get returns a capability by ID, optionally enforcing a version constraint.
-// The constraint syntax is a simple exact match (e.g. "1.0.0").
-func (r *Registry) Get(id, versionConstraint string) (*models.Capability, error) {
-	if id == "" {
-		return nil, domain.ErrInvalidArgument
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	c, ok := r.index[id]
-	if !ok {
-		return nil, domain.ErrCapabilityNotFound
-	}
-	if versionConstraint != "" && versionConstraint != c.Version {
-		return nil, domain.ErrVersionMismatch
-	}
-	return c, nil
-}
-
 // GetForOrg resolves a capability only when it belongs to the verified tenant
 // or the explicit global catalog. A tenant-owned entry wins over a global
 // entry with the same ID. Foreign and missing IDs are intentionally
@@ -335,32 +317,6 @@ func capabilityVisibleToOrg(capability *models.Capability, orgID string) bool {
 	return capability != nil && (capability.OrgID == orgID || capability.OrgID == "global")
 }
 
-// ValidateSkill checks that the requested capability exists and is a skill.
-// Semantic validation failures are reported in the returned error list rather
-// than as transport errors so callers can surface them directly to users.
-func (r *Registry) ValidateSkill(id string) (*models.Capability, []string, error) {
-	capability, err := r.Get(id, "")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	errorsOut := make([]string, 0)
-	if capability.Kind != models.KindSkill {
-		errorsOut = append(errorsOut, "capability is not a skill")
-	}
-	if capability.Name == "" {
-		errorsOut = append(errorsOut, "skill name is required")
-	}
-	if capability.Version == "" {
-		errorsOut = append(errorsOut, "skill version is required")
-	}
-	if capability.Scope == "" {
-		errorsOut = append(errorsOut, "skill scope is required")
-	}
-
-	return capability, errorsOut, nil
-}
-
 // ValidateSkillForOrg is the tenant-pinned variant used at authenticated gRPC
 // boundaries.
 func (r *Registry) ValidateSkillForOrg(id, orgID string) (*models.Capability, []string, error) {
@@ -394,47 +350,6 @@ func validateSkill(capability *models.Capability) (*models.Capability, []string,
 		errorsOut = append(errorsOut, "skill scope is required")
 	}
 	return capability, errorsOut, nil
-}
-
-// CheckPromotion validates whether a skill can be promoted between scopes.
-func (r *Registry) CheckPromotion(id, fromScope, toScope string) (*models.Capability, []string, error) {
-	if fromScope == "" || toScope == "" {
-		return nil, nil, domain.ErrInvalidArgument
-	}
-	capability, validationErrors, err := r.ValidateSkill(id)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	checks := make([]string, 0, 4)
-	checks = append(checks, "skill_exists")
-	if len(validationErrors) == 0 {
-		checks = append(checks, "skill_valid")
-	}
-	if capability.Scope == fromScope {
-		checks = append(checks, "source_scope_matches")
-	}
-	if _, ok := validScopes[toScope]; ok {
-		checks = append(checks, "target_scope_valid")
-	}
-	if fromScope != toScope {
-		checks = append(checks, "scope_changes")
-	}
-
-	if len(validationErrors) > 0 {
-		return capability, append(checks, validationErrors...), nil
-	}
-	if capability.Scope != fromScope {
-		return capability, append(checks, "source_scope_mismatch"), nil
-	}
-	if _, ok := validScopes[toScope]; !ok {
-		return capability, append(checks, "target_scope_invalid"), nil
-	}
-	if fromScope == toScope {
-		return capability, append(checks, "target_scope_unchanged"), nil
-	}
-
-	return capability, checks, nil
 }
 
 // CheckPromotionForOrg performs promotion validation only after tenant-pinned
@@ -489,43 +404,6 @@ func checkPromotion(capability *models.Capability, fromScope, toScope string) (*
 		return capability, append(checks, "target_scope_unchanged"), nil
 	}
 	return capability, checks, nil
-}
-
-// PromoteSkill updates a skill's scope after promotion checks have passed.
-func (r *Registry) PromoteSkill(id, fromScope, toScope string) (*models.Capability, []string, error) {
-	capability, checks, err := r.CheckPromotion(id, fromScope, toScope)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !containsAll(checks,
-		"skill_exists",
-		"skill_valid",
-		"source_scope_matches",
-		"target_scope_valid",
-		"scope_changes",
-	) {
-		return capability, checks, nil
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	current, ok := r.index[id]
-	if !ok {
-		return nil, nil, domain.ErrCapabilityNotFound
-	}
-	updated := *current
-	updated.Scope = toScope
-	r.index[id] = &updated
-	for idx, entry := range r.items {
-		if entry.ID == id {
-			r.items[idx] = &updated
-			break
-		}
-	}
-
-	checks = append(checks, "registry_updated")
-	return &updated, checks, nil
 }
 
 // PromoteSkillForOrg atomically rechecks ownership and promotion invariants

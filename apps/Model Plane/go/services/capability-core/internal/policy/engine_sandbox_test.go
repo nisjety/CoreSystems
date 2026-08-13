@@ -65,7 +65,13 @@ func TestEngineAllowsHermeticSandboxWhileArbitraryShellStillAsks(t *testing.T) {
 	engine := policy.New(reg)
 	ctx := context.Background()
 
-	sandbox, err := engine.Evaluate(ctx, "cap.command.sandbox", "run-1", "agent-1", "org-1", "global")
+	// executionDispatchSource seeds both rows with OrgID "global", so any
+	// caller org resolves them via GetForOrg's global fallback.
+	sandboxCap, err := reg.GetForOrg("cap.command.sandbox", "", "org-1")
+	if err != nil {
+		t.Fatalf("resolve cap.command.sandbox: %v", err)
+	}
+	sandbox, err := engine.EvaluateCapability(ctx, sandboxCap, "run-1", "agent-1", "org-1", "global")
 	if err != nil {
 		t.Fatalf("evaluate cap.command.sandbox: %v", err)
 	}
@@ -84,7 +90,11 @@ func TestEngineAllowsHermeticSandboxWhileArbitraryShellStillAsks(t *testing.T) {
 			sandbox.BudgetContext)
 	}
 
-	shell, err := engine.Evaluate(ctx, "cap.command.shell", "run-1", "agent-1", "org-1", "global")
+	shellCap, err := reg.GetForOrg("cap.command.shell", "", "org-1")
+	if err != nil {
+		t.Fatalf("resolve cap.command.shell: %v", err)
+	}
+	shell, err := engine.EvaluateCapability(ctx, shellCap, "run-1", "agent-1", "org-1", "global")
 	if err != nil {
 		t.Fatalf("evaluate cap.command.shell: %v", err)
 	}
@@ -110,7 +120,7 @@ func TestSeededSandboxCapabilityEvaluatesToAllow(t *testing.T) {
 	reg := registry.NewRegistry()
 	engine := policy.New(reg)
 
-	seeded, err := reg.Get("cap.command.sandbox", "")
+	seeded, err := reg.GetForOrg("cap.command.sandbox", "", "triodelab")
 	if err != nil {
 		t.Fatalf("expected cap.command.sandbox in the static seed: %v", err)
 	}

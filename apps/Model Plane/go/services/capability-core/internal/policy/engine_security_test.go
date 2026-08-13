@@ -14,11 +14,16 @@ import (
 
 func TestEngineRejectsMissingAndUnsupportedInvocationScopes(t *testing.T) {
 	t.Parallel()
-	engine := policy.New(registry.NewRegistry())
+	reg := registry.NewRegistry()
+	engine := policy.New(reg)
+	capability, err := reg.GetForOrg("cap.memory.search", "", "triodelab")
+	if err != nil {
+		t.Fatalf("resolve cap.memory.search: %v", err)
+	}
 
 	for _, scope := range []string{"", "something-random"} {
-		_, err := engine.Evaluate(
-			context.Background(), "cap.memory.search", "run-1", "agent-1", "triodelab", scope,
+		_, err := engine.EvaluateCapability(
+			context.Background(), capability, "run-1", "agent-1", "triodelab", scope,
 		)
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("scope %q error = %v, want ErrInvalidArgument", scope, err)

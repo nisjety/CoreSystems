@@ -11,55 +11,67 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
 
-func TestEngine_Evaluate(t *testing.T) {
+// TestEngine_EvaluateCapability_ArgumentValidation covers the argument
+// guards EvaluateCapability enforces on behalf of every caller (a resolved
+// capability, run, agent, org, and a supported scope are all mandatory). This
+// used to be exercised through the now-removed Evaluate(capID, ...)
+// convenience wrapper, which resolved capID via the registry's org-blind,
+// last-write-wins Get — a landmine closed by POL-1's sibling finding POL-2.
+// Callers must resolve a capability through a tenant-scoped lookup
+// (registry.GetForOrg or the durable store's GetForOrg) themselves and call
+// EvaluateCapability directly, as every real gRPC/HTTP entry point already does.
+func TestEngine_EvaluateCapability_ArgumentValidation(t *testing.T) {
 	reg := registry.NewRegistry()
 	eng := policy.New(reg)
 	ctx := context.Background()
 
 	const (
-		validCap   = "cap.memory.search"
 		validRun   = "run-1"
 		validAgent = "agent-1"
 		validOrg   = "org-1"
 	)
+	// The static seed's OrgID is the fixed "triodelab" owner (see
+	// staticSeedSource.Load in registry.go); GetForOrg is the tenant-safe
+	// resolution path that replaced the org-blind Get.
+	validCap, err := reg.GetForOrg("cap.memory.search", "", "triodelab")
+	if err != nil {
+		t.Fatalf("resolve cap.memory.search: %v", err)
+	}
 
-	t.Run("empty capID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, "", validRun, validAgent, validOrg, "global")
+	t.Run("nil capability returns ErrInvalidArgument", func(t *testing.T) {
+		_, err := eng.EvaluateCapability(ctx, nil, validRun, validAgent, validOrg, "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("empty runID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, validCap, "", validAgent, validOrg, "global")
+		_, err := eng.EvaluateCapability(ctx, validCap, "", validAgent, validOrg, "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("empty agentID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, validCap, validRun, "", validOrg, "global")
+		_, err := eng.EvaluateCapability(ctx, validCap, validRun, "", validOrg, "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
 	t.Run("empty orgID returns ErrInvalidArgument", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, validCap, validRun, validAgent, "", "global")
+		_, err := eng.EvaluateCapability(ctx, validCap, validRun, validAgent, "", "global")
 		if !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Fatalf("expected ErrInvalidArgument, got %v", err)
 		}
 	})
 
-	t.Run("unknown capability returns ErrCapabilityNotFound", func(t *testing.T) {
-		_, err := eng.Evaluate(ctx, "cap.does.not.exist", validRun, validAgent, validOrg, "global")
-		if !errors.Is(err, domain.ErrCapabilityNotFound) {
-			t.Fatalf("expected ErrCapabilityNotFound, got %v", err)
-		}
-	})
-
 	t.Run("low-risk capability is allowed with default budget", func(t *testing.T) {
-		res, err := eng.Evaluate(ctx, "cap.policy.round-robin", validRun, validAgent, validOrg, "global")
+		lowRisk, err := reg.GetForOrg("cap.policy.round-robin", "", "triodelab")
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := eng.EvaluateCapability(ctx, lowRisk, validRun, validAgent, validOrg, "global")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -75,7 +87,7 @@ func TestEngine_Evaluate(t *testing.T) {
 	})
 
 	t.Run("medium-risk capability is allowed with constrained budget", func(t *testing.T) {
-		capability, err := reg.Get("cap.browser.open", "")
+		capability, err := reg.GetForOrg("cap.browser.open", "", "triodelab")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,7 +110,7 @@ func TestEngine_Evaluate(t *testing.T) {
 	})
 
 	t.Run("high-risk capability requires durable approval with empty budget", func(t *testing.T) {
-		capability, err := reg.Get("cap.sandbox.exec", "")
+		capability, err := reg.GetForOrg("cap.sandbox.exec", "", "triodelab")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -129,7 +141,7 @@ func TestEngineEvaluateCapabilityUsesAuthorizedSnapshot(t *testing.T) {
 
 	reg := registry.NewRegistry()
 	engine := policy.New(reg)
-	authorized, err := reg.Get("cap.policy.round-robin", "")
+	authorized, err := reg.GetForOrg("cap.policy.round-robin", "", "triodelab")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,25 +170,26 @@ func TestEngine_ScopeEnforcement(t *testing.T) {
 	eng := policy.New(reg)
 	ctx := context.Background()
 
-	const (
-		lowRiskAllowedCap = "cap.policy.round-robin" // seeded with EnabledForScopes=["global"]
-	)
+	// seeded with EnabledForScopes=["global"]; static seed OrgID is "triodelab".
+	capability, err := reg.GetForOrg("cap.policy.round-robin", "", "triodelab")
+	if err != nil {
+		t.Fatalf("resolve cap.policy.round-robin: %v", err)
+	}
 
 	cases := []struct {
 		name       string
-		capID      string
 		scope      string
 		wantResult string
 		wantReason string
 	}{
-		{"matching scope allows", lowRiskAllowedCap, "global", policy.DecisionAllow, "low-risk"},
-		{"non-matching scope denies", lowRiskAllowedCap, "org", policy.DecisionDeny, "not enabled for scope"},
+		{"matching scope allows", "global", policy.DecisionAllow, "low-risk"},
+		{"non-matching scope denies", "org", policy.DecisionDeny, "not enabled for scope"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			res, err := eng.Evaluate(ctx, tc.capID, "run-1", "agent-1", "org-1", tc.scope)
+			res, err := eng.EvaluateCapability(ctx, capability, "run-1", "agent-1", "org-1", tc.scope)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -220,7 +233,11 @@ func TestEngine_ScopeWildcardAllowsSupportedScope(t *testing.T) {
 	}
 	eng := policy.New(reg)
 	ctx := context.Background()
-	res, err := eng.Evaluate(ctx, wildcardCap, "run-1", "agent-1", "org-1", "global")
+	capability, err := reg.GetForOrg(wildcardCap, "", "triodelab")
+	if err != nil {
+		t.Fatalf("resolve %s: %v", wildcardCap, err)
+	}
+	res, err := eng.EvaluateCapability(ctx, capability, "run-1", "agent-1", "org-1", "global")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
