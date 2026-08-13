@@ -94,7 +94,11 @@ async fn auto_mode_executes_tool() {
     )
     .await;
     assert_eq!(outcome.status, "completed");
-    assert_eq!(outcome.output, "hello");
+    // Tool output carries execution-core's provenance prefix
+    // (`provenance::render`). Asserted in full rather than with `contains` so
+    // this still pins the payload exactly, and so a change to the rendered
+    // prefix has to be made deliberately here.
+    assert_eq!(outcome.output, "[source: org-internal]\nhello");
 }
 
 #[tokio::test]
@@ -239,7 +243,11 @@ async fn reasoning_step_without_tool() {
     )
     .await;
     assert_eq!(outcome.status, "completed");
-    assert_eq!(outcome.output, "reasoning_step_completed");
+    // Provenance-prefixed, same as `auto_mode_executes_tool` above.
+    assert_eq!(
+        outcome.output,
+        "[source: org-internal]\nreasoning_step_completed"
+    );
 }
 
 #[test]

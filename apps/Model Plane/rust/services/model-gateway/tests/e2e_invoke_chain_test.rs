@@ -2954,9 +2954,14 @@ async fn invoke_stream_browse_web_flag_forces_search_without_tool_array() {
     // calls too, so the final captured prompt is one of those rather than the
     // answer's. Find the prompt that carries the tool results — that is the one
     // this test is about.
+    //
+    // The needle spans the provenance label rather than stopping at the arrow:
+    // `append_tool_outcomes` renders `- web_search [source: ...] → ...`, so a
+    // bare `"web_search →"` matches nothing and this `expect` fires even though
+    // the results were carried correctly.
     let messages = captured
         .iter()
-        .find(|set| set.iter().any(|(_, c)| c.contains("web_search →")))
+        .find(|set| set.iter().any(|(_, c)| c.contains("web_search [source:")))
         .expect("an inference call should have carried the web_search results");
     assert!(messages
         .iter()
