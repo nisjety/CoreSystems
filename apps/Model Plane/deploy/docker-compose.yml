@@ -414,12 +414,24 @@ services:
       # stop enforcing rather than erroring.
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       # Secret half of the org-core service credential; the id half is
-      # MODEL_GATEWAY_SERVICE_ID, already set above. Register this pair in
-      # Control Plane's ORG_CORE_SERVICE_CREDENTIALS with scope org:read:any (to
-      # read any tenant's ceiling) plus the settings-write scope (so SetPolicy
-      # can record one) — the same registration shape execution-core uses.
-      # UNSET is a supported state: no org ceiling is applied and SetPolicy
-      # refuses the cap fields rather than pretending to store them.
+      # MODEL_GATEWAY_SERVICE_ID, already set above. The pair is registered in
+      # Control Plane's ORG_CORE_SERVICE_CREDENTIALS under principal
+      # "model-gateway" with scope org:read:any — the same registration shape
+      # execution-core uses. That scope is what makes the ceiling ENFORCE:
+      # fetch_org_limits fails open, so an unset token means no org ceiling is
+      # applied at any point, silently.
+      #
+      # Deliberately org:read:any ONLY, NOT the settings-write scope an earlier
+      # note here asked for: org-core rejects any ":self" scope held by a
+      # principal other than verevon-gateway, in a check that runs before it
+      # opens a listener. Adding it would not enable the cap write — it would
+      # stop org-core from booting.
+      #
+      # Cap writes are not missing, they live elsewhere: the Verevon gateway
+      # holds that scope, mints the required v3 delegation naming the acting
+      # user, and serves PUT /api/v1/orgs/:id/quotas/:key. SetPolicy's own cap
+      # write therefore returns org-core's 403 by design.
+      # UNSET is still a supported state: no org ceiling is applied.
       MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN: ${MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN:-}
       APPLICATION_CORE_INTERNAL_KEY: ${APPLICATION_CORE_INTERNAL_KEY:-${INTERNAL_API_KEY:-}}
       # Verevon's own public origin, as seen by a user's browser through the

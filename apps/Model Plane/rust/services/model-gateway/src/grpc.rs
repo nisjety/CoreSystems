@@ -536,6 +536,31 @@ impl GatewayService {
     /// that org-core does not accept. The caller's authority is still checked —
     /// `authorize_rpc` gated this RPC before we got here — and org-core applies
     /// its own scope check on the service credential.
+    ///
+    /// # This write is refused by org-core, and the credential cannot fix it
+    ///
+    /// `PUT .../quotas/:key` requires `org:settings:write:self`, and org-core
+    /// rejects any `:self` scope held by a principal other than
+    /// `verevon-gateway` — in `validateServiceCredential`, which runs from
+    /// `main.go` BEFORE any listener. Adding that scope to this service's
+    /// registry entry would not grant the write; it would stop Control Plane's
+    /// org-core from booting at all. This service is therefore registered with
+    /// `org:read:any` only, which is exactly what reading and enforcing a
+    /// ceiling needs.
+    ///
+    /// That is not a gap to route around. The route also sits behind org-core's
+    /// membership guard and demands a verified v3 HMAC delegation naming the
+    /// acting user, because setting an org's spend cap is a governed admin
+    /// action, not something a service should do on its own authority. The
+    /// Verevon gateway already holds that scope, mints the delegation, and
+    /// exposes the write at `PUT /api/v1/orgs/:id/quotas/:key` (its
+    /// `domains/orgs/quotas.rs`) — so the capability exists, with an operator
+    /// behind it.
+    ///
+    /// So this arm returns org-core's 403: an honest failure with a working
+    /// alternative one plane over. Teaching model-gateway to sign its own
+    /// delegation would duplicate Control-Plane-facing authority the gateway
+    /// already owns.
     async fn put_org_quota(&self, org_id: &str, key: &str, limit: i64) -> Result<(), Status> {
         if self.state.org_core_base_url.trim().is_empty()
             || self.state.org_core_service_token.trim().is_empty()
