@@ -31,11 +31,11 @@ import (
 // score-ranked listing.
 type Server struct {
 	mpv1.UnimplementedCapabilityCoreServer
-	registry *registry.Registry
-	modelReg *registry.ModelsRegistry
-	policy   *policy.Engine
-	store    capabilityStore // optional: enables score-ranked List
-	toolRank toolDefinitionSearcher
+	registry            *registry.Registry
+	modelReg            *registry.ModelsRegistry
+	policy              *policy.Engine
+	store               capabilityStore // optional: enables score-ranked List
+	toolRank            toolDefinitionSearcher
 	decisionProofSigner *DecisionProofSigner
 }
 
@@ -573,28 +573,45 @@ func (s *Server) CheckSkillPromotion(ctx context.Context, req *mpv1.CheckSkillPr
 	return &mpv1.CheckSkillPromotionResponse{Passed: passed, Checks: checks, Reason: reason}, nil
 }
 
-// PromoteSkill updates the registry scope for a validated skill promotion.
-func (s *Server) PromoteSkill(ctx context.Context, req *mpv1.PromoteSkillRequest) (*mpv1.PromoteSkillResponse, error) {
-	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "PromoteSkill")))
-	orgID, err := verifiedOrganizationID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if s.store != nil {
-		return nil, status.Error(codes.FailedPrecondition, "durable skill promotion is not configured")
-	}
-	capability, checks, err := s.registry.PromoteSkillForOrg(req.SkillId, req.FromScope, req.ToScope, orgID)
-	if err != nil {
-		return nil, mapErr(err)
-	}
-	promoted := capability != nil && capability.Scope == req.ToScope && len(checks) > 0 && checks[len(checks)-1] == "registry_updated"
-	detail := toDetail(capability)
-	reason := "skill promoted"
-	if !promoted {
-		reason = "promotion requirements not met"
-	}
-	return &mpv1.PromoteSkillResponse{Promoted: promoted, Checks: checks, Reason: reason, Capability: detail}, nil
-}
+// PromoteSkill is deliberately not implemented here. Calls fall through to
+// the embedded mpv1.UnimplementedCapabilityCoreServer.PromoteSkill, which
+// returns a plain codes.Unimplemented — the honest answer, in place of the
+// permanently-failing codes.FailedPrecondition this method used to return.
+//
+// Removed per QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md SKILL-2. Findings:
+//
+//   - This RPC could never succeed in production: cmd/main.go always builds
+//     a durable capabilities store and attaches it via WithStore, so the
+//     `if s.store != nil` guard this method used to have fired on every
+//     real call and returned FailedPrecondition. Only tests, which build a
+//     Server with no store, ever reached the in-memory branch below it.
+//
+//   - That in-memory branch was not "real" durable promotion regardless:
+//     the models.Capability.Scope field it mutated (via the registry's
+//     since-removed PromoteSkillForOrg) is a rollout/routing label — agent
+//     -> workspace -> org -> global — not an ownership or access-control
+//     field, and nothing reads it back to decide runtime availability.
+//     policy.Engine.EvaluateCapability, the one function that actually
+//     decides allow/deny/ask, never reads Capability.Scope: it reads
+//     EnabledForScopes (the static scope *kinds* a capability supports)
+//     and, when a ScopeResolver is attached, the durable capability_scopes
+//     grant table via registry.ScopeStore — the real "who is granted it"
+//     authority. Implementing durable promotion against .Scope would have
+//     built a convincing no-op, not a working feature.
+//
+//   - The real mechanism for broadening a capability's reach already
+//     exists and works: registry.ScopeStore.Grant, exposed through
+//     api.NewCapabilitiesHandler(...).WithScopeStore(...) in cmd/main.go.
+//
+// ValidateSkillBundle and CheckSkillPromotion are unaffected and stay: they
+// are read-only dry-run checks over the same Scope field/checkPromotion()
+// invariants, still useful for inspecting promotion eligibility even though
+// nothing can durably act on the result via this RPC.
+//
+// orchestrator-core's SkillPromotionWorkflow (which called this RPC via
+// UpdateRegistryActivity) now fails fast and explicitly at that step
+// instead of retrying a call that could never succeed — see
+// services/orchestrator-core/cmd/workflows/skill_promotion.go.
 
 func verifiedOrganizationID(ctx context.Context) (string, error) {
 	principal, err := verifiedPrincipal(ctx)

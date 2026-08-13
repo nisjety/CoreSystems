@@ -19,19 +19,22 @@ func newPromotionEnv() (*testsuite.TestWorkflowEnvironment, *activities.Activiti
 	a := activities.NewActivities(logger, nil)
 	env.RegisterActivity(a.ValidateSkillBundleActivity)
 	env.RegisterActivity(a.RunPromotionGateActivity)
-	env.RegisterActivity(a.UpdateRegistryActivity)
 	return env, a
 }
 
-func TestSkillPromotionWorkflow_HappyPath(t *testing.T) {
+// TestSkillPromotionWorkflow_GateSuccessFailsExplicitlyAtRegistryUpdate
+// replaces the old "happy path" test. SKILL-2 removed UpdateRegistryActivity
+// (it called capability-core's now-removed PromoteSkill RPC), so step 3 can
+// no longer succeed even when validation and the gate both pass — it now
+// fails immediately and explicitly with ErrRegistryUpdateNotSupported instead
+// of retrying a call that could never work.
+func TestSkillPromotionWorkflow_GateSuccessFailsExplicitlyAtRegistryUpdate(t *testing.T) {
 	env, _ := newPromotionEnv()
 
 	env.OnActivity("ValidateSkillBundleActivity", mock.Anything, mock.Anything).
 		Return(activities.SkillValidationOutput{Valid: true}, nil).Once()
 	env.OnActivity("RunPromotionGateActivity", mock.Anything, mock.Anything).
 		Return(activities.PromotionGateOutput{Passed: true, Checks: []string{"skill_exists", "skill_valid", "source_scope_matches", "target_scope_valid", "scope_changes"}}, nil).Once()
-	env.OnActivity("UpdateRegistryActivity", mock.Anything, mock.Anything).
-		Return(nil).Once()
 
 	env.ExecuteWorkflow(SkillPromotionWorkflow, SkillPromotionInput{
 		SkillID:   "cap.skill.summarize",
@@ -40,13 +43,10 @@ func TestSkillPromotionWorkflow_HappyPath(t *testing.T) {
 	})
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
-
-	var output SkillPromotionOutput
-	require.NoError(t, env.GetWorkflowResult(&output))
-	require.True(t, output.Promoted)
-	require.Equal(t, []string{"skill_exists", "skill_valid", "source_scope_matches", "target_scope_valid", "scope_changes"}, output.Checks)
-	require.Contains(t, output.Reason, "promoted")
+	err := env.GetWorkflowError()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "update registry")
+	require.Contains(t, err.Error(), ErrRegistryUpdateNotSupported.Error())
 }
 
 func TestSkillPromotionWorkflow_GateFailureStopsBeforeRegistryUpdate(t *testing.T) {

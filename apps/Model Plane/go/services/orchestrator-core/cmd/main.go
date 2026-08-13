@@ -135,7 +135,9 @@ func main() {
 	w.RegisterActivity(a.WriteConsolidatedMemoryActivity)
 	w.RegisterActivity(a.ValidateSkillBundleActivity)
 	w.RegisterActivity(a.RunPromotionGateActivity)
-	w.RegisterActivity(a.UpdateRegistryActivity)
+	// UpdateRegistryActivity was removed (SKILL-2): it called capability-core's
+	// now-removed PromoteSkill RPC. SkillPromotionWorkflow's step 3 fails
+	// explicitly instead of invoking an activity.
 	w.RegisterActivity(a.AggregateFeedbackActivity)
 	w.RegisterActivity(a.QuarantineSweepActivity)
 	w.RegisterActivity(a.EvaluatorOptimizerActivity)

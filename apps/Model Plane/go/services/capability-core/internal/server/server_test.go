@@ -355,7 +355,13 @@ func TestExactLocalToolIntersectionRejectsWildcardMalformedAndAmbiguousBindings(
 	}
 }
 
-func TestPromoteSkillIsQuarantinedWhenDurableStoreIsAttached(t *testing.T) {
+// TestPromoteSkillIsUnimplemented pins down SKILL-2's outcome: the RPC is
+// intentionally absent (see PromoteSkill's doc comment in server.go), so
+// every call — regardless of store wiring, tenant, or identity — falls
+// through to the embedded UnimplementedCapabilityCoreServer default and
+// returns codes.Unimplemented rather than the old permanently-failing
+// FailedPrecondition. It must not mutate the registry either way.
+func TestPromoteSkillIsUnimplemented(t *testing.T) {
 	t.Parallel()
 
 	server := newTestServer()
@@ -365,15 +371,15 @@ func TestPromoteSkillIsQuarantinedWhenDurableStoreIsAttached(t *testing.T) {
 	_, err := server.PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
 		SkillId: "cap.skill.summarize", FromScope: "agent", ToScope: "workspace",
 	})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("durable promotion status = %v", err)
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("promotion status = %v, want Unimplemented", err)
 	}
 	capability, lookupErr := server.registry.GetForOrg("cap.skill.summarize", "", "triodelab")
 	if lookupErr != nil {
 		t.Fatal(lookupErr)
 	}
 	if capability.Scope != "agent" {
-		t.Fatalf("quarantined promotion mutated memory to scope %q", capability.Scope)
+		t.Fatalf("unimplemented promotion mutated memory to scope %q", capability.Scope)
 	}
 }
 
@@ -563,12 +569,9 @@ func TestInMemoryGRPCMethodsRejectForeignTenantCapabilities(t *testing.T) {
 			})
 			return invokeErr
 		},
-		"promote": func() error {
-			_, invokeErr := server.PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
-				SkillId: foreignSkill.ID, FromScope: "agent", ToScope: "workspace",
-			})
-			return invokeErr
-		},
+		// No "promote" case: PromoteSkill is unconditionally Unimplemented
+		// (see server.go), so it no longer enforces tenant isolation the way
+		// the other RPCs here do — there's nothing left to assert per-tenant.
 	} {
 		t.Run(name, func(t *testing.T) {
 			if code := status.Code(invoke()); code != codes.NotFound {
@@ -615,12 +618,8 @@ func TestInMemoryGRPCMethodsRequireVerifiedIdentity(t *testing.T) {
 			})
 			return err
 		},
-		"promote": func() error {
-			_, err := server.PromoteSkill(context.Background(), &mpv1.PromoteSkillRequest{
-				SkillId: "cap.skill.summarize", FromScope: "agent", ToScope: "workspace",
-			})
-			return err
-		},
+		// No "promote" case: PromoteSkill is unconditionally Unimplemented
+		// (see server.go) and never reaches the identity check at all.
 	} {
 		t.Run(name, func(t *testing.T) {
 			if code := status.Code(invoke()); code != codes.Unauthenticated {
@@ -913,30 +912,28 @@ func TestSkillPromotionRPCs(t *testing.T) {
 		t.Fatalf("expected promotion gate to pass, got %+v", gate)
 	}
 
-	promoted, err := s.PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
+	// PromoteSkill itself is intentionally unimplemented (SKILL-2 — see its
+	// doc comment in server.go): the checks above can pass, but nothing can
+	// durably act on that result via this RPC.
+	if _, err := s.PromoteSkill(ctx, &mpv1.PromoteSkillRequest{
 		SkillId:   "cap.skill.summarize",
 		FromScope: "agent",
 		ToScope:   "workspace",
-	})
-	if err != nil {
-		t.Fatalf("PromoteSkill: %v", err)
-	}
-	if !promoted.Promoted {
-		t.Fatalf("expected promotion success, got %+v", promoted)
-	}
-	if promoted.Capability == nil || promoted.Capability.Scope != "workspace" {
-		t.Fatalf("expected promoted scope workspace, got %+v", promoted.Capability)
+	}); status.Code(err) != codes.Unimplemented {
+		t.Fatalf("PromoteSkill status = %v, want Unimplemented", err)
 	}
 
-	failedGate, err := s.CheckSkillPromotion(ctx, &mpv1.CheckSkillPromotionRequest{
+	// The gate is unaffected by the no-op PromoteSkill call: the same
+	// agent -> workspace check still passes because no promotion occurred.
+	gateAgain, err := s.CheckSkillPromotion(ctx, &mpv1.CheckSkillPromotionRequest{
 		SkillId:   "cap.skill.summarize",
 		FromScope: "agent",
 		ToScope:   "workspace",
 	})
 	if err != nil {
-		t.Fatalf("CheckSkillPromotion mismatch: %v", err)
+		t.Fatalf("CheckSkillPromotion (repeat): %v", err)
 	}
-	if failedGate.Passed {
-		t.Fatalf("expected gate mismatch to fail after promotion, got %+v", failedGate)
+	if !gateAgain.Passed {
+		t.Fatalf("expected promotion gate to still pass since nothing promoted it, got %+v", gateAgain)
 	}
 }

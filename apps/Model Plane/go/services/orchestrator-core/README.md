@@ -76,7 +76,15 @@ All activities are **fully implemented** with typed gRPC proto clients. There ar
 |---|---|---|
 | `ValidateSkillBundleActivity` | `mpv1.NewCapabilityCoreClient` | `ValidateSkillBundle` on signed bundle |
 | `RunPromotionGateActivity` | `mpv1.NewCapabilityCoreClient` | `CheckSkillPromotion` gate |
-| `UpdateRegistryActivity` | `mpv1.NewCapabilityCoreClient` | `PromoteSkill` to the registry |
+
+`SkillPromotionWorkflow`'s step 3 (durably persisting the promotion) has no
+activity: capability-core's `PromoteSkill` RPC was removed as dead code
+(QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md SKILL-2) — it always returned
+`FailedPrecondition` in production, and the field it mutated
+(`Capability.Scope`) has no effect on runtime authorization anyway. The step
+now fails immediately with `workflows.ErrRegistryUpdateNotSupported` instead
+of calling an activity that no longer exists. `UpdateRegistryActivity` was
+removed along with it.
 
 ### Helpers
 
