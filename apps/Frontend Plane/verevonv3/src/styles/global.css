@@ -39734,3 +39734,84 @@ textarea:focus-visible {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.55; }
 }
+
+/* ---------------------------------------------------------------------------
+   Space cockpit — the six-tab shell.
+
+   The unavailable panel is deliberately styled as a normal, calm state rather
+   than an error: a plane that has not published a Space projection yet is an
+   expected stage of the rollout, not a fault the reader should act on.
+   --------------------------------------------------------------------------- */
+.verevon-space-cockpit {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.verevon-space-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--verevon-border);
+  padding-bottom: 2px;
+}
+
+.dark .verevon-space-tabs {
+  border-bottom-color: rgb(255 255 255 / 10%);
+}
+
+.verevon-space-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 10px 10px 0 0;
+  cursor: pointer;
+  opacity: 0.7;
+  border-bottom: 2px solid transparent;
+}
+
+.verevon-space-tab:hover {
+  opacity: 1;
+  background: rgb(0 0 0 / 3%);
+}
+
+.dark .verevon-space-tab:hover {
+  background: rgb(255 255 255 / 5%);
+}
+
+/* Weight and an underline carry the selection, not colour alone. */
+.verevon-space-tab--active {
+  opacity: 1;
+  font-weight: 600;
+  border-bottom-color: currentcolor;
+}
+
+.verevon-space-panel:focus-visible,
+.verevon-space-tab:focus-visible {
+  outline: 2px solid currentcolor;
+  outline-offset: 2px;
+}
+
+.verevon-space-panel-unavailable {
+  padding: 20px;
+  border: 1px dashed var(--verevon-border);
+  border-radius: 14px;
+}
+
+.dark .verevon-space-panel-unavailable {
+  border-color: rgb(255 255 255 / 14%);
+}
+
+.verevon-space-panel-purpose {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.verevon-space-panel-reason {
+  margin: 0;
+  opacity: 0.72;
+  max-width: 62ch;
+}
