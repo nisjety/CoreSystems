@@ -1,13 +1,14 @@
 mod deletion;
 mod info;
 mod members;
+mod quotas;
 mod roles;
 mod settings;
 mod shared;
 mod switch;
 
 use axum::{
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 
@@ -36,6 +37,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/orgs/:id/settings",
             patch(settings::update_org_settings),
         )
+        // Quotas (spend/token ceilings). Control Plane owns these; model-gateway
+        // reads them for cost-core's budget check. Previously org-core had the
+        // full settable API with no route or client reaching it, so an operator
+        // could not set a ceiling the Model Plane was already enforcing.
+        .route("/api/v1/orgs/:id/quotas", get(quotas::list_quotas))
+        .route("/api/v1/orgs/:id/quotas/:key", put(quotas::set_quota))
         // Members
         .route("/api/v1/orgs/:id/members", get(members::list_members))
         .route(

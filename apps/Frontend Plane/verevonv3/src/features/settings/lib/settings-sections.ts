@@ -13,6 +13,7 @@ export const workspaceSettingsSectionIds = [
   'skills',
   'plugins',
   'cron',
+  'quotas',
   'memory',
 ] as const
 
@@ -125,6 +126,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Planlagte kjøringer',
     description: 'Tidsstyrte oppgaver agenten kjører automatisk via cron-uttrykk. Sweeperen fyrer forfalte planer og beregner neste kjøring.',
     saveLabel: 'Lagre planer',
+  },
+  {
+    id: 'quotas',
+    label: 'Forbrukstak',
+    title: 'Forbrukstak',
+    description: 'Tak for kostnad og tokens per kjøring. Model Plane leser disse og håndhever dem i budsjettsjekken — de er ikke det samme som plankvotene under Fakturering.',
+    saveLabel: 'Lagre tak',
   },
   {
     id: 'memory',

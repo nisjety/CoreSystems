@@ -7,6 +7,7 @@ import { McpServersSection } from '@/features/settings/components/McpServersSect
 import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { PluginsSection } from '@/features/settings/components/PluginsSection'
 import { CronSchedulesSection } from '@/features/settings/components/CronSchedulesSection'
+import { OrgQuotasSection } from '@/features/settings/components/OrgQuotasSection'
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
@@ -211,6 +212,9 @@ const sectionStatusCards: Record<WorkspaceSettingsSectionId, StatusCard[]> = {
   plugins: [],
   // Cron schedules render their own live list + form, so no shared status grid.
   cron: [],
+  // Quotas render their own live fields with the persisted limit and usage, so
+  // no shared status grid — and no fabricated "within limits" posture.
+  quotas: [],
   // Memory renders its own live list, so it carries no shared status grid.
   memory: [],
 }
@@ -457,6 +461,9 @@ function WorkspaceSettingsSection(props: {
       </Match>
       <Match when={props.section === 'cron'}>
         <CronSchedulesSection />
+      </Match>
+      <Match when={props.section === 'quotas'}>
+        <OrgQuotasSection />
       </Match>
       <Match when={props.section === 'memory'}>
         <MemorySection />
