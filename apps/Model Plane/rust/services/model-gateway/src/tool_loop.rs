@@ -127,6 +127,14 @@ pub struct ToolOutcome {
     pub name: String,
     pub output: String,
     pub error: Option<String>,
+    /// Provenance/screening envelope slice (S2.7 vocabulary — see
+    /// `crate::moderation`'s module docs): trust class, screening posture,
+    /// and a content hash of whatever payload was actually inspected.
+    /// Populated at dispatch by classifying the tool that produced `output`;
+    /// rendered per-result in `append_tool_outcomes` so the model can see
+    /// what it is reading, never as instructions embedded in the content
+    /// itself.
+    pub provenance: crate::moderation::ToolProvenance,
 }
 
 /// Internal envelope key. The canvas tools and the code interpreter return
@@ -1185,6 +1193,9 @@ fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcome {
         name: call.name.clone(),
         output: String::new(),
         error: Some(msg.into()),
+        // An error outcome carries no upstream content to screen — it is
+        // this service's own diagnostic string, never attacker-controlled.
+        provenance: crate::moderation::ToolProvenance::unscreened(&call.name, ""),
     }
 }
 
@@ -1280,17 +1291,22 @@ async fn dispatch_brreg_lookup_tool(state: &AppState, call: &ToolCall) -> ToolOu
     };
 
     if response.status().as_u16() == 404 || response.status().as_u16() == 410 {
+        // Brreg is a public Norwegian government registry, but it is proxied
+        // and structured by our own service — org-internal per
+        // `TrustClass::classify`, not one of the three untrusted classes.
+        let output = serde_json::json!({
+            "query": query,
+            "count": 0,
+            "source": "Brønnøysundregistrene Enhetsregisteret",
+            "sourceUrl": source_url,
+            "results": [],
+        })
+        .to_string();
         return ToolOutcome {
             call_id: call.id.clone(),
             name: call.name.clone(),
-            output: serde_json::json!({
-                "query": query,
-                "count": 0,
-                "source": "Brønnøysundregistrene Enhetsregisteret",
-                "sourceUrl": source_url,
-                "results": [],
-            })
-            .to_string(),
+            provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+            output,
             error: None,
         };
     }
@@ -1314,17 +1330,19 @@ async fn dispatch_brreg_lookup_tool(state: &AppState, call: &ToolCall) -> ToolOu
         vec![normalize_brreg_entity(&body)]
     };
 
+    let output = serde_json::json!({
+        "query": query,
+        "count": results.len(),
+        "source": "Brønnøysundregistrene Enhetsregisteret",
+        "sourceUrl": source_url,
+        "results": results,
+    })
+    .to_string();
     ToolOutcome {
         call_id: call.id.clone(),
         name: call.name.clone(),
-        output: serde_json::json!({
-            "query": query,
-            "count": results.len(),
-            "source": "Brønnøysundregistrene Enhetsregisteret",
-            "sourceUrl": source_url,
-            "results": results,
-        })
-        .to_string(),
+        provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+        output,
         error: None,
     }
 }
@@ -1384,6 +1402,7 @@ async fn dispatch_shipping_quotes_tool(
         Ok(body) => ToolOutcome {
             call_id: call.id.clone(),
             name: call.name.clone(),
+            provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &body),
             output: body,
             error: None,
         },
@@ -1401,6 +1420,18 @@ async fn dispatch_shipping_quotes_tool(
 /// upstream returns, and every round re-sends the whole accumulated history.
 /// `Err` becomes an honest `err_outcome` naming the cause — never an empty
 /// success the model would read as "the organization has no data".
+///
+/// Provenance/screening deliberately runs BEFORE parking, on the full
+/// pre-park `output` — not after, and not on the (already small, fixed-shape)
+/// handle envelope `handle_or_inline_output` returns in its place. Every
+/// caller of this function reads the org's own Verevon actions/documents —
+/// `TrustClass::classify` puts them all in `OrgInternal`, never one of the
+/// three untrusted classes — so this uses the cheap synchronous path rather
+/// than a capability-core round trip per call. If a future tool ever parks
+/// genuinely untrusted (e.g. third-party MCP) content through this same
+/// §23.6 handle store, it MUST call `ToolProvenance::assess` on the full
+/// payload here, before parking — a `result_query` read-back only re-derives
+/// trust from the stored `capability_id`, it does not re-screen.
 fn verevon_read_outcome(
     state: &AppState,
     org_id: &str,
@@ -1411,6 +1442,7 @@ fn verevon_read_outcome(
 ) -> ToolOutcome {
     match result {
         Ok(output) => {
+            let provenance = crate::moderation::ToolProvenance::unscreened(&call.name, &output);
             // §23.6: park an oversized JSON result under a handle and hand the
             // model a description plus an id, instead of a blind truncation
             // that silently drops rows.
@@ -1418,6 +1450,7 @@ fn verevon_read_outcome(
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
+                provenance,
                 // The ceiling still applies, and is not redundant:
                 // `handle_or_inline_output` passes the payload straight
                 // through whenever it cannot park it — a ZDR turn, an already
@@ -1518,6 +1551,12 @@ pub async fn dispatch_tool(
     execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
     session_bearer: &str,
+    // Delegated capability-core bearer for the `injection_defense` safety
+    // policy gate (`crate::moderation::screen_tool_payload`). `None` fails
+    // closed to screening ON — see that function's docs — so an untrusted
+    // caller (e.g. `dispatch_web_tool_audited`'s gateway-orchestrated web
+    // tools) simply always screens rather than being unable to check in.
+    capability_bearer: Option<&str>,
     zdr: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
@@ -1561,9 +1600,15 @@ pub async fn dispatch_tool(
             )
             .await
             {
+                // code_interpreter runs the model's OWN sandboxed code with no
+                // network access, so its stdout/stderr cannot smuggle in
+                // externally-sourced injection content that was not already
+                // screened at ITS point of entry — org-internal per
+                // `TrustClass::classify`.
                 Ok(output) => ToolOutcome {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
+                    provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
                     output,
                     error: None,
                 },
@@ -1582,10 +1627,18 @@ pub async fn dispatch_tool(
             match validate_authored_artifact(&id, &kind, &title, &content) {
                 Ok((id, kind, title)) => {
                     let version = state.artifact_versions.next_version(thread_id, &id);
+                    // The model's own authored content, not retrieved/tool
+                    // content read FROM anywhere — injection screening exists
+                    // to protect the model from what it reads, not to police
+                    // what it writes.
+                    let output = authored_artifact_payload(&id, kind, &title, &content, version);
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        output: authored_artifact_payload(&id, kind, &title, &content, version),
+                        provenance: crate::moderation::ToolProvenance::unscreened(
+                            &call.name, &output,
+                        ),
+                        output,
                         error: None,
                     }
                 }
@@ -1634,10 +1687,12 @@ pub async fn dispatch_tool(
             // selection for older versions.
             let title = arg_str(&call.arguments_json, "title");
             let version = state.artifact_versions.next_version(thread_id, id);
+            let output = updated_artifact_payload(id, &title, &content, version);
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
-                output: updated_artifact_payload(id, &title, &content, version),
+                provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &output),
+                output,
                 error: None,
             }
         }
@@ -1689,10 +1744,25 @@ pub async fn dispatch_tool(
                             item
                         })
                         .collect();
+                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
+                    // Untruncated: web_search returns short structured hits
+                    // (url/title/snippet), never a page body, so there is no
+                    // separate pre-truncation step to screen ahead of —
+                    // `output` here already IS the complete payload.
+                    let provenance = crate::moderation::ToolProvenance::assess(
+                        &call.name,
+                        &output,
+                        &state.screening_semaphore,
+                        &state.http_client,
+                        &state.capability_core_base_url,
+                        capability_bearer,
+                    )
+                    .await;
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        output: serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned()),
+                        provenance,
+                        output,
                         error: None,
                     }
                 }
@@ -1711,6 +1781,7 @@ pub async fn dispatch_tool(
                 Ok(summary) => ToolOutcome {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
+                    provenance: crate::moderation::ToolProvenance::unscreened(&call.name, &summary),
                     output: summary,
                     error: None,
                 },
@@ -1757,6 +1828,20 @@ pub async fn dispatch_tool(
                             ),
                         );
                     }
+                    // Screen the COMPLETE fetched page text BEFORE
+                    // `truncate_chars` below — scanning only the already-cut
+                    // `MAX_FETCH_CHARS` head is exactly the middle-of-payload
+                    // gap this closes: an injection planted past the first
+                    // 4,000 characters must still be seen.
+                    let provenance = crate::moderation::ToolProvenance::assess(
+                        &call.name,
+                        &body,
+                        &state.screening_semaphore,
+                        &state.http_client,
+                        &state.capability_core_base_url,
+                        capability_bearer,
+                    )
+                    .await;
                     let out = serde_json::json!({
                         "final_url": r.final_url,
                         "title": r.title,
@@ -1765,6 +1850,7 @@ pub async fn dispatch_tool(
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
+                        provenance,
                         output: out.to_string(),
                         error: None,
                     }
@@ -1815,6 +1901,20 @@ pub async fn dispatch_tool(
                                 .get("content")
                                 .and_then(serde_json::Value::as_str)
                                 .unwrap_or("");
+                            // Screen the COMPLETE scraped page text BEFORE
+                            // truncation, same reasoning as `fetch_url`: the
+                            // browser drove a live untrusted page, so a
+                            // planted instruction past MAX_FETCH_CHARS must
+                            // still be caught.
+                            let provenance = crate::moderation::ToolProvenance::assess(
+                                &call.name,
+                                content,
+                                &state.screening_semaphore,
+                                &state.http_client,
+                                &state.capability_core_base_url,
+                                capability_bearer,
+                            )
+                            .await;
                             let out = serde_json::json!({
                                 "content": truncate_chars(content, MAX_FETCH_CHARS),
                                 "confidence": v.get("confidence").cloned().unwrap_or(serde_json::Value::Null),
@@ -1822,6 +1922,7 @@ pub async fn dispatch_tool(
                             ToolOutcome {
                                 call_id: call.id.clone(),
                                 name: call.name.clone(),
+                                provenance,
                                 output: out.to_string(),
                                 error: None,
                             }
@@ -1871,10 +1972,22 @@ pub async fn dispatch_tool(
                             })
                         })
                         .collect();
+                    // The org's own saved memory, not one of the three
+                    // untrusted classes — cheap path. NOTE: each entry is
+                    // already 600-char-truncated above (a per-item cap on
+                    // short memory notes, not the MAX_FETCH_CHARS-scale
+                    // "large untrusted payload" case this feature targets),
+                    // so this hashes the assembled, already-truncated JSON —
+                    // a known, documented residual gap versus fetch_url's
+                    // screen-before-truncate ordering.
+                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        output: serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned()),
+                        provenance: crate::moderation::ToolProvenance::unscreened(
+                            &call.name, &output,
+                        ),
+                        output,
                         error: None,
                     }
                 }
@@ -1918,16 +2031,22 @@ pub async fn dispatch_tool(
                 ))
                 .await
             {
-                Ok(resp) => ToolOutcome {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    output: serde_json::json!({
+                Ok(resp) => {
+                    let output = serde_json::json!({
                         "memory_id": resp.into_inner().memory_id,
                         "saved": true,
                     })
-                    .to_string(),
-                    error: None,
-                },
+                    .to_string();
+                    ToolOutcome {
+                        call_id: call.id.clone(),
+                        name: call.name.clone(),
+                        provenance: crate::moderation::ToolProvenance::unscreened(
+                            &call.name, &output,
+                        ),
+                        output,
+                        error: None,
+                    }
+                }
                 Err(e) => err_outcome(call, format!("save_memory failed: {}", e.message())),
             }
         }
@@ -1973,10 +2092,24 @@ pub async fn dispatch_tool(
                             })
                         })
                         .collect();
+                    // The org's own knowledge base — org-internal per
+                    // `TrustClass::classify`. NOTE: each candidate is already
+                    // 600-char-truncated above, so (like `recall_memory`)
+                    // this hashes the assembled, already-truncated JSON — a
+                    // known residual gap. A poisoned ingested document could
+                    // still carry an injection marker past that per-item cut;
+                    // closing it fully would mean threading `::assess` through
+                    // this per-candidate map, which is out of scope here (see
+                    // final report) in favor of covering the three explicitly
+                    // untrusted classes end to end.
+                    let output = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned());
                     ToolOutcome {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        output: serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_owned()),
+                        provenance: crate::moderation::ToolProvenance::unscreened(
+                            &call.name, &output,
+                        ),
+                        output,
                         error: None,
                     }
                 }
@@ -2144,23 +2277,39 @@ pub async fn dispatch_tool(
                 state
                     .tool_results
                     .attach_artifact(org_id, user_id, handle_id.trim(), &artifact_id);
+                let output = authored_artifact_payload(
+                    &artifact_id,
+                    crate::artifacts::ArtifactKind::Code,
+                    &format!("Result of {}", resolved.capability_id),
+                    &content,
+                    version,
+                );
+                // Classified from the ORIGINAL tool that produced the parked
+                // payload (`resolved.capability_id`), not from "result_query"
+                // itself — a handle produced by an untrusted source must
+                // still read as untrusted on every later read-back. See
+                // `verevon_read_outcome`'s docs: today every parked payload
+                // is org-internal, so this is the cheap path; a future
+                // caller parking third-party content MUST screen it before
+                // parking, not here.
+                let provenance =
+                    crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, &output);
                 return ToolOutcome {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
-                    output: authored_artifact_payload(
-                        &artifact_id,
-                        crate::artifacts::ArtifactKind::Code,
-                        &format!("Result of {}", resolved.capability_id),
-                        &content,
-                        version,
-                    ),
+                    provenance,
+                    output,
                     error: None,
                 };
             }
+            let output = truncate_chars(&slice.to_string(), MAX_TOOL_OUTPUT_CHARS);
+            let provenance =
+                crate::moderation::ToolProvenance::unscreened(&resolved.capability_id, &output);
             ToolOutcome {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
-                output: truncate_chars(&slice.to_string(), MAX_TOOL_OUTPUT_CHARS),
+                provenance,
+                output,
                 error: None,
             }
         }
@@ -2296,6 +2445,7 @@ async fn dispatch_audited_tool(
     execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
     session_bearer: &str,
+    capability_bearer: Option<&str>,
     zdr: bool,
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
@@ -2329,6 +2479,7 @@ async fn dispatch_audited_tool(
         execution_bearer,
         inference_bearer,
         session_bearer,
+        capability_bearer,
         zdr,
         call,
         ingestion_bearer,
@@ -2391,6 +2542,12 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         "",
         session_bearer,
+        // No delegated capability bearer on this gateway-orchestrated path —
+        // fails closed to screening always ON for deep_research's own
+        // web_search/fetch_url calls (see `dispatch_tool`'s doc on this
+        // parameter), which is the conservative default for exactly the
+        // fetches with the largest external-content surface.
+        None,
         zdr,
         call,
         None,
@@ -2628,6 +2785,7 @@ impl ToolEvents<'_> {
 /// Tool-calling remains available for follow-up fetches or other tools, but a
 /// search-selected turn should not depend on the model deciding to call the
 /// `web_search` function. This also gives the UI deterministic web citations.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_forced_web_search(
     state: &AppState,
     request_id: &str,
@@ -2636,6 +2794,7 @@ pub async fn run_forced_web_search(
     user_id: &str,
     thread_id: &str,
     session_bearer: &str,
+    capability_bearer: Option<&str>,
     zdr: bool,
     base_messages: Vec<ChatMessage>,
     query: &str,
@@ -2663,6 +2822,7 @@ pub async fn run_forced_web_search(
         None,
         "",
         session_bearer,
+        capability_bearer,
         zdr,
         &call,
         None,
@@ -2966,6 +3126,7 @@ pub async fn run_tool_rounds(
     execution_bearer: Option<&VerifiedExecutionBearer>,
     inference_bearer: &str,
     session_bearer: &str,
+    capability_bearer: Option<&str>,
     zdr: bool,
     model: &str,
     base_messages: Vec<ChatMessage>,
@@ -3151,6 +3312,7 @@ pub async fn run_tool_rounds(
                     execution_bearer,
                     inference_bearer,
                     session_bearer,
+                    capability_bearer,
                     zdr,
                     call,
                     ingestion_bearer,
@@ -3418,6 +3580,7 @@ mod tests {
             None,
             "",
             "",
+            None,
             true,
             &call,
             None,
@@ -3572,7 +3735,7 @@ mod tests {
         let call = tool_call("result_query", r#"{"handle_id":"res_does_not_exist"}"#);
 
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3605,7 +3768,7 @@ mod tests {
             ),
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3640,7 +3803,7 @@ mod tests {
             &format!(r#"{{"handle_id":"{handle_id}","aggregate":{{"op":"count"}}}}"#),
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3669,7 +3832,7 @@ mod tests {
         let call = tool_call("result_query", &format!(r#"{{"handle_id":"{handle_id}"}}"#));
         let outcome = dispatch_tool(
             // Same org, different user.
-            &state, "run", "org", "user_b", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user_b", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3735,7 +3898,7 @@ mod tests {
             r#"{"tool_name":"mcp__srv__create_order","arguments":{"order_id":{"nested":1}}}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3756,7 +3919,7 @@ mod tests {
             r#"{"tool_name":"mcp__srv__create_order","arguments":{"order_id":"SO-1","segment":"b2b"}}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3780,7 +3943,7 @@ mod tests {
             r#"{"tool_name":"mcp__srv__delete_everything","arguments":{}}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
 
@@ -3800,7 +3963,7 @@ mod tests {
             r#"{"order_id":"SO-1","segment":"b2b"}"#,
         );
         let outcome = dispatch_tool(
-            &state, "run", "org", "user", "thread", None, None, "", "", false, &call, None,
+            &state, "run", "org", "user", "thread", None, None, "", "", None, false, &call, None,
         )
         .await;
         let error = outcome.error.expect("direct MCP must be denied");
@@ -3825,6 +3988,7 @@ mod tests {
             None,
             "",
             "",
+            None,
             false,
             &tool_call(crate::runtime_registries::MCP_CATALOG_TOOL_NAME, "{}"),
             None,
@@ -3963,6 +4127,7 @@ mod tests {
                     None,
                     "",
                     "",
+                    None,
                     true,
                     &call,
                     None,
@@ -4114,7 +4279,8 @@ mod tests {
         let state = crate::state::AppState::new();
         let call = tool_call("social_list_accounts", "{}");
         let outcome = dispatch_tool(
-            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", true, &call, None,
+            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", None, true, &call,
+            None,
         )
         .await;
         assert!(outcome.output.is_empty(), "a failed read returns no output");
@@ -4130,7 +4296,8 @@ mod tests {
         let state = crate::state::AppState::new();
         let call = tool_call("knowledge_list_documents", r#"{"limit":5}"#);
         let outcome = dispatch_tool(
-            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", true, &call, None,
+            &state, "run_1", "org_1", "user_1", "thread_1", None, None, "", "", None, true, &call,
+            None,
         )
         .await;
         let error = outcome.error.expect("missing bearer must error");
@@ -4436,10 +4603,15 @@ mod tests {
 
     #[test]
     fn oversized_tool_output_is_bounded_when_framed_into_context() {
+        let output = "y".repeat(MAX_TOOL_OUTPUT_CHARS * 3);
         let outcomes = vec![ToolOutcome {
             call_id: "c1".into(),
             name: "mcp__srv__execute_query".into(),
-            output: "y".repeat(MAX_TOOL_OUTPUT_CHARS * 3),
+            provenance: crate::moderation::ToolProvenance::unscreened(
+                "mcp__srv__execute_query",
+                &output,
+            ),
+            output,
             error: None,
         }];
 
@@ -4458,6 +4630,10 @@ mod tests {
         let outcomes = vec![ToolOutcome {
             call_id: "c1".into(),
             name: "mcp__srv__execute_query".into(),
+            provenance: crate::moderation::ToolProvenance::unscreened(
+                "mcp__srv__execute_query",
+                "",
+            ),
             output: String::new(),
             error: Some(upstream.into()),
         }];
@@ -4471,12 +4647,17 @@ mod tests {
             ToolOutcome {
                 call_id: "c1".into(),
                 name: "web_search".into(),
+                provenance: crate::moderation::ToolProvenance::unscreened(
+                    "web_search",
+                    "[{\"url\":\"x\"}]",
+                ),
                 output: "[{\"url\":\"x\"}]".into(),
                 error: None,
             },
             ToolOutcome {
                 call_id: "c2".into(),
                 name: "unknown".into(),
+                provenance: crate::moderation::ToolProvenance::unscreened("unknown", ""),
                 output: String::new(),
                 error: Some("unknown tool 'unknown'".into()),
             },
@@ -4492,6 +4673,7 @@ mod tests {
         let outcomes = vec![ToolOutcome {
             call_id: "c1".into(),
             name: "fetch_url".into(),
+            provenance: crate::moderation::ToolProvenance::unscreened("fetch_url", ""),
             output: String::new(),
             error: Some("fetch_url failed: 404".into()),
         }];
@@ -4780,6 +4962,7 @@ mod tests {
         ToolOutcome {
             call_id: "call-1".to_owned(),
             name: name.to_owned(),
+            provenance: crate::moderation::ToolProvenance::unscreened(name, &output),
             output,
             error: None,
         }
@@ -5099,10 +5282,12 @@ mod tests {
 
     #[test]
     fn web_search_outputs_become_citation_events() {
+        let output: String = r#"[{"url":"https://example.com/model-plane","title":"Model Plane","snippet":"Overview of the Model Plane"}]"#.into();
         let mut outcome = ToolOutcome {
             call_id: "c1".into(),
             name: "web_search".into(),
-            output: r#"[{"url":"https://example.com/model-plane","title":"Model Plane","snippet":"Overview of the Model Plane"}]"#.into(),
+            provenance: crate::moderation::ToolProvenance::unscreened("web_search", &output),
+            output,
             error: None,
         };
 

@@ -362,6 +362,11 @@ impl ToolProvenance {
 /// as screened, so it degrades explicitly rather than skipping silently.
 const SCREENING_MAX_BYTES: usize = 4 * 1024 * 1024;
 const SCREENING_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+/// Default width of the process-wide screening semaphore (`AppState::new`'s
+/// `screening_semaphore`). Generous relative to `max_tool_rounds`' own
+/// concurrent-call fan-out — this bounds a pathological burst, not normal
+/// traffic.
+pub(crate) const SCREENING_CONCURRENCY: usize = 32;
 
 /// Screen `text` — the COMPLETE, untruncated tool payload — for
 /// prompt-injection markers, gated by capability-core's `injection_defense`

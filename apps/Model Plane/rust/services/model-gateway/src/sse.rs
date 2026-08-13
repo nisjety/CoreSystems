@@ -1222,6 +1222,9 @@ pub async fn invoke_stream_sse(
                 &user_clone,
                 &thread_scope,
                 session_bearer.as_str(),
+                capability_bearer
+                    .as_ref()
+                    .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
                 messages,
                 &tool_phase_query,
@@ -1269,6 +1272,9 @@ pub async fn invoke_stream_sse(
                 execution_bearer.as_ref(),
                 inference_bearer.as_str(),
                 session_bearer.as_str(),
+                capability_bearer
+                    .as_ref()
+                    .map(VerifiedCapabilityBearer::as_str),
                 effective_zdr,
                 &model_clone,
                 messages,

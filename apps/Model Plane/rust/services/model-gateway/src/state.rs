@@ -266,6 +266,15 @@ pub struct AppState {
     pub messages: crate::runtime_registries::MessageStore,
     pub analytics: crate::runtime_registries::AnalyticsStore,
     pub tasks: crate::runtime_registries::TaskStore,
+    /// Bounds process-wide CONCURRENCY for untrusted tool-payload injection
+    /// screening (`crate::moderation::screen_tool_payload`), per its
+    /// size/deadline/concurrency contract. An instance field rather than a
+    /// global static so tests can construct their own unshared semaphore
+    /// instead of racing other tests through one process-wide singleton.
+    /// `Arc`-wrapped solely because `AppState` derives `Clone` and
+    /// `Semaphore` itself does not — every clone still shares the same
+    /// bound, which is the point.
+    pub screening_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// Cap on establishing a downstream gRPC connection, including the HTTP/2
@@ -380,6 +389,9 @@ impl AppState {
             messages: crate::runtime_registries::MessageStore::new(),
             analytics: crate::runtime_registries::AnalyticsStore::new(),
             tasks: crate::runtime_registries::TaskStore::new(),
+            screening_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                crate::moderation::SCREENING_CONCURRENCY,
+            )),
         }
     }
 

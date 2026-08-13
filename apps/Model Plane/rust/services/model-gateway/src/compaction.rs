@@ -355,6 +355,7 @@ mod tests {
             name: "web_search".to_owned(),
             output: "hits".to_owned(),
             error: None,
+            provenance: crate::moderation::ToolProvenance::unscreened("web_search", "hits"),
         }];
         assert!(is_tool_result_message(&message(
             "user",
