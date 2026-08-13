@@ -2284,6 +2284,13 @@ mod tests {
             Err(Status::unimplemented("delete_threads not used"))
         }
 
+        async fn delete_space_threads(
+            &self,
+            _: Request<pb::DeleteSpaceThreadsRequest>,
+        ) -> Result<Response<pb::DeleteSpaceThreadsResponse>, Status> {
+            Err(Status::unimplemented("delete_space_threads not used"))
+        }
+
         async fn append_message(
             &self,
             request: Request<pb::AppendMessageRequest>,
