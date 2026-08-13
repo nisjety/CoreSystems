@@ -160,55 +160,6 @@ func containsAll(checks []string, required ...string) bool {
 	return true
 }
 
-// List returns a slice of capabilities matching the provided filters. A
-// pagination cursor (afterID) advances past the matching element. When limit
-// is zero, a default of 50 is used.
-func (r *Registry) List(kindFilter, query, afterID string, limit uint32) ([]*models.Capability, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if limit == 0 || limit > 200 {
-		limit = 50
-	}
-
-	q := strings.ToLower(strings.TrimSpace(query))
-	filtered := make([]*models.Capability, 0, len(r.items))
-	for _, c := range r.items {
-		if !c.Enabled {
-			continue
-		}
-		if kindFilter != "" && c.Kind != kindFilter {
-			continue
-		}
-		if q != "" && !strings.Contains(strings.ToLower(c.Name), q) && !strings.Contains(strings.ToLower(c.Description), q) {
-			continue
-		}
-		filtered = append(filtered, c)
-	}
-
-	start := 0
-	if afterID != "" {
-		for i, c := range filtered {
-			if c.ID == afterID {
-				start = i + 1
-				break
-			}
-		}
-	}
-
-	end := start + int(limit)
-	hasMore := false
-	if end < len(filtered) {
-		hasMore = true
-	} else {
-		end = len(filtered)
-	}
-	if start > len(filtered) {
-		start = len(filtered)
-	}
-	return filtered[start:end], hasMore
-}
-
 // ListForOrg returns only capabilities owned by the verified tenant or the
 // explicit global catalog. Tenant entries override a global entry with the
 // same ID so a mixed process-wide registry cannot leak or ambiguously resolve
