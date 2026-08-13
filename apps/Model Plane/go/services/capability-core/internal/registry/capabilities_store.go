@@ -7,6 +7,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -19,6 +20,12 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/scoring"
 )
+
+// ErrRiskFloorViolation is returned by Upsert when a write would lower a
+// floored capability's risk_level (one whose seed or currently persisted
+// risk_level is high) without the caller holding authz.RiskOverrideScope.
+// See POL-1 in apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md.
+var ErrRiskFloorViolation = errors.New("capability risk floor: capability:risk:override is required to lower a high-risk capability's risk_level")
 
 // CapabilityRow is the full mutable row for the capabilities table.
 type CapabilityRow struct {
@@ -88,13 +95,20 @@ func NewCapabilitiesStore(pool *pgxpool.Pool) (*CapabilitiesStore, error) {
 	return &CapabilitiesStore{pool: pool}, nil
 }
 
-// Upsert inserts or updates a capability row using ON CONFLICT on (org_id,kind,name).
-func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow) error {
+// Upsert inserts or updates a capability row using ON CONFLICT on
+// (org_id,kind,name). hasRiskOverride must be true for a caller authorized
+// (via authz.RiskOverrideScope) to lower the risk_level of a floored
+// capability; ordinary capability:write callers must pass false. See
+// enforceRiskFloor and POL-1 in apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md.
+func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow, hasRiskOverride bool) error {
 	if r == nil {
 		return fmt.Errorf("capability is required")
 	}
 	if !models.IsSupportedRiskLevel(r.RiskLevel) {
 		return fmt.Errorf("unsupported capability risk level %q", r.RiskLevel)
+	}
+	if err := s.enforceRiskFloor(ctx, r, hasRiskOverride); err != nil {
+		return err
 	}
 	if r.SchemaInput == nil {
 		r.SchemaInput = []byte("{}")
@@ -175,6 +189,53 @@ func (s *CapabilitiesStore) Upsert(ctx context.Context, r *CapabilityRow) error 
 		r.RolloutState, r.CreatedBy, now, now,
 	)
 	return err
+}
+
+// enforceRiskFloor blocks a write from lowering a capability's risk_level
+// below high once it is high, unless hasRiskOverride is true. It does NOT
+// otherwise restrict risk_level changes — a medium or low capability may
+// freely move between medium and low under plain capability:write. Only the
+// high floor is protected, matching POL-1's finding that no seeded High-risk
+// capability (cap.command.shell, cap.browser.open, ...) may be silently
+// downgraded to disable its human-approval gate in policy/engine.go.
+//
+// A capability is "floored" when either:
+//   - its currently persisted risk_level, read fresh and matched on the same
+//     natural key (org_id, kind, name) this upsert itself targets, is high; or
+//   - no current row can be read for it, but its id is one of the statically
+//     seeded RiskHigh capabilities (models.IsSeededHighRiskCapability) — the
+//     fail-closed backstop: refuse rather than assume a missing or unreadable
+//     protected row is safe to write at a lower level.
+//
+// Known limitation: the read here and the upsert's write are two round trips,
+// not one transaction, so a precisely-timed concurrent write could still race
+// past this check. That residual is disclosed in docs/SECURITY.md; it is not
+// the silent, always-open gap this floor closes.
+func (s *CapabilitiesStore) enforceRiskFloor(ctx context.Context, r *CapabilityRow, hasRiskOverride bool) error {
+	if hasRiskOverride || r.RiskLevel == models.RiskHigh {
+		return nil // Upgrades to high, and any override-scoped write, always pass.
+	}
+
+	var priorRiskLevel string
+	err := s.pool.QueryRow(ctx, `
+		SELECT risk_level FROM capabilities
+		WHERE org_id = $1 AND kind = $2 AND name = $3 AND deleted_at IS NULL
+	`, r.OrgID, r.Kind, r.Name).Scan(&priorRiskLevel)
+
+	switch {
+	case err == nil:
+		if priorRiskLevel == models.RiskHigh {
+			return fmt.Errorf("%w: %s is currently high-risk and cannot be lowered to %q", ErrRiskFloorViolation, r.ID, r.RiskLevel)
+		}
+		return nil
+	case errors.Is(err, pgx.ErrNoRows):
+		if models.IsSeededHighRiskCapability(r.ID) {
+			return fmt.Errorf("%w: %s is a protected high-risk capability with no readable prior state", ErrRiskFloorViolation, r.ID)
+		}
+		return nil // Genuinely new, unfloored capability: nothing to downgrade from.
+	default:
+		return fmt.Errorf("capability risk floor check for %s: %w", r.ID, err)
+	}
 }
 
 // Get returns a single capability by ID.

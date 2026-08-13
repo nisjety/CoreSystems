@@ -6,12 +6,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
@@ -114,13 +116,28 @@ func (h *CapabilitiesHandler) upsert(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, "risk_level must be one of: low, medium, high", http.StatusBadRequest)
 		return
 	}
+	hasRiskOverride := verifiedHasScope(r, authz.RiskOverrideScope)
+	// Fast, DB-free rejection of the exact POL-1 shape: a plain write-scoped
+	// caller targeting a statically seeded high-risk id (cap.command.shell,
+	// cap.browser.open, ...) with anything less than high. This is a
+	// first-line check only — capabilities_store.go's Upsert is the
+	// authoritative floor and also protects non-seeded high-risk capabilities
+	// by reading current state, so both layers must independently agree.
+	if row.RiskLevel != models.RiskHigh && !hasRiskOverride && models.IsSeededHighRiskCapability(row.ID) {
+		jsonErr(w, "capability:risk:override scope is required to set this protected capability's risk_level below high", http.StatusForbidden)
+		return
+	}
 	if row.ID == "" {
 		row.ID = "cap_" + uuid.New().String()
 	}
 	row.OrgID = verifiedOrganizationID(r)
 	actor := verifiedActorID(r)
 	row.CreatedBy = actor
-	if err := h.store.Upsert(r.Context(), &row); err != nil {
+	if err := h.store.Upsert(r.Context(), &row, hasRiskOverride); err != nil {
+		if errors.Is(err, registry.ErrRiskFloorViolation) {
+			jsonErr(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		jsonErr(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
