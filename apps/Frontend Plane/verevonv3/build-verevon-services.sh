@@ -276,19 +276,19 @@ STACK_NAMES=(
 BOOTSTRAP_SERVICES=(
   "lago-migrate audit-nats-provisioner audit-extra-nats-provisioner"  # Control
   "minio-init migrate"                                                # Data Plane v2
-  ""                                                                  # Model
+  "nats-provisioner"                                                  # Model
   "affine-runtime-migration jetstream-provisioner"                    # Application
   ""                                                                  # Ingestion
   ""                                                                  # Frontend
   ""                                                                  # Infra
 )
-# Model Plane (index 3) historically had three one-shots
+# Model Plane (index 2) historically had three one-shots
 # (capability-migrations, minio-bootstrap, temporal-bootstrap) — they were
 # removed from `apps/Model Plane/deploy/docker-compose.yml` when the
 # corresponding setup moved into the runtime containers themselves
 # (temporal uses temporalio/auto-setup; capability-core/minio bootstrap
-# inline on first start). Leave the slot empty so `docker compose rm` does
-# not error on names that no longer exist.
+# inline on first start). The current `nats-provisioner` is still a real
+# run-to-completion dependency of Session Core, so keep it in the slot.
 
 # Model Plane used to be derived from the `deploy` folder name. Stop that old
 # project before starting the explicit `model-plane` project to avoid port and
@@ -496,6 +496,21 @@ plane_env_files() {
                    "$CORE_ROOT/apps/Application Plane/.env.generated-secrets"; do
         [[ -f "$owner" ]] && printf '%s\n' "$owner"
       done
+      ;;
+    "deploy")
+      # Model Gateway's org-limit lookup uses a Control-issued org-core
+      # credential. Keep one canonical local value in Control's persisted
+      # development store instead of copying secrets between planes.
+      owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
+      [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      ;;
+    "verevonv3")
+      # The Frontend gateway consumes Control Plane's GDPR stream with a
+      # Control-owned scoped NATS identity. Load the owner's persisted local
+      # development store first; a deliberate frontend-local override still
+      # wins later in this function.
+      owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
+      [[ -f "$owner" ]] && printf '%s\n' "$owner"
       ;;
   esac
 
