@@ -1541,6 +1541,77 @@ fn normalize_tool_query(query: &str) -> String {
         .join(" ")
 }
 
+/// [`crate::moderation::ToolProvenance::assess`] plus the out-of-band semantic
+/// shadow pass, for the three arms that ingest untrusted external page text:
+/// `web_search`, `fetch_url` and `browser_agent`.
+///
+/// The provenance returned is exactly what `assess` alone would produce. The
+/// shadow pass is a calibration signal that never gates the turn (see
+/// [`crate::semantic_screening`]), and its `JoinHandle` is dropped on purpose —
+/// dropping a tokio handle detaches the task rather than aborting it, which is
+/// the entire point of classifying out of band.
+///
+/// # Why the shadow pass is skipped without an inference bearer
+///
+/// The classifier reaches inference-core with the turn's DELEGATED bearer.
+/// `dispatch_web_tool_audited` — deep research's own `web_search`/`fetch_url`
+/// calls — passes an empty one (it also passes no capability bearer, by
+/// design). Classifying there would sample a fifth of those fetches into a gRPC
+/// call that cannot authenticate: a guaranteed `Unavailable` bought with a real
+/// round trip each time, and the least useful possible place to spend it.
+///
+/// Skipping is not a screening gap. The deterministic pass runs identically on
+/// both paths and is what actually decides the turn; on that path it is in fact
+/// stricter, because an absent capability bearer fails closed to screening
+/// always on.
+#[allow(clippy::too_many_arguments)]
+async fn assess_external_payload(
+    state: &AppState,
+    tool_name: &str,
+    text: &str,
+    capability_bearer: Option<&str>,
+    inference_bearer: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    zdr: bool,
+) -> crate::moderation::ToolProvenance {
+    if inference_bearer.trim().is_empty() {
+        return crate::moderation::ToolProvenance::assess(
+            tool_name,
+            text,
+            &state.screening_semaphore,
+            &state.http_client,
+            &state.capability_core_base_url,
+            capability_bearer,
+        )
+        .await;
+    }
+    let classifier = crate::semantic_screening::GrpcContentSafetyClassifier {
+        client: state.inference_client.clone(),
+        bearer: inference_bearer.to_owned(),
+        org_id: org_id.to_owned(),
+        request_id: run_id.to_owned(),
+    };
+    let (provenance, _shadow) = crate::semantic_screening::assess_with_semantic_shadow(
+        tool_name,
+        text,
+        state.screening_semaphore.clone(),
+        state.http_client.clone(),
+        state.capability_core_base_url.clone(),
+        capability_bearer.map(str::to_owned),
+        classifier,
+        state.publisher.clone(),
+        org_id,
+        user_id,
+        run_id,
+        zdr,
+        crate::semantic_screening::semantic_sample_rate(),
+    )
+    .await;
+    provenance
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn dispatch_tool(
     state: &AppState,
@@ -1750,13 +1821,16 @@ pub async fn dispatch_tool(
                     // (url/title/snippet), never a page body, so there is no
                     // separate pre-truncation step to screen ahead of —
                     // `output` here already IS the complete payload.
-                    let provenance = crate::moderation::ToolProvenance::assess(
+                    let provenance = assess_external_payload(
+                        state,
                         &call.name,
                         &output,
-                        &state.screening_semaphore,
-                        &state.http_client,
-                        &state.capability_core_base_url,
                         capability_bearer,
+                        inference_bearer,
+                        org_id,
+                        user_id,
+                        run_id,
+                        zdr,
                     )
                     .await;
                     ToolOutcome {
@@ -1834,13 +1908,16 @@ pub async fn dispatch_tool(
                     // `MAX_FETCH_CHARS` head is exactly the middle-of-payload
                     // gap this closes: an injection planted past the first
                     // 4,000 characters must still be seen.
-                    let provenance = crate::moderation::ToolProvenance::assess(
+                    let provenance = assess_external_payload(
+                        state,
                         &call.name,
                         &body,
-                        &state.screening_semaphore,
-                        &state.http_client,
-                        &state.capability_core_base_url,
                         capability_bearer,
+                        inference_bearer,
+                        org_id,
+                        user_id,
+                        run_id,
+                        zdr,
                     )
                     .await;
                     let out = serde_json::json!({
@@ -1907,13 +1984,16 @@ pub async fn dispatch_tool(
                             // browser drove a live untrusted page, so a
                             // planted instruction past MAX_FETCH_CHARS must
                             // still be caught.
-                            let provenance = crate::moderation::ToolProvenance::assess(
+                            let provenance = assess_external_payload(
+                                state,
                                 &call.name,
                                 content,
-                                &state.screening_semaphore,
-                                &state.http_client,
-                                &state.capability_core_base_url,
                                 capability_bearer,
+                                inference_bearer,
+                                org_id,
+                                user_id,
+                                run_id,
+                                zdr,
                             )
                             .await;
                             let out = serde_json::json!({
