@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import { routeFromPath } from '@/features/core/lib/shell-data'
-import { sidebarSections, type SidebarPanelItem } from '@/features/core/lib/sidebar-navigation'
+import {
+  applyDemoModeNavGate,
+  getSidebarSectionForPath,
+  sidebarSections,
+  type SidebarPanelItem,
+} from '@/features/core/lib/sidebar-navigation'
 
 /**
  * Guards the link between the sidebar and the route table.
@@ -58,5 +63,25 @@ describe('sidebar navigation wiring', () => {
 
     expect(spaceItems.length, 'no sidebar item reaches the Space surface').toBeGreaterThan(0)
     expect(routeFromPath('/spaces/space_personal_1')).toBe('/spaces')
+  })
+
+  it('gives Rom its own rail section rather than only a Hjem shortcut', () => {
+    // The Hjem panel is a customizable shortcut list, so an entry there is not a
+    // home — remove the shortcut and the surface becomes unreachable again. The
+    // rail section is what makes it permanent, and it must survive the
+    // demo-mode gate to actually render.
+    const rail = applyDemoModeNavGate(sidebarSections)
+    const spaces = rail.find((section) => section.href === '/spaces')
+
+    expect(spaces, 'no top-level sidebar section reaches /spaces').toBeDefined()
+    expect(spaces?.panelGroups.flatMap((group) => group.items).length).toBeGreaterThan(0)
+  })
+
+  it('keeps the Rom section active while a specific room is open', () => {
+    // Section lookup matches on section.href, and the Hjem section owns
+    // /dashboard — so a room must resolve to Rom, not fall back to Hjem and
+    // show the wrong panel next to an open room.
+    const section = getSidebarSectionForPath('/spaces/space_personal_1', '/spaces')
+    expect(section.href).toBe('/spaces')
   })
 })

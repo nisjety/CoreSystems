@@ -69,6 +69,27 @@ services:
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
       ORG_CORE_SERVICE_TOKEN: ${GATEWAY_ORG_CORE_SERVICE_TOKEN:?GATEWAY_ORG_CORE_SERVICE_TOKEN must match Control Plane configuration}
+      # Space lifecycle and membership live in Convex — Application Plane owns
+      # that projection, and domains/spaces.rs queries it for every Space read.
+      #
+      # Both names were read by that handler and declared in NO compose file, so
+      # `personal_space_lifecycle` failed its first guard and every
+      # GET /api/v1/spaces answered 503 "space_lifecycle_unavailable". The Space
+      # surface had never been connected to its data source at all.
+      #
+      # 3210 is the client/query API the handler POSTs `/api/query` to (3211 is
+      # the site/subscription port Control Plane uses for a different purpose).
+      APPLICATION_CONVEX_URL: ${APPLICATION_CONVEX_URL:-http://convex-backend:3210}
+      # Convex's own validator accepts CONVEX_INTERNAL_SERVICE_KEY, falling back
+      # to INTERNAL_API_KEY, and throws when neither is set (convex/authz.ts
+      # assertServiceKey). Pointing at the first name means both sides resolve
+      # the same value by construction rather than by convention; convex-core's
+      # compose already requires it, and its startup.sh pushes it into the
+      # deployment with `convex env set`.
+      #
+      # Optional, not required: empty keeps the handler's honest 503 instead of
+      # refusing to boot a gateway whose other surfaces do not need Convex.
+      APPLICATION_CONVEX_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:-}
       SESSION_CORE_URL: ${SESSION_CORE_URL:-http://session-core:3017}
       SESSION_CORE_SERVICE_TOKEN: ${SESSION_CORE_SERVICE_TOKEN:?SESSION_CORE_SERVICE_TOKEN must match Control Plane configuration}
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN must match Control Plane configuration}

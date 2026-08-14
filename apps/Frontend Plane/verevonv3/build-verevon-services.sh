@@ -506,11 +506,18 @@ plane_env_files() {
       ;;
     "verevonv3")
       # The Frontend gateway consumes Control Plane's GDPR stream with a
-      # Control-owned scoped NATS identity. Load the owner's persisted local
-      # development store first; a deliberate frontend-local override still
-      # wins later in this function.
-      owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
-      [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      # Control-owned scoped NATS identity, and reads Space lifecycle from
+      # Application Plane's Convex with that plane's internal service key
+      # (CONVEX_INTERNAL_SERVICE_KEY — the exact name convex/authz.ts validates
+      # against, so both sides resolve one value instead of two that drift).
+      #
+      # Two owners, same shape as the Ingestion Plane case above. Load them
+      # first; a deliberate frontend-local override still wins later in this
+      # function.
+      for owner in "$CORE_ROOT/apps/Control Plane/.env.generated-secrets" \
+                   "$CORE_ROOT/apps/Application Plane/convex-core/.env"; do
+        [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      done
       ;;
   esac
 
