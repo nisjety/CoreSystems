@@ -37,6 +37,7 @@ import { auditPlugin } from './audit-plugin';
 import { userServiceIntegrationPlugin } from './user-service-integration.plugin';
 import { organizationEventsPlugin } from './organization-events.plugin';
 import { normalizeIdentityEmail } from './account-linking.policy';
+import { withSoleOrganizationActivated } from './sole-org-auto-activation';
 import {
   buildInvitationLink,
   canonicalPublicOrigin,
@@ -404,7 +405,9 @@ const authOptions: BetterAuthOptions = {
         typeof requestBody.invitationId === 'string'
           ? requestBody.invitationId
           : '';
-      const marker = ctx.request?.headers.get('x-verevon-invitation-acceptance');
+      const marker = ctx.request?.headers.get(
+        'x-verevon-invitation-acceptance',
+      );
       if (
         !verifyInvitationAcceptanceInternalMarker(
           marker,
@@ -736,6 +739,20 @@ const authOptions: BetterAuthOptions = {
           return Promise.resolve({
             data: { ...user, email: normalizeIdentityEmail(user.email) },
           });
+        },
+      },
+    },
+    session: {
+      create: {
+        // Activate a single-org user's organization BEFORE the session is
+        // written anywhere: this hook's returned data is what reaches
+        // secondaryStorage (Redis) and the session cookie cache, and a
+        // database hook fires for every session-creation path (email,
+        // social OAuth, SSO callback, passkey) — unlike the route-matched
+        // after-hooks that missed Microsoft logins entirely. See
+        // sole-org-auto-activation.ts for the full rationale.
+        async before(session) {
+          return { data: await withSoleOrganizationActivated(session) };
         },
       },
     },

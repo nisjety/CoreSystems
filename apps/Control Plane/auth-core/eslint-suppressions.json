@@ -1,9 +1,4 @@
 {
-  "src/auth/user-service-integration.plugin.ts": {
-    "@typescript-eslint/no-explicit-any": { "count": 9 },
-    "@typescript-eslint/no-unsafe-call": { "count": 8 },
-    "@typescript-eslint/no-unused-vars": { "count": 6 }
-  },
   "src/internal/user-service-grpc.client.ts": {
     "@typescript-eslint/no-explicit-any": { "count": 20 },
     "@typescript-eslint/no-redundant-type-constituents": { "count": 1 },

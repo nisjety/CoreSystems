@@ -8,10 +8,9 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 import { APIError, createAuthMiddleware } from 'better-auth/api';
 import type { BetterAuthPlugin } from 'better-auth';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { redisSecondaryStorage } from '../db/redis';
 import { AuthIntegrationService } from '../internal/auth-integration.service';
 
 let authIntegrationService: AuthIntegrationService | null = null;
@@ -22,76 +21,14 @@ export function setAuthIntegrationService(service: AuthIntegrationService) {
   console.log('✅ [Plugin] AuthIntegrationService set successfully');
 }
 
-/**
- * A brand-new Better Auth session never carries `activeOrganizationId` —
- * Better Auth only sets it once something explicitly calls
- * `/organization/set-active`, which today only happens from the manual
- * org-switcher UI. A user who belongs to exactly one organization has
- * nothing to actually choose, so every fresh sign-in otherwise lands them
- * in a broken "no active org" state (every org-scoped request fails) until
- * they manually switch once. This closes that gap without touching
- * multi-org accounts, where the ambiguity is real and switching stays a
- * deliberate user action.
- *
- * Writes both backing stores directly (Redis via the same
- * `secondaryStorage` Better Auth itself reads sessions from, plus Postgres
- * for any reader that goes straight to the DB) rather than calling
- * `auth.api.setActiveOrganization` — that endpoint authenticates the caller
- * from cookies on the INCOMING request, which for a just-created session
- * during its own sign-in hook don't exist yet.
- */
-async function autoActivateSoleOrganization(
-  userId: string,
-  sessionToken: string,
-): Promise<string | undefined> {
-  try {
-    const memberships = await db
-      .select({ organizationId: schema.member.organizationId })
-      .from(schema.member)
-      .where(eq(schema.member.userId, userId));
-    if (memberships.length !== 1) return undefined;
-    const organizationId = memberships[0].organizationId;
-
-    const raw = await redisSecondaryStorage.get(sessionToken);
-    if (raw) {
-      const cached = JSON.parse(raw) as {
-        session?: { activeOrganizationId?: string | null; expiresAt?: string };
-      };
-      if (cached.session && !cached.session.activeOrganizationId) {
-        const expiresAtMs = cached.session.expiresAt
-          ? new Date(cached.session.expiresAt).getTime()
-          : Date.now();
-        const ttlSeconds = Math.max(
-          1,
-          Math.floor((expiresAtMs - Date.now()) / 1000),
-        );
-        cached.session.activeOrganizationId = organizationId;
-        await redisSecondaryStorage.set(
-          sessionToken,
-          JSON.stringify(cached),
-          ttlSeconds,
-        );
-      }
-    }
-
-    await db
-      .update(schema.session)
-      .set({ activeOrganizationId: organizationId })
-      .where(eq(schema.session.token, sessionToken));
-
-    console.log(
-      `✅ [Plugin] Auto-activated sole organization ${organizationId} for user ${userId}`,
-    );
-    return organizationId;
-  } catch (error) {
-    // Best-effort UX enhancement — never let this break sign-in itself.
-    console.error(
-      '⚠️ [Plugin] Auto-activate sole organization failed:',
-      error,
-    );
-    return undefined;
-  }
-}
+// Sole-organization auto-activation used to live here as a route-matched
+// post-hoc patcher (Redis blob patch + Postgres UPDATE). It never fired on
+// Microsoft logins: `/sign-in/social` isn't matched by the email sign-in
+// matcher, and on `/callback/:id` the after-hook context carries no
+// `user`/`account`, so the handler bailed before reaching it. It now runs
+// as a `databaseHooks.session.create.before` hook instead — see
+// sole-org-auto-activation.ts — which covers every session-creation path
+// and lands the org id in the session before any store or cookie sees it.
 
 export function userServiceIntegrationPlugin(): BetterAuthPlugin {
   return {
@@ -134,20 +71,29 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
               return;
             }
 
-            // Try to get user from different context properties
-            const user =
-              ctx.context.user ||
+            // Try to get user from different context properties. `returned`
+            // is not part of the typed hook context, so narrow it once
+            // instead of casting to `any` at every read.
+            const contextWithReturned = ctx.context as {
+              returned?: {
+                user?: RegisteredUserLike;
+                data?: { user?: RegisteredUserLike };
+              };
+            };
+            const user = (ctx.context.user ||
               ctx.context.newUser ||
-              (ctx.context as any).returned?.user ||
-              (ctx.context as any).returned?.data?.user;
+              contextWithReturned.returned?.user ||
+              contextWithReturned.returned?.data?.user) as unknown as
+              | RegisteredUserLike
+              | undefined;
 
             console.log('🔍 [Plugin Debug] User extraction:', {
               contextUser: !!ctx.context.user,
               contextNewUser: !!ctx.context.newUser,
-              returnedUser: !!(ctx.context as any).returned?.user,
-              returnedDataUser: !!(ctx.context as any).returned?.data?.user,
-              returnedKeys: (ctx.context as any).returned
-                ? Object.keys((ctx.context as any).returned as object)
+              returnedUser: !!contextWithReturned.returned?.user,
+              returnedDataUser: !!contextWithReturned.returned?.data?.user,
+              returnedKeys: contextWithReturned.returned
+                ? Object.keys(contextWithReturned.returned)
                 : null,
             });
 
@@ -177,13 +123,6 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
             const user = ctx.context.user;
             const newSession = ctx.context.newSession;
             if (!user || !newSession?.session) return;
-            const activatedOrgId = await autoActivateSoleOrganization(
-              user.id,
-              newSession.session.token,
-            );
-            if (activatedOrgId) {
-              (newSession.session as any).activeOrganizationId = activatedOrgId;
-            }
             if (!authIntegrationService) return;
             const headers = ctx.request?.headers;
             const userAgent = headers?.get('user-agent') ?? undefined;
@@ -203,14 +142,15 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
               provider: 'email',
               // Better Auth does NOT set activeOrganizationId at raw sign-in
               // time; the org plugin only sets it after an explicit
-              // /organization/set-active call. autoActivateSoleOrganization
-              // above makes that call implicitly for single-org accounts and
-              // patches this in-memory session object, so this reads the
-              // freshly-activated id on that path, a carried-over id on
-              // re-authentication, or undefined for a genuinely org-less /
-              // multi-org session still awaiting a manual switch.
-              activeOrganizationId:
-                (newSession.session as any).activeOrganizationId ?? undefined,
+              // /organization/set-active call. The session.create.before
+              // database hook (sole-org-auto-activation.ts) fills it for
+              // single-org accounts before the session is stored, so this
+              // reads the freshly-activated id on that path, a carried-over
+              // id on re-authentication, or undefined for a genuinely
+              // org-less / multi-org session still awaiting a manual switch.
+              activeOrganizationId: sessionActiveOrganizationId(
+                newSession.session,
+              ),
             });
           }),
         },
@@ -242,19 +182,14 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
         {
           matcher: ({ path }) => (path ?? '').startsWith('/callback/'),
           handler: createAuthMiddleware(async (ctx) => {
-            const user = ctx.context.user;
-            const account = ctx.context.account;
+            // `user`/`account` are untyped on the after-hook context; narrow
+            // them once to the structural shapes this handler reads.
+            const user = ctx.context.user as OAuthCallbackUser | undefined;
+            const account = ctx.context.account as
+              | OAuthCallbackAccount
+              | undefined;
             const newSession = ctx.context.newSession;
             if (!user || !account) return;
-            if (newSession?.session) {
-              const activatedOrgId = await autoActivateSoleOrganization(
-                user.id,
-                newSession.session.token,
-              );
-              if (activatedOrgId) {
-                (newSession.session as any).activeOrganizationId = activatedOrgId;
-              }
-            }
             if (!authIntegrationService) return;
 
             const headers = ctx.request?.headers;
@@ -271,23 +206,20 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
               `🔗 [Plugin] OAuth callback: ${user.email}, provider: ${account.providerId}, isNewUser: ${isNewUser}`,
             );
 
+            // The resolve* helpers take loose provider payloads; the typed
+            // Better Auth account object is narrowed once here.
+            const accountRecord = account as unknown as Record<string, unknown>;
+
             if (isNewUser) {
               // Brand-new user registered via OAuth
-              const providerAccountId = this.resolveProviderAccountId(
-                account,
+              const providerAccountId = resolveProviderAccountId(account);
+              const scopesGranted = resolveScopesGranted(accountRecord);
+              const tenantId = resolveTenantID(accountRecord);
+              const emailFromProvider = resolveProviderEmail(
                 user,
+                accountRecord,
               );
-              const scopesGranted = this.resolveScopesGranted(account);
-              const tenantId = this.resolveTenantID(account, user);
-              const emailFromProvider = this.resolveProviderEmail(
-                account,
-                user,
-              );
-              const profileHints = this.resolveProfileHints(account, user);
-              const metadata = {
-                accountId: providerAccountId,
-                providerId: account.providerId,
-              };
+              const profileHints = resolveProfileHints(user, accountRecord);
               await authIntegrationService.handleUserRegistration({
                 id: user.id,
                 email: user.email,
@@ -306,11 +238,9 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
               });
             } else {
               // Existing user - account linking
-              const providerAccountId =
-                (account as { accountId?: string }).accountId || account.id;
-              const tenantId = this.resolveTenantID(account, user);
-              const profileHints = this.resolveProfileHints(account, user);
-              const scopesGranted = this.resolveScopesGranted(account);
+              const providerAccountId = resolveProviderAccountId(account);
+              const profileHints = resolveProfileHints(user, accountRecord);
+              const scopesGranted = resolveScopesGranted(accountRecord);
 
               await authIntegrationService.handleAccountLinked({
                 id: user.id,
@@ -335,12 +265,13 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
                 userAgent,
                 provider: account.providerId || 'oauth',
                 // Better Auth does not set activeOrganizationId during the OAuth
-                // callback either; autoActivateSoleOrganization above covers
-                // single-org accounts and patches this in-memory object, so
+                // callback either; the session.create.before database hook
+                // (sole-org-auto-activation.ts) covers single-org accounts, so
                 // this reads the freshly-activated id, a carried-over id on
                 // re-authentication, or undefined pending a manual switch.
-                activeOrganizationId:
-                  (newSession.session as any).activeOrganizationId ?? undefined,
+                activeOrganizationId: sessionActiveOrganizationId(
+                  newSession.session,
+                ),
               });
             }
           }),
@@ -390,8 +321,10 @@ export function userServiceIntegrationPlugin(): BetterAuthPlugin {
             if (!user) return;
             // ctx.context.session is the session being terminated; it carries
             // activeOrganizationId when the user had an active org in this session.
-            const activeOrganizationId =
-              (ctx.context.session as any)?.activeOrganizationId ?? undefined;
+            const terminatedSession = ctx.context.session as object | null;
+            const activeOrganizationId = terminatedSession
+              ? sessionActiveOrganizationId(terminatedSession)
+              : undefined;
             await authIntegrationService.handleUserLogout({
               userId: user.id,
               email: user.email,
@@ -443,6 +376,59 @@ function extractSessionFromCookies(
     cookies['session_token'] ||
     cookies['session']
   );
+}
+
+/**
+ * Minimal structural shape of the user object surfaced by the sign-up hook
+ * context; the concrete object varies by Better Auth flow/version.
+ */
+type RegisteredUserLike = {
+  id: string;
+  email: string;
+  name?: string | null;
+  emailVerified?: boolean | null;
+};
+
+/**
+ * Structural shapes of the user/account objects the OAuth callback hook
+ * reads. They arrive untyped (`any`) on the after-hook context, so the
+ * handler narrows to exactly the fields it consumes.
+ */
+type OAuthCallbackUser = {
+  id: string;
+  email: string;
+  name?: string | null;
+  image?: string | null;
+  emailVerified?: boolean | null;
+  createdAt?: Date | string;
+};
+
+type OAuthCallbackAccount = {
+  id: string;
+  accountId?: string | null;
+  providerId?: string | null;
+};
+
+/**
+ * `activeOrganizationId` is an organization-plugin field, absent from the
+ * core Session type; read it structurally instead of via `any`. Preserves
+ * the historical `?? undefined` semantics (null becomes undefined).
+ */
+function sessionActiveOrganizationId(session: object): string | undefined {
+  const value = (session as { activeOrganizationId?: string | null })
+    .activeOrganizationId;
+  return value ?? undefined;
+}
+
+/**
+ * Prefer the provider-side account id, fall back to the row id — the same
+ * fallback the account-linking path has always used.
+ */
+function resolveProviderAccountId(account: {
+  accountId?: string | null;
+  id: string;
+}): string {
+  return account.accountId || account.id;
 }
 
 function resolveScopesGranted(account: Record<string, unknown>): string[] {
