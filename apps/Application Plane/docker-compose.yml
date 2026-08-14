@@ -143,6 +143,13 @@ services:
             # `application-plane` project uses. Both are kept in step.
             CONTROL_SPACE_REGISTRATION_URL: ${CONTROL_SPACE_REGISTRATION_URL:-http://user-core:3012/api/v1/internal/spaces/register}
             APPLICATION_SPACE_LIFECYCLE_TOKEN: ${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}
+            # Organization room membership sync (convex/spaceMembershipSync.ts).
+            # org-core owns the roster; Control owns the Space membership. A
+            # separate org-core token from the lifecycle one, so read access to
+            # every organization's roster can be rotated without also rotating
+            # the credential that registers Spaces.
+            APPLICATION_ORG_CORE_SERVICE_TOKEN: ${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}
+            CONTROL_SPACE_MEMBERSHIP_BASE_URL: ${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}
         networks:
             - app-net
         healthcheck:

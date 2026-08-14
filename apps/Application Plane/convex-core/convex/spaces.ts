@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { assertServiceKey, requireViewerMembership } from "./authz";
 import {
@@ -358,6 +358,25 @@ export const ensureOrganizationRoomForGateway = mutation({
     if (!space) throw new Error("organization room creation failed");
     const event = await appendLifecycleEvent(ctx, space, now);
     return { ...space, lifecycleEvent: event };
+  },
+});
+
+/** Every organization room Control has registered active, for the re-sync pass. */
+export const listActiveOrganizationRooms = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const spaces = await ctx.db.query("spaces").collect();
+    return spaces
+      .filter(
+        (space: any) =>
+          space.isOrganizationRoom === true &&
+          space.kind === "room" &&
+          space.lifecycle === "active",
+      )
+      .map((space: any) => ({
+        spaceRef: space.spaceRef,
+        externalOrgId: space.externalOrgId,
+      }));
   },
 });
 
@@ -1337,6 +1356,15 @@ export const acknowledgeRegistrationClaim = internalMutation({
       const updated = await ctx.db.get(space._id);
       if (!updated) throw new Error("Space activation update failed");
       await appendLifecycleEvent(ctx, updated, args.now);
+      // Only now is the room usable: Control refuses a membership write to a
+      // Space it has not registered active, so scheduling the roster sync any
+      // earlier would guarantee a rejection.
+      if ((updated as any).isOrganizationRoom === true) {
+        await ctx.scheduler.runAfter(0, internal.spaceMembershipSync.syncOrganizationRoom, {
+          spaceRef: updated.spaceRef,
+          externalOrgId: updated.externalOrgId,
+        });
+      }
     }
     return delivery;
   },
