@@ -53,6 +53,11 @@ function renderSpacePage() {
   ))
 }
 
+// No I18nProvider wraps these renders, so useI18n() resolves to the module's
+// fallback context — whose `tr` always picks the Norwegian argument, exactly
+// matching defaultLocale ('no'). That is real default behavior, not a test
+// shortcut: a fresh session with no stored locale preference renders
+// Norwegian, so these assertions pin what an actual first-time user sees.
 describe('SpacePage', () => {
   beforeEach(() => {
     spacesClient.getSpaceContext.mockReset()
@@ -84,7 +89,7 @@ describe('SpacePage', () => {
     recheck!()
     await waitFor(() => expect(spacesClient.getSpaceContext).toHaveBeenCalledTimes(2))
 
-    expect(await screen.findByRole('heading', { name: 'Space unavailable' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Rom utilgjengelig' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Personal Space' })).toBeNull()
     expect(screen.queryByRole('link', { name: 'Chat' })).toBeNull()
   })
@@ -109,12 +114,12 @@ describe('SpacePage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Personal Space' })).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'Samtaler' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Room pulse' })).toBeTruthy()
-    expect(screen.getByText('Verevon is working')).toBeTruthy()
-    expect(screen.getByRole('link', { name: /Verevon is working.*Prepare launch brief/ }).getAttribute('href')).toBe(
+    expect(screen.getByRole('heading', { name: 'Rompuls' })).toBeTruthy()
+    expect(screen.getByText('Verevon jobber')).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Verevon jobber.*Prepare launch brief/ }).getAttribute('href')).toBe(
       '/chat?thread_id=thread_running',
     )
-    expect(screen.queryByRole('link', { name: 'Open Agent Studio' })).toBeNull()
+    expect(screen.queryByRole('link', { name: 'Åpne Agent Studio' })).toBeNull()
   })
 
   it('keeps the Space composer link encoded without rendering a duplicate Space overview rail', async () => {
@@ -152,13 +157,13 @@ describe('SpacePage', () => {
       </Router>
     ))
 
-    expect(await screen.findByRole('link', { name: /^Launch plan.*Latest release preparation.*Working/ }).then((link) => link.getAttribute('href'))).toBe(
+    expect(await screen.findByRole('link', { name: /^Launch plan.*Latest release preparation.*Arbeider/ }).then((link) => link.getAttribute('href'))).toBe(
       '/chat?thread_id=thread%20%2F%20launch',
     )
-    expect(screen.getByRole('link', { name: 'Message Personal Space' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'Skriv til Personal Space' }).getAttribute('href')).toBe(
       '/chat?space_ref=space%20%2F%20personal',
     )
-    expect(screen.getByRole('link', { name: /^Retro notes.*Capture the learnings.*Completed/ })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /^Retro notes.*Capture the learnings.*Fullført/ })).toBeTruthy()
     expect(screen.queryByRole('complementary', { name: 'Space overview' })).toBeNull()
   })
 
@@ -167,22 +172,22 @@ describe('SpacePage', () => {
     spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [] })
     renderSpacePage()
 
-    expect(await screen.findByRole('heading', { name: 'Explore bots in Agent Studio' })).toBeTruthy()
-    expect(screen.getByText('Personal room')).toBeTruthy()
-    expect(screen.queryByText('Shared workroom')).toBeNull()
+    expect(await screen.findByRole('heading', { name: 'Utforsk boter i Agent Studio' })).toBeTruthy()
+    expect(screen.getByText('Personlig rom')).toBeTruthy()
+    expect(screen.queryByText('Delt arbeidsrom')).toBeNull()
     expect(screen.queryByRole('link', { name: 'Chat' })).toBeNull()
-    expect(screen.getByRole('link', { name: 'Start a conversation' })).toBeTruthy()
-    expect(screen.getByRole('link', { name: 'Open Agent Studio' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'Start en samtale' })).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Åpne Agent Studio' }).getAttribute('href')).toBe(
       '/agents?agent=chatbot&view=playground',
     )
-    expect(screen.getByRole('link', { name: 'Message Personal Space' }).getAttribute('href')).toBe(
+    expect(screen.getByRole('link', { name: 'Skriv til Personal Space' }).getAttribute('href')).toBe(
       '/chat?space_ref=space_personal_1',
     )
 
     fireEvent.click(screen.getByRole('tab', { name: 'Medlemmer' }))
     // The Members tab no longer says a roster is unpublished — Control now
     // publishes one, so the tab states whose list it is showing instead.
-    expect(screen.getByText(/the roster below is Control/)).toBeTruthy()
+    expect(screen.getByText(/listen under kommer fra Control/)).toBeTruthy()
   })
 
   it('does not mistake a failed conversation projection for a fresh Space', async () => {
@@ -190,10 +195,10 @@ describe('SpacePage', () => {
     spacesClient.getSpaceThreads.mockRejectedValue(new Error('projection unavailable'))
     renderSpacePage()
 
-    expect(await screen.findByText(/Space conversation activity is temporarily unavailable/)).toBeTruthy()
+    expect(await screen.findByText(/Samtaleaktiviteten i rommet er midlertidig utilgjengelig/)).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'Start the conversation in Personal Space' })).toBeNull()
-    expect(screen.getByRole('heading', { name: 'Conversation record unavailable' })).toBeTruthy()
-    expect(screen.queryByRole('link', { name: 'Open Agent Studio' })).toBeNull()
+    expect(screen.getByRole('heading', { name: 'Samtalearkivet er utilgjengelig' })).toBeTruthy()
+    expect(screen.queryByRole('link', { name: 'Åpne Agent Studio' })).toBeNull()
   })
 
   it('keeps a newer thread projection available when an older request fails late', async () => {
@@ -212,10 +217,10 @@ describe('SpacePage', () => {
     expect(await screen.findByRole('heading', { name: 'Personal Space' })).toBeTruthy()
     recheck!()
 
-    expect(await screen.findByRole('link', { name: 'Open Agent Studio' })).toBeTruthy()
+    expect(await screen.findByRole('link', { name: 'Åpne Agent Studio' })).toBeTruthy()
     staleThreads.reject(new Error('stale projection failed'))
 
-    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Conversation record unavailable' })).toBeNull())
-    expect(screen.getByRole('link', { name: 'Open Agent Studio' })).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Samtalearkivet er utilgjengelig' })).toBeNull())
+    expect(screen.getByRole('link', { name: 'Åpne Agent Studio' })).toBeTruthy()
   })
 })
