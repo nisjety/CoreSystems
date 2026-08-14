@@ -1024,6 +1024,16 @@ impl SessionCore for MockSessionCore {
         ))
     }
 
+    async fn prepare_scheduled_run_thread(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::PrepareScheduledRunThreadRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::PrepareScheduledRunThreadResponse>, Status>
+    {
+        Err(Status::unimplemented(
+            "prepare_scheduled_run_thread not needed in this test",
+        ))
+    }
+
     async fn replay_thread(
         &self,
         _: TReq<ReplayThreadRequest>,

@@ -3526,6 +3526,18 @@ mod tests {
             Err(Status::unimplemented("delete_threads not needed in test"))
         }
 
+        async fn prepare_scheduled_run_thread(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::PrepareScheduledRunThreadRequest>,
+        ) -> Result<
+            Response<mp_contracts::model_plane::v1::PrepareScheduledRunThreadResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented(
+                "prepare_scheduled_run_thread not needed in test",
+            ))
+        }
+
         async fn delete_space_threads(
             &self,
             _: Request<mp_contracts::model_plane::v1::DeleteSpaceThreadsRequest>,

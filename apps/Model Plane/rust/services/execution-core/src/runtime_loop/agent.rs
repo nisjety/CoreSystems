@@ -2291,6 +2291,15 @@ mod tests {
             Err(Status::unimplemented("delete_space_threads not used"))
         }
 
+        async fn prepare_scheduled_run_thread(
+            &self,
+            _: Request<pb::PrepareScheduledRunThreadRequest>,
+        ) -> Result<Response<pb::PrepareScheduledRunThreadResponse>, Status> {
+            Err(Status::unimplemented(
+                "prepare_scheduled_run_thread not used",
+            ))
+        }
+
         async fn append_message(
             &self,
             request: Request<pb::AppendMessageRequest>,
