@@ -59,9 +59,10 @@ describe('PlaneTokenController service issuance audit', () => {
       issuePlaneToken: jest.fn().mockReturnValue({ token: mintedToken }),
     };
     const audit = {
-      publishAuditDurable: jest
-        .fn()
-        .mockResolvedValue({ stream: 'VEREVON_CONTROL_OBSERVABILITY', seq: 41 }),
+      publishAuditDurable: jest.fn().mockResolvedValue({
+        stream: 'VEREVON_CONTROL_OBSERVABILITY',
+        seq: 41,
+      }),
     };
     const controller = new PlaneTokenController(
       tokens as never,

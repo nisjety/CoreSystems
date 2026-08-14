@@ -35,9 +35,9 @@ describe('invitation email contract', () => {
     expect(canonicalPublicOrigin('http://127.0.0.1:5173', false)).toBe(
       'http://127.0.0.1:5173',
     );
-    expect(() => canonicalPublicOrigin('http://verevon.example', false)).toThrow(
-      'canonical HTTPS origin',
-    );
+    expect(() =>
+      canonicalPublicOrigin('http://verevon.example', false),
+    ).toThrow('canonical HTTPS origin');
     expect(() => canonicalPublicOrigin('http://localhost:5173', true)).toThrow(
       'canonical HTTPS origin',
     );
