@@ -7,6 +7,17 @@
 > here was resolved around 2026-07-16/17. Service-port/topology details below
 > were not individually re-verified in this pass.
 
+> **2026-08-14 Quarry browser update:** a focused code/runtime pass now proves
+> the local Chromium driver behind Quarry's per-session DNS-pinned HTTP/CONNECT
+> proxy. Private/metadata policy, rebinding/pinning, a public redirect to an
+> ungranted target, iframe, XHR/fetch, image, and script-navigation requests
+> fail closed with zero private-server hits and produce bounded evidence.
+> Remote browser providers remain unpromoted; native AX/OOPIF stale-target,
+> upload/download quarantine, signed dialog approval replay, and authoritative
+> provider-meter work remain open. This scoped result supersedes older claims
+> that local browser redirect/DNS containment was still absent; it does not
+> re-certify the full compose/runtime inventory below.
+
 > **Verified 2026-07-11** (host-curl + source + compose): All service ports below confirmed live (200) — quarry-edge `:8082`, quarry-control `:8081`, imports-api `:3025`, integration-api `:3026`, integration-webhook-normalizer `:3036`, finspo-api `:3130`, and shipping-core `:3156`. Quarry stub claims re-confirmed in source. Corrections applied this pass: **shipping-core** and **integration-email-worker** were missing from the topology and have been added; **support-worker** was wrongly described as "not part of the main compose path" — it is a default (non-profile-gated) compose service and is running. autocomplete-core correctly remains absent from the Ingestion compose (it is referenced by verevonv3 on `:3219`). Containers report `(unhealthy)` only because their exec-based healthchecks fail against a corrupted containerd store; the processes serve traffic normally.
 
 ## Executive Summary
@@ -134,6 +145,23 @@ flowchart TD
 - `quarry-control` owns resource/history APIs and the stable operator surface.
 - `quarry-orchestrator` runs Temporal workflows rather than exposing business logic directly.
 
+### Agent web and browser capability state — 2026-08-14
+
+- Quarry provides the native `search`/read/crawl/browser acquisition path; it
+  does not use Firecrawl as a dependency, control plane, or fallback.
+- Model Plane owns planning and replanning, BrowserBroker owns exact grants,
+  Quarry owns acquisition, execution/rejection, observations, and evidence,
+  and Data Plane owns only promoted durable knowledge.
+- Local Chromium advertises isolated egress and security evidence only when
+  constructed with Quarry's pinned proxy. Remote providers currently fail that
+  promotion gate.
+- Opaque semantic element references and receipts are the agent-facing
+  direction. Native AX/OOPIF stale-root/child-target proof, artifact transfer
+  quarantine, and signed dialog approval replay are still required before
+  those effect classes can be called complete.
+- Provider cost is currently unknown. A hard `max_cost_usd` request must be
+  rejected rather than accepted without an authoritative per-action meter.
+
 ### Cross-plane dependencies
 
 - Model Plane: `quarry-edge` calls Model Plane invoke/planning paths for answer, query, and agent-style flows.
@@ -143,6 +171,9 @@ flowchart TD
 ### Observed runtime signals
 
 - `QUARRY_EDGE_AUTH_DEV_BYPASS=1` is explicitly blocked in production by startup checks.
+- Local Chromium's `isolated_egress` and `security_evidence` flags are dynamic
+  and true only when the per-session pinned proxy is installed; equivalent
+  flags remain false for unproved remote drivers.
 - Compose comments state the model gateway `/v1/invoke/stream` path is still a stub on the downstream side, so some streamed answer flows are not end-to-end complete.
 - `quarry-control` mounts a broad resource surface, but some schedule/resource families are intentionally empty or stubbed while schema/Temporal wiring catches up.
 
@@ -305,12 +336,18 @@ This section intentionally excludes normal test mocks and focuses on runtime-rel
    - Concrete SDK client wiring is deferred; current path documents the upcoming swap.
 
 6. `Quarry-v2/crates/quarry-runtime/src/request_queue.rs`
-   - Dragonfly-backed and Postgres-backed request queues are still TODO.
-   - That means durable multi-worker queue implementations are not fully converged in the runtime.
+   - **Reconciled 2026-08-14:** the Rust Postgres queue/frontier implementation
+     exists and is tested but has no production caller. Production crawl/batch
+     durability is instead provided by Quarry Control plus Temporal workflows.
+   - Treat the unused queue as a resource/API convergence question, not as
+     evidence that the active production workflow is an in-memory-only queue.
 
 7. `Quarry-v2/crates/quarry-runtime/src/artifact_store.rs`
    - Contains `unimplemented!()` paths.
-   - These should be treated as live partial surfaces until proven unreachable in production.
+   - These should be treated as historical audit findings until reachability is
+     source-verified. Independently, browser upload/download capabilities remain
+     false until quarantine, correlation, malware/type/size, and OOPIF proof is
+     complete.
 
 8. `Quarry-v2/lab/evals/src/bench_runner.rs`
    - Several evaluation modes return explicit stub/pending notes.
@@ -440,7 +477,13 @@ These are candidates only. Do not delete until the cross-plane deletion register
 2. Verify whether `integration-core` has any remaining runtime consumers.
 3. Trace actual Frontend/Application calls into `integration-api`, `imports-api`, `autocomplete-core`, and Quarry to identify dead public surfaces.
 4. Confirm whether Quarry schedule aliases are now backed by a real Temporal SDK client anywhere outside the sampled code.
-5. Use the later stale-doc deletion register to separate:
+5. Prove native AX/OOPIF stale-target behavior, artifact transfer quarantine,
+   signed dialog approval replay, and remote-provider egress parity before
+   promoting the next browser capability.
+6. Measure local Chromium and any experimental Quarry Lite tier on cold/warm
+   startup, usable-observation latency, CPU/RSS, snapshot size, verified-action
+   cost, and compatibility-triggered fallback.
+7. Use the later stale-doc deletion register to separate:
    - historical planning docs worth archiving,
    - misleading docs to update,
    - safe-to-delete docs that are no longer referenced.

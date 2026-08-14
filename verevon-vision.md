@@ -1,6 +1,6 @@
 # Verevon Vision
 
-**Last updated:** 2026-08-03. Builds on `apps/Frontend Plane/verevonv3/apps/verevon-web/COMPETITOR-ANALYSIS.md`
+**Last updated:** 2026-08-14. Builds on `apps/Frontend Plane/verevonv3/apps/verevon-web/COMPETITOR-ANALYSIS.md`
 (2026-07-20, verevon-web homepage vs. 10 Nordic + world competitors) and
 `verevon-feature-map.md` §6.4–6.6a (the "north star," the curated-wedge
 doctrine, and the two-trust-levers pattern). This document exists to answer
@@ -14,11 +14,19 @@ verify implemented flows, fix runtime bugs, and continue iterating. The vision
 does not call for an external production launch before the local stack and its
 core workflows are complete and stable.
 
-**Current execution ledger — 2026-08-05.** The Vision remains the product
+**Current execution ledger — 2026-08-14.** The Vision remains the product
 direction. Its current implementation status and ordered delivery work are
 maintained in
-[verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-05),
+[verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14),
 which resolves conflicting dated status claims across the companion documents.
+
+**Scope coherence update — 2026-08-14.** The product target is a first-class
+Verevon Space: one person, room, project, or case has one collaboration
+authority context, agent context, workspace, queue projection, activity
+history, and presence across supported surfaces. It is an execution target,
+not a claim that today's organization/thread/project identifiers already
+compose this way. The QM comparison plan supplies the staged adoption path;
+CoreSystem retains authority at Control and at each effect-owning plane.
 
 **Architecture source set — 2026-08-03:**
 
@@ -32,22 +40,32 @@ Control/Application own identity, durable intent, policy, approval, and human
 review. Mem0 is a Data Plane design donor and benchmark target, not Verevon's
 canonical memory authority.
 
+**Quarry evidence update — 2026-08-14.** The web capability beneath this
+vision is first-party Quarry functionality, with no Firecrawl runtime or
+dependency. Local Chromium has now proved DNS-pinned outbound authority and
+fail-closed redirect/frame/XHR/subresource behavior, making the evidence moat
+material rather than merely architectural. This is not a blanket browser-fleet
+certificate: remote providers, native AX/OOPIF stale-target handling,
+upload/download quarantine, signed dialog approval replay, and authoritative
+provider metering remain gated. A driver is eligible only when its advertised
+capabilities are backed by current security evidence.
+
 ---
 
 ## 1. The thesis
 
 Verevon is an **AI-first organization workbench**, not a support-ticket tool
-wearing an AI badge. The operative claim, restated precisely: **the chat
-surface is the platform** — every capability a human can reach through a
-work surface (dashboard, inbox, tickets, agents, knowledge, social, studio)
-is also reachable as an API the chat/agent loop can call, under the same
-governance (approval, audit, cost, retention) a human-driven action would
-go through. "Every UI is an API" is not a slogan here — as of 2026-08-01 it
-is demonstrably true for a growing slice of the surface: chat can look up a
-shipping quote, query a connected ERP via MCP, run a sandboxed code
-interpreter, generate a real spreadsheet, and search the org's own knowledge
-base — all through the same conversational entry point a human uses elsewhere
-in the product.
+wearing an AI badge. The operative direction is that the chat surface becomes
+the universal **governed orchestration** surface: an eligible capability a
+human can reach through dashboard, inbox, tickets, agents, knowledge, social,
+or studio should have a versioned owner-plane API that Chat may request under
+the same policy, approval, cost, retention, and audit rules. This is not a
+claim that every visible action is already executable by both actors. The V3
+registry is currently typed UX metadata while gateway dispatch and owner-plane
+validation are separate; Model eligibility must be an actor-specific filtered
+view, and human-only grants, impersonation, approvals, and administration are
+never Model-callable. The Action Catalog program is the work that closes that
+gap without centralizing effect authority in the gateway or Model Plane.
 
 The architecture synthesis adds one precision: chat is the **universal
 governed orchestration surface**, not a second authority and not a replacement
@@ -269,7 +287,9 @@ into ranked improvements rather than generic thumbs-down feedback.
 - **Quarry captures evidence and executes browser procedures.** It owns secure
   acquisition, runtime selection, observations, adaptive targets, challenge
   intelligence, typed browser actions, change impact, deterministic browser
-  verification, and browser proof receipts.
+  verification, and browser proof receipts. Its local Chromium driver is the
+  currently proved governed browser path; other drivers remain unavailable to
+  agents until they independently satisfy the same containment contract.
 - **Data Plane knows.** It owns documents, chunks, embeddings, retrieval,
   GraphRAG, wiki, source logs, canonical organizational memory,
   validity/supersession/contradiction, retention, and deletion of canonical

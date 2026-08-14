@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@solidjs/testing-library'
+import { fireEvent, render, screen, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { SpaceCockpit } from './SpaceCockpit'
@@ -30,7 +30,7 @@ describe('SpaceCockpit', () => {
 
     it('says plainly that this is a missing connection, not an empty room', () => {
       render(() => <SpaceCockpit initialTab="arbeid" />)
-      expect(screen.getByText(/manglende kobling, ikke et tomt rom/)).toBeTruthy()
+      expect(within(screen.getByRole('tabpanel')).getByText(/manglende kobling, ikke et tomt rom/)).toBeTruthy()
     })
 
     it('attributes Members to Control Plane, which owns membership', () => {
@@ -69,6 +69,14 @@ describe('SpaceCockpit', () => {
       expect(screen.getByRole('tab', { name: 'Arbeid' }).getAttribute('aria-selected')).toBe('true')
     })
 
+    it('moves focus with its roving selection when using arrow keys', () => {
+      render(() => <SpaceCockpit initialTab="chat" />)
+      const first = screen.getByRole('tab', { name: 'Samtaler' })
+      first.focus()
+      fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
+      expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Arbeid' }))
+    })
+
     it('wraps around at the ends rather than dead-ending', () => {
       render(() => <SpaceCockpit initialTab="chat" />)
       const list = screen.getByRole('tablist')
@@ -90,6 +98,16 @@ describe('SpaceCockpit', () => {
       expect(screen.getByText('Standard')).toBeTruthy()
     })
 
+    it.each([
+      ['members', 'medlemmer', 'Medlemsinnhold'],
+      ['work', 'arbeid', 'Arbeidsinnhold'],
+      ['activity', 'aktivitet', 'Aktivitetsinnhold'],
+    ] as const)('keeps the legacy #%s link pointed at %s', (legacyHash, tab, label) => {
+      window.location.hash = `#${legacyHash}`
+      render(() => <SpaceCockpit tabs={{ [tab]: <p>{label}</p> }} />)
+      expect(screen.getByText(label)).toBeTruthy()
+    })
+
     it('respects initialTab when the URL carries no hash', () => {
       render(() => <SpaceCockpit initialTab="agent" />)
       expect(screen.getByRole('tab', { name: 'Agent' }).getAttribute('aria-selected')).toBe('true')
@@ -103,5 +121,14 @@ describe('SpaceCockpit', () => {
     expect(screen.getByRole('tab', { name: 'Samtaler' }).getAttribute('aria-controls')).toBe(
       'space-panel-chat',
     )
+  })
+
+  it('keeps every aria-controls target in the DOM, including inactive tabs', () => {
+    render(() => <SpaceCockpit initialTab="chat" />)
+    for (const tab of screen.getAllByRole('tab')) {
+      const panelId = tab.getAttribute('aria-controls')
+      expect(panelId).toBeTruthy()
+      expect(document.getElementById(panelId!)).toBeTruthy()
+    }
   })
 })

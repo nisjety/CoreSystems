@@ -1,5 +1,117 @@
 # Verevon UI/UX & Cowork Research: x.ai/bot and block/buzz (2026-08-13)
 
+> **Space UI update — 2026-08-14.** This addendum is the implementation
+> direction for `src/features/spaces`. It narrows the research below into a
+> desktop-first Space surface; it does not widen any plane's ownership or
+> claim that unavailable projections already exist.
+
+## Space UI direction: the calm control room
+
+### The decision
+
+Make a Space feel like a **shared room with a visible working pulse**, not a
+settings page and not an agent command centre. The visual character is a warm,
+high-contrast desk surface: one focused canvas, a quiet room rail, and a
+compact right-hand pulse. It borrows Buzz's central idea — humans and agents
+are first-class participants in the same room — while taking the useful part
+of Grok's interaction model: a named agent should be understandable at a
+glance and must visibly ask for a human when it cannot safely proceed.
+
+The supplied reference images reinforce the same composition:
+
+- a **persistent, scannable left rail** for rooms and people;
+- a **large central conversation/work canvas** that earns most of the screen;
+- a **compact contextual surface** rather than a permanently noisy dashboard;
+- soft containers, hairline borders, and status that communicates with text
+  and shape instead of colour alone.
+
+This is deliberately not a clone of Buzz, Grok, Slack, or a generic dark
+"agent cockpit." Verevon should retain its quiet neutral product palette and
+use a small warm-orange signal only for action, human attention, and active
+work. The memorable element is the *room pulse*: the Space header, agent
+presence, and activity rows make it possible to see what is moving without
+turning the page into a stream of opaque logs.
+
+### Source notes and guardrails
+
+| Input | What we adopt | What we do not copy |
+|---|---|---|
+| [Block Buzz](https://github.com/block/buzz) | Agents are room members; a room is the durable record of conversation, work, review, and evidence; activity is expressed as a readable action trajectory. | Buzz's protocol, relay, tenancy, identity, or permission model. Verevon keeps its existing plane boundaries and server-authoritative Space checks. |
+| [xAI Grok Bot overview](https://docs.x.ai/grok-bot/overview), [bots](https://docs.x.ai/grok-bot/bots), [chat and collaboration](https://docs.x.ai/grok-bot/chat-and-collaboration), and [computer and apps](https://docs.x.ai/grok-bot/computer-and-apps) | A named assistant with a concise status, a clear continuation point, and an unmistakable request for human intervention. | Treating chat as a secret channel, or implying that a person can grant execution authority from the UI. Computer takeover remains a separate Quarry/Model capability. |
+| Current xAI product documentation — [Grok workspaces](https://docs.x.ai/grok/user-guide) and [connectors](https://docs.x.ai/grok/connectors) | Keep collaboration and connected work legible in the room, with visible scoping. | Importing data-source or connector affordances before Verevon has a published Space projection for them. |
+
+The supplied `x.ai/bot` and earlier `docs.x.ai/grok-bot/*` URLs are retained
+as requested reference material. Their public contents were not reliably
+retrievable in this review pass, so no unsupported product claims from them
+are used as implementation requirements.
+
+### The screen architecture
+
+```text
+┌ Room rail ──────────┬ Main canvas ────────────────────────┬ Room pulse ──────┐
+│ space switcher      │ breadcrumb / room title / members   │ agent is working │
+│ room facts          │ view strip: Chat · Work · …         │ active work      │
+│ conversation list   │                                     │ needs attention  │
+│                      │ selected view                       │ recent movement  │
+│                      │                                     │                  │
+│                      │ contextual composer / next action   │                  │
+└──────────────────────┴─────────────────────────────────────┴──────────────────┘
+```
+
+At narrow widths the right pulse moves below the canvas and the room rail
+becomes a horizontally scrolling summary. The page must remain fully useful
+without a large-screen layout.
+
+### Content rules for the first implementation
+
+1. **The page header answers orientation in one scan.** Show the room's name,
+   kind, the signed-in member's role, a lifecycle label, and the small member
+   / active-work signals. Do not display internal references, revisions, or
+   plane names in the normal path.
+2. **Mount the existing six-view Space cockpit.** `Chat`, `Work`, `Knowledge`,
+   `Activity`, `Agent`, and `Members` remain deep-linkable. A view with no
+   published projection is an honest, designed placeholder that explains what
+   it will contain; it must never masquerade as empty data.
+3. **Make conversation the centre of gravity.** The Chat view offers the
+   existing, Space-scoped chat entry point and a short thread list. It does
+   not reimplement the chat composer or duplicate chat state.
+4. **Use a human-readable activity grammar.** The pulse and Activity view
+   use the existing verb / object / outcome rendering. Running and
+   approval-waiting work is surfaced above completed work; rows link to their
+   actual conversations.
+5. **Name the agent's state, never simulate it.** A running thread can say
+   “Verevon is working” and link to its conversation. With no active run,
+   say so. Do not invent members, agent capabilities, files, or approvals
+   until their owner plane publishes a Space projection.
+6. **Keep destructive controls out of the working rhythm.** Personal Space
+   deletion remains available but is visually isolated in the Members view.
+   Its authorization/purge distinction remains exactly as implemented.
+
+### Accessibility and interaction bar
+
+- Preserve the tablist's roving keyboard behavior and URL hash deep links.
+- Keep labels as text; icons only support them. Status must have a text
+  equivalent and sufficient contrast in both themes.
+- Maintain the membership revalidation and fail-closed state. A redesign must
+  not leave a previously authorized room visible after a failed recheck.
+- Honour `prefers-reduced-motion`; the active pulse may be calm but cannot be
+  the only indicator that work is ongoing.
+- All links to chat retain the existing Space/thread query parameters. The UI
+  is a projection over data, never an authority grant.
+
+### First implementation scope and explicit non-goals
+
+**In scope:** mount and polish the existing cockpit; add a room rail, a
+conversation-forward Chat view, an Activity view, a truthful Agent view, a
+membership view, responsive layout, and focused behavior tests.
+
+**Out of scope:** a new API endpoint, new Space membership actions, a real
+member roster, a new agent runtime, task teaching, a computer takeover,
+cross-plane delivery receipts, or simulated data. Those need their own
+owner-plane projections and contracts before they belong here.
+
+---
+
 ## 0. Scope, method, and confidence
 
 This document researches two external products for **UI/UX and collaborative

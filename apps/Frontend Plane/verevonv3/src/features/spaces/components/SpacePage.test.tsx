@@ -75,4 +75,31 @@ describe('SpacePage', () => {
     expect(screen.queryByRole('heading', { name: 'Personal Space' })).toBeNull()
     expect(screen.queryByRole('link', { name: 'Chat' })).toBeNull()
   })
+
+  it('composes the room projection into the cockpit with a visible work pulse', async () => {
+    spacesClient.getSpaceContext.mockResolvedValue(personalContext)
+    spacesClient.getSpaceThreads.mockResolvedValue({
+      ...personalContext,
+      threads: [
+        {
+          thread_id: 'thread_running',
+          space_id: 'space_personal_1',
+          title: 'Prepare launch brief',
+          preview: 'Collecting the latest release evidence.',
+          latest_run_status: 'running',
+          latest_run_updated_at: '2026-08-14T10:00:00Z',
+        },
+      ],
+    })
+
+    renderSpacePage()
+
+    expect(await screen.findByRole('heading', { name: 'Personal Space' })).toBeTruthy()
+    expect(screen.getByRole('tab', { name: 'Samtaler' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Room pulse' })).toBeTruthy()
+    expect(screen.getByText('Verevon is working')).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Verevon is working.*Prepare launch brief/ }).getAttribute('href')).toBe(
+      '/chat?thread_id=thread_running',
+    )
+  })
 })

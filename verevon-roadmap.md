@@ -1,6 +1,6 @@
 # Verevon Roadmap
 
-**Last updated:** 2026-08-05. Synthesizes `verevon-vision.md` (what Verevon
+**Last updated:** 2026-08-14. Synthesizes `verevon-vision.md` (what Verevon
 should become), `VEREVON.md` and `Verevon-ai-first.md` (what is verifiably
 live today), and `verevon-feature-map.md` (the feature-by-feature reality
 map, including its own §5 recommended sequence, which this roadmap absorbs
@@ -27,7 +27,7 @@ not swept under anything — §7 is the concrete plan to close it.
 
 ---
 
-## Current execution ledger — 2026-08-05
+## Current execution ledger — 2026-08-14
 
 This is the current execution source of truth for the six Verevon strategy
 documents. Their dated audit notes remain useful evidence, but where an older
@@ -39,6 +39,31 @@ the Feature Map's detailed capability analysis.
 the affected services, apply configuration or migrations, verify the running
 flow, fix what fails, and continue. No statement in this ledger authorizes or
 claims an external customer deployment.
+
+### 2026-08-14 delta: Space, operations, and scheduled work
+
+The current cross-plane program is now the
+[Verevon v3 × QM comparison and adoption plan](apps/Frontend%20Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md).
+It is authoritative for the Space sequences (R-1–R-5 and S0–S6) and uses
+three separate evidence states: source-verified, release-proven, and target.
+No sequence is complete merely because a source slice compiles.
+
+| Work | Current status | What is true now | What still closes it |
+| --- | --- | --- | --- |
+| Canonical Space and Action Catalog | `[~]` | Initial Application/Control/Model slices and V3 contract-drift guards exist. | ADR/ID inventory, resource-intersection enforcement, actor-specific owner contracts, migration/cutover evidence, and the Space cockpit. |
+| Release gates R-1–R-5 | `[~]` | Local contracts and several focused recovery/durability tests exist. | Immutable candidate, provider ZDR attestation, deployed approval continuation, notification/replay proof, and rollback rehearsal. |
+| Scheduled work S4.1 | `[~]` | Commit `fa2d1eff` adds a short-lived, owner-approved single-fire decision from Control; Capability Core verifies it and uses its bearer only for the direct Session Core preparation RPC; Session Core fences a deterministic `service:orchestrator-core` thread; Orchestrator preserves that prepared thread. Focused Control, Capability Core, Session Core, and Orchestrator checks pass. | Disposable end-to-end fire/revocation/ZDR tests; real Control → Session → Temporal → receipt observation; exact owner effect authorization; candidate/rollback evidence. |
+| Local stack | `[~]` | The canonical `build-verevon-services.sh` launcher rebuilt and started the selected dev stacks without rotating existing credentials; migration-version and environment checks passed. | Repeatable user journeys and fault/recovery drills for each claimed loop. |
+| Quarry agent web/browser | `[~]` | Quarry-native search/read/browser execution is retained. Local Chromium is dynamically promoted only with its DNS-pinned egress proxy; focused proxy/DNS and real-browser redirect/frame/XHR/subresource proof is green. | Keep remote providers disabled until equivalent containment proof; close native AX/OOPIF stale-target, artifact transfer/quarantine, dialog-approval replay, and authoritative provider-meter gates. |
+
+**Immediate sequence.** First make the scheduled-run slice observable end to
+end and prove its denied paths. In parallel, clear the release gates that make
+all effectful Space work honest. Then deliver the Personal Space vertical slice
+(Control decision, V3 resolver, thread/run/Data propagation), one governed
+owner operation, scoped credentials/instructions/skills, durable workspace
+state, watches/delivery, and only then additional surfaces. This order adopts
+QM's scope coherence while retaining CoreSystem's stronger owner-plane,
+privacy, and evidence boundaries.
 
 **Support state today.** The unified Support workspace has working
 Conversation, Ticketing, and content-free Outbound surfaces. Gmail and
@@ -259,9 +284,9 @@ The following order is authoritative where it conflicts with older Phase A wordi
 
 #### P0 — release correctness and authority
 
-1. **Quarry browser-network containment:** enforce resolve-and-pin address authority, redirect revalidation, private/metadata/unspecified-address denial, proxy/remote-runtime parity, and unignore adversarial SSRF tests.
+1. **Quarry browser-network containment — local Chromium resolved 2026-08-14:** the per-session pinned proxy, private/metadata/unspecified-address denial, redirect revalidation, and frame/XHR/fetch/image/script-navigation fixtures are proved. Keep Browserless, Browserbase, and Kernel ineligible for governed agent runs until they pass the same request-level contract; next close native AX/OOPIF, artifact-transfer, and dialog-approval proof.
 2. **Approval continuation dispatcher:** lease the existing `approval_delivery_outbox`, bind tenant/user/run/step/capability/payload/policy/idempotency, execute once, verify, and acknowledge. Resume the current step/run continuation—not a future GraphNode.
-3. **Wire Quarry's existing durable Postgres frontier:** remove the in-memory production path, prove lease/recovery/checkpoint/cancel/backfill semantics, and expose real readiness.
+3. **Reconcile Quarry frontier resources:** production crawl/batch durability already comes from Quarry Control + Temporal workflow history. Do not replace it with the separate unused Rust Postgres request queue by assumption. Decide whether that queue is needed for a queryable frontier/resource surface, and if promoted require lease/recovery/checkpoint/cancel/backfill and readiness proof.
 4. **Memory deletion and scope correctness:** fix Letta Postgres deletion, prove canonical and derived-index purge, and make Control-issued scope immutable to caller metadata.
 5. **Resolved 2026-08-04 — Delegation replay closure for Control Session Core.**
    Gateway → Control Session Core now uses a signed `v2` delegation that binds
@@ -727,7 +752,7 @@ says so, but because they are live, wired, currently-exploitable-in-shape
 gaps in exactly the properties `verevon-vision.md` §2 names as the moat
 (approvable execution, trust boundaries):
 
-1. **Partially resolved 2026-08-03 — headless-browser SSRF admission.**
+1. **Resolved for local Chromium 2026-08-14; remote providers remain gated — headless-browser SSRF admission.**
    `quarry-browser` now owns one shared navigation guard
    that permits only `about:blank` or HTTP(S), applies `quarry_security`'s
    scheme/host/userinfo policy, resolves the target, and fails closed when
@@ -744,10 +769,14 @@ gaps in exactly the properties `verevon-vision.md` §2 names as the moat
    a blocked target creates no remote session; and all five formerly ignored
    Chromium SSRF checks pass when explicitly invoked; a Chromium regression
    proves an in-page loopback image request is aborted before its server
-   receives it. **This is not complete browser-network SSRF containment:**
-   browser providers other than local Chromium lack comparable request-level
-   interception, an end-to-end HTTP-redirect fixture is still needed, and DNS
-   resolution is not pinned after the preflight lookup.
+   receives it. **Superseding proof from 2026-08-14:** local Chromium now runs
+   behind Quarry's per-session DNS-pinned HTTP/CONNECT proxy and advertises
+   `isolated_egress`/`security_evidence` only when that proxy exists. Focused
+   proxy and DNS/rebinding tests plus real installed-Chromium cases prove a
+   public redirect to an ungranted target, iframes, XHR/fetch, image
+   subresources, and script navigation fail closed before private transport.
+   Browserless, Browserbase, and Kernel still lack equivalent request-level
+   proof and therefore remain unpromoted for governed agents.
 2. **Resolved 2026-08-03 — static-fetch redirect SSRF bypass.** The primary
    crawl driver now uses `reqwest::redirect::Policy::none()` and turns every
    3xx response into `SecurityBlocked` before reading its body. A regression
@@ -1279,10 +1308,14 @@ credential, unrelated to anything this session touched).
 
 ### 9.2 Run in parallel — same urgency band, independent owners
 
-1. **Quarry SSRF, close the remaining gaps** (§3a item 1): request-level
-   containment for non-Chromium browser providers, an end-to-end
-   HTTP-redirect fixture, DNS pinning after preflight, and a proxy-side
-   address-authority contract for CONNECT/SOCKS egress.
+1. **Quarry browser proof, close the remaining gates** (§3a item 1): local
+   Chromium's proxy-side address authority, DNS pinning, redirect, frame, XHR,
+   fetch, image, and script-navigation fixtures are complete. Keep remote
+   providers disabled until they pass equivalent request-level proof, then
+   close native AX/OOPIF stale-root/child-target behavior, artifact
+   upload/download quarantine and correlation, signed dialog approval replay,
+   and authoritative per-action provider metering. Cost remains unknown; do
+   not accept `max_cost_usd` as enforced.
 2. **Corrected 2026-08-06 — this item's premise was wrong; do not wire it
    in as originally written.** Investigated before touching anything: the
    real production durable-dispatch layer for crawl/batch work already

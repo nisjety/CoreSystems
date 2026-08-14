@@ -2,11 +2,30 @@
 
 > **Implementation record — 2026-08-03.** This document is the delivery companion to [VEREVON.md](VEREVON.md), [Verevon-ai-first.md](Verevon-ai-first.md), [verevon-feature-map.md](verevon-feature-map.md), [verevon-vision.md](verevon-vision.md), and [verevon-roadmap.md](verevon-roadmap.md). It records what is actually wired in the Frontend Plane and gateway, rather than treating a design target as shipped product capability.
 
-> **Current execution ledger — 2026-08-05.** [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-05)
+> **Current execution ledger — 2026-08-14.** [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14)
 > is the canonical current-status checklist for the six Verevon documents.
 > This document remains the detailed Support delivery record; its dated notes
 > are evidence, not a substitute for the current ledger when a status claim
 > conflicts.
+
+> **Space and operation boundary — 2026-08-14.** Inbox and Ticketing are
+> owner-plane work surfaces inside a future Verevon Space; they are not the
+> authority for Space membership, a customer resource, or a provider effect.
+> A Space decision can narrow context and audience but can never broaden the
+> Conversation/Ticketing owner authorization. The upcoming Action Catalog must
+> give direct human and eligible-agent requests the same versioned request and
+> receipt shape while retaining human-only approvals, grants, and customer-send
+> authority. No scheduled run or background watch may send, mutate, or retry a
+> customer interaction merely because it has a Space or cron context.
+
+> **Web-evidence boundary — 2026-08-14.** Support agents may consume cited
+> Quarry search/read/browser evidence through governed Model Plane tools, but
+> Inbox and Ticketing never receive raw CDP access, provider credentials, or
+> host filesystem paths. Quarry's local-Chromium egress proof does not prove a
+> customer-message provider effect: send, delivery, read, bounce, and retry
+> still require the authoritative provider receipts tracked in this document.
+> Remote browser drivers and browser artifact transfers remain gated and cannot
+> be used to widen Support's action authority.
 
 > **Local implementation loop — 2026-08-03.** “Deployed” and “runtime
 > verified” here mean running the current implementation in the local Docker
@@ -119,7 +138,14 @@ Verevon Support is a single, governed resolution loop across three distinct surf
 
 The product objective is: for every inbound signal, determine whether the right result is an answer, draft, question, customer case, internal work item, incident, or permitted business action—and complete it with evidence, approval where needed, authoritative verification, and an audit receipt.
 
-This is deliberately not three independent AI implementations. Meaningful mutations use a shared typed action contract; Chat is the reasoning workspace, Inbox is the communication workspace, and Ticketing is the work-control workspace.
+This is deliberately not three independent AI implementations. Chat is the
+reasoning workspace, Inbox is the communication workspace, and Ticketing is
+the work-control workspace. Today the V3 typed action registry is a useful UX
+contract, not yet an authoritative server catalog; each meaningful mutation
+must therefore still re-authorize with its owning service and return that
+owner's durable receipt. The Space/Action Catalog program will replace this
+parallelism with a versioned contract without moving support-state or provider
+authority into Chat, the gateway, or Model Plane.
 
 ## Research basis and parity standard
 

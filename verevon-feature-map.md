@@ -6,12 +6,37 @@
 > end-to-end flows, fix bugs, and continue implementation. This is not an
 > instruction to release Verevon externally.
 
-> **Current execution ledger — 2026-08-05.** For current status and ordered
+> **Current execution ledger — 2026-08-14.** For current status and ordered
 > execution across this audit, `VEREVON.md`, the AI-first audit, Vision,
 > Roadmap, and Support delivery record, use
-> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-05).
+> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14).
 > This feature map retains detailed and dated evidence; the ledger resolves any
 > conflicting current-status claim.
+
+> **Feature-map correction — 2026-08-14.** The map now distinguishes a typed
+> UI registry, a reachable gateway route, an owner-plane effect, and a verified
+> outcome. They are not interchangeable. In particular, human and agent paths
+> should share a versioned owner contract only where the actor is eligible;
+> human-only administration, grants, impersonation, and approvals must remain
+> absent from Model-visible tool sets and rejected when forged. The active
+> Space/Action Catalog program, including the coverage gaps in this map, is
+> tracked in [the 2026-08-14 ledger](verevon-roadmap.md#current-execution-ledger--2026-08-14).
+
+> **Local checkpoint — 2026-08-14.** A full dev-stack launcher pass is green,
+> and an owner-approved scheduled-run preparation slice now binds a Control
+> decision, a Capability Core recheck, Session Core's deterministic
+> service-owned thread, and Orchestrator handoff. It is a foundation for the
+> Agents/Work surface, not proof that schedules, watches, ambient presence, or
+> external delivery are feature-complete.
+
+> **Quarry capability correction — 2026-08-14.** Quarry is Verevon's native
+> agent web-evidence engine; Firecrawl is not a dependency or fallback. The
+> local Chromium driver is now promoted only with Quarry's per-session,
+> DNS-pinned egress proxy. Focused source and real-browser proof covers private
+> and metadata denial, rebinding/pinning behavior, public redirects, iframes,
+> XHR/fetch, images, and script navigation. Remote providers remain
+> unpromoted; uploads/downloads, native AX/OOPIF stale-target behavior, dialog
+> approval replay, and authoritative provider cost metering remain open.
 
 > **2026-08-02 correction (resolution-plan review).** A bounded Inbox resolution plan can now correlate the separately staged `draft.reply`, `internal.note`, and existing-ticket `ticket.update` proposals in the durable, tenant-scoped AI-action ledger. The opaque correlation is visible to reviewers after reload but is deliberately not a bulk-approval, bulk-rejection, or execution capability: every proposal retains an independent payload, human decision, execution path, and receipt. An authenticated browser regression proves all three persisted entries retain separate review controls after reload. It does not turn Chat into the support system of record or claim Autopilot.
 
@@ -184,10 +209,10 @@ The core loop is **connect → understand → search → decide → act → appr
 
 **What verifiably exists**
 
-- The crawler/ingestion product is real: `VerevonIngestionsPage` (1,137 LOC) → sources, **crawler profiles**, **schedules**, runs, evidence, actions; monitoring/change-watch client. Quarry-v2: scrape/crawl/batch (100+ URLs), URL security scanning, change tracking, webhook delivery, browser pooling, SSRF/DNS guards, production HMAC enforcement — 652 tests green.
+- The crawler/ingestion product is real: `VerevonIngestionsPage` (1,137 LOC) → sources, **crawler profiles**, **schedules**, runs, evidence, actions; monitoring/change-watch client. Quarry-v2 provides scrape/crawl/batch, search, change tracking, webhook delivery, browser pooling, production HMAC enforcement, and a locally proved Chromium egress boundary. The older 652-test count is historical; the 2026-08-14 promotion evidence is the focused proxy/DNS suite plus real-browser redirect/frame/XHR/subresource proof, not an inferred whole-workspace certificate.
 
 - **New Quarry reliability target — deterministic self-healing before more model calls.** Persist semantic element fingerprints, relocate read-only/extraction targets using structure/accessibility/context, classify acquisition challenges, compile verified trajectories into browser procedures, and connect source changes to affected workflows. Consequential targets (`send`, `publish`, `delete`, `approve`, `pay`) may never auto-repair from similarity alone.
-- **Immediate Quarry blockers are smaller and more urgent than the new features:** the latest code-aware audit confirms the headless/redirect/DNS SSRF path is broken in shape today, and the durable Postgres frontier is already written but feature-flagged off with zero production callers. Close and wire those before expanding runtime variety.
+- **Immediate Quarry blockers have changed:** local Chromium headless/redirect/DNS containment is now proved. Do not enable Browserless, Browserbase, or Kernel for governed agents until equivalent request-level evidence exists. Next close native AX/OOPIF stale-target behavior, artifact upload/download quarantine and correlation, signed dialog approval replay, and truthful provider metering. Quarry Control + Temporal are already the production durable crawl path; the unused Rust Postgres queue is a separate resource/API decision, not proof that production crawl durability is in-memory only.
 - imports-core: Notion/HubSpot/Salesforce/Odoo/REST connectors + PDF/DOCX/CSV/JSON/HTML parsers with signed identity and fail-closed quota.
 
 **Honest gaps**
@@ -389,7 +414,7 @@ These block **every** feature above and are the actual roadmap. _(Corrected 2026
 5. **Cross-tenant IDOR + observe-mode auth.** One fix at the BFF chokepoint (derive org from session, never from header) covers the demo; RLS activation + enforce-mode + negative-test suite in CI is the pilot gate.
 6. **CI is red.** verevonv3 `pnpm test` fails (loadStudioWorkspace unhandled rejections); Quarry-v2 workspace tests fail to compile (`DataPlaneIngestRequest` constructors). A team cannot gate deploys on a suite it ignores.
 7. **Ops sustainability (structural).** Six planes / ~10 stateful infra systems is a 20–30-engineer topology run by 3 people, and its failures are already ops failures (disk, stale images, stopped daemons). Not demo-blocking, but the council's minority-report warning (below) deserves a real team decision.
-8. **2026-08-02 down-the-stack critical audit, partially resolved 2026-08-03.** Full detail remains in `verevon-roadmap.md` §3a. (a) **Headless navigation is fail-closed and Chromium now has page-request interception:** the shared `quarry-browser` guard admits only blank or HTTP(S) targets that pass the common URL policy and resolve wholly to public addresses. Chromiumoxide guards `goto()` and initial `new_tab()` before CDP navigation, then installs a CDP Fetch listener which applies the same guard to page-controlled requests and aborts rejected resource loads or redirect follow-ups. Browserless, Browserbase, and Kernel retain the direct `goto()` guard; a blocked Browserbase target creates no remote session. **Still open:** comparable request-level containment for remote browser providers, an end-to-end HTTP-redirect fixture, and browser DNS pinning after preflight. (b) **Resolved for direct static and TLS-profile egress:** `StaticDriver` disables implicit reqwest redirects and rejects every 3xx response as `SecurityBlocked`; a regression proves the redirect target receives no request. Its direct-egress runtime path and `TlsProfileDriver` now receive PageRunner's public-address-checked DNS result. Static uses a no-fallback Reqwest resolver; TLS uses a per-request wreq DNS override while preserving the original hostname for TLS SNI/HTTP authority and disables inherited proxies. Both reject malformed/private pins, and focused TLS/runtime suites pass (9/418). Imports-core's customer-controlled CMS and Odoo paths now receive their public DNS answer set as a target object and use proxy-free pinned HTTPX/httpcore and urllib transports respectively; they dial only those addresses while preserving the original hostname for TLS/Host validation, and reject private or unpreflighted pins. The focused connector/network suite and full imports-core suite pass (52 tests). Browser providers and proxy-egress remain unpinned: proxy destination resolution needs an explicit proxy-side address-authority contract, not a client-side resolver override. (c) **social-core's production publisher now uses integration-corev2 actions for LinkedIn, Facebook Page, and Instagram writes.** The tokenless governed publisher passes only a connection ID and bounded action payload; a regression proves the action path, while X, TikTok, and Snapchat now fail closed until their complete action contracts exist. The old raw-token publisher is retained only as unconstructed compatibility/test code and must be removed after that contract work, so this is a material runtime closure rather than complete source-level removal.
+8. **2026-08-02 down-the-stack critical audit, superseded for local Chromium on 2026-08-14.** Full historical detail remains in `verevon-roadmap.md` §3a. Quarry's local Chromium driver now receives a per-session DNS-pinned HTTP/CONNECT proxy and advertises `isolated_egress` plus `security_evidence` only when that boundary is present. Focused proxy/DNS tests and real installed-Chromium fixtures prove fail-closed handling for private/metadata targets, rebinding, a public redirect to an ungranted destination, iframe/XHR/fetch/image subrequests, and script navigation, with zero private-server hits. Browserless, Browserbase, and Kernel remain unpromoted because direct-target checks are not equivalent to request-level containment. Static/TLS/import transport closures and the governed social-publisher work described by the earlier audit remain valid. This is scoped promotion evidence, not a whole-system release certificate.
 
 ---
 
@@ -577,7 +602,11 @@ Checked 6 Scandinavian/adjacent AI companies for shared structure: Ayfie, boost.
 **Backend/infra layer — same doctrine, one level down:**
 
 - **Model Plane vs. Claude Code / Hermes / Phi-style agent tooling:** don't build a general coding agent. Finish what's ~90% built — a durable, observable, **approval-gated** tool-use loop (execution-core already dispatches real tools + real HITL). Take Claude Code's lesson (reliable resume after a pause — the named P0), Phi's lesson (cheap small models for high-volume narrow tasks: triage, intent classification), Hermes's lesson (reliable function-calling from smaller/open models keeps cost-per-resolution down under ZDR constraints). Moat = tiered, cost-aware, approval-gated execution, not matching any one tool feature-for-feature.
-- **Quarry v2 vs. Firecrawl / Apify:** Quarry already outputs clean LLM-ready markdown/JSON like Firecrawl — don't add complexity chasing it. From Apify, take the lesson not the breadth: rock-solid anti-bot resilience on the handful of sources a Norwegian SMB actually needs (own site, Brreg, Proff, LinkedIn company pages), not a general scraping marketplace.
+- **Quarry v2 as the owned web engine:** Quarry already outputs clean
+  LLM-ready Markdown/JSON and must remain first-party rather than chase an
+  external crawler dependency. The useful marketplace lesson is selectivity:
+  build rock-solid resilience for the sources Norwegian organizations actually
+  need, not a general scraping marketplace.
 - **Data Plane vs. GraphRAG / VisionRAG:** GraphRAG is already built (graph-index-rs) and differentiates against every competitor above — none have a knowledge graph. Priority isn't adding VisionRAG next (correctly already off, no MVP blocker) — it's closing the one real architecture violation: the embedding hop still falls back to direct Azure instead of routing through inference-core. That's the difference between "we own the whole grounded pipeline" being true vs. half-true.
 
 ## 6.7 Phase 0 execution log (2026-07-20, implementation pass)
@@ -721,7 +750,7 @@ The two code-aware reviews plus the Data Plane memory analysis change the featur
 | ---------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------- |
 | Grounded answer              | source/evidence capture, hybrid retrieval, provenance, contradiction-aware memory           | Quarry + Data Plane                            | strong base; memory truth lifecycle incomplete                              |
 | Approved action              | exact authority, durable continuation, typed effects, independent postconditions            | Control/Application + Model/Integration/Quarry | approval persistence exists; dispatcher/verification consistency incomplete |
-| Reliable web work            | secure runtime, durable frontier, adaptive targets, challenge classification, change impact | Quarry                                         | strong runtime; SSRF gap and unwired frontier are P0                        |
+| Reliable web work            | secure runtime, durable frontier, adaptive targets, challenge classification, change impact | Quarry                                         | local Chromium containment proved; remote-provider, AX/OOPIF, artifact, dialog, and meter gates remain |
 | Repeatable agent behavior    | Procedures/Skills, simulations, shadow mode, promotion/rollback                             | Model Plane                                    | partial skill lifecycle; compiler/quality loop incomplete                   |
 | Trust customers can inspect  | Runtime Evidence Manifest + Verevon Proof Bundle                                            | cross-plane projection                         | greenfield contract, high product leverage                                  |
 | Useful organizational memory | typed candidates, authorized scopes, temporal/supersession state, deletion proof            | Data Plane                                     | provenance exists; canonical Memory Intelligence incomplete                 |
@@ -747,6 +776,6 @@ This is how Verevon makes its existing grounding, approvability, and EU/Nordic g
 
 **Doc trust guide** (for future audits): trust 2026-07-13+ correction banners as the current layer. `apps/STATUS.md` (2026-04-23) is the most misleading doc in the repo — "30/30 gates closed" measures crate tests, not runtime, and predates the discovery that the hot path was down; update or delete it. Feb-2026 "Production Ready v1.0.0" READMEs (Ingestion, Model) are formally retracted by their own July docs. `docs/core-research/mock-backed-surfaces.md` is flagged stale. Eight stale Ingestion docs await sign-off in `STALE_DOC_DELETION_REGISTER.md`.
 
-**Known red tests to fix in Phase 0:** verevonv3 `pnpm test` (loadStudioWorkspace unhandled rejection when session lacks `orgs`); Quarry-v2 workspace compile (`DataPlaneIngestRequest` missing `initiator_user_id`/`visibility`).
+**Verification scope note — 2026-08-14:** the focused Quarry browser-security and provider-meter suites are green, including real-browser cases. The whole Quarry workspace and the historical verevonv3 failure listed by the earlier audit were not re-certified in this documentation pass; do not repeat those old failures as current without rerunning them.
 
 **Things that are better than you think** (keep morale honest too): the frontend honesty contract is genuinely unusual and good; ticketing SLA/macros already exist; the HITL gate is real server-side enforcement, not decoration; GraphRAG + wiki + source traces is a real cognee-class substrate; the inbound pipeline is proven channel-agnostic; the gateway has zero mocks across ~49 domains. The team's instinct that "features don't work" is a _deployment_ problem wearing a feature costume.

@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
+import { createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
 
 /**
  * The Space cockpit shell: the six tabs the adoption plan specifies
@@ -87,10 +87,16 @@ const SPACE_TABS: readonly SpaceTabDefinition[] = [
 
 const TAB_IDS = new Set<string>(SPACE_TABS.map((tab) => tab.id))
 const DEFAULT_TAB: SpaceTabId = 'chat'
+const LEGACY_HASH_ALIASES: Readonly<Record<string, SpaceTabId>> = {
+  members: 'medlemmer',
+  work: 'arbeid',
+  activity: 'aktivitet',
+}
 
 function tabFromHash(hash: string): SpaceTabId {
   const value = hash.replace(/^#/, '').trim().toLowerCase()
-  return TAB_IDS.has(value) ? (value as SpaceTabId) : DEFAULT_TAB
+  if (TAB_IDS.has(value)) return value as SpaceTabId
+  return LEGACY_HASH_ALIASES[value] ?? DEFAULT_TAB
 }
 
 export interface SpaceCockpitProps {
@@ -105,6 +111,7 @@ export interface SpaceCockpitProps {
 
 export function SpaceCockpit(props: SpaceCockpitProps) {
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
+  const tabButtons: Partial<Record<SpaceTabId, HTMLButtonElement>> = {}
 
   onMount(() => {
     if (typeof window === 'undefined') return
@@ -116,12 +123,13 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
     onCleanup(() => window.removeEventListener('hashchange', onHashChange))
   })
 
-  const select = (id: SpaceTabId) => {
+  const select = (id: SpaceTabId, options?: { focus?: boolean }) => {
     setActive(id)
     if (typeof window !== 'undefined') {
       // Replace rather than push: flipping tabs should not fill the back stack.
       window.history.replaceState(null, '', `#${id}`)
     }
+    if (options?.focus) tabButtons[id]?.focus()
   }
 
   /**
@@ -136,19 +144,8 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
     if (step === 0) return
     event.preventDefault()
     const next = order[(index + step + order.length) % order.length]
-    if (next) select(next)
+    if (next) select(next, { focus: true })
   }
-
-  const current = createMemo(() => SPACE_TABS.find((tab) => tab.id === active()) ?? SPACE_TABS[0]!)
-
-  /**
-   * Read as a memo and rendered as a plain JSX expression rather than through
-   * `<Show>`'s callback form. The callback only re-runs when the condition
-   * crosses falsy→truthy, so switching between two tabs that BOTH have content
-   * left the first tab's panel on screen — the condition stayed truthy, so the
-   * callback never re-ran.
-   */
-  const content = createMemo(() => props.tabs?.[active()])
 
   return (
     <div class="verevon-space-cockpit">
@@ -164,6 +161,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
               tabIndex={active() === tab.id ? 0 : -1}
               class={`verevon-space-tab${active() === tab.id ? ' verevon-space-tab--active' : ''}`}
               onClick={() => select(tab.id)}
+              ref={(element) => { tabButtons[tab.id] = element }}
             >
               {tab.label}
             </button>
@@ -171,28 +169,36 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
         </For>
       </div>
 
-      <section
-        role="tabpanel"
-        id={`space-panel-${active()}`}
-        aria-labelledby={`space-tab-${active()}`}
-        class="verevon-space-panel"
-        tabIndex={0}
-      >
-        <Show
-          when={content()}
-          fallback={
-            <div class="verevon-space-panel-unavailable">
-              <p class="verevon-space-panel-purpose">{current().purpose}</p>
-              <p class="verevon-space-panel-reason">
-                {current().owner} har ikke publisert en romprojeksjon for denne fanen ennå, så det
-                finnes ingenting å vise her. Dette er en manglende kobling, ikke et tomt rom.
-              </p>
-            </div>
-          }
-        >
-          {content()}
-        </Show>
-      </section>
+      <For each={SPACE_TABS}>
+        {(tab) => {
+          const content = () => props.tabs?.[tab.id]
+          return (
+            <section
+              role="tabpanel"
+              id={`space-panel-${tab.id}`}
+              aria-labelledby={`space-tab-${tab.id}`}
+              class="verevon-space-panel"
+              tabIndex={active() === tab.id ? 0 : -1}
+              hidden={active() !== tab.id}
+            >
+              <Show
+                when={content()}
+                fallback={
+                  <div class="verevon-space-panel-unavailable">
+                    <p class="verevon-space-panel-purpose">{tab.purpose}</p>
+                    <p class="verevon-space-panel-reason">
+                      {tab.owner} har ikke publisert en romprojeksjon for denne fanen ennå, så det
+                      finnes ingenting å vise her. Dette er en manglende kobling, ikke et tomt rom.
+                    </p>
+                  </div>
+                }
+              >
+                {content()}
+              </Show>
+            </section>
+          )
+        }}
+      </For>
     </div>
   )
 }

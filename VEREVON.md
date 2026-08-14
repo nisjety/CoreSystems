@@ -6,11 +6,47 @@
 > relevant end-to-end flow has been verified. It does not mean Verevon has been
 > released to external customers.
 
-> **Current execution ledger — 2026-08-05.** For the current reconciled status
+> **Current execution ledger — 2026-08-14.** For the current reconciled status
 > and ordered implementation work across the six Verevon documents, use
-> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-05).
+> [verevon-roadmap.md](verevon-roadmap.md#current-execution-ledger--2026-08-14).
 > The dated material below remains evidence and historical context; it is not
 > a newer status assertion when it conflicts with that ledger.
+
+> **Scope-and-operations update — 2026-08-14.** Verevon's next product
+> contract is a first-class **Space**: one person, room, project, or case has
+> one explicit collaboration authority context, agent context, work projection,
+> activity history, and presence across supported surfaces. This is an active
+> execution program, not a shipped claim. The canonical plan is
+> [Verevon v3 × QM: comparison and adoption plan](apps/Frontend%20Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md).
+> Space access never widens an owner-plane resource ACL: effective access is
+> the intersection of current Space authority, active recipient audience, and
+> the owner plane's current resource decision.
+
+> **Local implementation checkpoint — 2026-08-14.** Commit `fa2d1eff` adds a
+> source/test-backed owner-approved scheduled-run preparation contract across
+> Control, Capability Core, Session Core, and Orchestrator. Control issues a
+> short-lived, single-fire decision; Capability Core verifies it and passes its
+> bearer only to Session Core; Session Core creates or reuses the exact
+> service-owned deterministic thread; Orchestrator preserves that supplied
+> thread. The canonical local launcher rebuilt and started the selected
+> CoreSystem stacks without rotating existing credentials. This is **not** a
+> release certificate or end-to-end scheduled-effect proof: live Control →
+> Session → Temporal → receipt, revocation, ZDR, and rollback evidence remain
+> open in the roadmap's R/S gates.
+
+> **Quarry web/browser checkpoint — 2026-08-14.** Verevon's agent web
+> capability is Quarry-native; Firecrawl is neither a runtime dependency nor
+> an execution fallback. Model Plane plans and replans, BrowserBroker issues
+> exact grants, and Quarry acquires pages, executes or rejects browser actions,
+> and returns evidence and receipts. Local Chromium now has source- and
+> runtime-backed per-session DNS-pinned egress plus fail-closed coverage for
+> private/metadata destinations, HTTP redirects, frames, XHR/fetch, images,
+> and script-triggered navigation. That promotion is deliberately local-driver
+> only: Browserless, Browserbase, and Kernel remain ineligible for governed
+> agent runs until they prove equivalent request-level containment. Artifact
+> upload/download, dialog approval replay, and native AX/OOPIF stale-target
+> behavior remain gated; provider action cost is unknown, so a requested
+> `max_cost_usd` must be rejected rather than treated as enforced.
 
 > **Production-readiness correction — 2026-07-13.** The 2026-07-10 “live” sections below are historical, not a current release certificate. Model Plane `model-gateway:9090` and `inference-core:9092` are absent while HTTP health remains green, so default inference/chat, tools that depend on inference, and Data Plane query embedding are currently unavailable. Live cost/session/capability boundaries remain unauthenticated, semantic memory search is down, and no Verevon Visma runtime integration exists. Significant authenticated/tenant-scoped source fixes, exact audience issuance, and the ordinary invoke caller graph pass source tests but are not deployed; approval/browser/Letta/background callers, a verified ZDR provider route, compatibility, and rollback gates remain incomplete. See [MODEL_PLANE_STATUS.md](apps/Model%20Plane/MODEL_PLANE_STATUS.md) and the [2026-07-13 audit](apps/Model%20Plane/docs/core-research/plane-audit-2026-07-13.md).
 
@@ -102,7 +138,18 @@ The core loop is **connect → understand → search → decide → act → appr
 
 ## What it can do
 
-Capabilities are modeled as a **typed action registry** (`verevonv3/src/shared/actions/action-registry.ts`) — each action carries id, owner-plane, risk, `requiresApproval`, reversibility, and Zod input/output schemas. The same descriptors become Model-Plane tool specs (`agent-tools.ts`), so **the human UI and the AI agent share one action contract.**
+Verevon v3 has a **typed UX action registry**
+(`apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts`) — each action carries an
+ID, owner plane, risk, approval/reversibility metadata, and Zod input/output
+schemas. It is valuable product metadata, but it is **not yet the one
+executable cross-plane contract**: the BFF and owner planes still have
+independent dispatch/validation paths, and Model eligibility is intentionally
+actor-filtered. The target is one versioned owner-approved manifest with
+actor-specific views: every eligible human or agent request receives the same
+envelope/idempotency/receipt semantics, while human-only authority is never
+advertised to or forgeable by the Model. Until S2 is complete, a registry entry
+or tool description is not evidence that the underlying owner operation can
+execute.
 
 ### Grounded answers — chat & inbox
 

@@ -1,10 +1,36 @@
 # Quarry V2 Browser Automation Improvements 2026
 
-**Status:** Architecture, standards, research, and implementation proposal  
+**Status:** Architecture, standards, research, and implementation ledger
 **Scope:** `apps/Ingestion Plane/Quarry-v2`, Model Plane browser planning, BrowserBroker, browser runtime adapters, and App Shell replay/approval UX  
 **Research date:** 2026-08-03  
-**Verified against the running stack:** 2026-08-03 (same day) — every major proposed component cross-checked against actual Rust/Go source in `Quarry-v2`, with file:line citations. See §1a for the full ledger. Two findings change how this document should be prioritized: the SSRF/DNS controls in P0 item 1 are not merely "incomplete," they are confirmed broken in the headless-browser path today (a real security gap, not a hardening exercise), and the "in-memory frontier" in P0 item 2 has a durable Postgres replacement **already written** in Rust — feature-flagged off and with zero production callers. Both are smaller, more urgent, and more concrete than they read as proposals. Re-verify before trusting anything below without a citation next to it.  
-**Primary rule:** Model Plane decides. Quarry executes and records evidence. BrowserBroker grants. Browser runtimes provide isolated sessions.
+**Current implementation verification:** 2026-08-14. The 2026-08-03 §1a findings remain the historical baseline, not the current status. The continuously reconciled, code-aware ledger is `Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md`.
+**Primary rule:** Application/Conversation owns human intent and approval; Model Plane plans and replans; BrowserBroker issues exact grants; Quarry acquires, executes or rejects, and records proof; Data Plane owns only promoted durable knowledge. Browser runtimes are capability-scoped execution adapters, never independent authorities.
+
+## Current implementation delta — 2026-08-14
+
+- **No Firecrawl dependency.** Quarry's web search, read, crawl, browser, and
+  evidence paths are first-party. External products remain historical research
+  comparisons only; none is a runtime fallback or control authority.
+- **Local Chromium browser egress is proved.** `ChromiumoxideDriver` advertises
+  `isolated_egress` and `security_evidence` only when constructed with Quarry's
+  per-session DNS-pinned HTTP/CONNECT proxy. Three proxy-policy/teardown tests,
+  seven DNS/pinning/rebinding tests, and real installed-Chromium cases cover a
+  public redirect to an ungranted target, iframe, XHR, fetch, image
+  subresource, and script navigation with zero private-server hits.
+- **Remote providers remain gated.** Browserless, Browserbase, and Kernel do
+  not have equivalent request-level containment proof and must not be selected
+  for governed agent runs.
+- **Artifact capabilities remain false.** Uploads and downloads require
+  approved-artifact-only input, quarantine/correlation, out-of-process frame
+  handling, malware/type/size checks, and evidence promotion proof. Host
+  filesystem paths are never part of the contract.
+- **Provider cost remains unknown.** Current provider APIs do not supply an
+  authoritative per-action meter; provider cost stays `None`, and
+  `max_cost_usd` is rejected rather than falsely enforced.
+- **Next proof order:** native AX/OOPIF stale-root and child-target behavior;
+  artifact upload/download quarantine; signed dialog-approval replay; fleet
+  CPU/RSS plus authoritative billing; then an experimental stateless Quarry
+  Lite renderer with measured compatibility and automatic Chromium fallback.
 
 ---
 
@@ -24,7 +50,8 @@ Quarry V2 already provides much more than a browser wrapper. It is a self-hosted
 - Temporal workflows, NATS events, Postgres control state, and MinIO/S3 artifacts;
 - deterministic source capture and SSRF/tenant policy enforcement.
 
-This document therefore does not propose replacing Quarry with Firecrawl, Stagehand, browser-use, Skyvern, or another browser platform.
+This document does not propose replacing Quarry with any external crawler or
+browser platform. Quarry remains the owned execution and evidence boundary.
 
 The objective is to make Quarry's agentic browser execution **top class** by improving:
 
@@ -39,18 +66,19 @@ The objective is to make Quarry's agentic browser execution **top class** by imp
 - workflow compilation and self-healing;
 - browser-agent security;
 - evaluation and continuous learning;
-- Firecrawl-level API and SDK ergonomics.
+- Quarry-native agent web API and SDK ergonomics.
 
 ---
 
-## 1a. Verification pass against the running stack — 2026-08-03
+## 1a. Historical verification baseline — 2026-08-03
 
 This document was written as a research proposal. This section is the
 difference between that and reality: every major component was checked
 against the actual current Rust/Go source (file:line cited), including
 findings from a separate down-the-stack code-health audit run earlier the
 same day. Re-run this check before treating anything below as still
-accurate.
+accurate. The current 2026-08-14 delta above supersedes this section wherever
+the two conflict.
 
 **Read this first — three corrections that change how the rest of the
 document should be read.**
@@ -119,7 +147,7 @@ inline at each relevant section:
 | §39.1 | Challenge/failure classification | PARTIAL — two real enums exist but lump 401/403/451/999/CDN-challenge into one bucket by explicit design comment |
 | §39.4 | Runtime compatibility manifest (real probe, not process health) | GREENFIELD |
 | §42 | Compiled/deterministic workflow with rollout state | GREENFIELD — only an unrelated session video-replay concept exists |
-| §48 P0.1 | SSRF/DNS/address-authority controls | **BROKEN TODAY**, see correction 1 above |
+| §48 P0.1 | SSRF/DNS/address-authority controls | **HISTORICAL 2026-08-03 finding; resolved for local Chromium on 2026-08-14. Remote providers remain gated.** |
 
 ---
 
@@ -1236,7 +1264,11 @@ interface EvidenceSufficiency {
 
 ---
 
-## 23. Firecrawl comparison and parity improvements
+## 23. Historical external-API comparison; Quarry-native improvements
+
+This section records the 2026-08-03 research comparison only. It does not
+authorize a Firecrawl dependency, fallback, hosted call, or compatibility
+contract. The product target is a coherent Quarry-native agent web API.
 
 Firecrawl's current product surface emphasizes:
 
@@ -1253,7 +1285,7 @@ Firecrawl's current product surface emphasizes:
 - simple SDK and CLI ergonomics;
 - MCP/agent skill exposure.
 
-Quarry already covers much of this. The highest-value parity improvements are below.
+Quarry already covers much of this. The highest-value native improvements are below.
 
 ### 23.1 Stateful interact API
 
@@ -1272,10 +1304,11 @@ This should map to Quarry leases and profiles rather than introduce a new sessio
 
 ### 23.2 Agent endpoint
 
-Expose an optional high-level endpoint through Quarry edge, but execution remains split:
+Expose an optional high-level endpoint at the App/Model gateway as a thin
+facade. Do not make Quarry Edge a second planning authority:
 
 ```text
-POST /v1/agent
+POST /v1/agent  (App/Model gateway)
   -> Model Plane plan
   -> Quarry search/fetch/browser tools
   -> artifacts and citations
@@ -1859,7 +1892,7 @@ Quarry's browser-agent improvements are successful when:
 - browser sessions can be watched, taken over, resumed, and replayed in Verevon's own UI;
 - benchmark results identify the best planner/observation/backend combination by task class;
 - security tests include indirect prompt injection and credential-exfiltration attempts;
-- Firecrawl-level endpoint and SDK ergonomics are available without making Firecrawl a dependency.
+- Quarry-native endpoint and SDK ergonomics are available without an external crawler dependency.
 
 ---
 
@@ -2246,9 +2279,11 @@ Crawlee remains the strongest general crawler-runtime donor for:
 - state persistence and restartability;
 - pluggable datasets and key-value artifacts.
 
-Quarry's current in-memory frontier is a higher-priority gap than adding another
-browser model. The durable frontier should be completed before large-scale
-browser-agent expansion.
+**2026-08-14 correction:** Quarry Control + Temporal already provide the active
+durable crawl/batch workflow. The separate Rust Postgres queue is implemented
+but unused. Reconcile its intended resource/API role before adding another
+runtime; do not replace the active workflow or call it in-memory-only without
+new source and recovery evidence.
 
 ### 37.3 Spider-rs
 
@@ -3388,28 +3423,22 @@ Derived outputs must record the exact source and transform versions.
 
 ### P0: close current execution and security gaps
 
-**Resequenced 2026-08-03 against verified reality (see §1a).** Item 1 is
-confirmed broken today, not just incomplete — promote it above everything
-else without qualification. Item 2 is now scoped as "wire an existing
-schema," not "build a durable frontier."
+**Resequenced 2026-08-14 against verified reality (see the current delta and
+§1a).** Local Chromium's network-containment portion of item 1 is complete;
+remote providers remain refused. Item 2 must respect the later production-path
+correction: Quarry Control + Temporal already provide durable crawl/batch
+execution, while the separate Rust Postgres queue has no production caller.
 
-1. **Fix the confirmed-broken SSRF/DNS controls first, no exceptions**:
-   wire `quarry_security`/`dns_guard` into `chromiumoxide.rs`'s `goto()`/
-   `open_tab_page()` (currently zero calls); stop `fetch.rs`'s redirect
-   policy from following without a re-check; fix `dns_guard.rs`'s
-   resolve-then-discard TOCTOU (pin the checked IP into the actual
-   connection, don't re-resolve); add `is_unspecified()` to `heur.rs`'s
-   IPv4 checks (0.0.0.0 currently bypasses loopback blocking); un-ignore
-   `quarry-browser/tests/ssrf.rs` so a regression here fails CI. Apply the
-   identical fix to imports-core's Python guard
-   (`network_policy.py`), which has the same TOCTOU gap independently.
-2. **Wire the existing durable-frontier schema, don't design a new one** —
-   `crates/quarry-runtime/src/{request_queue,postgres_queue,crawl_frontier}.rs`
-   is already correct (SKIP LOCKED, visibility timeouts, org isolation);
-   enable the `postgres-queue` feature, connect
-   `quarry-orchestrator`'s Go/Temporal workflows to it instead of an
-   in-process slice/map, and complete `cycle23.go`'s `MountRequestQueues`
-   stub on the read side.
+1. **Keep local Chromium containment closed and prove every other driver
+   independently.** The pinned proxy and request-level redirect/frame/XHR/
+   fetch/image/script fixtures are green. Browserless, Browserbase, and Kernel
+   remain unavailable to governed agents until equivalent tests and receipts
+   pass; a direct-target preflight is not parity.
+2. **Reconcile, do not blindly replace, the frontier implementations.** Quarry
+   Control + Temporal are the production durable crawl/batch path. Decide
+   whether the unused Rust Postgres queue is required for queryable frontier
+   visibility or a different workload class; promote it only with explicit
+   ownership, lease/recovery/checkpoint/cancel/backfill, and readiness proof.
 3. Finish approval continuation for effectful browser work using the current
    run/step continuation model (confirmed greenfield as a Quarry-owned
    concept, §18 — Quarry validates Model Plane's grants but has no
@@ -3449,7 +3478,7 @@ schema," not "build a durable frontier."
 1. Benchmark Lightpanda for read-heavy extraction.
 2. Benchmark Patchright, Camoufox, and nodriver patterns in isolated labs.
 3. Evaluate Steel as a self-hosted runtime adapter.
-4. Improve Firecrawl-level SDK and stateful interact ergonomics.
+4. Improve Quarry-native SDK and stateful interact ergonomics.
 5. Add recorder/procedure authoring UX inspired by Maxun and Stagehand.
 6. Add richer semantic/visual change-monitoring UX.
 
