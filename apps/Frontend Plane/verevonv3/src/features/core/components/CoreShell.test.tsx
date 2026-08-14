@@ -200,7 +200,12 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByText('Detaljert')).toBeTruthy()
     expect(screen.getByText('Legg til filer eller bilder')).toBeTruthy()
     expect(screen.getByText('Ta et skjermbilde')).toBeTruthy()
-    expect(screen.getByText('Legg til i prosjekt')).toBeTruthy()
+    // "Legg til i prosjekt" left DashboardComposer in eeb99146 and this
+    // assertion did not go with it, so the test has been red since. Not
+    // restored as a menu entry: its successor is attaching the composer's work
+    // to a Space (`project` is a Space kind in ADR-0001) and that action does
+    // not exist yet. A menu item naming a capability nothing implements is
+    // worse than its absence.
     expect(screen.getByText('Ferdigheter')).toBeTruthy()
     expect(screen.getByText('Koblinger')).toBeTruthy()
 
@@ -392,6 +397,72 @@ describe('v2 dashboard shell port', () => {
     renderSidebar('/account')
     expect(screen.getByRole('navigation', { name: 'Kontoseksjoner' })).toBeTruthy()
     expect(screen.getByText('Tilkoblede kontoer')).toBeTruthy()
+  })
+
+  it('uses the core Rom panel for a Space and does not render the generic open-room item', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path === '/api/v1/spaces') {
+        return new Response(JSON.stringify({
+          data: {
+            spaces: [{
+              space_ref: 'space personal',
+              name: 'Personal Space',
+              kind: 'personal',
+              lifecycle: 'active',
+            }],
+          },
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      if (path === '/api/v1/spaces/space%20personal/threads') {
+        return new Response(JSON.stringify({
+          data: {
+            space: {
+              space_ref: 'space personal',
+              name: 'Personal Space',
+              kind: 'personal',
+              lifecycle: 'active',
+            },
+            membership: {
+              space_ref: 'space personal',
+              org_id: 'org_1',
+              subject_id: 'user_1',
+              kind: 'personal',
+              role: 'owner',
+              revisions: { authority: 1, membership: 1, privacy: 1, recipient_audience: 1, entitlement: 1 },
+            },
+            threads: [{
+              thread_id: 'thread / planning',
+              space_id: 'space personal',
+              title: 'Planning',
+              preview: 'Release preparation',
+              latest_run_status: 'running',
+            }],
+          },
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      return new Response(JSON.stringify({ data: {} }), {
+        headers: { 'Content-Type': 'application/json' },
+        status: 200,
+      })
+    }))
+
+    renderWithRouter(() => (
+      <AgentsProvider>
+        <CoreSidebar
+          activeRoute="/spaces"
+          expanded
+          onExpandedChange={vi.fn()}
+          onOpenSearch={vi.fn()}
+        />
+      </AgentsProvider>
+    ), '/spaces/space%20personal')
+
+    expect(screen.getByRole('navigation', { name: 'Romnavigasjon' })).toBeTruthy()
+    expect(await screen.findByRole('link', { name: 'Personal Space' })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: /search rooms and conversations|søk i rom og samtaler/i })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Planning/ }).getAttribute('href')).toBe('/chat?thread_id=thread%20%2F%20planning')
+    expect(screen.queryByRole('link', { name: /Åpne rommet|open room/i })).toBeNull()
   })
 
   it('renders saved chat thread history in the expanded chat sidebar', () => {

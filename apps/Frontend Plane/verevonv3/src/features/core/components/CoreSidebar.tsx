@@ -30,6 +30,7 @@ import {
 import { AgentsExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAgentsPanel'
 import { KnowledgeExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarKnowledgePanel'
 import { SupportExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSupportPanel'
+import { SpacesExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSpacesPanel'
 import {
   SidebarPanelTitle,
   SidebarSearchField,
@@ -170,6 +171,7 @@ function ExpandedSidebarPanel(props: {
   const firstPanelTabId = () => panelTabs()[0]?.id ?? null
   const panelKind = createMemo(() => {
     if (props.activeSection.id === 'messages') return 'messages'
+    if (props.activeSection.id === 'spaces') return 'spaces'
     if (props.activeSection.id === 'inbox') return 'support'
     if (props.activeSection.id === 'agents') return 'agents'
     if (props.activeSection.id === 'knowledge') return 'knowledge'
@@ -200,6 +202,9 @@ function ExpandedSidebarPanel(props: {
     >
       <Match when={panelKind() === 'messages'}>
         <ChatSidebarPanel onCollapse={() => props.onCollapse()} />
+      </Match>
+      <Match when={panelKind() === 'spaces'}>
+        <SpacesExpandedSidebarPanel onCollapse={props.onCollapse} />
       </Match>
       <Match when={panelKind() === 'support'}>
         <SupportExpandedSidebarPanel onCollapse={props.onCollapse} />

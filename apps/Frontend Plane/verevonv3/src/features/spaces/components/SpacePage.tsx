@@ -1,15 +1,13 @@
-import { useParams } from '@solidjs/router'
-import { ArrowUpRight, Bot, Circle, Clock3, MessageCircle, Sparkles, Users } from 'lucide-solid'
+import { A, useParams } from '@solidjs/router'
+import { ArrowUpRight, Bot, Clock3, MessageCircle, Plus, Sparkles, Users } from 'lucide-solid'
 import { createResource, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
 
 import {
   getPersonalSpaceDeletionReceipt,
   getSpaceContext,
   getSpaceThreads,
-  listSpaces,
   requestPersonalSpaceDeletion,
   type SpaceDeletionReceipt,
-  type SpaceSummary,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { SpaceActivityFeed } from './SpaceActivityFeed'
@@ -31,8 +29,20 @@ export default function SpacePage() {
   const params = useParams<{ spaceId: string }>()
   const spaceRef = () => params.spaceId?.trim() ?? ''
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
-  const [threads, { refetch: refetchThreads }] = createResource(spaceRef, getSpaceThreads)
-  const [spaces] = createResource(listSpaces)
+  const [threadsUnavailable, setThreadsUnavailable] = createSignal(false)
+  let latestThreadRequest = 0
+  const [threads, { refetch: refetchThreads }] = createResource(spaceRef, async (ref) => {
+    const request = ++latestThreadRequest
+    setThreadsUnavailable(false)
+    try {
+      const projection = await getSpaceThreads(ref)
+      if (request === latestThreadRequest) setThreadsUnavailable(false)
+      return projection
+    } catch {
+      if (request === latestThreadRequest) setThreadsUnavailable(true)
+      return undefined
+    }
+  })
   // `undefined`, not '': Solid skips a fetch only for false/null/undefined, and
   // an empty string is none of those — so the receipt resource fired on mount
   // and requested `/spaces/deletion-requests/` with no id, producing a 404 on
@@ -86,16 +96,10 @@ export default function SpacePage() {
       <Show when={context.error ? undefined : context()}>
         {(current) => (
           <div class="verevon-space-workroom">
-            <SpaceRoomRail
-              currentSpace={current().space}
-              spaces={() => spaces() ?? []}
-              threads={currentThreads}
-            />
-
             <main class="verevon-space-canvas">
               <header class="verevon-space-header">
                 <div class="verevon-space-header__title">
-                  <p class="verevon-space-eyebrow">Shared workroom</p>
+                  <p class="verevon-space-eyebrow">{spaceWorkroomLabel(current().space.kind)}</p>
                   <h1 id="space-title">{current().space.name}</h1>
                   <div class="verevon-space-meta" aria-label="Current Space status">
                     <span>{formatLabel(current().space.kind)}</span>
@@ -105,14 +109,9 @@ export default function SpacePage() {
                     <span>Your role: {formatLabel(current().membership.role)}</span>
                   </div>
                 </div>
-                <a class="verevon-space-primary-action" href={spaceChatHref(current().space.space_ref)}>
-                  <MessageCircle size={16} aria-hidden="true" />
-                  <span>Chat</span>
-                  <ArrowUpRight size={15} aria-hidden="true" />
-                </a>
               </header>
 
-              <Show when={threads.error}>
+              <Show when={threadsUnavailable()}>
                 <p class="verevon-space-projection-error" role="alert">
                   Space conversation activity is temporarily unavailable. Your confirmed Space access remains unchanged.
                 </p>
@@ -123,8 +122,10 @@ export default function SpacePage() {
                   chat: (
                     <SpaceConversationPanel
                       spaceRef={current().space.space_ref}
+                      spaceName={current().space.name}
                       threads={currentThreads}
                       loading={() => threads.loading}
+                      unavailable={threadsUnavailable}
                     />
                   ),
                   aktivitet: (
@@ -155,82 +156,20 @@ export default function SpacePage() {
   )
 }
 
-function SpaceRoomRail(props: {
-  readonly currentSpace: SpaceSummary
-  readonly spaces: () => readonly SpaceSummary[]
-  readonly threads: () => readonly SpaceThread[]
-}) {
-  const changeSpace = (event: Event) => {
-    const select = event.currentTarget as HTMLSelectElement
-    window.location.href = `/spaces/${encodeURIComponent(select.value)}`
-  }
-  const availableSpaces = () => {
-    const resolved = props.spaces()
-    return resolved.some((space) => space.space_ref === props.currentSpace.space_ref)
-      ? resolved
-      : [props.currentSpace, ...resolved]
-  }
-
-  return (
-    <aside class="verevon-space-room-rail" aria-label="Space overview">
-      <label class="verevon-space-switcher">
-        <span>Switch Space</span>
-        <select value={props.currentSpace.space_ref} onChange={changeSpace}>
-          <For each={availableSpaces()}>
-            {(space) => <option value={space.space_ref}>{space.name}</option>}
-          </For>
-        </select>
-      </label>
-
-      <div class="verevon-space-room-card">
-        <span class="verevon-space-room-mark" aria-hidden="true">{spaceInitial(props.currentSpace.name)}</span>
-        <p class="verevon-space-room-card__eyebrow">This Space</p>
-        <p class="verevon-space-room-card__name">{props.currentSpace.name}</p>
-        <p class="verevon-space-room-card__status">
-          <Circle size={8} fill="currentColor" aria-hidden="true" />
-          {formatLabel(props.currentSpace.lifecycle)}
-        </p>
-      </div>
-
-      <div class="verevon-space-rail-section">
-        <div class="verevon-space-rail-section__heading">
-          <span>Conversations</span>
-          <span>{props.threads().length}</span>
-        </div>
-        <Show
-          when={props.threads().length > 0}
-          fallback={<p class="verevon-space-rail-empty">Your room’s conversations will collect here.</p>}
-        >
-          <ul class="verevon-space-thread-rail-list">
-            <For each={props.threads().slice(0, 8)}>
-              {(thread) => (
-                <li>
-                  <a href={threadHref(thread.thread_id)} aria-label={`Open ${threadTitle(thread)}`}>
-                    <span class="verevon-space-thread-rail-list__title">{threadTitle(thread)}</span>
-                    <span class="verevon-space-thread-rail-list__detail">{threadStatus(thread)}</span>
-                  </a>
-                </li>
-              )}
-            </For>
-          </ul>
-        </Show>
-      </div>
-    </aside>
-  )
-}
-
 function SpaceConversationPanel(props: {
   readonly spaceRef: string
+  readonly spaceName: string
   readonly threads: () => readonly SpaceThread[]
   readonly loading: () => boolean
+  readonly unavailable: () => boolean
 }) {
   return (
-    <section class="verevon-space-view" aria-labelledby="space-conversations-title">
+    <section class="verevon-space-view verevon-space-view--conversations" aria-labelledby="space-conversations-title">
       <div class="verevon-space-view__heading">
         <div>
-          <p class="verevon-space-eyebrow">Conversation record</p>
+        <p class="verevon-space-eyebrow">Space conversation</p>
           <h2 id="space-conversations-title">Samtaler</h2>
-          <p>The people and agent work that belong to this Space.</p>
+          <p>The shared record for people and agent work connected to this Space.</p>
         </div>
         <a class="verevon-space-secondary-action" href={spaceChatHref(props.spaceRef)}>
           <Sparkles size={15} aria-hidden="true" />
@@ -241,24 +180,51 @@ function SpaceConversationPanel(props: {
       <Show when={props.loading()}>
         <p class="verevon-space-inline-status" role="status">Loading Space conversations…</p>
       </Show>
-      <Show
-        when={props.threads().length > 0}
-        fallback={
-          <div class="verevon-space-empty-state">
-            <MessageCircle size={18} aria-hidden="true" />
-            <div>
-              <strong>No conversations yet</strong>
-              <p>Start the first conversation and it will become part of this room’s record.</p>
-            </div>
-          </div>
-        }
-      >
-        <ul class="verevon-space-conversation-list">
-          <For each={props.threads()}>
-            {(thread) => <SpaceConversationRow thread={thread} />}
-          </For>
-        </ul>
+      <Show when={!props.loading()}>
+        <Show
+          when={!props.unavailable() && props.threads().length > 0}
+          fallback={
+            <Show
+              when={props.unavailable()}
+              fallback={
+                <div class="verevon-space-fresh-conversation" aria-labelledby="space-fresh-conversation-title">
+                  <span class="verevon-space-fresh-conversation__mark" aria-hidden="true" />
+                  <h3 id="space-fresh-conversation-title">Explore bots in Agent Studio</h3>
+                  <p>Open Agent Studio to explore the bot blueprints available to your organization.</p>
+                  <A
+                    class="verevon-space-fresh-conversation__action"
+                    href="/agents?agent=chatbot&view=playground"
+                    aria-label="Open Agent Studio"
+                  >
+                    <Bot size={16} aria-hidden="true" />
+                    Open Agent Studio
+                  </A>
+                </div>
+              }
+            >
+              <div class="verevon-space-empty-state" role="status">
+                <MessageCircle size={20} aria-hidden="true" />
+                <div>
+                  <h3>Conversation record unavailable</h3>
+                  <p>Try again shortly. We could not confirm whether this Space has conversations.</p>
+                </div>
+              </div>
+            </Show>
+          }
+        >
+          <ul class="verevon-space-conversation-list">
+            <For each={props.threads()}>
+              {(thread) => <SpaceConversationRow thread={thread} />}
+            </For>
+          </ul>
+        </Show>
       </Show>
+
+      <a class="verevon-space-composer-link" href={spaceChatHref(props.spaceRef)} aria-label={`Message ${props.spaceName}`}>
+        <span class="verevon-space-composer-link__plus" aria-hidden="true"><Plus size={16} /></span>
+        <span>Message {props.spaceName}</span>
+        <ArrowUpRight size={16} aria-hidden="true" />
+      </a>
     </section>
   )
 }
@@ -339,7 +305,7 @@ function SpaceMembersPanel(props: {
         <span class="verevon-space-membership-card__icon" aria-hidden="true"><Users size={17} /></span>
         <div>
           <strong>You are confirmed as {formatLabel(props.role)}</strong>
-          <p>A full roster will appear when Control Plane publishes a Space member projection.</p>
+          <p>People and bots connected to this Space will appear only when an access-filtered roster is published for this Space.</p>
         </div>
       </div>
 
@@ -468,14 +434,14 @@ function formatLabel(value: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
+function spaceWorkroomLabel(kind: string): string {
+  return kind === 'personal' ? 'Personal room' : 'Shared workroom'
+}
+
 function formatWhen(value: string): string {
   try {
     return new Date(value).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' })
   } catch {
     return value
   }
-}
-
-function spaceInitial(name: string): string {
-  return name.trim().charAt(0).toUpperCase() || 'S'
 }
