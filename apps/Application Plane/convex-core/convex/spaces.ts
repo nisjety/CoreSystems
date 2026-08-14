@@ -117,6 +117,25 @@ function patchForDelivery(delivery: SpaceLifecycleDelivery) {
   };
 }
 
+/**
+ * Maps a lifecycle transition result onto the `spaces` table's field names.
+ *
+ * `transitionSpaceLifecycle` works in the lifecycle value object's shape,
+ * `{lifecycle, revision}`, but the table stores the counter as
+ * `lifecycleRevision`. Every call site spread the result straight into a patch,
+ * which wrote an extra `revision` field the schema validator rejects — so every
+ * transition threw at the database, not at a type check.
+ *
+ * That went unnoticed because no transition had ever executed: the only thing
+ * that activates a Space is the Application -> Control registration worker, and
+ * it had never been configured, so it released each claim before reaching this
+ * line. Control accepted the registration and Convex then failed to record it,
+ * leaving the Space `active` in Control and `pending_registration` here.
+ */
+function patchForLifecycle(next: { lifecycle: SpaceLifecycle; revision: number }) {
+  return { lifecycle: next.lifecycle, lifecycleRevision: next.revision };
+}
+
 function assertDeliveryWorker(workerId: string): void {
   if (!workerId.trim()) throw new Error("Space delivery worker identity is required");
 }
@@ -701,7 +720,7 @@ export const applyControlRegistration = internalMutation({
     );
     const now = Date.now();
     await ctx.db.patch(current._id, {
-      ...next,
+      ...patchForLifecycle(next),
       controlResourceRef: args.accepted ? args.controlResourceRef : undefined,
       updatedAt: now,
     });
@@ -722,7 +741,7 @@ export const transitionLifecycle = internalMutation({
       args.lifecycle,
     );
     const now = Date.now();
-    await ctx.db.patch(current._id, { ...next, updatedAt: now });
+    await ctx.db.patch(current._id, { ...patchForLifecycle(next), updatedAt: now });
     const updated = await ctx.db.get(current._id);
     if (!updated) throw new Error("Space lifecycle update failed");
     const event = await appendLifecycleEvent(ctx, updated, now);
@@ -833,7 +852,7 @@ export const acknowledgeDeletionAuthorizationClaim = internalMutation({
       { lifecycle: space.lifecycle as SpaceLifecycle, revision: space.lifecycleRevision },
       "deleting",
     );
-    await ctx.db.patch(space._id, { ...next, updatedAt: args.now });
+    await ctx.db.patch(space._id, { ...patchForLifecycle(next), updatedAt: args.now });
     const updated = await ctx.db.get(space._id);
     if (!updated) throw new Error("deletion fence update failed");
     await appendLifecycleEvent(ctx, updated, args.now);
@@ -928,7 +947,7 @@ async function finalizeDeletionWhenEveryOwnerSucceeded(ctx: any, requestId: stri
     { lifecycle: space.lifecycle as SpaceLifecycle, revision: space.lifecycleRevision },
     "deleted",
   );
-  await ctx.db.patch(space._id, { ...next, updatedAt: now });
+  await ctx.db.patch(space._id, { ...patchForLifecycle(next), updatedAt: now });
   const deleted = await ctx.db.get(space._id);
   if (!deleted) throw new Error("Space deletion finalization failed");
   await appendLifecycleEvent(ctx, deleted, now);
@@ -1236,7 +1255,7 @@ export const acknowledgeRegistrationClaim = internalMutation({
         "active",
       );
       await ctx.db.patch(space._id, {
-        ...next,
+        ...patchForLifecycle(next),
         controlResourceRef: args.controlResourceRef,
         updatedAt: args.now,
       });
@@ -1281,7 +1300,7 @@ export const rejectRegistrationClaim = internalMutation({
         { lifecycle: space.lifecycle as SpaceLifecycle, revision: space.lifecycleRevision },
         "failed_registration",
       );
-      await ctx.db.patch(space._id, { ...next, updatedAt: args.now });
+      await ctx.db.patch(space._id, { ...patchForLifecycle(next), updatedAt: args.now });
       const updated = await ctx.db.get(space._id);
       if (!updated) throw new Error("Space registration rejection update failed");
       // The conflicting Control reference cannot consume a later lifecycle
