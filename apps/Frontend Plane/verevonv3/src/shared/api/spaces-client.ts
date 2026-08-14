@@ -110,6 +110,26 @@ export function getSpaceActions(spaceRef: string): Promise<SpaceActions> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/actions`)
 }
 
+/**
+ * Provision the caller's own personal Space.
+ *
+ * Idempotent server-side — an owner has at most one personal Space, so calling
+ * this twice returns the same room rather than creating a second.
+ *
+ * The room comes back as `pending_registration`, not active: Control registers
+ * it afterwards, and Space actions stay refused until it does. Treat a
+ * successful response as "the room now exists", not as "the room is ready".
+ * Owner and organization are taken from the session at the gateway; nothing
+ * here identifies the user.
+ */
+export async function createPersonalSpace(name?: string): Promise<SpaceSummary> {
+  const response = await requestJson<{ space: SpaceSummary }>('/api/v1/spaces', {
+    method: 'POST',
+    body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
+  })
+  return response.space
+}
+
 export function requestPersonalSpaceDeletion(spaceRef: string, idempotencyKey: string): Promise<SpaceDeletionRequest> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/deletion-requests`, {
     method: 'POST',

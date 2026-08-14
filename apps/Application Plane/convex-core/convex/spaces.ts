@@ -173,6 +173,100 @@ export const ensurePersonalSpace = mutation({
   },
 });
 
+/**
+ * Resolves the acting member for a service-key call, applying the same two
+ * checks the `*ForGateway` reads already apply: the organization must exist and
+ * not be deleted, and the caller must be a non-deleted member of it.
+ *
+ * The service key proves the CALLER is the gateway. It says nothing about which
+ * user the gateway is acting for, so that must still be established from the
+ * data — a key alone must never be enough to act as an arbitrary user.
+ *
+ * Extracted rather than inlined a sixth time: this file already repeats these
+ * two lookups five times. Those five are left alone deliberately (they are
+ * authority code another workstream is actively changing, and consolidating
+ * them is a separate change), but a new copy of an authorization check is not
+ * something to add.
+ */
+async function requireGatewayMember(ctx: any, externalAuthId: string, externalOrgId: string) {
+  const organizations = await ctx.db
+    .query("organizations")
+    .withIndex("by_external_id", (q: any) => q.eq("externalOrgId", externalOrgId))
+    .collect();
+  const organization = organizations.find((candidate: any) => candidate.syncStatus !== "deleted");
+  if (!organization) throw new Error("Organization not found");
+  const members = await ctx.db
+    .query("users")
+    .withIndex("by_external_and_org", (q: any) =>
+      q.eq("externalAuthId", externalAuthId).eq("orgId", organization._id),
+    )
+    .collect();
+  if (!members.some((candidate: any) => candidate.syncStatus !== "deleted")) {
+    throw new Error("Unauthorized");
+  }
+  return organization;
+}
+
+/**
+ * Service-key counterpart of `ensurePersonalSpace`, so the BFF can provision a
+ * caller's own personal Space. Convex identity is unavailable on that path —
+ * the gateway holds a Control session, not a Convex one — which is why the
+ * viewer is resolved from the arguments after the membership check above.
+ *
+ * Idempotent by the same rule as the identity version: an owner has at most one
+ * personal Space, so a repeat call returns the existing record rather than
+ * creating a second. Two would trip the `personal Space invariant violated`
+ * guard every read applies.
+ *
+ * The new Space is `pending_registration`, NOT active. Control registers it
+ * afterwards through `applyControlRegistration`; this mutation deliberately
+ * cannot shortcut that, because a room that exists is not yet a room Control
+ * has authorized.
+ */
+export const ensurePersonalSpaceForGateway = mutation({
+  args: {
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+    name: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const existing = await ctx.db
+      .query("spaces")
+      .withIndex("by_personal_owner", (q: any) =>
+        q.eq("externalOrgId", args.externalOrgId)
+          .eq("kind", "personal")
+          .eq("ownerExternalAuthId", args.externalAuthId),
+      )
+      .collect();
+    if (existing.length > 1) throw new Error("personal Space invariant violated");
+    if (existing[0]) return existing[0];
+
+    const now = Date.now();
+    const recordId = await ctx.db.insert("spaces", {
+      spaceRef: "pending",
+      externalOrgId: args.externalOrgId,
+      kind: "personal",
+      name: args.name?.trim() || "Personal Space",
+      ownerExternalAuthId: args.externalAuthId,
+      createdByExternalAuthId: args.externalAuthId,
+      lifecycle: "pending_registration",
+      lifecycleRevision: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const spaceRef = String(recordId);
+    await ctx.db.patch(recordId, { spaceRef });
+    const space = await ctx.db.get(recordId);
+    if (!space) throw new Error("Space creation failed");
+    const event = await appendLifecycleEvent(ctx, space, now);
+    return { ...space, lifecycleEvent: event };
+  },
+});
+
 export const getPersonalSpace = query({
   args: { externalOrgId: v.string() },
   handler: async (ctx, args) => {

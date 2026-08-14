@@ -1,7 +1,7 @@
-import { createResource, Show, For } from 'solid-js'
+import { createResource, createSignal, Show, For } from 'solid-js'
 import { Navigate } from '@solidjs/router'
 
-import { listSpaces, type SpaceSummary } from '@/shared/api/spaces-client'
+import { createPersonalSpace, listSpaces, type SpaceSummary } from '@/shared/api/spaces-client'
 
 /**
  * Entry point for `/spaces`, so the sidebar has something to link to.
@@ -34,7 +34,28 @@ export function pickDefaultSpace(
 }
 
 export default function SpacesIndexPage() {
-  const [spaces] = createResource(listSpaces)
+  const [spaces, { refetch }] = createResource(listSpaces)
+  const [creating, setCreating] = createSignal(false)
+  const [createError, setCreateError] = createSignal('')
+
+  async function createRoom() {
+    if (creating()) return
+    setCreateError('')
+    setCreating(true)
+    try {
+      await createPersonalSpace()
+      // Refetch rather than navigating straight to the returned ref: the list
+      // is the single source this page resolves from, so one path decides where
+      // you land whether the room was just made or already existed.
+      await refetch()
+    } catch {
+      setCreateError(
+        'Rommet kunne ikke opprettes. Ingenting ble klargjort — prøv igjen, eller last siden på nytt.',
+      )
+    } finally {
+      setCreating(false)
+    }
+  }
 
   return (
     <section class="space-page" aria-labelledby="spaces-index-title">
@@ -62,10 +83,23 @@ export default function SpacesIndexPage() {
               <div>
                 <h1 id="spaces-index-title">Ingen rom ennå</h1>
                 <p>
-                  Du er ikke medlem av noe rom. Et personlig rom opprettes av Control Plane
-                  når kontoen din klargjøres — dette er en manglende klargjøring, ikke et
-                  tomt rom.
+                  Du har ikke et personlig rom i denne organisasjonen. Opprett det her — det
+                  blir ditt eget, og du kan invitere andre inn i det senere.
                 </p>
+                <button type="button" onClick={() => void createRoom()} disabled={creating()}>
+                  {creating() ? 'Oppretter rommet …' : 'Opprett mitt rom'}
+                </button>
+                {/* Honest about the two-step lifecycle: the room exists as soon
+                    as this returns, but Control must register it before any
+                    Space action is allowed. Saying "ready" here would promise
+                    something the next screen would then refuse. */}
+                <p>
+                  Rommet opprettes med én gang, men må registreres av Control Plane før
+                  handlinger i det er tillatt. Du ser statusen i rommet.
+                </p>
+                <Show when={createError()}>
+                  <p role="alert">{createError()}</p>
+                </Show>
               </div>
             }
           >

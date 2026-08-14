@@ -600,7 +600,10 @@ fn invalid_decision() -> (StatusCode, Json<Value>) {
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/spaces", get(list_personal_spaces))
+        .route(
+            "/api/v1/spaces",
+            get(list_personal_spaces).post(create_personal_space),
+        )
         .route(
             "/api/v1/spaces/:space_ref/membership",
             get(current_membership),
@@ -900,7 +903,11 @@ async fn list_personal_spaces(
     Extension(user): Extension<AuthenticatedUser>,
 ) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
-    let Ok(space) = personal_space_lifecycle(&state, &user, &org_id).await else {
+    // Unfiltered on purpose: a listing reports what exists. A Space awaiting
+    // Control registration is still the caller's Space, and hiding it would
+    // make "create a room" look like it silently failed. Every acting surface
+    // keeps using `personal_space_lifecycle`, which still requires `active`.
+    let Ok(space) = personal_space_record(&state, &user, &org_id).await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(error(
@@ -918,7 +925,84 @@ async fn list_personal_spaces(
     )
 }
 
-async fn personal_space_lifecycle(
+/// Provision the caller's own personal Space.
+///
+/// Idempotent: an owner has at most one personal Space, so a repeat call
+/// returns the existing record rather than creating a second — two would trip
+/// the invariant guard every read applies. That also makes a double-clicked
+/// button harmless.
+///
+/// The result is `pending_registration`, not active. Control registers it
+/// afterwards, so this returns 202 rather than 201: the room now exists, but it
+/// is not yet a room Control has authorized, and the acting surfaces will keep
+/// refusing until it is. Reporting 201 would imply a readiness this does not
+/// deliver.
+///
+/// The body is ignored beyond an optional name; owner and org come from the
+/// verified session and the caller's active organization, never from the
+/// browser.
+async fn create_personal_space(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    body: Option<Json<Value>>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "organization_required",
+                "An active organization is required before a Space can be created.",
+            )),
+        );
+    }
+    let name = body
+        .as_ref()
+        .and_then(|Json(value)| value.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+
+    // `convex_gateway_call` injects only the service key; identity is the
+    // caller's responsibility, and it comes from the verified session and the
+    // resolved active org — never from the request body.
+    let mut args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+    });
+    if let Some(name) = name {
+        args["name"] = json!(name);
+    }
+    let Ok(created) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaces:ensurePersonalSpaceForGateway",
+        args,
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "space_provisioning_unavailable",
+                "The Space could not be created. Nothing was provisioned.",
+            )),
+        );
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"data": {"space": public_space(&created)}})),
+    )
+}
+
+/// The caller's personal Space as stored, at ANY lifecycle.
+///
+/// Used by surfaces that report existence rather than grant action. A Space
+/// still `pending_registration` must be visible — otherwise creating one looks
+/// like it did nothing, and the owner has no way to see that registration is
+/// what they are waiting on.
+async fn personal_space_record(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
@@ -961,10 +1045,34 @@ async fn personal_space_lifecycle(
         .get("spaceRef")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if space_ref.trim().is_empty() || lifecycle != "active" {
+    if space_ref.trim().is_empty() {
         return Ok(None);
     }
+    let _ = lifecycle;
     Ok(Some(value))
+}
+
+/// The caller's personal Space **only when Control has authorized it**.
+///
+/// This is the resolver every acting surface uses — context, actions, threads,
+/// deletion. A Space that exists is not yet a Space Control has registered, so
+/// anything that grants an action must keep this gate.
+///
+/// [`personal_space_record`] is the unfiltered read, and is for surfaces whose
+/// job is to report what exists rather than to act on it.
+async fn personal_space_lifecycle(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> Result<Option<Value>, ()> {
+    let Some(space) = personal_space_record(state, user, org_id).await? else {
+        return Ok(None);
+    };
+    let active = space
+        .get("lifecycle")
+        .and_then(Value::as_str)
+        .is_some_and(|lifecycle| lifecycle == "active");
+    Ok(active.then_some(space))
 }
 
 // The Application service key stays exclusively in the BFF. Gateway callers
