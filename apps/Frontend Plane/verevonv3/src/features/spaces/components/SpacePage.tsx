@@ -5,9 +5,11 @@ import { createResource, createSignal, For, onCleanup, onMount, Show } from 'sol
 import {
   getPersonalSpaceDeletionReceipt,
   getSpaceContext,
+  getSpaceRoster,
   getSpaceThreads,
   requestPersonalSpaceDeletion,
   type SpaceDeletionReceipt,
+  type SpaceRosterMember,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { SpaceActivityFeed } from './SpaceActivityFeed'
@@ -136,6 +138,7 @@ export default function SpacePage() {
                   ),
                   medlemmer: (
                     <SpaceMembersPanel
+                      spaceRef={current().space.space_ref}
                       role={current().membership.role}
                       kind={current().space.kind}
                       deletionError={deletionError}
@@ -284,6 +287,7 @@ function SpaceActivityPanel(props: {
 }
 
 function SpaceMembersPanel(props: {
+  readonly spaceRef: string
   readonly role: string
   readonly kind: string
   readonly deletionError: () => string
@@ -291,6 +295,8 @@ function SpaceMembersPanel(props: {
   readonly deletionSubmitting: () => boolean
   readonly onRequestDeletion: () => Promise<void>
 }) {
+  const [roster] = createResource(() => props.spaceRef, getSpaceRoster)
+
   return (
     <section class="verevon-space-view" aria-labelledby="space-members-title">
       <div class="verevon-space-view__heading">
@@ -305,9 +311,44 @@ function SpaceMembersPanel(props: {
         <span class="verevon-space-membership-card__icon" aria-hidden="true"><Users size={17} /></span>
         <div>
           <strong>You are confirmed as {formatLabel(props.role)}</strong>
-          <p>People and bots connected to this Space will appear only when an access-filtered roster is published for this Space.</p>
+          <p>Your own access is rechecked by the server; the roster below is Control's.</p>
         </div>
       </div>
+
+      <Show when={roster.loading}>
+        <p class="verevon-space-inline-status" role="status">Henter medlemmer …</p>
+      </Show>
+
+      {/* A refused roster is NOT an empty room. Control answers 404 when the
+          caller is not a member, and every Space has at least an owner, so
+          "could not be shown" and "nobody is here" must read differently. */}
+      <Show when={roster.error}>
+        <p class="verevon-space-projection-error" role="alert">
+          Medlemslisten kunne ikke hentes. Din egen tilgang er uendret.
+        </p>
+      </Show>
+
+      <Show when={roster()}>
+        {(members) => (
+          <ul class="verevon-space-roster">
+            <For each={members()}>
+              {(member: SpaceRosterMember) => (
+                <li class="verevon-space-roster__row">
+                  {/* An empty display name means the user projection has not
+                      arrived yet. Showing the opaque id is honest; inventing a
+                      name from it would not be. */}
+                  <span class="verevon-space-roster__name">
+                    {member.display_name || member.subject_id}
+                  </span>
+                  <span class="verevon-space-roster__meta">
+                    {member.subject_type === 'service' ? 'Agent' : 'Person'} · {formatLabel(member.role)}
+                  </span>
+                </li>
+              )}
+            </For>
+          </ul>
+        )}
+      </Show>
 
       <Show when={props.kind === 'personal'}>
         <section class="verevon-space-danger-zone" aria-labelledby="space-deletion-title">

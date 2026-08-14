@@ -6,6 +6,7 @@ import SpacePage from './SpacePage'
 
 const spacesClient = vi.hoisted(() => ({
   getSpaceContext: vi.fn(),
+  getSpaceRoster: vi.fn(),
   getSpaceThreads: vi.fn(),
   getPersonalSpaceDeletionReceipt: vi.fn(),
   listSpaces: vi.fn(),
@@ -14,6 +15,7 @@ const spacesClient = vi.hoisted(() => ({
 
 vi.mock('@/shared/api/spaces-client', () => ({
   getSpaceContext: spacesClient.getSpaceContext,
+  getSpaceRoster: spacesClient.getSpaceRoster,
   getSpaceThreads: spacesClient.getSpaceThreads,
   getPersonalSpaceDeletionReceipt: spacesClient.getPersonalSpaceDeletionReceipt,
   listSpaces: spacesClient.listSpaces,
@@ -58,6 +60,7 @@ describe('SpacePage', () => {
     spacesClient.getPersonalSpaceDeletionReceipt.mockReset()
     spacesClient.listSpaces.mockReset()
     spacesClient.requestPersonalSpaceDeletion.mockReset()
+    spacesClient.getSpaceRoster.mockResolvedValue([])
     spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [] })
     spacesClient.listSpaces.mockResolvedValue([personalContext.space])
   })
@@ -177,7 +180,9 @@ describe('SpacePage', () => {
     )
 
     fireEvent.click(screen.getByRole('tab', { name: 'Medlemmer' }))
-    expect(screen.getByText(/People and bots connected to this Space will appear only when/)).toBeTruthy()
+    // The Members tab no longer says a roster is unpublished — Control now
+    // publishes one, so the tab states whose list it is showing instead.
+    expect(screen.getByText(/the roster below is Control/)).toBeTruthy()
   })
 
   it('does not mistake a failed conversation projection for a fresh Space', async () => {
