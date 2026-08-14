@@ -4,6 +4,10 @@ export type VerevonRoute =
   | '/dashboard'
   | '/search'
   | '/chat'
+  // Resolver route. `/spaces/:spaceId` is the real surface, but it cannot be a
+  // navigation target because it needs a ref the sidebar does not have — so
+  // `/spaces` picks one and forwards. Only this form belongs in SidebarHref.
+  | '/spaces'
   | '/studio'
   | '/studio/canvas'
   | '/studio/campaigns'
@@ -107,6 +111,8 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
   switch (activeRoute) {
     case '/chat':
       return labels('Chat', 'Chat', 'Oppgaver', 'Tasks')
+    case '/spaces':
+      return labels('Rom', 'Space', 'Oversikt', 'Overview')
     case '/studio':
     case '/studio/canvas':
       return { moduleLabel: 'Studio', tabLabel: 'Canvas' }
@@ -156,6 +162,8 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
       return labels('Agenter', 'Agents', 'Kjørekonsoll', 'Run Console')
     case '/knowledge':
       return labels('Kunnskap', 'Knowledge', 'Kilder', 'Sources')
+    case '/leads':
+      return labels('Leads', 'Leads', 'Søk', 'Search')
     case '/account':
       return labels('Konto', 'Account', 'Profil', 'Profile')
     case '/settings':
@@ -176,6 +184,11 @@ export function getNavbarLabels(activeRoute: VerevonRoute, locale: Locale = 'no'
 export function routeFromPath(pathname: string): VerevonRoute {
   const path = pathname.replace(/\/+$/, '') || '/dashboard'
   if (path.startsWith('/chat')) return '/chat'
+  // Collapses `/spaces/:spaceId` onto the resolver route, so the sidebar item
+  // highlights and the navbar names the surface while a specific room is open.
+  // Without this the path fell through to the `/dashboard` default and a Space
+  // read as "Hjem".
+  if (path.startsWith('/spaces')) return '/spaces'
   if (path.startsWith('/studio/campaigns')) return '/studio/campaigns'
   if (path.startsWith('/studio/templates')) return '/studio/templates'
   if (path.startsWith('/studio')) return '/studio/canvas'
@@ -200,6 +213,9 @@ export function routeFromPath(pathname: string): VerevonRoute {
   if (path.startsWith('/insights')) return '/insights/overview'
   if (path.startsWith('/ingestions')) return '/ingestions'
   if (path.startsWith('/knowledge')) return '/knowledge'
+  // Routed and linked from the sidebar, but missing here — so /leads collapsed
+  // onto the /dashboard default and its own sidebar item never highlighted.
+  if (path.startsWith('/leads')) return '/leads'
   // The Run Console is a full-bleed surface — keep it out of the /agents config
   // sub-sidebar by routing it to its own value (matched before the /agents catch).
   if (path.startsWith('/agents/runs')) return '/agents/runs'

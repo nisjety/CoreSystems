@@ -32,6 +32,7 @@ import {
   TestTubeDiagonal,
   TicketCheck,
   TrendingUp,
+  Users,
   LayoutTemplate,
   type IconNode,
   type LucideProps,
@@ -116,6 +117,10 @@ export const sidebarSections: SidebarSection[] = [
         items: [
           { id: 'overview-home', label: 'Hjem', href: '/dashboard', icon: Home, description: 'Tilbake til Verevon Home.', tabId: 'my-account' },
           { id: 'overview-chat', label: 'Verevon Chat', href: '/chat', icon: MessageSquare, description: 'Start eller fortsett arbeid med AI.', tabId: 'my-account' },
+          // Points at the /spaces resolver, not /spaces/:spaceId — the sidebar
+          // has no Space ref to build a direct link from. `aliases` keeps the
+          // item highlighted once the resolver has forwarded to a real room.
+          { id: 'overview-spaces', label: 'Rom', href: '/spaces', icon: Users, description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.', tabId: 'my-account', aliases: ['/spaces'] },
           { id: 'overview-studio', label: 'Studio', href: '/studio/canvas', icon: PanelsTopLeft, description: 'Bygg kampanjer, pakker og visuelle planer på canvas.', tabId: 'my-account' },
           { id: 'overview-inbox', label: 'Support', href: '/support', icon: Inbox, description: 'Samtaler, saker, AI-gjennomgang og SLA i én arbeidsflyt.', tabId: 'my-account' },
           { id: 'overview-social', label: 'Social', href: '/social/calendar', icon: CalendarDays, description: 'Planlegg postkalender, godkjenninger og kanaler.', tabId: 'shared' },

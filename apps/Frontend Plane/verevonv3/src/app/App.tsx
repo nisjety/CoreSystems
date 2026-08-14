@@ -21,6 +21,7 @@ const InsightsPage = lazy(() => import('@/features/insights/components/InsightsP
 const KnowledgePage = lazy(() => import('@/features/knowledge/components/KnowledgePage'))
 const SharedWithMePage = lazy(() => import('@/features/knowledge/components/SharedWithMePage'))
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
+const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
 const VerevonIngestionsPage = lazy(() => import('@/features/ingestions/components/VerevonIngestionsPage'))
 const AuthPage = lazy(() => import('@/features/auth/components/AuthPage'))
@@ -146,6 +147,7 @@ export default function App() {
         <Route path="/" component={DashboardPage} />
         <Route path="/dashboard" component={DashboardPage} />
         <Route path="/chat" component={ChatPage} />
+        <Route path="/spaces" component={SpacesIndexPage} />
         <Route path="/spaces/:spaceId" component={SpacePage} />
         <Route path="/studio" component={() => <StudioPage section="canvas" />} />
         <Route path="/studio/canvas" component={() => <StudioPage section="canvas" />} />
