@@ -290,6 +290,7 @@ func (s *Server) setupRoutes() {
 				spaces.PUT("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.applySpaceLegalHold)
 				spaces.DELETE("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.releaseSpaceLegalHold)
 				spaces.GET("", s.requireVerifiedSpaceResolver, s.listSpacesForSubject)
+				spaces.GET("/:space_ref/roster", s.requireVerifiedSpaceResolver, s.spaceRoster)
 				spaces.PUT("/:space_ref/memberships", s.requireSpaceMembershipWriter, s.replaceSpaceMemberships)
 				spaces.POST("/recipient-audiences", s.requireSpaceAudiencePublisher, s.registerRecipientAudience)
 				spaces.PUT("/effect-policy", s.requireSpacePolicyWriter, s.upsertSpaceEffectPolicy)
@@ -303,6 +304,7 @@ func (s *Server) setupRoutes() {
 				spaces.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
 				spaces.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
 				spaces.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
+				spaces.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
 			}
 
 			// Per-user authz facade — the single internal surface Data Plane

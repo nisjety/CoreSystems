@@ -488,6 +488,65 @@ func (r *Repository) RegisterRecipientAudience(ctx context.Context, registration
 	return &registered, nil
 }
 
+// RosterForSpace lists who is in a Space, for a caller who is in it themselves.
+//
+// Membership is the gate: the roster of a room is only visible from inside it.
+// The same organization-membership backstop as the index applies, so someone
+// who has left the organization cannot read a roster even if their per-Space
+// revocation has not synced.
+//
+// Sanitized deliberately. It carries display identity and role — what a Members
+// tab needs to show who you work with — and NOT email. An email is a contact
+// detail and a durable identifier for someone who may only have consented to
+// being in a room, not to having their address published to everyone else in
+// it. Nothing here is a credential, an audience, or a decision.
+func (r *Repository) RosterForSpace(ctx context.Context, spaceRef, orgID, subjectID string) ([]RosterMember, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("Space authority repository unavailable")
+	}
+	spaceRef = strings.TrimSpace(spaceRef)
+	orgID = strings.TrimSpace(orgID)
+	subjectID = strings.TrimSpace(subjectID)
+	if spaceRef == "" || orgID == "" || subjectID == "" {
+		return nil, fmt.Errorf("Space, organization and subject are required")
+	}
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT m.subject_type, m.subject_id, m.role, m.revision, COALESCE(u.name, '')
+		FROM space_memberships m
+		JOIN registered_spaces s ON s.space_ref = m.space_ref
+		LEFT JOIN users u ON u.id = m.subject_id AND m.subject_type = 'user'
+		WHERE m.space_ref = $1 AND m.active
+		  AND s.org_id = $2 AND s.registration_state = 'active'
+		  AND EXISTS (
+		      SELECT 1 FROM space_memberships caller
+		      WHERE caller.space_ref = $1 AND caller.subject_type = 'user'
+		        AND caller.subject_id = $3 AND caller.active
+		  )
+		  AND EXISTS (
+		      SELECT 1 FROM user_org_memberships uo
+		      WHERE uo.user_id = $3 AND uo.org_id = $2 AND uo.status = 'active'
+		  )
+		ORDER BY m.role, m.subject_id`, spaceRef, orgID, subjectID)
+	if err != nil {
+		return nil, fmt.Errorf("read Space roster: %w", err)
+	}
+	defer rows.Close()
+
+	members := make([]RosterMember, 0, 16)
+	for rows.Next() {
+		var member RosterMember
+		if err := rows.Scan(&member.SubjectType, &member.SubjectID, &member.Role,
+			&member.Revision, &member.DisplayName); err != nil {
+			return nil, fmt.Errorf("scan roster member: %w", err)
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read Space roster: %w", err)
+	}
+	return members, nil
+}
+
 // SpacesForSubject lists the registered Spaces a subject currently belongs to.
 //
 // This is the actor-filtered index: Control decides what a caller may see,

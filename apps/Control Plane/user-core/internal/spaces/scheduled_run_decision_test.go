@@ -61,3 +61,39 @@ func TestIssueScheduledRunDecisionFailsClosedOnRevokedOrMismatchedAuthority(t *t
 		t.Fatal("mismatched subject must be denied")
 	}
 }
+
+func TestIssueScheduledRunExecutionDecisionIsDistinctAndBoundToPreparedThread(t *testing.T) {
+	evidence := validPersonalThreadEvidence()
+	evidence.ScheduleFireEntitled = true
+	intent := validScheduledRunIntent()
+	now := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+
+	decision, err := IssueScheduledRunExecutionDecision(
+		evidence, intent, "thread-scheduled-1", "decision-execute", "nonce-execute", now,
+	)
+	if err != nil {
+		t.Fatalf("IssueScheduledRunExecutionDecision: %v", err)
+	}
+	if decision.ActionID != scheduledRunExecutionAction ||
+		decision.ActionSchemaHash != scheduledRunExecutionSchema ||
+		decision.ServiceAudience != scheduledRunExecutionAudience ||
+		!matchesOneOf("schedule:execute", decision.Permissions...) {
+		t.Fatalf("unexpected execution decision: %#v", decision)
+	}
+	preparation, err := IssueScheduledRunDecision(evidence, intent, "decision-prepare", "nonce-prepare", now)
+	if err != nil {
+		t.Fatalf("IssueScheduledRunDecision: %v", err)
+	}
+	if decision.PayloadDigest == preparation.PayloadDigest {
+		t.Fatal("execution decision must not be interchangeable with preparation")
+	}
+	otherThread, err := IssueScheduledRunExecutionDecision(
+		evidence, intent, "thread-scheduled-2", "decision-execute-2", "nonce-execute-2", now,
+	)
+	if err != nil {
+		t.Fatalf("IssueScheduledRunExecutionDecision for changed thread: %v", err)
+	}
+	if decision.PayloadDigest == otherThread.PayloadDigest {
+		t.Fatal("execution decision must bind the exact prepared thread")
+	}
+}

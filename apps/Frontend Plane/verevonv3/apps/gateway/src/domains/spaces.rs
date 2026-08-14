@@ -610,6 +610,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/spaces/:space_ref/context", get(space_context))
         .route("/api/v1/spaces/:space_ref/actions", get(space_actions))
+        .route("/api/v1/spaces/:space_ref/roster", get(space_roster))
         .route("/api/v1/spaces/:space_ref/threads", get(list_space_threads))
         .route(
             "/api/v1/spaces/:space_ref/deletion-requests",
@@ -1034,6 +1035,42 @@ async fn create_personal_space(
         StatusCode::ACCEPTED,
         Json(json!({"data": {"space": public_space(&created)}})),
     )
+}
+
+/// Who is in this Space, for a caller who is in it.
+///
+/// A straight proxy of Control's roster: membership is the authority and the
+/// display identity comes with it, so there is nothing for this plane to
+/// compose or decide. Control answers 404 to a non-member, which passes through
+/// unchanged — "you cannot see this" must not be softened into an empty room.
+async fn space_roster(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    let url = format!(
+        "{}/api/v1/internal/spaces/{}/roster",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let actor = ActionActor {
+        user_id: user.user_id,
+        user_email: user.user_email,
+        user_name: user.user_name,
+        user_role: user.auth_role.unwrap_or_default(),
+    };
+    proxy_json(&state, Method::GET, &url, None, Some(&org_id), Some(&actor), None).await
 }
 
 /// Control's actor-filtered Space index: which Spaces this caller belongs to,

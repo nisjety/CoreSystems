@@ -10,9 +10,12 @@ import (
 )
 
 const (
-	scheduledRunAction   = "model.schedule.run"
-	scheduledRunAudience = "model-plane-capability-core"
-	scheduledRunSchema   = "sha256:space-scheduled-run-v1"
+	scheduledRunAction            = "model.schedule.run"
+	scheduledRunAudience          = "model-plane-capability-core"
+	scheduledRunSchema            = "sha256:space-scheduled-run-v1"
+	scheduledRunExecutionAction   = "model.schedule.execute"
+	scheduledRunExecutionAudience = "model-plane-session-core"
+	scheduledRunExecutionSchema   = "sha256:space-scheduled-run-execute-v1"
 )
 
 // ScheduledRunIntent is the immutable, non-secret owner effect Capability Core
@@ -51,16 +54,17 @@ func (i ScheduledRunIntent) Validate() error {
 	return nil
 }
 
-func scheduledRunPayloadDigest(evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent) string {
+func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, threadID string) string {
 	hash := sha256.New()
-	hash.Write([]byte("model.schedule.run\x00v1\x00"))
+	hash.Write([]byte(action + "\x00v1\x00"))
 	for _, field := range []struct{ name, value string }{
 		{"org_id", evidence.Membership.OrgID}, {"user_id", evidence.Membership.SubjectID},
 		{"space_id", evidence.Membership.SpaceRef}, {"schedule_id", intent.ScheduleID},
 		{"fire_key", intent.FireKey}, {"run_id", intent.TaskID}, {"system_thread_key", intent.SystemThreadKey()},
 		{"template_digest", intent.TemplateDigest}, {"recipient_audience_ref", evidence.RecipientAudienceRef},
 		{"recipient_audience_hash", evidence.RecipientAudienceHash}, {"privacy_policy_ref", evidence.Privacy.PolicyRef},
-		{"resource_authorization_ref", evidence.ResourceAuthorizationRef}, {"action_schema_hash", scheduledRunSchema},
+		{"resource_authorization_ref", evidence.ResourceAuthorizationRef}, {"action_schema_hash", schema},
+		{"thread_id", threadID},
 		{"idempotency_key", intent.IdempotencyKey},
 	} {
 		hash.Write([]byte(field.name))
@@ -92,6 +96,33 @@ func scheduledRunPayloadDigest(evidence PersonalThreadDecisionEvidence, intent S
 // IssueScheduledRunDecision authorizes preparation of one service-owned run
 // thread. It is not user delegation and does not authorize any provider effect.
 func IssueScheduledRunDecision(evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, decisionRef, nonce string, now time.Time) (Decision, error) {
+	return issueScheduledRunDecision(
+		evidence, intent, decisionRef, nonce, now,
+		scheduledRunAction, scheduledRunAudience, scheduledRunSchema, "schedule:run", "",
+	)
+}
+
+// IssueScheduledRunExecutionDecision re-resolves an owner's active Space
+// authority immediately before Orchestrator Core starts a prepared run. It is
+// a distinct Session-targeted grant; preparation authority cannot be replayed
+// as execution authority.
+func IssueScheduledRunExecutionDecision(evidence PersonalThreadDecisionEvidence, intent ScheduledRunIntent, threadID, decisionRef, nonce string, now time.Time) (Decision, error) {
+	if strings.TrimSpace(threadID) == "" {
+		return Decision{}, fmt.Errorf("scheduled run execution thread is required")
+	}
+	return issueScheduledRunDecision(
+		evidence, intent, decisionRef, nonce, now,
+		scheduledRunExecutionAction, scheduledRunExecutionAudience, scheduledRunExecutionSchema, "schedule:execute", strings.TrimSpace(threadID),
+	)
+}
+
+func issueScheduledRunDecision(
+	evidence PersonalThreadDecisionEvidence,
+	intent ScheduledRunIntent,
+	decisionRef, nonce string,
+	now time.Time,
+	action, audience, schema, permission, threadID string,
+) (Decision, error) {
 	if err := evidence.validatePersonalAuthority(); err != nil {
 		return Decision{}, err
 	}
@@ -115,13 +146,13 @@ func IssueScheduledRunDecision(evidence PersonalThreadDecisionEvidence, intent S
 	}
 	return Decision{
 		DecisionRef: strings.TrimSpace(decisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evidence.Membership.SpaceRef,
-		SubjectID: evidence.Membership.SubjectID, ServiceAudience: scheduledRunAudience, ActionID: scheduledRunAction,
-		ActionSchemaHash: scheduledRunSchema, PayloadDigest: scheduledRunPayloadDigest(evidence, intent), IdempotencyKey: strings.TrimSpace(intent.IdempotencyKey),
+		SubjectID: evidence.Membership.SubjectID, ServiceAudience: audience, ActionID: action,
+		ActionSchemaHash: schema, PayloadDigest: scheduledRunPayloadDigest(action, schema, evidence, intent, threadID), IdempotencyKey: strings.TrimSpace(intent.IdempotencyKey),
 		RecipientAudienceRef: strings.TrimSpace(evidence.RecipientAudienceRef), RecipientAudienceHash: strings.TrimSpace(evidence.RecipientAudienceHash),
 		PrivacyPolicyRef: strings.TrimSpace(evidence.Privacy.PolicyRef), ResourceAuthorizationRef: strings.TrimSpace(evidence.ResourceAuthorizationRef),
 		AuthorityRevision: evidence.Membership.Revisions.Authority, MembershipRevision: evidence.Membership.Revisions.Membership,
 		PrivacyRevision: evidence.Membership.Revisions.Privacy, RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision: evidence.Membership.Revisions.Entitlement, Permissions: []string{"schedule:run"},
+		EntitlementRevision: evidence.Membership.Revisions.Entitlement, Permissions: []string{permission},
 		Purpose: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.LawfulBasis),
 		PrivacyClass: strings.TrimSpace(evidence.Privacy.PrivacyClass), ThirdPartyAllowed: evidence.Privacy.ThirdPartyAllowed,
 		RetentionClass: strings.TrimSpace(evidence.Privacy.RetentionClass), Residency: strings.TrimSpace(evidence.Privacy.Residency),

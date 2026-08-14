@@ -106,6 +106,28 @@ export function getSpaceThreads(spaceRef: string): Promise<SpaceThreads> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/threads`)
 }
 
+/** One participant of a Space as shown to another participant. */
+export type SpaceRosterMember = {
+  subject_type: 'user' | 'service'
+  subject_id: string
+  role: 'viewer' | 'editor' | 'manager' | 'owner'
+  revision: number
+  /** May be empty: a membership can exist before its user projection does. */
+  display_name: string
+}
+
+/**
+ * Who is in this Space. Control gates it on your own membership and answers 404
+ * when you are not in the room — that is "you cannot see this", not "the room
+ * is empty", and the two must stay distinguishable in the UI.
+ */
+export async function getSpaceRoster(spaceRef: string): Promise<readonly SpaceRosterMember[]> {
+  const response = await requestJson<{ members: readonly SpaceRosterMember[] }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/roster`,
+  )
+  return response.members
+}
+
 export function getSpaceActions(spaceRef: string): Promise<SpaceActions> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/actions`)
 }

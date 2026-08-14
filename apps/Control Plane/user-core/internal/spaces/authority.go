@@ -180,6 +180,21 @@ func (p EffectPolicy) Validate() error {
 // to a resolver only as one component of effective access: callers must still
 // intersect recipient, policy, and owner-resource authorization before an
 // effect. The database result is deliberately not a signed access decision.
+// RosterMember is one participant of a Space as shown to another participant.
+//
+// `SubjectType` distinguishes a person from a service/agent identity, so the UI
+// can say which is which instead of implying every row is a colleague.
+// `DisplayName` may be empty — a membership can exist before its user
+// projection does, and an empty name is more honest than substituting the
+// opaque id as though it were one.
+type RosterMember struct {
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Role        string `json:"role"`
+	Revision    int64  `json:"revision"`
+	DisplayName string `json:"display_name"`
+}
+
 // SpaceIndexEntry is one Space a subject may see, with the role they hold in
 // it. Deliberately narrow: an index answers "which rooms are mine and what am
 // I in them", and anything more — audiences, policies, decisions — belongs to

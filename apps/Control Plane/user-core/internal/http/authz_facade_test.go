@@ -176,6 +176,31 @@ func TestRequireSpaceScheduleFireReauthorizerRequiresExactPrincipalAndScope(t *t
 	}
 }
 
+func TestRequireSpaceScheduledRunExecutorRequiresExactPrincipalAndScope(t *testing.T) {
+	s := &Server{}
+	for _, candidate := range []struct {
+		serviceID string
+		scopes    []string
+		allowed   bool
+	}{
+		{serviceID: capabilityCorePrincipal, scopes: []string{"spaces:schedule:execute"}},
+		{serviceID: orchestratorCorePrincipal, scopes: []string{"spaces:schedule:reauthorize"}},
+		{serviceID: orchestratorCorePrincipal, scopes: []string{"spaces:schedule:execute"}, allowed: true},
+	} {
+		c, w := newGinCtx("/api/v1/internal/spaces/scheduled-run-execution-decision")
+		c.Set("auth_method", "service_principal")
+		c.Set("service_id", candidate.serviceID)
+		c.Set("service_scopes", candidate.scopes)
+		s.requireSpaceScheduledRunExecutor(c)
+		if candidate.allowed && w.Code != http.StatusOK {
+			t.Fatalf("eligible scheduled-run executor denied: %d", w.Code)
+		}
+		if !candidate.allowed && w.Code != http.StatusForbidden {
+			t.Fatalf("ineligible scheduled-run executor accepted: %d", w.Code)
+		}
+	}
+}
+
 func TestRequireSpaceDeletionAuthorizerRequiresDedicatedScope(t *testing.T) {
 	s := &Server{}
 	for _, candidate := range []struct {

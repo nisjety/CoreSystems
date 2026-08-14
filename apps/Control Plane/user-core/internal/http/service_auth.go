@@ -100,6 +100,8 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:policy:write"
 	case strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/legal-hold"):
 		return "spaces:policy:write"
+	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/roster"):
+		return "spaces:resolve"
 	case method == http.MethodGet && (path == "/api/v1/internal/spaces" || path == "/api/v1/internal/spaces/"):
 		return "spaces:resolve"
 	case method == http.MethodPut && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/memberships"):
@@ -112,8 +114,10 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:issue"
 	case path == "/api/v1/internal/spaces/import-execution-decision":
 		return "spaces:import:reauthorize"
-	case path == "/api/v1/internal/spaces/schedule-fire-decision":
+	case path == "/api/v1/internal/spaces/schedule-fire-decision" || path == "/api/v1/internal/spaces/scheduled-run-decision":
 		return "spaces:schedule:reauthorize"
+	case path == "/api/v1/internal/spaces/scheduled-run-execution-decision":
+		return "spaces:schedule:execute"
 	case path == "/api/v1/internal/spaces/effect-policy":
 		return "spaces:policy:write"
 	case strings.HasPrefix(path, "/api/v1/internal/authz/"):
