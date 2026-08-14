@@ -488,6 +488,58 @@ func (r *Repository) RegisterRecipientAudience(ctx context.Context, registration
 	return &registered, nil
 }
 
+// SpacesForSubject lists the registered Spaces a subject currently belongs to.
+//
+// This is the actor-filtered index: Control decides what a caller may see,
+// because Control owns memberships. Application can name and describe a Space,
+// but it must not be the thing that decides whether you are in it — a
+// projection can lag a revocation, and an index that lags is an index that
+// shows a room somebody was removed from.
+//
+// Both memberships are checked, not one: the Space membership AND a live
+// organization membership. Leaving an organization must remove its rooms from
+// your index even if the per-Space revocation has not been synced yet, so the
+// org check is the backstop that makes the sync's timing non-security-critical.
+func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID string) ([]SpaceIndexEntry, error) {
+	if r == nil || r.db == nil {
+		return nil, fmt.Errorf("Space authority repository unavailable")
+	}
+	orgID = strings.TrimSpace(orgID)
+	subjectID = strings.TrimSpace(subjectID)
+	if orgID == "" || subjectID == "" {
+		return nil, fmt.Errorf("organization and subject are required")
+	}
+	rows, err := r.db.Pool.Query(ctx, `
+		SELECT s.space_ref, s.org_id, s.space_kind, m.role
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref = s.space_ref
+		WHERE s.org_id = $1
+		  AND s.registration_state = 'active'
+		  AND m.subject_type = 'user' AND m.subject_id = $2 AND m.active = TRUE
+		  AND EXISTS (
+		      SELECT 1 FROM user_org_memberships u
+		      WHERE u.user_id = $2 AND u.org_id = $1 AND u.status = 'active'
+		  )
+		ORDER BY s.space_kind, s.registered_at`, orgID, subjectID)
+	if err != nil {
+		return nil, fmt.Errorf("list Spaces for subject: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]SpaceIndexEntry, 0, 8)
+	for rows.Next() {
+		var entry SpaceIndexEntry
+		if err := rows.Scan(&entry.SpaceRef, &entry.OrgID, &entry.Kind, &entry.Role); err != nil {
+			return nil, fmt.Errorf("scan Space index entry: %w", err)
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read Space index: %w", err)
+	}
+	return entries, nil
+}
+
 // ReplaceMemberships converges a Space's membership on the declared set and
 // returns the resulting authority revisions.
 //

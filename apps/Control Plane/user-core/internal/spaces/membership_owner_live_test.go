@@ -116,3 +116,38 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 		t.Fatalf("an empty roster removed the owner: role=%q active=%v", role, active)
 	}
 }
+
+// The index answers with the Spaces a subject actually belongs to, and the
+// organization-membership backstop removes them all when the person leaves the
+// organization — even before the per-Space revocation syncs.
+func TestSpacesForSubjectIsActorFiltered(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping live index test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	repo := &Repository{db: &database.DB{Pool: pool}}
+
+	// A subject with no organization membership sees nothing, regardless of
+	// what Spaces exist.
+	entries, err := repo.SpacesForSubject(ctx, "test-org-index", "test-stranger")
+	if err != nil {
+		t.Fatalf("index for stranger: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("a non-member saw %d Spaces", len(entries))
+	}
+
+	// Missing identity is refused rather than treated as "everyone".
+	if _, err := repo.SpacesForSubject(ctx, "", "test-stranger"); err == nil {
+		t.Fatal("an empty organization was accepted")
+	}
+	if _, err := repo.SpacesForSubject(ctx, "test-org-index", ""); err == nil {
+		t.Fatal("an empty subject was accepted")
+	}
+}

@@ -100,6 +100,8 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:policy:write"
 	case strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/legal-hold"):
 		return "spaces:policy:write"
+	case method == http.MethodGet && (path == "/api/v1/internal/spaces" || path == "/api/v1/internal/spaces/"):
+		return "spaces:resolve"
 	case method == http.MethodPut && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/memberships"):
 		return "spaces:membership:write"
 	case path == "/api/v1/internal/spaces/recipient-audiences":

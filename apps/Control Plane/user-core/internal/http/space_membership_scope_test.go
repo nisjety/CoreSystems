@@ -12,6 +12,7 @@ func TestSpaceMembershipScopeRouting(t *testing.T) {
 		{http.MethodGet, "/api/v1/internal/spaces/space-1/membership", "spaces:resolve"},
 		{http.MethodPost, "/api/v1/internal/spaces/register", "spaces:register"},
 		{http.MethodPost, "/api/v1/internal/spaces/recipient-audiences", "spaces:audience:publish"},
+		{http.MethodGet, "/api/v1/internal/spaces", "spaces:resolve"},
 	}
 	for _, tc := range cases {
 		got := serviceScopeForRequest(httptest.NewRequest(tc.method, tc.path, nil))

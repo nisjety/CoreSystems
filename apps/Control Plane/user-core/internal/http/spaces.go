@@ -154,6 +154,26 @@ func (s *Server) registerSpace(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": registered})
 }
 
+// listSpacesForSubject is the actor-filtered Space index.
+//
+// The acting subject comes from the verified delegation the `spaces:resolve`
+// scope already requires, never from a query parameter — an index keyed on a
+// caller-supplied id is an enumeration endpoint.
+func (s *Server) listSpacesForSubject(c *gin.Context) {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	entries, err := s.spaceRepo.SpacesForSubject(c.Request.Context(), c.GetString("org_id"), c.GetString("user_id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Space index resolution failed"})
+		return
+	}
+	// An empty index is a valid answer, not an error: a subject can legitimately
+	// belong to no registered Space yet.
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"spaces": entries, "count": len(entries)}})
+}
+
 // replaceSpaceMemberships converges a Space's roster on the declared set.
 //
 // The Space reference comes from the path, not the body: the route is already

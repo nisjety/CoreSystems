@@ -180,6 +180,17 @@ func (p EffectPolicy) Validate() error {
 // to a resolver only as one component of effective access: callers must still
 // intersect recipient, policy, and owner-resource authorization before an
 // effect. The database result is deliberately not a signed access decision.
+// SpaceIndexEntry is one Space a subject may see, with the role they hold in
+// it. Deliberately narrow: an index answers "which rooms are mine and what am
+// I in them", and anything more — audiences, policies, decisions — belongs to
+// the per-Space reads that check authority again for that specific use.
+type SpaceIndexEntry struct {
+	SpaceRef string `json:"space_ref"`
+	OrgID    string `json:"org_id"`
+	Kind     Kind   `json:"kind"`
+	Role     string `json:"role"`
+}
+
 // MemberGrant is one subject's place in a Space. `service` covers agent and
 // workload identities, which the product model allows as Space members but
 // never infers — an identity is a member because it was granted, not because
