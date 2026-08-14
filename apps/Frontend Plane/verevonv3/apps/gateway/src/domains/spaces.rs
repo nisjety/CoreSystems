@@ -907,6 +907,46 @@ async fn list_personal_spaces(
     // Control registration is still the caller's Space, and hiding it would
     // make "create a room" look like it silently failed. Every acting surface
     // keeps using `personal_space_lifecycle`, which still requires `active`.
+    // Control decides WHICH Spaces the caller may see; Application only names
+    // them. Ask Control first and intersect, so a Space that exists in the
+    // Application projection but is absent from Control's index — revoked,
+    // never registered, or someone else's — can never appear here merely
+    // because the projection still lists it.
+    if let Some(index) = control_space_index(&state, &user, &org_id).await {
+        let labels = organization_space_labels(&state, &user, &org_id).await;
+        let spaces: Vec<Value> = index
+            .iter()
+            .filter_map(|entry| {
+                let space_ref = entry.get("space_ref").and_then(Value::as_str)?;
+                let label = labels.iter().find(|candidate| {
+                    candidate.get("spaceRef").and_then(Value::as_str) == Some(space_ref)
+                });
+                Some(json!({
+                    "space_ref": space_ref,
+                    // A missing label is not a missing Space: Control authorized
+                    // it, so it is listed under a neutral name rather than
+                    // dropped, which would hide a room the caller is in.
+                    "name": label
+                        .and_then(|value| value.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Space"),
+                    "kind": entry.get("kind").and_then(Value::as_str).unwrap_or("room"),
+                    "lifecycle": label
+                        .and_then(|value| value.get("lifecycle"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("active"),
+                    "role": entry.get("role").and_then(Value::as_str).unwrap_or_default(),
+                }))
+            })
+            .collect();
+        return (StatusCode::OK, Json(json!({"data": {"spaces": spaces}})));
+    }
+
+    // Control's index is unavailable. Fall back to the Application projection of
+    // the caller's own personal Space — the one Space whose membership needs no
+    // Control lookup, because registration seeds its owner and there is exactly
+    // one per principal. Shared rooms are deliberately NOT guessed at: without
+    // Control there is nothing that can say who belongs to them.
     let Ok(space) = personal_space_record(&state, &user, &org_id).await else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -994,6 +1034,64 @@ async fn create_personal_space(
         StatusCode::ACCEPTED,
         Json(json!({"data": {"space": public_space(&created)}})),
     )
+}
+
+/// Control's actor-filtered Space index: which Spaces this caller belongs to,
+/// and the role held in each. `None` means Control could not answer — never
+/// "no Spaces", because the caller above must not show those the same way.
+async fn control_space_index(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> Option<Vec<Value>> {
+    if org_id.trim().is_empty() {
+        return None;
+    }
+    let url = format!("{}/api/v1/internal/spaces", state.user_core_url);
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let (status, Json(response)) = proxy_json(
+        state,
+        Method::GET,
+        &url,
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return None;
+    }
+    crate::envelope::unwrap_data(&response)
+        .get("spaces")
+        .and_then(Value::as_array)
+        .cloned()
+}
+
+/// Names and lifecycles for the organization's Spaces. Display only — access
+/// was already decided by [`control_space_index`], so a failed read degrades
+/// the labels and never the membership.
+async fn organization_space_labels(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> Vec<Value> {
+    let Ok(value) = convex_gateway_call(
+        state,
+        "query",
+        "spaces:spacesForOrgForGateway",
+        json!({ "externalAuthId": user.user_id, "externalOrgId": org_id }),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    value.as_array().cloned().unwrap_or_default()
 }
 
 /// The caller's personal Space as stored, at ANY lifecycle.
@@ -1350,6 +1448,10 @@ mod tests {
 
     #[tokio::test]
     async fn space_action_catalog_rejects_an_empty_space_before_any_owner_lookup() {
+        // Serialized: this reads process-global service URLs that sibling
+        // tests mutate with `set_var`, so without the lock it asserts against
+        // whichever mock scheduling happened to leave installed.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let (status, _) = space_actions(
             State(crate::tests::test_state(false)),
             Extension(authenticated_user()),
@@ -1361,6 +1463,10 @@ mod tests {
 
     #[tokio::test]
     async fn browser_cannot_smuggle_a_space_authority_without_a_space_selection() {
+        // Serialized: this reads process-global service URLs that sibling
+        // tests mutate with `set_var`, so without the lock it asserts against
+        // whichever mock scheduling happened to leave installed.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let state = crate::tests::test_state(false);
         let mut outbound = json!({
             "content": "hello",
@@ -1379,6 +1485,10 @@ mod tests {
 
     #[tokio::test]
     async fn schedule_create_replaces_forged_authority_with_a_control_bound_token() {
+        // Serialized: this reads process-global service URLs that sibling
+        // tests mutate with `set_var`, so without the lock it asserts against
+        // whichever mock scheduling happened to leave installed.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let user_core = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path(
@@ -1439,6 +1549,13 @@ mod tests {
 
     #[tokio::test]
     async fn control_issuance_replaces_forged_space_authority_before_model_dispatch() {
+        // Serialized with the other Space tests: the handler under test reads
+        // process-global service URLs, and a sibling test mutates them with
+        // `set_var`. Without the lock this asserts on a payload captured from
+        // whichever mock happened to be installed, which passes or fails by
+        // scheduling. It went unnoticed while the request count was low enough
+        // that the two rarely overlapped.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let user_core = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/v1/internal/spaces/thread-decision"))
@@ -1525,6 +1642,10 @@ mod tests {
 
     #[tokio::test]
     async fn existing_scoped_thread_gets_fresh_content_bound_append_authority() {
+        // Serialized: this reads process-global service URLs that sibling
+        // tests mutate with `set_var`, so without the lock it asserts against
+        // whichever mock scheduling happened to leave installed.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let user_core = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/v1/internal/spaces/thread-append-decision"))
@@ -1581,6 +1702,10 @@ mod tests {
 
     #[tokio::test]
     async fn import_ingress_uses_control_decision_and_never_leaves_a_bearer_in_action_input() {
+        // Serialized: this reads process-global service URLs that sibling
+        // tests mutate with `set_var`, so without the lock it asserts against
+        // whichever mock scheduling happened to leave installed.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let user_core = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/v1/internal/spaces/personal-import-decision"))
