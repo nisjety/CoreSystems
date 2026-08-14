@@ -514,8 +514,15 @@ plane_env_files() {
       # Two owners, same shape as the Ingestion Plane case above. Load them
       # first; a deliberate frontend-local override still wins later in this
       # function.
+      # convex-core's own pair, in the owner's resolution order: this function
+      # loads each core's `.env` then `.env.local` sorted, so `.env.local` wins
+      # there. Loading only `.env` here picked a value the running deployment
+      # had already moved past, and Convex answered "Unauthorized" — the two
+      # files had drifted, and mirroring one of them is not the same as
+      # mirroring the owner.
       for owner in "$CORE_ROOT/apps/Control Plane/.env.generated-secrets" \
-                   "$CORE_ROOT/apps/Application Plane/convex-core/.env"; do
+                   "$CORE_ROOT/apps/Application Plane/convex-core/.env" \
+                   "$CORE_ROOT/apps/Application Plane/convex-core/.env.local"; do
         [[ -f "$owner" ]] && printf '%s\n' "$owner"
       done
       ;;
