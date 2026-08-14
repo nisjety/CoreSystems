@@ -113,7 +113,10 @@ impl GrpcGrantValidator {
             allowed_frame_ids: Vec::new(),
             allowed_dialog_ids: Vec::new(),
             allowed_artifact_ids: Vec::new(),
-            parent_grant_id: None,
+            // Proto3 represents an absent parent grant as the empty string.
+            // This legacy issuance path remains deny-by-default above and does
+            // not claim delegation from a parent grant.
+            parent_grant_id: String::new(),
         }));
         let resp: AcquireGrantResponse = client
             .acquire_grant(request)

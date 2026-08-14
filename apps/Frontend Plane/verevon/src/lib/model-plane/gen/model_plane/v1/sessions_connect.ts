@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -48,6 +48,19 @@ export const SessionCore = {
       name: "StartRun",
       I: StartRunRequest,
       O: StartRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Prepare the deterministic service-owned thread for one freshly
+     * Control-authorized schedule fire. The decision bearer is consumed only by
+     * this RPC and is never persisted or forwarded to Temporal.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.PrepareScheduledRunThread
+     */
+    prepareScheduledRunThread: {
+      name: "PrepareScheduledRunThread",
+      I: PrepareScheduledRunThreadRequest,
+      O: PrepareScheduledRunThreadResponse,
       kind: MethodKind.Unary,
     },
     /**

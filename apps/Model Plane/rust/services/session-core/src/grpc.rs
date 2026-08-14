@@ -78,6 +78,9 @@ const CONTROL_SPACE_DECISION_AUDIENCE: &str = "model-plane";
 const CONTROL_THREAD_CREATE_ACTION: &str = "model.thread.create";
 const CONTROL_THREAD_APPEND_ACTION: &str = "model.thread.append";
 const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
+const CONTROL_SCHEDULED_RUN_AUDIENCE: &str = "model-plane-capability-core";
+const CONTROL_SCHEDULED_RUN_ACTION: &str = "model.schedule.run";
+const CONTROL_SCHEDULED_RUN_SCHEMA: &str = "sha256:space-scheduled-run-v1";
 const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
 
 #[allow(clippy::result_large_err)]
@@ -604,9 +607,151 @@ struct ControlSpaceDecisionClaims {
     zero_data_retention: bool,
     nonce: String,
     authority_revision: u64,
+    membership_revision: u64,
+    privacy_revision: u64,
+    entitlement_revision: u64,
     permissions: Vec<String>,
     issued_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+}
+
+fn scheduled_run_payload_digest(
+    req: &pb::PrepareScheduledRunThreadRequest,
+    claims: &ControlSpaceDecisionClaims,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.schedule.run\0v1\0");
+    for (name, value) in [
+        ("org_id", req.org_id.as_str()),
+        ("user_id", req.human_subject_id.as_str()),
+        ("space_id", req.space_id.as_str()),
+        ("schedule_id", req.schedule_id.as_str()),
+        ("fire_key", req.fire_key.as_str()),
+        ("run_id", req.run_id.as_str()),
+        ("system_thread_key", req.system_thread_key.as_str()),
+        ("template_digest", req.template_digest.as_str()),
+        (
+            "recipient_audience_ref",
+            req.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            req.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", req.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            req.resource_authorization_ref.as_str(),
+        ),
+        ("action_schema_hash", req.action_schema_hash.as_str()),
+        ("idempotency_key", req.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    for (name, value) in [
+        ("authority_revision", req.authority_revision),
+        ("membership_revision", claims.membership_revision),
+        ("privacy_revision", claims.privacy_revision),
+        (
+            "recipient_audience_revision",
+            req.recipient_audience_revision,
+        ),
+        ("entitlement_revision", claims.entitlement_revision),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update(value.to_be_bytes());
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn verify_scheduled_run_decision(req: &pb::PrepareScheduledRunThreadRequest) -> Result<(), Status> {
+    if req.control_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control scheduled-run decision is too large",
+        ));
+    }
+    let expected_thread_key = format!("schedule/{}/{}", req.schedule_id, req.fire_key);
+    if req.org_id.trim().is_empty()
+        || req.human_subject_id.trim().is_empty()
+        || req.run_id.trim().is_empty()
+        || req.schedule_id.contains('/')
+        || req.fire_key.contains('/')
+        || req.system_thread_key != expected_thread_key
+        || req.action_schema_hash != CONTROL_SCHEDULED_RUN_SCHEMA
+        || req.authority_revision == 0
+        || req.recipient_audience_revision == 0
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-run preparation bindings are invalid",
+        ));
+    }
+    let parts: Vec<&str> = req.control_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control scheduled-run decision envelope",
+        ));
+    }
+    let key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let keys = configured_control_space_decision_keys()?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .map_err(|_| Status::permission_denied("invalid Control scheduled-run decision payload"))?;
+    let signature = URL_SAFE_NO_PAD.decode(parts[3]).map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run decision signature")
+    })?;
+    let signature = Signature::from_slice(&signature).map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run decision signature")
+    })?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control scheduled-run decision signature"))?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload)
+        .map_err(|_| Status::permission_denied("invalid Control scheduled-run decision claims"))?;
+    let matches = claims.decision_ref == req.space_decision_ref
+        && claims.org_id == req.org_id
+        && claims.space_ref == req.space_id
+        && claims.subject_id == req.human_subject_id
+        && claims.service_audience == CONTROL_SCHEDULED_RUN_AUDIENCE
+        && claims.action_id == CONTROL_SCHEDULED_RUN_ACTION
+        && claims.action_schema_hash == req.action_schema_hash
+        && claims.idempotency_key == req.idempotency_key
+        && claims.recipient_audience_ref == req.recipient_audience_ref
+        && claims.recipient_audience_revision == req.recipient_audience_revision
+        && claims.recipient_audience_hash == req.recipient_audience_hash
+        && claims.privacy_policy_ref == req.privacy_policy_ref
+        && claims.resource_authorization_ref == req.resource_authorization_ref
+        && claims.authority_revision == req.authority_revision
+        && claims.payload_digest == req.payload_digest
+        && claims.payload_digest == scheduled_run_payload_digest(req, &claims)
+        && claims
+            .permissions
+            .iter()
+            .any(|permission| permission == "schedule:run")
+        && !claims.zero_data_retention;
+    if !matches
+        || claims.nonce.trim().is_empty()
+        || claims.expires_at <= Utc::now()
+        || claims.issued_at > Utc::now() + chrono::Duration::minutes(1)
+    {
+        return Err(Status::permission_denied(
+            "Control decision does not authorize this scheduled run",
+        ));
+    }
+    Ok(())
 }
 
 /// Thread Space context is an all-or-nothing authority envelope. It is kept
@@ -1073,6 +1218,13 @@ async fn create_thread_inner(
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
     verify_thread_space_decision(&req)?;
+    create_thread_inner_preverified(pool, req).await
+}
+
+async fn create_thread_inner_preverified(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let mut tx = pool
         .begin()
         .await
@@ -2727,6 +2879,78 @@ impl SessionCore for SessionService {
         .await;
         record_metrics("start_run", started, result.is_ok());
         result
+    }
+
+    async fn prepare_scheduled_run_thread(
+        &self,
+        request: Request<pb::PrepareScheduledRunThreadRequest>,
+    ) -> Result<Response<pb::PrepareScheduledRunThreadResponse>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "session:schedule-prepare")?;
+        if !caller.is_service() || caller.principal_id() != "service:capability-core" {
+            return Err(Status::permission_denied(
+                "only Capability Core may prepare scheduled runs",
+            ));
+        }
+        let req = request.into_inner();
+        caller.authorize_org(&req.org_id)?;
+        verify_scheduled_run_decision(&req)?;
+
+        let owner = "service:orchestrator-core";
+        let created = create_thread_inner_preverified(
+            &self.pool,
+            pb::CreateThreadRequest {
+                session_key: req.system_thread_key.clone(),
+                org_id: req.org_id.clone(),
+                user_id: owner.to_owned(),
+                space_id: req.space_id.clone(),
+                space_decision_ref: req.space_decision_ref.clone(),
+                recipient_audience_ref: req.recipient_audience_ref.clone(),
+                recipient_audience_revision: req.recipient_audience_revision,
+                recipient_audience_hash: req.recipient_audience_hash.clone(),
+                privacy_policy_ref: req.privacy_policy_ref.clone(),
+                resource_authorization_ref: req.resource_authorization_ref.clone(),
+                authority_revision: req.authority_revision,
+                action_schema_hash: req.action_schema_hash.clone(),
+                payload_digest: req.payload_digest.clone(),
+                idempotency_key: req.idempotency_key.clone(),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_inner();
+
+        let exact: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM threads WHERE id=$1 AND org_id=$2 AND user_id=$3 AND session_key=$4
+             AND space_id=$5 AND space_decision_ref=$6 AND recipient_audience_ref=$7
+             AND recipient_audience_revision=$8 AND recipient_audience_hash=$9
+             AND privacy_policy_ref=$10 AND resource_authorization_ref=$11 AND authority_revision=$12",
+        )
+        .bind(&created.thread_id)
+        .bind(&req.org_id)
+        .bind(owner)
+        .bind(&req.system_thread_key)
+        .bind(&req.space_id)
+        .bind(&req.space_decision_ref)
+        .bind(&req.recipient_audience_ref)
+        .bind(i64::try_from(req.recipient_audience_revision).map_err(|_| Status::invalid_argument("recipient audience revision is too large"))?)
+        .bind(&req.recipient_audience_hash)
+        .bind(&req.privacy_policy_ref)
+        .bind(&req.resource_authorization_ref)
+        .bind(i64::try_from(req.authority_revision).map_err(|_| Status::invalid_argument("authority revision is too large"))?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+        if exact.is_none() {
+            return Err(Status::permission_denied(
+                "existing scheduled-run thread has different authority bindings",
+            ));
+        }
+        Ok(Response::new(pb::PrepareScheduledRunThreadResponse {
+            thread_id: created.thread_id,
+            run_id: req.run_id,
+            owner_id: owner.to_owned(),
+        }))
     }
 
     async fn complete_step(

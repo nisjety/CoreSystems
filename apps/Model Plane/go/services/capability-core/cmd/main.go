@@ -276,7 +276,7 @@ func main() {
 	if cronAuthErr == nil {
 		taskFireAuthorizer = cronAuthorizer
 	}
-	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub, taskFireAuthorizer)
+	dispatcher, workflowBacked := buildTaskDispatcher(pool, recPub, taskFireAuthorizer, sessionClient)
 	if taskExecutorEnabled(workflowBacked) {
 		go taskexec.NewExecutor(pool, dispatcher).Start(ctx)
 		slog.Info("task executor started", "workflow_backed", workflowBacked)
@@ -426,7 +426,7 @@ func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpo
 // of stranding it, unless TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH=true
 // acknowledges that this deployment runs its own consumer of the published
 // subject (see NatsDispatcher's doc comment).
-func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireAuthorizer taskexec.ScheduleFireAuthorizer) (taskexec.Dispatcher, bool) {
+func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireAuthorizer taskexec.ScheduleFireAuthorizer, sessionClient mpv1.SessionCoreClient) (taskexec.Dispatcher, bool) {
 	fallback := taskexec.NewNatsDispatcher(pub, acceptsPublishOnlyDispatch())
 
 	addr := strings.TrimSpace(os.Getenv("ORCHESTRATOR_WORKFLOW_ADDR"))
@@ -465,6 +465,7 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 		slog.Error("dial orchestrator-core workflow service failed", "addr", addr, "error", err)
 		return fallback, false
 	}
+	dispatcher.SetScheduledRunSession(sessionClient)
 	dispatcher, err := taskexec.NewWorkflowDispatcher(
 		pool,
 		mpv1.NewOrchestratorWorkflowServiceClient(conn),
@@ -612,7 +613,7 @@ var (
 	// sessionCoreScopes covers the learning review's transcript read
 	// (ListConversation, ListAgentSkills → session:read) and its skill upsert
 	// (UpsertAgentSkill → session:skills:write).
-	sessionCoreScopes = []string{"session:read", "session:skills:write"}
+	sessionCoreScopes = []string{"session:read", "session:skills:write", "session:schedule-prepare"}
 	// inferenceCoreScopes covers the review's model call (Infer).
 	inferenceCoreScopes = []string{"inference:invoke"}
 )

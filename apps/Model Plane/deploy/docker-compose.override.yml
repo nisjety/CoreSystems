@@ -42,6 +42,10 @@ services:
   sandbox-manager:
     environment:
       LOG_LEVEL: debug
+      # The service intentionally refuses its current in-memory stores outside
+      # an explicit local-development opt-in. The full-stack launcher layers
+      # this override only in dev; production never receives this setting.
+      SANDBOX_MANAGER_ALLOW_EPHEMERAL_DEVELOPMENT: "true"
 
   browser-broker:
     environment:

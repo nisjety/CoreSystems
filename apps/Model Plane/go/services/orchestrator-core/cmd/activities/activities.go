@@ -309,7 +309,7 @@ func (a *Activities) StartRunActivity(ctx context.Context, runID, threadID, orgI
 	// existing thread for a repeated (org, owner, session_key), which matters
 	// because this activity is retried and a fresh id per attempt would leak a
 	// thread per retry.
-	if strings.TrimSpace(userID) == "" {
+	if strings.TrimSpace(userID) == "" && strings.TrimSpace(threadID) == "" {
 		created, terr := client.CreateThread(ctx, &mpv1.CreateThreadRequest{
 			SessionKey: "system-run/" + runID,
 			OrgId:      orgID,

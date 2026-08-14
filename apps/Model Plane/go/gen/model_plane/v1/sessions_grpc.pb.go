@@ -19,28 +19,29 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SessionCore_CreateThread_FullMethodName             = "/model_plane.v1.SessionCore/CreateThread"
-	SessionCore_AppendMessage_FullMethodName            = "/model_plane.v1.SessionCore/AppendMessage"
-	SessionCore_StartRun_FullMethodName                 = "/model_plane.v1.SessionCore/StartRun"
-	SessionCore_CompleteStep_FullMethodName             = "/model_plane.v1.SessionCore/CompleteStep"
-	SessionCore_ReserveToolAction_FullMethodName        = "/model_plane.v1.SessionCore/ReserveToolAction"
-	SessionCore_FinalizeToolAction_FullMethodName       = "/model_plane.v1.SessionCore/FinalizeToolAction"
-	SessionCore_SaveCheckpoint_FullMethodName           = "/model_plane.v1.SessionCore/SaveCheckpoint"
-	SessionCore_ReplayThread_FullMethodName             = "/model_plane.v1.SessionCore/ReplayThread"
-	SessionCore_GetContextAssembly_FullMethodName       = "/model_plane.v1.SessionCore/GetContextAssembly"
-	SessionCore_CompactNow_FullMethodName               = "/model_plane.v1.SessionCore/CompactNow"
-	SessionCore_UpsertAgentSkill_FullMethodName         = "/model_plane.v1.SessionCore/UpsertAgentSkill"
-	SessionCore_ListAgentSkills_FullMethodName          = "/model_plane.v1.SessionCore/ListAgentSkills"
-	SessionCore_SetAgentSkillEnabled_FullMethodName     = "/model_plane.v1.SessionCore/SetAgentSkillEnabled"
-	SessionCore_ListConversation_FullMethodName         = "/model_plane.v1.SessionCore/ListConversation"
-	SessionCore_ListThreads_FullMethodName              = "/model_plane.v1.SessionCore/ListThreads"
-	SessionCore_UpdateThreadPresentation_FullMethodName = "/model_plane.v1.SessionCore/UpdateThreadPresentation"
-	SessionCore_ArchiveThread_FullMethodName            = "/model_plane.v1.SessionCore/ArchiveThread"
-	SessionCore_ArchiveThreads_FullMethodName           = "/model_plane.v1.SessionCore/ArchiveThreads"
-	SessionCore_DeleteThread_FullMethodName             = "/model_plane.v1.SessionCore/DeleteThread"
-	SessionCore_DeleteThreads_FullMethodName            = "/model_plane.v1.SessionCore/DeleteThreads"
-	SessionCore_DeleteSpaceThreads_FullMethodName       = "/model_plane.v1.SessionCore/DeleteSpaceThreads"
-	SessionCore_SetRunMode_FullMethodName               = "/model_plane.v1.SessionCore/SetRunMode"
+	SessionCore_CreateThread_FullMethodName              = "/model_plane.v1.SessionCore/CreateThread"
+	SessionCore_AppendMessage_FullMethodName             = "/model_plane.v1.SessionCore/AppendMessage"
+	SessionCore_StartRun_FullMethodName                  = "/model_plane.v1.SessionCore/StartRun"
+	SessionCore_PrepareScheduledRunThread_FullMethodName = "/model_plane.v1.SessionCore/PrepareScheduledRunThread"
+	SessionCore_CompleteStep_FullMethodName              = "/model_plane.v1.SessionCore/CompleteStep"
+	SessionCore_ReserveToolAction_FullMethodName         = "/model_plane.v1.SessionCore/ReserveToolAction"
+	SessionCore_FinalizeToolAction_FullMethodName        = "/model_plane.v1.SessionCore/FinalizeToolAction"
+	SessionCore_SaveCheckpoint_FullMethodName            = "/model_plane.v1.SessionCore/SaveCheckpoint"
+	SessionCore_ReplayThread_FullMethodName              = "/model_plane.v1.SessionCore/ReplayThread"
+	SessionCore_GetContextAssembly_FullMethodName        = "/model_plane.v1.SessionCore/GetContextAssembly"
+	SessionCore_CompactNow_FullMethodName                = "/model_plane.v1.SessionCore/CompactNow"
+	SessionCore_UpsertAgentSkill_FullMethodName          = "/model_plane.v1.SessionCore/UpsertAgentSkill"
+	SessionCore_ListAgentSkills_FullMethodName           = "/model_plane.v1.SessionCore/ListAgentSkills"
+	SessionCore_SetAgentSkillEnabled_FullMethodName      = "/model_plane.v1.SessionCore/SetAgentSkillEnabled"
+	SessionCore_ListConversation_FullMethodName          = "/model_plane.v1.SessionCore/ListConversation"
+	SessionCore_ListThreads_FullMethodName               = "/model_plane.v1.SessionCore/ListThreads"
+	SessionCore_UpdateThreadPresentation_FullMethodName  = "/model_plane.v1.SessionCore/UpdateThreadPresentation"
+	SessionCore_ArchiveThread_FullMethodName             = "/model_plane.v1.SessionCore/ArchiveThread"
+	SessionCore_ArchiveThreads_FullMethodName            = "/model_plane.v1.SessionCore/ArchiveThreads"
+	SessionCore_DeleteThread_FullMethodName              = "/model_plane.v1.SessionCore/DeleteThread"
+	SessionCore_DeleteThreads_FullMethodName             = "/model_plane.v1.SessionCore/DeleteThreads"
+	SessionCore_DeleteSpaceThreads_FullMethodName        = "/model_plane.v1.SessionCore/DeleteSpaceThreads"
+	SessionCore_SetRunMode_FullMethodName                = "/model_plane.v1.SessionCore/SetRunMode"
 )
 
 // SessionCoreClient is the client API for SessionCore service.
@@ -57,6 +58,10 @@ type SessionCoreClient interface {
 	AppendMessage(ctx context.Context, in *AppendMessageRequest, opts ...grpc.CallOption) (*AppendMessageResponse, error)
 	// Start a new run within a thread.
 	StartRun(ctx context.Context, in *StartRunRequest, opts ...grpc.CallOption) (*StartRunResponse, error)
+	// Prepare the deterministic service-owned thread for one freshly
+	// Control-authorized schedule fire. The decision bearer is consumed only by
+	// this RPC and is never persisted or forwarded to Temporal.
+	PrepareScheduledRunThread(ctx context.Context, in *PrepareScheduledRunThreadRequest, opts ...grpc.CallOption) (*PrepareScheduledRunThreadResponse, error)
 	// Record completion of a single step within a run.
 	CompleteStep(ctx context.Context, in *CompleteStepRequest, opts ...grpc.CallOption) (*CompleteStepResponse, error)
 	// Durably reserve an inline tool-action audit intent before the tool runs.
@@ -166,6 +171,16 @@ func (c *sessionCoreClient) StartRun(ctx context.Context, in *StartRunRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartRunResponse)
 	err := c.cc.Invoke(ctx, SessionCore_StartRun_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) PrepareScheduledRunThread(ctx context.Context, in *PrepareScheduledRunThreadRequest, opts ...grpc.CallOption) (*PrepareScheduledRunThreadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrepareScheduledRunThreadResponse)
+	err := c.cc.Invoke(ctx, SessionCore_PrepareScheduledRunThread_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -385,6 +400,10 @@ type SessionCoreServer interface {
 	AppendMessage(context.Context, *AppendMessageRequest) (*AppendMessageResponse, error)
 	// Start a new run within a thread.
 	StartRun(context.Context, *StartRunRequest) (*StartRunResponse, error)
+	// Prepare the deterministic service-owned thread for one freshly
+	// Control-authorized schedule fire. The decision bearer is consumed only by
+	// this RPC and is never persisted or forwarded to Temporal.
+	PrepareScheduledRunThread(context.Context, *PrepareScheduledRunThreadRequest) (*PrepareScheduledRunThreadResponse, error)
 	// Record completion of a single step within a run.
 	CompleteStep(context.Context, *CompleteStepRequest) (*CompleteStepResponse, error)
 	// Durably reserve an inline tool-action audit intent before the tool runs.
@@ -478,6 +497,9 @@ func (UnimplementedSessionCoreServer) AppendMessage(context.Context, *AppendMess
 }
 func (UnimplementedSessionCoreServer) StartRun(context.Context, *StartRunRequest) (*StartRunResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StartRun not implemented")
+}
+func (UnimplementedSessionCoreServer) PrepareScheduledRunThread(context.Context, *PrepareScheduledRunThreadRequest) (*PrepareScheduledRunThreadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrepareScheduledRunThread not implemented")
 }
 func (UnimplementedSessionCoreServer) CompleteStep(context.Context, *CompleteStepRequest) (*CompleteStepResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CompleteStep not implemented")
@@ -607,6 +629,24 @@ func _SessionCore_StartRun_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SessionCoreServer).StartRun(ctx, req.(*StartRunRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_PrepareScheduledRunThread_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrepareScheduledRunThreadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).PrepareScheduledRunThread(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_PrepareScheduledRunThread_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).PrepareScheduledRunThread(ctx, req.(*PrepareScheduledRunThreadRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -964,6 +1004,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StartRun",
 			Handler:    _SessionCore_StartRun_Handler,
+		},
+		{
+			MethodName: "PrepareScheduledRunThread",
+			Handler:    _SessionCore_PrepareScheduledRunThread_Handler,
 		},
 		{
 			MethodName: "CompleteStep",

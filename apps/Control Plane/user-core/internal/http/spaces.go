@@ -668,6 +668,21 @@ type scheduleFireIntent struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+type scheduledRunDecisionRequest struct {
+	Intent scheduledRunIntent `json:"intent"`
+}
+
+type scheduledRunIntent struct {
+	OrgID          string `json:"org_id"`
+	SpaceRef       string `json:"space_ref"`
+	SubjectID      string `json:"subject_id"`
+	ScheduleID     string `json:"schedule_id"`
+	FireKey        string `json:"fire_key"`
+	TaskID         string `json:"task_id"`
+	TemplateDigest string `json:"template_digest"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
 // issueScheduleFireDecision is deliberately worker-only. It re-checks current
 // personal-Space authority before a claimed cron fire and issues an expiring,
 // target-bound decision for just that fire. A durable schedule's original
@@ -728,6 +743,68 @@ func (s *Server) issueScheduleFireDecision(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+// issueScheduledRunDecision authorizes only preparation of the service-owned
+// thread/run for one already-claimed fire. It is not user delegation and the
+// returned bearer must travel only on Capability Core's direct Session Core RPC.
+func (s *Server) issueScheduledRunDecision(c *gin.Context) {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	var request scheduledRunDecisionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run intent is required"})
+		return
+	}
+	intent := spaces.ScheduledRunIntent{
+		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef, SubjectID: request.Intent.SubjectID,
+		ScheduleID: request.Intent.ScheduleID, FireKey: request.Intent.FireKey, TaskID: request.Intent.TaskID,
+		TemplateDigest: request.Intent.TemplateDigest, IdempotencyKey: request.Intent.IdempotencyKey,
+	}
+	if err := intent.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run intent is required"})
+		return
+	}
+	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID)
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space scheduled run authority unavailable"})
+		return
+	}
+	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
+		return
+	}
+	decisionRef, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	nonce, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	decision, err := spaces.IssueScheduledRunDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space scheduled run is not authorized"})
+		return
+	}
+	token, err := spaces.SignDecision(key, decision)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"decision": decision, "token": token,
+		"system_thread_key": intent.SystemThreadKey(), "run_id": intent.TaskID,
+	}})
 }
 
 // personalImportExecutionIntent is a deliberately constrained wire view of a

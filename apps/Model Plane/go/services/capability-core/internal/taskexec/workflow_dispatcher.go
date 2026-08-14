@@ -77,6 +77,14 @@ type ScheduleFireAuthorizer interface {
 	AuthorizeFire(context.Context, cron.FireIntent) error
 }
 
+type scheduledRunAuthorizer interface {
+	AuthorizeScheduledRun(context.Context, cron.FireIntent, string) (cron.ScheduledRunPreparation, error)
+}
+
+type scheduledRunSession interface {
+	PrepareScheduledRunThread(context.Context, *mpv1.PrepareScheduledRunThreadRequest, ...grpc.CallOption) (*mpv1.PrepareScheduledRunThreadResponse, error)
+}
+
 // WorkflowDispatcher turns a claimed task into one durable Temporal run.
 //
 // Why this and not a NATS consumer of mp.v1.capability.task.dispatched: the
@@ -100,6 +108,13 @@ type WorkflowDispatcher struct {
 	pub                 publisher.EventPublisher
 	defaultWorkflowType string
 	fireAuthorizer      ScheduleFireAuthorizer
+	scheduledRunSession scheduledRunSession
+}
+
+// SetScheduledRunSession enables the scoped cron preparation path. Cron tasks
+// fail closed when it is absent; ordinary tasks are unchanged.
+func (d *WorkflowDispatcher) SetScheduledRunSession(client scheduledRunSession) {
+	d.scheduledRunSession = client
 }
 
 // NewWorkflowDispatcher builds the dispatcher. pub may be nil (reconcile events
@@ -180,7 +195,8 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 	if err != nil {
 		return err
 	}
-	if err := d.reauthorizeScheduleFire(ctx, task, detail); err != nil {
+	preparedThread, err := d.reauthorizeScheduleFire(ctx, task, detail)
+	if err != nil {
 		return err
 	}
 	req, err := dispatchPlan(task, detail, d.defaultWorkflowType)
@@ -191,6 +207,13 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 		// Nothing to dispatch (the row left `running` under us) and nothing to
 		// fail — another actor owns its state now.
 		return nil
+	}
+	if preparedThread != "" {
+		fields := req.GetInput().GetFields()
+		fields["thread_id"] = structpb.NewStringValue(preparedThread)
+		fields["schedule_fire_intent"] = structpb.NewStructValue(mustStruct(map[string]any{
+			"schedule_id": detail.scheduleID, "task_id": task.ID,
+		}))
 	}
 	workflowType := req.GetWorkflowType()
 
@@ -282,29 +305,59 @@ func (d *WorkflowDispatcher) loadTask(ctx context.Context, taskID string) (taskD
 	return detail, nil
 }
 
-func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task TaskRef, detail taskDetail) error {
+func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task TaskRef, detail taskDetail) (string, error) {
 	var envelope struct {
 		ScheduleFireIntent *cron.FireIntent `json:"schedule_fire_intent"`
 	}
 	if len(detail.config) > 0 {
 		if err := json.Unmarshal(detail.config, &envelope); err != nil {
-			return fmt.Errorf("taskexec: task %s config_json is not a valid template: %w", task.ID, err)
+			return "", fmt.Errorf("taskexec: task %s config_json is not a valid template: %w", task.ID, err)
 		}
 	}
 	if envelope.ScheduleFireIntent == nil {
-		return nil
+		return "", nil
 	}
 	if d.fireAuthorizer == nil {
-		return fmt.Errorf("taskexec: cron task %s cannot start without fresh Control fire authorization", task.ID)
+		return "", fmt.Errorf("taskexec: cron task %s cannot start without fresh Control fire authorization", task.ID)
 	}
 	intent := *envelope.ScheduleFireIntent
 	if intent.OrgID != task.OrgID || intent.ScheduleID != detail.scheduleID {
-		return fmt.Errorf("taskexec: cron task %s fire intent does not match durable task/schedule ownership", task.ID)
+		return "", fmt.Errorf("taskexec: cron task %s fire intent does not match durable task/schedule ownership", task.ID)
 	}
 	if err := d.fireAuthorizer.AuthorizeFire(ctx, intent); err != nil {
-		return fmt.Errorf("taskexec: cron task %s fresh Control fire authorization failed: %w", task.ID, err)
+		return "", fmt.Errorf("taskexec: cron task %s fresh Control fire authorization failed: %w", task.ID, err)
 	}
-	return nil
+	runAuthorizer, ok := d.fireAuthorizer.(scheduledRunAuthorizer)
+	if !ok || d.scheduledRunSession == nil {
+		return "", fmt.Errorf("taskexec: cron task %s cannot prepare a scoped scheduled run", task.ID)
+	}
+	prep, err := runAuthorizer.AuthorizeScheduledRun(ctx, intent, task.ID)
+	if err != nil {
+		return "", fmt.Errorf("taskexec: cron task %s scheduled-run authorization failed: %w", task.ID, err)
+	}
+	decision := prep.Decision
+	response, err := d.scheduledRunSession.PrepareScheduledRunThread(ctx, &mpv1.PrepareScheduledRunThreadRequest{
+		OrgId: intent.OrgID, HumanSubjectId: intent.SubjectID, SpaceId: intent.SpaceRef,
+		ScheduleId: intent.ScheduleID, FireKey: intent.FireKey, RunId: task.ID, SystemThreadKey: prep.SystemThreadKey,
+		TemplateDigest: intent.TemplateDigest, IdempotencyKey: intent.IdempotencyKey,
+		SpaceDecisionRef: decision.DecisionRef, RecipientAudienceRef: decision.RecipientAudienceRef,
+		RecipientAudienceRevision: uint64(decision.RecipientAudienceRevision), RecipientAudienceHash: decision.RecipientAudienceHash,
+		PrivacyPolicyRef: decision.PrivacyPolicyRef, ResourceAuthorizationRef: decision.ResourceAuthorizationRef,
+		AuthorityRevision: uint64(decision.AuthorityRevision), ActionSchemaHash: decision.ActionSchemaHash,
+		PayloadDigest: decision.PayloadDigest, ControlDecisionToken: prep.Token,
+	})
+	if err != nil {
+		return "", fmt.Errorf("taskexec: prepare scheduled run thread: %w", err)
+	}
+	if response.GetRunId() != task.ID || response.GetOwnerId() != "service:orchestrator-core" || response.GetThreadId() == "" {
+		return "", fmt.Errorf("taskexec: Session Core returned a mismatched scheduled-run preparation")
+	}
+	return response.GetThreadId(), nil
+}
+
+func mustStruct(value map[string]any) *structpb.Struct {
+	result, _ := structpb.NewStruct(value)
+	return result
 }
 
 // dispatchPlan turns a claimed row into the StartWorkflow request to send, or

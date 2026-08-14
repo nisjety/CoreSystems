@@ -118,8 +118,8 @@ func TestWorkflowDispatchReauthorizesOnlyBoundCronIntent(t *testing.T) {
 	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer}
 	detail := taskDetail{config: config, scheduleID: "schedule-1"}
 	task := TaskRef{ID: "task-1", OrgID: "org-1"}
-	if err := dispatcher.reauthorizeScheduleFire(context.Background(), task, detail); err != nil {
-		t.Fatalf("bound intent: %v", err)
+	if _, err := dispatcher.reauthorizeScheduleFire(context.Background(), task, detail); err == nil {
+		t.Fatal("bound cron intent without scheduled-run preparation must fail closed")
 	}
 	if authorizer.intent.ScheduleID != "schedule-1" {
 		t.Fatalf("authorizer received %+v", authorizer.intent)
@@ -130,12 +130,12 @@ func TestWorkflowDispatchReauthorizesOnlyBoundCronIntent(t *testing.T) {
 		{config: config, scheduleID: "schedule-1"},
 	} {
 		if altered.scheduleID == "schedule-1" {
-			if err := (&WorkflowDispatcher{}).reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
+			if _, err := (&WorkflowDispatcher{}).reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
 				t.Fatal("cron intent without a fresh authorizer must fail closed")
 			}
 			continue
 		}
-		if err := dispatcher.reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
+		if _, err := dispatcher.reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
 			t.Fatal("schedule mismatch must fail closed")
 		}
 	}

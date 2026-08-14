@@ -17,13 +17,15 @@ import (
 )
 
 const (
-	controlDecisionVersion = "v2"
-	controlCreateAction    = "model.cron.create"
-	controlCreateAudience  = "model-plane-capability-core"
-	controlCreateSchema    = "sha256:space-cron-create-v1"
-	controlFireAction      = "model.cron.fire"
-	controlFireAudience    = "model-plane-capability-core"
-	controlFireSchema      = "sha256:space-cron-fire-v1"
+	controlDecisionVersion    = "v2"
+	controlCreateAction       = "model.cron.create"
+	controlCreateAudience     = "model-plane-capability-core"
+	controlCreateSchema       = "sha256:space-cron-create-v1"
+	controlFireAction         = "model.cron.fire"
+	controlFireAudience       = "model-plane-capability-core"
+	controlFireSchema         = "sha256:space-cron-fire-v1"
+	controlScheduledRunAction = "model.schedule.run"
+	controlScheduledRunSchema = "sha256:space-scheduled-run-v1"
 )
 
 // ControlFireAuthorizer is Capability Core's narrow client for the Control
@@ -35,6 +37,73 @@ type ControlFireAuthorizer struct {
 	token    string
 	verifier *ControlDecisionVerifier
 	client   *http.Client
+}
+
+// ScheduledRunPreparation is the verified one-call material for Session Core.
+// Token is bearer authority and must never be persisted or forwarded to Temporal.
+type ScheduledRunPreparation struct {
+	Decision        controlDecision
+	Token           string
+	SystemThreadKey string
+	RunID           string
+}
+
+func (a *ControlFireAuthorizer) AuthorizeScheduledRun(ctx context.Context, intent FireIntent, taskID string) (ScheduledRunPreparation, error) {
+	if err := validateFireIntent(intent); err != nil {
+		return ScheduledRunPreparation{}, err
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return ScheduledRunPreparation{}, fmt.Errorf("scheduled run task id is required")
+	}
+	body, err := json.Marshal(map[string]any{"intent": map[string]string{
+		"org_id": intent.OrgID, "space_ref": intent.SpaceRef, "subject_id": intent.SubjectID,
+		"schedule_id": intent.ScheduleID, "fire_key": intent.FireKey, "task_id": taskID,
+		"template_digest": intent.TemplateDigest, "idempotency_key": intent.IdempotencyKey,
+	}})
+	if err != nil {
+		return ScheduledRunPreparation{}, fmt.Errorf("encode scheduled run intent: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint+"/api/v1/internal/spaces/scheduled-run-decision", bytes.NewReader(body))
+	if err != nil {
+		return ScheduledRunPreparation{}, fmt.Errorf("build scheduled run authorization request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Service-Token", a.token)
+	response, err := a.client.Do(request)
+	if err != nil {
+		return ScheduledRunPreparation{}, fmt.Errorf("request scheduled run authority: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return ScheduledRunPreparation{}, fmt.Errorf("Control scheduled run authority rejected: status %d", response.StatusCode)
+	}
+	var envelope struct {
+		Data struct {
+			Decision        controlDecision `json:"decision"`
+			Token           string          `json:"token"`
+			SystemThreadKey string          `json:"system_thread_key"`
+			RunID           string          `json:"run_id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&envelope); err != nil {
+		return ScheduledRunPreparation{}, fmt.Errorf("decode scheduled run authority: %w", err)
+	}
+	verified, err := a.verifier.verify(envelope.Data.Token)
+	if err != nil {
+		return ScheduledRunPreparation{}, err
+	}
+	if envelope.Data.RunID != taskID || envelope.Data.SystemThreadKey != "schedule/"+intent.ScheduleID+"/"+intent.FireKey {
+		return ScheduledRunPreparation{}, fmt.Errorf("Control scheduled run identifiers do not match the claimed task")
+	}
+	if verified.ActionID != controlScheduledRunAction || verified.ActionSchemaHash != controlScheduledRunSchema ||
+		verified.ServiceAudience != controlFireAudience || verified.OrgID != intent.OrgID || verified.SpaceRef != intent.SpaceRef ||
+		verified.SubjectID != intent.SubjectID || verified.IdempotencyKey != intent.IdempotencyKey || verified.ZeroDataRetention ||
+		!time.Now().UTC().Before(verified.ExpiresAt) || !hasPermission(verified.Permissions, "schedule:run") ||
+		verified.PayloadDigest != expectedScheduledRunPayloadDigest(verified, intent, taskID, envelope.Data.SystemThreadKey) {
+		return ScheduledRunPreparation{}, fmt.Errorf("Control scheduled run decision does not bind this task")
+	}
+	envelope.Data.Decision = verified
+	return ScheduledRunPreparation(envelope.Data), nil
 }
 
 // ControlDecisionVerifier verifies only Control's public, key-identified
@@ -310,6 +379,39 @@ func expectedFirePayloadDigest(decision controlDecision, intent FireIntent) stri
 		{"privacy_revision", decision.PrivacyRevision},
 		{"recipient_audience_revision", decision.RecipientAudienceRevision},
 		{"entitlement_revision", decision.EntitlementRevision},
+	} {
+		hash.Write([]byte(revision.name))
+		hash.Write([]byte{0})
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
+		hash.Write(encoded[:])
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func expectedScheduledRunPayloadDigest(decision controlDecision, intent FireIntent, taskID, threadKey string) string {
+	hash := sha256.New()
+	hash.Write([]byte("model.schedule.run\x00v1\x00"))
+	for _, field := range []struct{ name, value string }{
+		{"org_id", decision.OrgID}, {"user_id", decision.SubjectID}, {"space_id", decision.SpaceRef},
+		{"schedule_id", intent.ScheduleID}, {"fire_key", intent.FireKey}, {"run_id", taskID}, {"system_thread_key", threadKey},
+		{"template_digest", intent.TemplateDigest}, {"recipient_audience_ref", decision.RecipientAudienceRef}, {"recipient_audience_hash", decision.RecipientAudienceHash},
+		{"privacy_policy_ref", decision.PrivacyPolicyRef}, {"resource_authorization_ref", decision.ResourceAuthorizationRef},
+		{"action_schema_hash", controlScheduledRunSchema}, {"idempotency_key", intent.IdempotencyKey},
+	} {
+		hash.Write([]byte(field.name))
+		hash.Write([]byte{0})
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(field.value)))
+		hash.Write(length[:])
+		hash.Write([]byte(field.value))
+	}
+	for _, revision := range []struct {
+		name  string
+		value int64
+	}{
+		{"authority_revision", decision.AuthorityRevision}, {"membership_revision", decision.MembershipRevision}, {"privacy_revision", decision.PrivacyRevision},
+		{"recipient_audience_revision", decision.RecipientAudienceRevision}, {"entitlement_revision", decision.EntitlementRevision},
 	} {
 		hash.Write([]byte(revision.name))
 		hash.Write([]byte{0})

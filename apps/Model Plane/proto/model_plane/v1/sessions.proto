@@ -21,6 +21,11 @@ service SessionCore {
   // Start a new run within a thread.
   rpc StartRun(StartRunRequest) returns (StartRunResponse);
 
+  // Prepare the deterministic service-owned thread for one freshly
+  // Control-authorized schedule fire. The decision bearer is consumed only by
+  // this RPC and is never persisted or forwarded to Temporal.
+  rpc PrepareScheduledRunThread(PrepareScheduledRunThreadRequest) returns (PrepareScheduledRunThreadResponse);
+
   // Record completion of a single step within a run.
   rpc CompleteStep(CompleteStepRequest) returns (CompleteStepResponse);
 
@@ -273,6 +278,34 @@ message StartRunResponse {
   // envelopes. Without it a system-initiated run carries one actor string in
   // `runs.user_id` and a different, locally-invented one on its NATS events,
   // and nothing downstream can join the two.
+  string owner_id = 3;
+}
+
+message PrepareScheduledRunThreadRequest {
+  string org_id = 1;
+  string human_subject_id = 2;
+  string space_id = 3;
+  string schedule_id = 4;
+  string fire_key = 5;
+  string run_id = 6;
+  string system_thread_key = 7;
+  string template_digest = 8;
+  string idempotency_key = 9;
+  string space_decision_ref = 10;
+  string recipient_audience_ref = 11;
+  uint64 recipient_audience_revision = 12;
+  string recipient_audience_hash = 13;
+  string privacy_policy_ref = 14;
+  string resource_authorization_ref = 15;
+  uint64 authority_revision = 16;
+  string action_schema_hash = 17;
+  string payload_digest = 18;
+  string control_decision_token = 19;
+}
+
+message PrepareScheduledRunThreadResponse {
+  string thread_id = 1;
+  string run_id = 2;
   string owner_id = 3;
 }
 

@@ -589,7 +589,7 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .filter(|url| !url.trim().is_empty())
         {
-            let validator = quarry_runtime::GrpcGrantValidator::connect(url).await?;
+            let validator = quarry_runtime::grpc::GrpcGrantValidator::connect(url).await?;
             let validator = match cfg.model_plane_token.as_deref() {
                 Some(token) if cfg.cross_plane_auth_dev_bypass => {
                     validator.with_bearer_token(token.to_owned())

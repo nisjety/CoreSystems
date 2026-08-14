@@ -551,6 +551,69 @@ plane_env_files() {
   fi
 }
 
+# Capability Core signs every execution decision and Execution Core verifies
+# it. Local development must therefore have a real Ed25519 pair even when no
+# production secret store is attached. Generate the pair only when BOTH values
+# are absent; a partial configuration is an error because replacing either half
+# would silently rotate an existing trust relationship.
+ensure_model_capability_decision_dev_keys() {
+  [[ "$PRODUCTION" != "true" ]] || return 0
+  [[ "$DRY_RUN" != "true" ]] || return 0
+  [[ "$MODE" == "build" || "$MODE" == "compose-bootstrap" ]] || return 0
+  if [[ "$MODE" == "build" ]] && (( START_STACK_INDEX > 2 || LAST_STACK_INDEX < 2 )); then
+    return 0
+  fi
+
+  local model_dir="$CORE_ROOT/apps/Model Plane/deploy"
+  local generated_file="$model_dir/.env.generated-secrets"
+  local signing_key="${CAPABILITY_CORE_DECISION_SIGNING_KEY:-}"
+  local public_key="${EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY:-}"
+  local env_file value temporary_dir private_pem private_der public_der
+
+  if [[ -z "$signing_key" || -z "$public_key" ]]; then
+    while IFS= read -r env_file; do
+      [[ -f "$env_file" ]] || continue
+      value="$(dotenv_value "$env_file" CAPABILITY_CORE_DECISION_SIGNING_KEY 2>/dev/null || true)"
+      [[ -z "$value" ]] || signing_key="$value"
+      value="$(dotenv_value "$env_file" EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY 2>/dev/null || true)"
+      [[ -z "$value" ]] || public_key="$value"
+    done < <(plane_env_files "$model_dir")
+  fi
+
+  if [[ -n "$signing_key" && -n "$public_key" ]]; then
+    return 0
+  fi
+  if [[ -n "$signing_key" || -n "$public_key" ]]; then
+    printf '[dev-keys] ERROR: capability-decision signing configuration is partial; refusing to replace an existing key.\n' >&2
+    return 1
+  fi
+  command -v openssl >/dev/null 2>&1 || {
+    printf '[dev-keys] ERROR: openssl is required to create the missing local capability-decision key pair.\n' >&2
+    return 1
+  }
+
+  umask 077
+  temporary_dir="$(mktemp -d "${TMPDIR:-/tmp}/verevon-model-keys.XXXXXX")"
+  private_pem="$temporary_dir/private.pem"
+  private_der="$temporary_dir/private.der"
+  public_der="$temporary_dir/public.der"
+
+  openssl genpkey -algorithm ED25519 -out "$private_pem" >/dev/null 2>&1
+  openssl pkey -in "$private_pem" -outform DER -out "$private_der"
+  openssl pkey -in "$private_pem" -pubout -outform DER -out "$public_der"
+  signing_key="$(tail -c 32 "$private_der" | openssl base64 -A)"
+  public_key="$(tail -c 32 "$public_der" | openssl base64 -A)"
+
+  touch "$generated_file"
+  chmod 600 "$generated_file"
+  printf '\n# Generated once for the internal development capability-decision trust boundary.\n' >> "$generated_file"
+  printf 'CAPABILITY_CORE_DECISION_SIGNING_KEY=%s\n' "$signing_key" >> "$generated_file"
+  printf 'EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY=%s\n' "$public_key" >> "$generated_file"
+  rm -f "$private_pem" "$private_der" "$public_der"
+  rmdir "$temporary_dir"
+  printf '[dev-keys] Generated missing internal capability-decision key pair; existing credentials were not changed.\n'
+}
+
 # verify_plane_env_contract — guard against this script's env resolution
 # drifting from the per-plane launchers, which are the canonical definition of
 # what a plane needs.
@@ -619,6 +682,48 @@ verify_oneshot_declarations() {
   fi
 
   printf '[one-shots] OK — every completes-and-exits service is declared\n'
+}
+
+# SQLx and similar migration runners identify migrations by the leading
+# numeric version, not the full filename. Two files such as 0023_alpha.sql and
+# 0023_beta.sql therefore collide even though their names look distinct. Catch
+# that repository error before any service starts applying migrations.
+verify_unique_migration_versions() {
+  local duplicates
+
+  duplicates="$(find "$CORE_ROOT/apps" -type f -path '*/migrations/*.sql' \
+      ! -path '*/node_modules/*' ! -path '*/target/*' ! -path '*/dist/*' -print \
+    | awk -F/ '
+        {
+          file=$NF
+          # Paired migration systems intentionally use the same version for
+          # name.up.sql and name.down.sql. This guard targets SQLx-style
+          # forward-only files whose basename contains no second dot.
+          if (file !~ /^[0-9]+_[^.]+\.sql$/) next
+          version=file
+          sub(/_.*/, "", version)
+          if (version !~ /^[0-9]+$/) next
+          dir=$0
+          sub("/" file "$", "", dir)
+          key=dir SUBSEP version
+          count[key]++
+          files[key]=files[key] " " file
+        }
+        END {
+          for (key in count) {
+            if (count[key] > 1) {
+              split(key, parts, SUBSEP)
+              print parts[1] ":" parts[2] ":" files[key]
+            }
+          }
+        }
+      ' | LC_ALL=C sort)"
+
+  if [[ -n "$duplicates" ]]; then
+    printf '[migrations] ERROR: duplicate numeric migration versions:\n%s\n' "$duplicates" >&2
+    return 1
+  fi
+  printf '[migrations] OK — numeric versions are unique within every migration directory\n'
 }
 
 verify_plane_env_contract() {
@@ -2197,7 +2302,10 @@ compose_bootstrap() {
 main() {
   preflight_compose_cli
 
+  ensure_model_capability_decision_dev_keys
+
   if [[ "$MODE" != "prune" && "$MODE" != "status" ]]; then
+    verify_unique_migration_versions
     verify_oneshot_declarations
     verify_plane_env_contract
     verify_internal_api_key_consistency
