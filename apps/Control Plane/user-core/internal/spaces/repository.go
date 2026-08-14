@@ -552,6 +552,7 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		return nil, fmt.Errorf("lock Space membership revision: %w", err)
 	}
 
+	ownerKey := "user\x00" + strings.TrimSpace(space.OwnerPrincipalID)
 	declared := make(map[string]struct{}, len(replacement.Members)+1)
 	changed := false
 	for _, member := range replacement.Members {
@@ -559,6 +560,18 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		subjectID := strings.TrimSpace(member.SubjectID)
 		role := strings.TrimSpace(member.Role)
 		declared[subjectType+"\x00"+subjectID] = struct{}{}
+		// A roster sync must not demote the owner. The source roster almost
+		// always CONTAINS them — they are an ordinary member of the
+		// organization too — so without this the owner is silently downgraded
+		// on every single sync, and no later sync can restore them because the
+		// same list keeps naming the lower role. Preserving presence alone was
+		// not enough; the realistic harm here is demotion, not removal.
+		//
+		// Transferring ownership is a deliberate act and needs its own path,
+		// not a side effect of a roster converging.
+		if subjectType+"\x00"+subjectID == ownerKey && role != "owner" {
+			continue
+		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, active, granted_by)
 			VALUES ($1, $2, $3, $4, TRUE, 'application-space-membership-sync')
@@ -579,7 +592,7 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		}
 	}
 	// Preserve the owner even when the declared set omits them.
-	declared["user\x00"+strings.TrimSpace(space.OwnerPrincipalID)] = struct{}{}
+	declared[ownerKey] = struct{}{}
 
 	rows, err := tx.Query(ctx, `
 		SELECT subject_type, subject_id FROM space_memberships
