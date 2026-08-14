@@ -533,6 +533,16 @@ export default defineSchema({
     name: v.string(),
     ownerExternalAuthId: v.optional(v.string()),
     createdByExternalAuthId: v.string(),
+    // Marks THE organization room — the one durable `room` every active member
+    // of an organization belongs to. Explicit rather than derived from
+    // `(externalOrgId, kind)`, because team and external Spaces are also
+    // `room`: keying idempotency on kind alone would make the first team room
+    // collide with the organization room, and the collision would look like a
+    // successful reuse rather than an error.
+    //
+    // Optional and `true`-only, so an ordinary room simply omits it and no
+    // backfill is needed for rooms that already exist.
+    isOrganizationRoom: v.optional(v.literal(true)),
     lifecycle: v.union(
       v.literal("pending_registration"),
       v.literal("active"),

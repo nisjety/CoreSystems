@@ -286,6 +286,81 @@ export const ensurePersonalSpaceForGateway = mutation({
   },
 });
 
+/**
+ * The one durable organization room, provisioned idempotently.
+ *
+ * Product rule (VEREVON_UI_COWORK_RESEARCH §"Organization and team Space
+ * model"): registering an organization creates exactly one `room` Space that
+ * every active organization user belongs to. Team, project and external Spaces
+ * are created separately and are visible only to their explicit participants.
+ *
+ * Idempotency is keyed on the `isOrganizationRoom` marker, NOT on
+ * `(externalOrgId, kind)`. Team rooms share the `room` kind, so a kind-based
+ * key would return the first team room as though it were the organization room
+ * — a wrong answer that reads as a successful reuse. Two organization rooms
+ * throw here rather than picking one, matching how the personal-Space
+ * invariant is enforced.
+ *
+ * Like a personal Space this is created `pending_registration` and becomes
+ * usable only once Control acknowledges the registration; the existing
+ * Application -> Control worker carries it.
+ *
+ * # What this deliberately does NOT do
+ *
+ * It does not add the organization's members. Control owns memberships (see
+ * ADR-0001), its `Register` seeds only the owner, and it exposes no
+ * membership-write route today — so a roster has to arrive through a Control
+ * contract, not by this plane asserting one. Until then the room exists and
+ * resolves for its registrar alone, which is the truthful subset rather than a
+ * simulated roster.
+ */
+export const ensureOrganizationRoomForGateway = mutation({
+  args: {
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+    name: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const rooms = await ctx.db
+      .query("spaces")
+      .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+    const existing = rooms.filter(
+      (space: any) => space.kind === "room" && space.isOrganizationRoom === true,
+    );
+    if (existing.length > 1) throw new Error("organization room invariant violated");
+    if (existing[0]) return existing[0];
+
+    const now = Date.now();
+    const recordId = await ctx.db.insert("spaces", {
+      spaceRef: "pending",
+      externalOrgId: args.externalOrgId,
+      kind: "room",
+      isOrganizationRoom: true,
+      name: args.name?.trim() || String(organization.name ?? "").trim() || "Organization",
+      // The registrar owns it for Control's purposes — Register requires an
+      // owner principal with an active membership. That is a registration
+      // fact, not a claim that this room is personal to them.
+      ownerExternalAuthId: args.externalAuthId,
+      createdByExternalAuthId: args.externalAuthId,
+      lifecycle: "pending_registration",
+      lifecycleRevision: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const spaceRef = String(recordId);
+    await ctx.db.patch(recordId, { spaceRef });
+    const space = await ctx.db.get(recordId);
+    if (!space) throw new Error("organization room creation failed");
+    const event = await appendLifecycleEvent(ctx, space, now);
+    return { ...space, lifecycleEvent: event };
+  },
+});
+
 export const getPersonalSpace = query({
   args: { externalOrgId: v.string() },
   handler: async (ctx, args) => {
