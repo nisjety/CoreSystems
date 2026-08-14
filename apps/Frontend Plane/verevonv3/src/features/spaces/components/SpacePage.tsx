@@ -136,6 +136,7 @@ export default function SpacePage() {
                       loading={() => threads.loading}
                     />
                   ),
+                  agent: <SpaceAgentPanel spaceRef={current().space.space_ref} />,
                   medlemmer: (
                     <SpaceMembersPanel
                       spaceRef={current().space.space_ref}
@@ -281,6 +282,76 @@ function SpaceActivityPanel(props: {
       />
       <p class="verevon-space-view__footnote">
         Run receipts and approvals appear from the current thread projection. Other owner-plane evidence joins only when a correlated Space projection is published.
+      </p>
+    </section>
+  )
+}
+
+/**
+ * Agents bound to this Space.
+ *
+ * Control owns bindings, and it already expresses one: a `service` subject in
+ * `space_memberships` IS an agent bound to a room, granted the same revisioned
+ * way a person is. So this reads the roster rather than waiting for a separate
+ * binding projection — the authority exists, and inventing a second one would
+ * mean two places deciding which agents are in a room.
+ *
+ * What it deliberately does NOT show is everything a binding will eventually
+ * carry: skills, connectors, availability, latest run. Those need the dedicated
+ * model, and a card implying them from a membership row would be the false
+ * promise this tab was left honest to avoid.
+ */
+function SpaceAgentPanel(props: { readonly spaceRef: string }) {
+  const [roster] = createResource(() => props.spaceRef, getSpaceRoster)
+  const agents = () => (roster() ?? []).filter((member) => member.subject_type === 'service')
+
+  return (
+    <section class="verevon-space-view" aria-labelledby="space-agents-title">
+      <div class="verevon-space-view__heading">
+        <div>
+          <p class="verevon-space-eyebrow">Agents</p>
+          <h2 id="space-agents-title">Agent</h2>
+          <p>Agenter som er gitt tilgang til dette rommet, med rollen de har her.</p>
+        </div>
+      </div>
+
+      <Show when={roster.loading}>
+        <p class="verevon-space-inline-status" role="status">Henter agenter …</p>
+      </Show>
+
+      <Show when={roster.error}>
+        <p class="verevon-space-projection-error" role="alert">
+          Agentlisten kunne ikke hentes. Din egen tilgang er uendret.
+        </p>
+      </Show>
+
+      <Show when={roster.error ? undefined : roster()}>
+        <Show
+          when={agents().length > 0}
+          fallback={
+            /* An empty list here is a real answer, not a missing projection:
+               Control was asked and no agent holds a binding in this room. */
+            <p>Ingen agenter er bundet til dette rommet ennå.</p>
+          }
+        >
+          <ul class="verevon-space-roster">
+            <For each={agents()}>
+              {(agent: SpaceRosterMember) => (
+                <li class="verevon-space-roster__row">
+                  <span class="verevon-space-roster__name">
+                    {agent.display_name || agent.subject_id}
+                  </span>
+                  <span class="verevon-space-roster__meta">Agent · {formatLabel(agent.role)}</span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </Show>
+
+      <p class="verevon-space-inline-status">
+        Ferdigheter, koblinger og kjørestatus per agent kommer når bindingsmodellen
+        publiserer dem; dette viser tilgangen Control faktisk har gitt.
       </p>
     </section>
   )
