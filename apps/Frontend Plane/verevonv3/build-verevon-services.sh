@@ -491,6 +491,16 @@ plane_env_files() {
   local owner core_env
 
   case "$(basename "$plane_dir")" in
+    "Application Plane")
+      # The Space registration worker presents a Control-issued service
+      # credential (principal `application-space-lifecycle`, scope
+      # `spaces:register`) to user-core. Control owns and generates it, so read
+      # it from Control's persisted store rather than copying it into a per-core
+      # file here — this plane's own pair already disagrees with itself on
+      # CONVEX_INTERNAL_SERVICE_KEY, which is exactly what a second copy invites.
+      owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
+      [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      ;;
     "Ingestion Plane")
       for owner in "$CORE_ROOT/apps/Control Plane/.env.generated-secrets" \
                    "$CORE_ROOT/apps/Application Plane/.env.generated-secrets"; do
