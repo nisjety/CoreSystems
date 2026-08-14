@@ -628,21 +628,59 @@ further work needed.
   leaf in the Space adoption plan's dependency graph (S3.5, S3.x, S3.4, S4.2).
   Building them org/user-scoped now would become migration debt the moment
   Space lands. They wait on that workstream, not on capacity.
-- **HARN-1/2** (one tool-execution module, then a turn-loop trait): the right
-  refactor, wrong week. It touches the three hottest paths in Model Plane
-  Rust — exactly where another workstream is actively landing large changes.
-  It needs a quiet tree, not a race.
+- **HARN-1/2** — **withdrawn 2026-08-14, not deferred.** When the tree went
+  quiet the premise was measured before any code moved, and it did not hold.
+  The two dispatchers share **zero** tools: `dispatch_tool` is an 18-arm
+  read-tool router whose first act is to refuse anything side-effecting, while
+  `execute_step_inner` is a capability/hook/permission pipeline around
+  sandboxed execution. That refusal *is* the authority boundary, and one module
+  owning both would make the next accidental cross-call compile. HARN-2's
+  proposed `run_turn(ctx, goal, ...)` also fits only one of the two loops:
+  `run_rounds` seeds its own history from a goal because subagent isolation
+  depends on it, `run_tool_rounds` receives a caller's thread because it
+  continues a conversation.
+
+  The round-budget constants this plan read as drift turned out to be
+  deliberate and documented — execution-core's comment names model-gateway's
+  and states the invariant that a deployed agent must never get less room than
+  chat. They were enforced by comment alone, so they are now asserted in
+  `execution-core/tests/cross_service_loop_contract.rs` (verified to fail when
+  perturbed, not merely to pass).
+
+  HARN-3 survived and is written:
+  `docs/architecture/adr-agent-loop-and-tool-execution-boundary.md`. Real
+  duplication does exist, just elsewhere — provenance/screening rendering is
+  implemented twice, and that one carries no authority.
 - **ADM-3/ADM-4**: product decisions, not engineering items.
 
-## Still blocking a shipped feature
+## Closed 2026-08-14: the credential that was blocking ADM-1
 
-`model-gateway` is absent from Control Plane's `ORG_CORE_SERVICE_CREDENTIALS`,
-and `MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN` defaults to empty. Until that pair
-is registered with `org:read:any` plus settings-write, an admin can set a spend
-ceiling in the UI that model-gateway cannot read — so the cap does not enforce.
-The code is honest about it (unset is a supported state that stops enforcing
-rather than erroring), but the net effect is a configured limit that does
-nothing. This needs an operator to generate the secret.
+`model-gateway` is now registered in Control Plane's
+`ORG_CORE_SERVICE_CREDENTIALS`, and the ceiling enforces. Verified against the
+running service: the quota read returns 200 with the credential and 401 with a
+wrong token, so the check is live rather than an unauthenticated endpoint.
+
+**The scope this section previously asked for would have broken Control Plane.**
+It said to register "`org:read:any` plus settings-write". org-core's
+`validateServiceCredential` rejects any `:self` scope held by a principal other
+than `verevon-gateway`, and that check runs from `main.go` *before* any listener
+opens — so adding `org:settings:write:self` would not have granted the cap
+write, it would have stopped org-core from booting. The registration is
+`org:read:any` only.
+
+Cap writes were never missing either, they live one plane over:
+`PUT .../quotas/:key` sits behind org-core's membership guard and requires a
+verified v3 HMAC delegation naming the acting user, because setting an org's
+spend cap is a governed admin action. The Verevon gateway already holds the
+scope, mints that delegation, and serves the write — which is the route the
+Forbrukstak UI uses. `SetPolicy`'s own service-authenticated cap write returns
+403 by design; that is documented at `put_org_quota` so the next reader does not
+try to widen the credential.
+
+The secret has one canonical local home rather than a copy per plane. Both
+launchers read Control's persisted store, so a rotation cannot leave a stale
+copy shadowing the live value — which would have failed silently, since a wrong
+token 403s the read and `fetch_org_limits` fails open.
 
 ## The pattern that keeps recurring
 
