@@ -31,6 +31,22 @@ func (s *Server) requireSpaceLifecycleRegistrar(c *gin.Context) {
 	c.Next()
 }
 
+// requireSpaceMembershipWriter is separate from registration and from audience
+// publication for the same reason those are separate from each other: writing
+// a roster decides who can reach a Space's content, which is a strictly larger
+// power than creating an empty one. A deployment can grant the organization
+// sync this scope without also letting that workload register Spaces or
+// publish recipient audiences.
+func (s *Server) requireSpaceMembershipWriter(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != applicationSpaceLifecyclePrincipal ||
+		!hasServiceScope(c, "spaces:membership:write") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Application Space membership writer required"})
+		return
+	}
+	c.Next()
+}
+
 // requireSpaceAudiencePublisher is deliberately separate from lifecycle
 // registration. A deployment can rotate/revoke the participant-set publisher
 // without giving another workload the ability to create registered Spaces.
@@ -136,6 +152,42 @@ func (s *Server) registerSpace(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"data": registered})
+}
+
+// replaceSpaceMemberships converges a Space's roster on the declared set.
+//
+// The Space reference comes from the path, not the body: the route is already
+// the resource, and accepting a second copy in the payload would let the two
+// disagree.
+func (s *Server) replaceSpaceMemberships(c *gin.Context) {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	var replacement spaces.MembershipReplacement
+	if err := c.ShouldBindJSON(&replacement); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid Space membership replacement"})
+		return
+	}
+	replacement.SpaceRef = strings.TrimSpace(c.Param("space_ref"))
+	revisions, err := s.spaceRepo.ReplaceMemberships(c.Request.Context(), replacement)
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "registered Space not found"})
+		return
+	}
+	if err != nil {
+		// A rejected roster is the caller's contract error, not a server fault:
+		// an unknown role, a duplicate subject, a personal Space, or a Space
+		// that is not registered active. Returning 500 for those would send an
+		// at-least-once caller into a retry loop over an unfixable request.
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"space_ref": replacement.SpaceRef,
+		"members":   len(replacement.Members),
+		"revisions": revisions,
+	}})
 }
 
 func (s *Server) registerRecipientAudience(c *gin.Context) {

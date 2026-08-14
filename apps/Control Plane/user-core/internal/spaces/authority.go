@@ -180,6 +180,67 @@ func (p EffectPolicy) Validate() error {
 // to a resolver only as one component of effective access: callers must still
 // intersect recipient, policy, and owner-resource authorization before an
 // effect. The database result is deliberately not a signed access decision.
+// MemberGrant is one subject's place in a Space. `service` covers agent and
+// workload identities, which the product model allows as Space members but
+// never infers — an identity is a member because it was granted, not because
+// it appeared in an action catalog.
+type MemberGrant struct {
+	SubjectType string `json:"subject_type"`
+	SubjectID   string `json:"subject_id"`
+	Role        string `json:"role"`
+}
+
+// MembershipReplacement declares the complete intended membership of a Space.
+//
+// Declarative rather than add/remove, because the caller that knows the answer
+// is the one holding the source roster (an organization's active users). An
+// incremental API would make the two drift the moment a single call is lost;
+// a full set converges on every call.
+//
+// Absence therefore means revocation. That is the point, and it is also the
+// sharp edge — see Repository.ReplaceMemberships for the one subject it
+// refuses to revoke.
+type MembershipReplacement struct {
+	SpaceRef string        `json:"space_ref"`
+	Members  []MemberGrant `json:"members"`
+}
+
+const maxSpaceMembers = 5000
+
+func (m MembershipReplacement) Validate() error {
+	if strings.TrimSpace(m.SpaceRef) == "" {
+		return fmt.Errorf("Space reference is required")
+	}
+	if len(m.Members) > maxSpaceMembers {
+		return fmt.Errorf("Space membership exceeds %d subjects", maxSpaceMembers)
+	}
+	seen := make(map[string]struct{}, len(m.Members))
+	for _, member := range m.Members {
+		subjectType := strings.TrimSpace(member.SubjectType)
+		subjectID := strings.TrimSpace(member.SubjectID)
+		role := strings.TrimSpace(member.Role)
+		if subjectType != "user" && subjectType != "service" {
+			return fmt.Errorf("unknown Space member subject type %q", member.SubjectType)
+		}
+		if subjectID == "" {
+			return fmt.Errorf("Space member subject id is required")
+		}
+		switch role {
+		case "viewer", "editor", "manager", "owner":
+		default:
+			return fmt.Errorf("unknown Space member role %q", member.Role)
+		}
+		key := subjectType + "\x00" + subjectID
+		if _, duplicate := seen[key]; duplicate {
+			// Two rows for one subject would make the resulting role depend on
+			// iteration order, so the caller must resolve it rather than us.
+			return fmt.Errorf("duplicate Space member %s:%s", subjectType, subjectID)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
 type CurrentMembership struct {
 	SpaceRef  string            `json:"space_ref"`
 	OrgID     string            `json:"org_id"`
