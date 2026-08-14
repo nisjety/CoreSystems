@@ -361,6 +361,43 @@ export const ensureOrganizationRoomForGateway = mutation({
   },
 });
 
+/**
+ * Display facts for every Space in an organization: name, kind, lifecycle.
+ *
+ * This is a LABEL source, not an access decision. Control owns memberships and
+ * decides which Spaces a caller may see; the gateway intersects that
+ * authoritative list with this one, so a Space present here but absent from
+ * Control's index is never shown. Returning the organization's Spaces rather
+ * than a caller-filtered set is therefore safe and keeps the two
+ * responsibilities from blurring — the moment this query started filtering by
+ * membership, it would become a second, lagging authority.
+ *
+ * The caller must still be a live member of the organization, so this is not an
+ * org-wide enumeration endpoint for an outsider.
+ */
+export const spacesForOrgForGateway = query({
+  args: {
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const spaces = await ctx.db
+      .query("spaces")
+      .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+    return spaces.map((space: any) => ({
+      spaceRef: space.spaceRef,
+      name: space.name,
+      kind: space.kind,
+      lifecycle: space.lifecycle,
+      isOrganizationRoom: space.isOrganizationRoom === true,
+    }));
+  },
+});
+
 /** Every organization room Control has registered active, for the re-sync pass. */
 export const listActiveOrganizationRooms = internalQuery({
   args: {},
