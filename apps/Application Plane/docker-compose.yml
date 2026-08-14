@@ -131,6 +131,18 @@ services:
             CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
             CONVEX_CONTROL_PROJECTION_KEY: ${APPLICATION_CONVEX_CONTROL_PROJECTION_KEY:?APPLICATION_CONVEX_CONTROL_PROJECTION_KEY must be set}
             CONVEX_RECONCILIATION_KEY: ${CONVEX_RECONCILIATION_KEY:?CONVEX_RECONCILIATION_KEY must be set}
+            # Application -> Control Space registration worker
+            # (convex/spaceRegistration.ts). The worker, its claim/lease
+            # mutations and Control's endpoint all already existed; these two
+            # names were read by it and declared nowhere, so every claim
+            # released with "not configured" and retried forever — leaving a
+            # created Space stuck at pending_registration.
+            #
+            # This service duplicates convex-core/docker-compose.yml's block
+            # rather than extending it, and THIS file is the one the running
+            # `application-plane` project uses. Both are kept in step.
+            CONTROL_SPACE_REGISTRATION_URL: ${CONTROL_SPACE_REGISTRATION_URL:-http://user-core:3012/api/v1/internal/spaces/register}
+            APPLICATION_SPACE_LIFECYCLE_TOKEN: ${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}
         networks:
             - app-net
         healthcheck:

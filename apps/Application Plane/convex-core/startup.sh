@@ -85,6 +85,12 @@ set_convex_env "AI_CORE_URL" "${AI_CORE_URL:-http://ai-core:8000}"
 # aliases still resolve in docker-compose but are being phased out.
 set_convex_env "ORG_CORE_URL" "${ORG_CORE_URL:-http://org-core:8080}"
 set_convex_env "AUTH_SERVER_URL" "${AUTH_SERVER_URL:-http://auth-core:3011}"
+# Space registration worker. Convex functions read process.env from the
+# DEPLOYMENT, not from this container, so these must be pushed here or
+# spaceRegistration.ts sees empty strings and releases every claim as
+# "not configured" — leaving each new Space pending_registration forever.
+set_convex_env "CONTROL_SPACE_REGISTRATION_URL" "${CONTROL_SPACE_REGISTRATION_URL:-http://user-core:3012/api/v1/internal/spaces/register}"
+set_convex_env "APPLICATION_SPACE_LIFECYCLE_TOKEN" "${APPLICATION_SPACE_LIFECYCLE_TOKEN:-}"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Force-deploy functions before starting dev mode.
