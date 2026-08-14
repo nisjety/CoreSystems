@@ -26,7 +26,11 @@ export default function SpacePage() {
   const [context, { refetch: refetchContext }] = createResource(spaceRef, getSpaceContext)
   const [threads, { refetch: refetchThreads }] = createResource(spaceRef, getSpaceThreads)
   const [spaces] = createResource(listSpaces)
-  const [deletionRequestId, setDeletionRequestId] = createSignal('')
+  // `undefined`, not '': Solid skips a fetch only for false/null/undefined, and
+  // an empty string is none of those — so the receipt resource fired on mount
+  // and requested `/spaces/deletion-requests/` with no id, producing a 404 on
+  // every page load for a request nobody had made.
+  const [deletionRequestId, setDeletionRequestId] = createSignal<string | undefined>(undefined)
   const [deletionReceipt] = createResource(deletionRequestId, getPersonalSpaceDeletionReceipt)
   const [deletionError, setDeletionError] = createSignal('')
   const [deletionSubmitting, setDeletionSubmitting] = createSignal(false)
