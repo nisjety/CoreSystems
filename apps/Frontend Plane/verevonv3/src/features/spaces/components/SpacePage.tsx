@@ -115,11 +115,11 @@ export default function SpacePage() {
                   <p class="verevon-space-eyebrow">{spaceWorkroomLabel(current().space.kind, i18n.tr)}</p>
                   <h1 id="space-title">{current().space.name}</h1>
                   <div class="verevon-space-meta" aria-label={i18n.tr('Status for rommet', 'Current Space status')}>
-                    <span>{formatLabel(current().space.kind)}</span>
+                    <span>{spaceKindLabel(current().space.kind, i18n.tr)}</span>
                     <span aria-hidden="true">·</span>
-                    <span>{formatLabel(current().space.lifecycle)}</span>
+                    <span>{spaceLifecycleLabel(current().space.lifecycle, i18n.tr)}</span>
                     <span aria-hidden="true">·</span>
-                    <span>{i18n.tr('Din rolle: ', 'Your role: ')}{formatLabel(current().membership.role)}</span>
+                    <span>{i18n.tr('Din rolle: ', 'Your role: ')}{spaceRoleLabel(current().membership.role, i18n.tr)}</span>
                   </div>
                 </div>
               </header>
@@ -392,7 +392,7 @@ function SpaceAgentPanel(props: { readonly spaceRef: string }) {
                   <span class="verevon-space-roster__name">
                     {agent.display_name || agent.subject_id}
                   </span>
-                  <span class="verevon-space-roster__meta">{i18n.tr('Agent', 'Agent')} · {formatLabel(agent.role)}</span>
+                  <span class="verevon-space-roster__meta">{i18n.tr('Agent', 'Agent')} · {spaceRoleLabel(agent.role, i18n.tr)}</span>
                 </li>
               )}
             </For>
@@ -438,7 +438,7 @@ function SpaceMembersPanel(props: {
       <div class="verevon-space-membership-card">
         <span class="verevon-space-membership-card__icon" aria-hidden="true"><Users size={17} /></span>
         <div>
-          <strong>{i18n.tr('Du er bekreftet som ', 'You are confirmed as ')}{formatLabel(props.role)}</strong>
+          <strong>{i18n.tr('Du er bekreftet som ', 'You are confirmed as ')}{spaceRoleLabel(props.role, i18n.tr)}</strong>
           <p>{i18n.tr(
             'Din egen tilgang sjekkes på nytt av serveren; listen under kommer fra Control.',
             "Your own access is rechecked by the server; the roster below is Control's.",
@@ -475,7 +475,7 @@ function SpaceMembersPanel(props: {
                     {member.display_name || member.subject_id}
                   </span>
                   <span class="verevon-space-roster__meta">
-                    {member.subject_type === 'service' ? i18n.tr('Agent', 'Agent') : i18n.tr('Person', 'Person')} · {formatLabel(member.role)}
+                    {member.subject_type === 'service' ? i18n.tr('Agent', 'Agent') : i18n.tr('Person', 'Person')} · {spaceRoleLabel(member.role, i18n.tr)}
                   </span>
                 </li>
               )}
@@ -613,17 +613,71 @@ function threadStatus(thread: SpaceThread, tr: (no: string, en: string) => strin
   return formatLabel(status)
 }
 
-// Humanizes a raw server enum token (Space `kind`/`lifecycle`, membership
-// `role`, deletion `state`/`purgeStatus`). Deliberately NOT translated: these
-// are API vocabulary, not authored UI copy, and a partial enum→Norwegian
-// dictionary would be less honest than the current literal-but-consistent
-// capitalization — see the module doc comment above for the same reasoning
-// applied elsewhere in this file.
+// Humanizes a raw server enum token this file has NOT given a translated
+// dictionary — currently only the deletion receipt's `state`/`purgeStatus`/
+// `ownerPlane.status`. Space `kind`/`lifecycle` and membership `role` used to
+// fall through to this too; they now go through the dictionaries below
+// instead, because those three are read on every page view (the header meta
+// line, the membership card, every roster row) and a user asked for them
+// translated. The receipt vocabulary stays here: it is seen rarely — only
+// mid-deletion — and building that dictionary without a confirmed, complete
+// value list would risk the same silent-gap problem this comment used to warn
+// against for the other three.
 function formatLabel(value: string): string {
   return value
     .trim()
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+// Space.kind, per Control's authority.go `Kind` enum (ADR-0001). Falls back to
+// `formatLabel` for anything not listed, so an unmapped value still renders
+// something readable instead of nothing.
+const SPACE_KIND_LABELS: Record<string, { no: string; en: string }> = {
+  personal: { no: 'Personlig', en: 'Personal' },
+  room: { no: 'Rom', en: 'Room' },
+  project: { no: 'Prosjekt', en: 'Project' },
+  case: { no: 'Sak', en: 'Case' },
+}
+
+// Space.lifecycle, per Control's authority.go `SpaceLifecycle` enum.
+const SPACE_LIFECYCLE_LABELS: Record<string, { no: string; en: string }> = {
+  pending_registration: { no: 'Venter på registrering', en: 'Pending registration' },
+  active: { no: 'Aktiv', en: 'Active' },
+  suspended: { no: 'Suspendert', en: 'Suspended' },
+  deleting: { no: 'Slettes', en: 'Deleting' },
+  deleted: { no: 'Slettet', en: 'Deleted' },
+  failed_registration: { no: 'Registrering feilet', en: 'Registration failed' },
+}
+
+// Membership/roster role, per user-core's `space_memberships_role_chk`
+// constraint (viewer/editor/manager/owner).
+const SPACE_ROLE_LABELS: Record<string, { no: string; en: string }> = {
+  viewer: { no: 'Leser', en: 'Viewer' },
+  editor: { no: 'Redaktør', en: 'Editor' },
+  manager: { no: 'Leder', en: 'Manager' },
+  owner: { no: 'Eier', en: 'Owner' },
+}
+
+function translatedEnumLabel(
+  value: string,
+  dictionary: Record<string, { no: string; en: string }>,
+  tr: (no: string, en: string) => string,
+): string {
+  const entry = dictionary[value.trim().toLowerCase()]
+  return entry ? tr(entry.no, entry.en) : formatLabel(value)
+}
+
+function spaceKindLabel(kind: string, tr: (no: string, en: string) => string): string {
+  return translatedEnumLabel(kind, SPACE_KIND_LABELS, tr)
+}
+
+function spaceLifecycleLabel(lifecycle: string, tr: (no: string, en: string) => string): string {
+  return translatedEnumLabel(lifecycle, SPACE_LIFECYCLE_LABELS, tr)
+}
+
+function spaceRoleLabel(role: string, tr: (no: string, en: string) => string): string {
+  return translatedEnumLabel(role, SPACE_ROLE_LABELS, tr)
 }
 
 function spaceWorkroomLabel(kind: string, tr: (no: string, en: string) => string): string {
