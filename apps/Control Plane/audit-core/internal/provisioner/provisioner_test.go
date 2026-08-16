@@ -627,6 +627,47 @@ func TestOrgErasureConsumerConfigsCoversAllFifteen(t *testing.T) {
 	}
 }
 
+// TestProvisionControlSharedRuntimeCreatesEveryOrgErasureConsumer pins the
+// deployment path to the map: every durable that orgErasureConsumerConfigs
+// declares (and cmd/nats-consumer-migrate can converge) must also be CREATED
+// by ProvisionControlSharedRuntime on a fresh broker. The two drifted once —
+// verevon-gateway-gdpr-erasure-v1 was added to the map without a matching
+// ensureFixedConsumer call in the runtime sequence, so a broker provisioned
+// from scratch came up without the consumer and the Frontend Plane gateway's
+// STREAM.INFO-free bind retried a 404 forever.
+func TestProvisionControlSharedRuntimeCreatesEveryOrgErasureConsumer(t *testing.T) {
+	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go natsServer.Start()
+	if !natsServer.ReadyForConnections(10 * time.Second) {
+		t.Fatal("NATS server did not become ready")
+	}
+	t.Cleanup(func() { natsServer.Shutdown(); natsServer.WaitForShutdown() })
+	nc, err := nats.Connect(natsServer.ClientURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProvisionControlSharedRuntime(context.Background(), js); err != nil {
+		t.Fatal(err)
+	}
+	for durable, wanted := range orgErasureConsumerConfigs() {
+		info, err := js.ConsumerInfo(ControlSharedStreamName, durable)
+		if err != nil {
+			t.Fatalf("consumer %s missing after ProvisionControlSharedRuntime: %v", durable, err)
+		}
+		if info.Config.FilterSubject != wanted.FilterSubject {
+			t.Fatalf("consumer %s FilterSubject = %q, want %q", durable, info.Config.FilterSubject, wanted.FilterSubject)
+		}
+	}
+}
+
 func TestProvisionModelRuntimeAndApplicationConsumersIsIdempotent(t *testing.T) {
 	natsServer, err := server.NewServer(&server.Options{JetStream: true, StoreDir: t.TempDir(), Port: -1})
 	if err != nil {
