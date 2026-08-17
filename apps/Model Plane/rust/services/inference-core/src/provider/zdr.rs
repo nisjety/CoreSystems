@@ -105,6 +105,22 @@ pub enum ZdrAttestationError {
         today: NaiveDate,
     },
 
+    /// A field contained a newline, making the canonical form ambiguous.
+    ///
+    /// The canonical form is newline-delimited, so a field containing a newline
+    /// lets two different field tuples hash identically: `resource_id="a\nb"` with
+    /// `approval_ref="c"` produces the same bytes as `resource_id="a"` with
+    /// `approval_ref="b\nc"`. That is not exploitable — anyone who can set these
+    /// variables controls the whole attestation anyway — but a digest that binds
+    /// two different inputs to one value is not a binding, so the ambiguity is
+    /// rejected rather than documented. No legitimate Azure resource id, approval
+    /// reference, date or reviewer contains a newline.
+    #[error(
+        "ZDR attestation for {prefix}: {field} contains a newline, which makes the canonical \
+         digest form ambiguous. Remove the line break."
+    )]
+    FieldContainsNewline { prefix: String, field: String },
+
     /// The legacy boolean asserted ZDR but no attestation backs it.
     #[error(
         "{legacy_var}=true but no ZDR attestation was supplied. A boolean is not evidence. \
@@ -184,6 +200,21 @@ impl ZdrAttestation {
                 prefix: prefix.to_owned(),
                 missing,
             });
+        }
+
+        // Reject *interior* newlines before hashing: the canonical form is
+        // newline-delimited, so a field containing one lets two different tuples
+        // hash identically. Leading/trailing whitespace is an ordinary `.env`
+        // artifact and is trimmed before hashing, so it is harmless — only a break
+        // inside the value shifts the delimiters.
+        for (suffix, value) in FIELD_SUFFIXES.iter().zip(present) {
+            let trimmed = value.trim();
+            if trimmed.contains('\n') || trimmed.contains('\r') {
+                return Err(ZdrAttestationError::FieldContainsNewline {
+                    prefix: prefix.to_owned(),
+                    field: format!("{prefix}{suffix}"),
+                });
+            }
         }
 
         let effective_date = NaiveDate::parse_from_str(raw.effective_date.trim(), "%Y-%m-%d")
@@ -551,6 +582,75 @@ mod tests {
             error,
             ZdrAttestationError::LegacyBooleanWithoutEvidence { .. }
         ));
+    }
+
+    /// The canonical form is newline-delimited, so a field containing a newline
+    /// would let two different field tuples hash identically. Proven here, then
+    /// rejected: without the guard, these two tuples collide.
+    #[test]
+    fn newline_in_a_field_is_rejected_because_it_would_collide() {
+        let split_in_resource = RawAttestation {
+            resource_id: "a\nb".to_owned(),
+            approval_ref: "c".to_owned(),
+            effective_date: "2026-01-01".to_owned(),
+            reviewer: "d".to_owned(),
+            digest: String::new(),
+        };
+        let split_in_approval = RawAttestation {
+            resource_id: "a".to_owned(),
+            approval_ref: "b\nc".to_owned(),
+            effective_date: "2026-01-01".to_owned(),
+            reviewer: "d".to_owned(),
+            digest: String::new(),
+        };
+        // The collision is real: the canonical bytes are identical.
+        assert_eq!(
+            canonical_digest(&split_in_resource),
+            canonical_digest(&split_in_approval),
+            "these tuples must collide -- that is why the guard below exists"
+        );
+
+        // Both are therefore refused before the digest is ever compared.
+        for raw in [&split_in_resource, &split_in_approval] {
+            let mut candidate = raw.clone();
+            candidate.digest = canonical_digest(raw);
+            let error = ZdrAttestation::validate(PREFIX, &candidate, today())
+                .expect_err("a newline in a field must be refused");
+            assert!(
+                matches!(error, ZdrAttestationError::FieldContainsNewline { .. }),
+                "expected FieldContainsNewline, got {error:?}"
+            );
+        }
+    }
+
+    /// Carriage returns are the same hazard via CRLF `.env` files.
+    #[test]
+    fn carriage_return_in_a_field_is_rejected() {
+        let raw = RawAttestation {
+            reviewer: "ops\r\nteam".to_owned(),
+            ..valid()
+        };
+        let error = ZdrAttestation::validate(PREFIX, &raw, today())
+            .expect_err("an interior CRLF must be refused");
+        assert!(matches!(
+            error,
+            ZdrAttestationError::FieldContainsNewline { .. }
+        ));
+    }
+
+    /// A trailing newline from a CRLF `.env` is trimmed, not rejected — only an
+    /// interior break shifts the canonical delimiters.
+    #[test]
+    fn trailing_newline_is_trimmed_not_rejected() {
+        let base = valid();
+        let raw = RawAttestation {
+            reviewer: format!("{}\r\n", base.reviewer),
+            digest: base.digest.clone(),
+            ..base.clone()
+        };
+        let attestation = ZdrAttestation::validate(PREFIX, &raw, today())
+            .expect("a trailing CRLF is an ordinary .env artifact");
+        assert_eq!(attestation.reviewer(), base.reviewer);
     }
 
     /// Digest stability: the canonical form is a documented operator contract
