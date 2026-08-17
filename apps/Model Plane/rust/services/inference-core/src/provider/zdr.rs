@@ -14,6 +14,23 @@
 //! fields, so a placeholder (`CHANGEME`, an empty string, a digest copied from
 //! a different resource) fails validation instead of silently granting ZDR.
 //!
+//! # What the digest does not prove
+//!
+//! The digest binds the four fields *to each other*, not to the endpoint traffic
+//! is actually sent to. Move the whole five-variable block to an environment whose
+//! `AZURE_*_ENDPOINT` points at a resource with no retention exception and it
+//! still validates — the fields remain mutually consistent, they just describe
+//! somewhere else. [`ZdrAttestation::warn_on_endpoint_mismatch`] closes the common
+//! case by comparing the attested resource id against the configured endpoint host
+//! and logging when they disagree, but that is a heuristic on an opaque
+//! operator-authored string, not a proof.
+//!
+//! There is also no upper bound: an attestation whose approval has since lapsed
+//! keeps validating, because nothing here knows the approval's term. A `review_by`
+//! field would close it and is a deliberate follow-up rather than an oversight —
+//! adding it changes the canonical form, so it is cheapest to do while no
+//! attestation is deployed yet.
+//!
 //! # Generating the digest
 //!
 //! The canonical form is the four fields in declaration order, each followed by
@@ -313,6 +330,68 @@ impl ZdrAttestation {
             });
         }
         Ok(attestation)
+    }
+
+    /// Warn when the attested resource id does not appear to describe `endpoint`.
+    ///
+    /// Catches the realistic failure: the five `*_ZDR_*` variables are a contiguous
+    /// block, so they get copied to a new environment together while the endpoint
+    /// is repointed at a resource that has no retention exception. The digest still
+    /// matches there — it only proves the fields agree with each other — so this is
+    /// the one signal that the attestation may be describing somewhere else.
+    ///
+    /// A heuristic, and deliberately only a warning: an Azure resource id is an
+    /// opaque operator-authored string whose final path segment is *usually* the
+    /// resource name that also appears in the endpoint host, but nothing guarantees
+    /// it. Failing boot on a string-shape mismatch would reject correct
+    /// configurations, so this reports and lets the operator judge.
+    pub fn warn_on_endpoint_mismatch(&self, surface: &str, endpoint: &str) {
+        if !self.endpoint_appears_to_match(endpoint) {
+            let host_label = endpoint
+                .trim()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('.')
+                .next()
+                .unwrap_or_default();
+            tracing::warn!(
+                surface = %surface,
+                attested_resource = %self.resource_id,
+                endpoint_host = %host_label,
+                approval_ref = %self.approval_ref,
+                "ZDR attestation may not describe the configured endpoint: the attested resource \
+                 name does not appear in the endpoint host. Verify the attestation covers THIS \
+                 resource — the digest proves only that its own fields agree with each other."
+            );
+        }
+    }
+
+    /// Whether the attested resource name plausibly appears in `endpoint`.
+    ///
+    /// Answers `true` when it cannot tell — a blank or hostless endpoint, or an
+    /// empty resource name — so the caller warns only on a positive mismatch.
+    #[must_use]
+    pub fn endpoint_appears_to_match(&self, endpoint: &str) -> bool {
+        let host = endpoint
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let Some(host_label) = host.split('.').next().filter(|label| !label.is_empty()) else {
+            return true;
+        };
+        let resource_name = self
+            .resource_id
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.resource_id);
+        if resource_name.is_empty() {
+            return true;
+        }
+        let host_label = host_label.to_ascii_lowercase();
+        let resource_name = resource_name.to_ascii_lowercase();
+        host_label == resource_name
+            || host_label.contains(&resource_name)
+            || resource_name.contains(&host_label)
     }
 
     /// The cloud resource this attestation covers.
@@ -651,6 +730,37 @@ mod tests {
         let attestation = ZdrAttestation::validate(PREFIX, &raw, today())
             .expect("a trailing CRLF is an ordinary .env artifact");
         assert_eq!(attestation.reviewer(), base.reviewer);
+    }
+
+    /// The realistic drift case: the five-variable block is copied to a new
+    /// environment whose endpoint points somewhere else. The digest still matches
+    /// there, so this heuristic is the only signal.
+    #[test]
+    fn endpoint_mismatch_is_detected_by_resource_name() {
+        let attestation = ZdrAttestation::validate(PREFIX, &valid(), today()).expect("valid");
+        // valid()'s resource id ends in `openai-swedencentral`.
+        assert!(
+            !attestation
+                .endpoint_appears_to_match("https://core-ai-rg.cognitiveservices.azure.com"),
+            "a different resource must not appear to match"
+        );
+        assert!(
+            attestation.endpoint_appears_to_match("https://openai-swedencentral.openai.azure.com"),
+            "the attested resource's own endpoint must match"
+        );
+    }
+
+    /// The heuristic must not fire on an empty or malformed endpoint, or it would
+    /// warn on every deployment that configures the resource id differently.
+    #[test]
+    fn endpoint_match_is_lenient_about_missing_input() {
+        let attestation = ZdrAttestation::validate(PREFIX, &valid(), today()).expect("valid");
+        for endpoint in ["", "   ", "https://"] {
+            assert!(
+                attestation.endpoint_appears_to_match(endpoint),
+                "a missing endpoint must not be reported as a mismatch ({endpoint:?})"
+            );
+        }
     }
 
     /// Digest stability: the canonical form is a documented operator contract

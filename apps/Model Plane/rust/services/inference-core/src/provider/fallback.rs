@@ -351,31 +351,57 @@ impl FallbackChain {
         let azure_openai_zdr = cfg.azure_openai_zdr.clone().map(Arc::new);
         let azure_anthropic_zdr = cfg.azure_anthropic_zdr.clone().map(Arc::new);
 
-        // Azure residency, from the same signals the region gate below classifies.
-        // An explicitly global deployment type is decisive: a Global deployment in
-        // an EU region still processes worldwide, so the region alone cannot earn
-        // `Eu`. This is exactly the trap the deployment-type gate exists to catch,
-        // and the two must agree or the gate would reject what this promoted.
-        let azure_declared_global = cfg
-            .azure_openai_deployment_type
-            .as_deref()
-            .is_some_and(crate::config::deployment_type_is_global);
-        let azure_openai_residency = if azure_declared_global {
-            Residency::Global
-        } else if cfg
-            .azure_openai_region
-            .as_deref()
-            .map(normalize_region_token)
-            .is_some_and(|region| is_eu_region(&region))
-        {
-            Residency::Eu
-        } else {
-            Residency::Global
-        };
+        // Correlate each attestation with the endpoint it is supposed to cover. The
+        // digest cannot do this: it binds the fields to each other, not to a host.
+        if let (Some(zdr), Some(endpoint)) = (
+            azure_openai_zdr.as_ref(),
+            cfg.azure_openai_endpoint.as_deref(),
+        ) {
+            zdr.warn_on_endpoint_mismatch("azure-openai", endpoint);
+        }
+        if let (Some(zdr), Some(endpoint)) = (
+            azure_anthropic_zdr.as_ref(),
+            cfg.azure_anthropic_endpoint.as_deref(),
+        ) {
+            zdr.warn_on_endpoint_mismatch("azure-anthropic", endpoint);
+        }
+
         let has_explicit_azure = cfg
             .provider_order
             .iter()
             .any(|name| matches!(name.as_str(), "azure" | "azure-openai"));
+
+        // Residency per Azure resource, classified independently.
+        //
+        // These are separate Azure resources -- the checked-in config points them
+        // at core-ai-rg.cognitiveservices.azure.com and
+        // cloude-ai-resource.services.ai.azure.com -- so neither may inherit the
+        // other's geography. An earlier version of this code did exactly that, and
+        // would have declared Foundry Claude EU-resident on the strength of
+        // AZURE_OPENAI_REGION alone.
+        //
+        // `Eu` requires positive evidence: a known-EU region AND, where the
+        // deployment type is declared, a non-global one. Unknown is classified
+        // `Global` rather than promoted, because "we cannot prove this stays in the
+        // EU" and "this stays in the EU" are different claims and only one of them
+        // is true. Phase 0's deployment-type gate deliberately only warns when the
+        // type is unset; promoting the same silence to an affirmative `Eu` here
+        // would turn a known blind spot into a stated guarantee.
+        let classify = |region: Option<&str>, declared_global: bool| -> Residency {
+            let region_is_eu = region
+                .map(normalize_region_token)
+                .is_some_and(|region| is_eu_region(&region));
+            Residency::classify(region_is_eu, declared_global)
+        };
+        let azure_declared_global = cfg
+            .azure_openai_deployment_type
+            .as_deref()
+            .is_some_and(crate::config::deployment_type_is_global);
+        let azure_openai_residency =
+            classify(cfg.azure_openai_region.as_deref(), azure_declared_global);
+        // Foundry Claude has no deployment-type variable of its own; its region is
+        // the only signal, and absent one it stays `Global`.
+        let azure_anthropic_residency = classify(cfg.azure_anthropic_region.as_deref(), false);
 
         for name in &cfg.provider_order {
             match name.as_str() {
@@ -415,12 +441,9 @@ impl FallbackChain {
                             endpoint.clone(),
                             cfg.azure_anthropic_deployments.clone(),
                         ) {
-                            // Foundry Claude rides the same Azure resource geography as the
-                            // OpenAI deployment, so it inherits that classification
-                            // rather than declaring an independent one.
                             let p = p
                                 .with_zdr_attestation(azure_anthropic_zdr.clone())
-                                .with_residency(azure_openai_residency);
+                                .with_residency(azure_anthropic_residency);
                             providers.push(("azure-anthropic".to_owned(), Arc::new(p)));
                             info!(provider = "azure-anthropic", "provider registered");
                             registered_azure_anthropic = true;
@@ -626,28 +649,42 @@ impl FallbackChain {
             }
         }
 
-        // Residency registration gate — STARTUP fail-loud (deny-by-default).
+        // Residency posture, recorded per provider at boot.
         //
-        // After the decision to drop Grok (PROVIDER_AND_PRIVACY_STRATEGY.md §0.0)
-        // every configured provider is either EU-resident or Norwegian, so the
-        // product can claim "no customer data is processed outside the EU/EEA"
-        // without an asterisk. A provider that declares no residency would void
-        // that claim silently, on one request, with nothing in the logs — so it
-        // must not register unless an operator explicitly accepted worldwide
-        // processing. The direct vendor APIs default to `Global`, which is why a
-        // dev box pointed at api.openai.com needs the opt-in.
+        // This warns rather than aborting, matching the EU embedding gate's actual
+        // precedent: that gate fires only when it can *positively determine* a
+        // non-EU region, and lets an unknown one through. Aborting on `Global`
+        // would also abort on merely-unproven, which after the classification above
+        // includes every deployment that has not yet set a region -- i.e. the
+        // running stack. A crash loop is a worse outcome than an honest log line,
+        // and nothing is silently misrepresented: `Global` is what gets recorded
+        // and logged.
+        //
+        // Real enforcement belongs on the request path, where a caller asks for a
+        // minimum residency and a provider that cannot meet it is skipped the way
+        // a non-ZDR provider already is. That needs a residency field on
+        // InferRequest, which needs the proto, and is deferred with the rest of the
+        // request-side work (strategy doc Phase 2). Until then this is disclosure,
+        // not a control -- and it is labelled as such rather than dressed up.
         for (name, provider) in &providers {
             let declared = provider.capabilities_dyn().residency;
-            assert!(
-                declared > Residency::Global || cfg.allow_global_residency_providers,
-                "provider residency: {name:?} declares no residency commitment \
-                 (residency={}), which voids the EU/EEA processing claim, and \
-                 MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY is off. Refusing to boot. Point it at an \
-                 EU or Norwegian deployment, or set MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY=1 to \
-                 explicitly accept worldwide processing for this provider.",
-                declared.as_str()
-            );
-            info!(provider = %name, residency = declared.as_str(), "provider residency declared");
+            if declared > Residency::Global {
+                info!(provider = %name, residency = declared.as_str(), "provider residency declared");
+            } else if cfg.allow_global_residency_providers {
+                info!(
+                    provider = %name,
+                    "provider declares no residency commitment; explicitly accepted via \
+                     MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY"
+                );
+            } else {
+                warn!(
+                    provider = %name,
+                    "provider declares NO residency commitment: traffic to it may be processed \
+                     outside the EU/EEA. Set its region (AZURE_OPENAI_REGION / \
+                     AZURE_ANTHROPIC_REGION) to an EU region, or set \
+                     MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY=1 to record this as accepted."
+                );
+            }
         }
 
         // Snapshot each provider's catalog once, keyed by registry id.

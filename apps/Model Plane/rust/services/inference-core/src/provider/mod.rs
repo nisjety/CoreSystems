@@ -368,6 +368,27 @@ pub enum Residency {
 }
 
 impl Residency {
+    /// Classify one Azure resource's residency from its own signals.
+    ///
+    /// `Eu` requires positive evidence. Unknown is `Global`, not `Eu`: "we cannot
+    /// prove this stays in the EU" and "this stays in the EU" are different claims
+    /// and only one of them is true. An explicitly global deployment type is
+    /// decisive over the region, because a Global deployment inside an EU region
+    /// still processes inference worldwide.
+    ///
+    /// Takes one resource's signals only. An earlier version derived Azure Foundry
+    /// Claude's residency from `AZURE_OPENAI_REGION`, which describes a *different*
+    /// Azure resource — the checked-in configuration points them at two distinct
+    /// hosts — so it would have declared Claude EU-resident on no evidence at all.
+    #[must_use]
+    pub fn classify(region_is_eu: bool, declared_global: bool) -> Self {
+        if declared_global || !region_is_eu {
+            Self::Global
+        } else {
+            Self::Eu
+        }
+    }
+
     /// Parse an operator-declared residency token.
     ///
     /// Unrecognised values return `None` so the caller can fail loud rather than
@@ -464,6 +485,37 @@ pub trait ProviderRouter: Send + Sync {
     #[allow(dead_code)] // intended surface; consumed by router/policy (Phase 2/5)
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
+    }
+}
+
+#[cfg(test)]
+mod residency_tests {
+    use super::Residency;
+
+    /// The regression this classifier exists to prevent: promoting a resource to
+    /// `Eu` on evidence that describes something else, or on no evidence.
+    #[test]
+    fn eu_requires_positive_evidence() {
+        assert_eq!(Residency::classify(true, false), Residency::Eu);
+        // Unknown region: cannot prove EU, so no commitment is claimed.
+        assert_eq!(Residency::classify(false, false), Residency::Global);
+    }
+
+    /// A Global deployment inside an EU region still processes worldwide, so the
+    /// declared type overrides the region rather than the other way round. If this
+    /// inverted, the residency classification would promote exactly what the
+    /// deployment-type startup gate refuses.
+    #[test]
+    fn declared_global_overrides_an_eu_region() {
+        assert_eq!(Residency::classify(true, true), Residency::Global);
+        assert_eq!(Residency::classify(false, true), Residency::Global);
+    }
+
+    #[test]
+    fn ordering_supports_a_minimum_comparison() {
+        assert!(Residency::Norway > Residency::Eu);
+        assert!(Residency::Eu > Residency::Global);
+        assert_eq!(Residency::default(), Residency::Global);
     }
 }
 

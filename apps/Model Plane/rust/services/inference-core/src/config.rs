@@ -97,6 +97,18 @@ pub struct InferenceConfig {
     /// "unspecified" — the endpoint-substring heuristic is then the only signal.
     pub azure_openai_region: Option<String>,
 
+    /// Explicit residency region of the Azure AI Foundry Claude resource (from
+    /// `AZURE_ANTHROPIC_REGION`).
+    ///
+    /// Separate from [`Self::azure_openai_region`] because these are separate
+    /// Azure resources: the checked-in configuration points them at
+    /// `core-ai-rg.cognitiveservices.azure.com` and
+    /// `cloude-ai-resource.services.ai.azure.com`. Inheriting one's geography for
+    /// the other would assert an EU boundary for a resource nothing has verified —
+    /// and Foundry Claude's regional availability is narrower than Azure
+    /// `OpenAI`'s, so they are quite likely to differ in practice.
+    pub azure_anthropic_region: Option<String>,
+
     /// Evidence-bound operator attestation that the configured Azure `OpenAI`
     /// deployment is covered by an independently verified ZDR contract (from
     /// `AZURE_OPENAI_ZDR_*`). Region alone is not evidence of provider retention
@@ -198,6 +210,7 @@ impl InferenceConfig {
             .unwrap_or(60);
 
         let azure_openai_region = trimmed_env("AZURE_OPENAI_REGION");
+        let azure_anthropic_region = trimmed_env("AZURE_ANTHROPIC_REGION");
 
         // One `today` for the whole boot so every provider surface evaluates its
         // in-force window against the same date.
@@ -260,6 +273,7 @@ impl InferenceConfig {
             session_core_url,
             router_policy_refresh_secs,
             azure_openai_region,
+            azure_anthropic_region,
             azure_openai_zdr,
             azure_anthropic_zdr,
             azure_openai_deployment_type,
