@@ -1,5 +1,9 @@
 # QM-Inspired Improvement Plan (2026-08-13)
 
+Last reconciled: 2026-08-17
+QM clone baseline: `d719f54075afee4648be75240fa02adb3a9071f0`
+CoreSystem baseline: `520a7a6b410a79b4b368a33b949abea1a0da4e37`
+
 ## What this is
 
 A full comparison of [yc-software/qm](https://github.com/yc-software/qm) ("a
@@ -29,12 +33,19 @@ caller, a UI field, an admin route — was never added.
   wires a durable store and the RPC only supports the no-store path. This
   strands `orchestrator-core`'s `SkillPromotionWorkflow`, which has real
   callers waiting on a dead RPC.
-- **6 of orchestrator-core's 7 registered Temporal workflows** have zero
-  production callers. The 7th (`InteractiveRunSupervision`) now does —
-  cron sweeper → task executor → `WorkflowDispatcher` → `StartWorkflow` gRPC
-  → real `Temporal.ExecuteWorkflow` — but the cron **creation form in the
-  frontend has no field to pick a workflow type**, so even a fully configured
-  deployment can only ever fire the one default.
+- **6 of orchestrator-core's 8 registered Temporal workflows** have zero
+  production callers (`ScheduledRunSupervision` joined the allowlist after
+  this doc's original count of 7 — see `workflowreg.go`). Two now have real
+  callers: `InteractiveRunSupervision` — cron sweeper → task executor →
+  `WorkflowDispatcher` → `StartWorkflow` gRPC → real `Temporal.ExecuteWorkflow`
+  — and `ScheduledRunSupervision`, which Capability Core's cron routing now
+  dispatches by name (`workflow_dispatcher.go`'s `ScheduledRunWorkflowType`
+  constant) through the same `StartWorkflow` path. The frontend cron
+  **creation form still has no field to pick a workflow type**, so even a
+  fully configured deployment is limited to whichever default the dispatch
+  path selects; see "space + qm style improvements.md" P1 item 4 for the
+  remaining gap in ordinary user-bound `ExecuteStep` reaching a
+  service-owned scheduled run.
 - **`inference-core`'s `ContentSafety` classifier** — a complete, LLM-based
   moderation operation, merged into the gRPC contract — has zero callers
   anywhere outside its own tests.
@@ -77,6 +88,64 @@ plainly rather than left for you to notice the discrepancy:
    different things and both stand.
 
 ## Scorecard
+
+## 2026-08-17 baseline reconciliation
+
+This plan is now aligned with both repositories' current checked-out commits,
+not the older `6c951c6e` CoreSystem snapshot used by the original research
+pass.
+
+### What changed in QM since the comparison pass
+
+The current QM commit `d719f540` fixes command-form approval compilation and
+keeps the deployment-layer evaluator in sync. A command-derived approval now
+matches the binary plus the command at a whitespace or end boundary, with
+regression coverage for both the CLI and deployment layer. This is a real
+correctness improvement, but it does not alter the larger comparison: QM still
+has the coherent `scopeId` resolver, durable monitor/delivery loop, scoped
+workspace/memory, adapter boundary, and deployment-directory evidence; its
+documented single-organization, fail-open, credential, and audit limitations
+still must not be copied into CoreSystem.
+
+### What changed in CoreSystem since the original comparison snapshot
+
+- V3 UI-4 now has a committed narrow slice for **Definitions + Space
+  installations**. The gateway composes the caller's Control Space index with
+  the existing Control-joined per-Space agent read, groups by `agent_ref`, and
+  exposes `/api/v1/agents/installations`; V3 renders it at
+  `/agents/installations` with tests for multi-Space grouping, empty state, and
+  read failure.
+- The slice was live-verified read-only in the authenticated AQUATIQ AS
+  organization. Unconfirmed Control bindings are omitted, which preserves the
+  same executable-installation rule as the room Agent tab. This is a safe
+  projection improvement, not a durable cross-Space registry, a new authority,
+  or proof that a Model agent can execute the definition.
+- The full Agent Studio vision remains intentionally open: blueprint
+  activation is still a showcase, Page/system installations have no storage
+  contract, Runs/receipts remain in the separate Task Console, and Chief/Core
+  cross-Space routing needs an owner-approved registry read.
+- The source lanes for capability health, scheduled-step authority,
+  `tickets.create` reservation/continuation, deletion, and Application
+  delivery are stronger than the original comparison, but they remain
+  source/disposable evidence. Auth Core registrations, deployed service
+  bindings, provider/ZDR, HA replay, owner-effect observation, immutable
+  candidate/rollback, and approved promotion thresholds remain release gates.
+
+### Reclassified status
+
+The following labels should be used in future updates:
+
+| Area | Current classification | Do not claim yet |
+|---|---|---|
+| Space cockpit | **Source progress** — Personal Space cockpit and Agent installations projection exist | QM's one-view scope computer/resources experience |
+| Action catalog | **Source progress** — typed registry drift checks and actor-specific view plumbing exist | Same executable action set for every actor or live owner-effect parity |
+| Scheduled work | **Source/disposable green, runtime gated** | A deployed scheduled effect or provider completion |
+| Approval continuation | **Source contract, release open** | Restart-safe live continuation of a governed owner action |
+| Delivery | **Source state machine, release open** | Exactly-once delivery; the target is at-least-once plus idempotent projection and explicit `unknown` |
+| Capability promotion | **Source-only** | Candidate/staging/rollback promotion |
+
+The original 8-topic findings and historical checkpoints below remain useful;
+this reconciliation supersedes only their stale baseline and status wording.
 
 | # | Topic | Verdict | One line |
 |---|---|---|---|
@@ -472,7 +541,7 @@ questions last.
 
 **Medium-term (apply an existing pattern, or close a specific dead path):**
 6. SKILL-1 — extend `mcp_servers`' sharing pattern to `agent_skills` (M/High)
-7. SKILL-2 — fix or kill `PromoteSkill` (M/High)
+7. ~~SKILL-2 — fix or kill `PromoteSkill` (M/High)~~ — done, see Landed
 8. SSRF-1 — SSRF guard for integration-corev2 (M/High)
 9. SSRF-2 — extract Quarry's DNS-pinning into a shared crate + regression test (M/High)
 10. AUTO-2 — background-job "notify me" path (M/High)
@@ -597,6 +666,7 @@ no longer exist.
 | **SSRF-1** | integration-corev2 has a real DNS-pinning egress guard. Microsoft Graph's `nextLink` pagination followed a URL out of an API response with **no guard of any kind** — that is now closed. |
 | **SSRF-2** | Resolved as a documented contract rather than a shared crate; see the correction section above for why. The gateway's forward-don't-fetch invariant is now enforced by a test instead of being incidental. |
 | **INJ-1/2/4** | Provenance and fail-closed screening on the tool-result path, built against S2.7's vocabulary. |
+| **SKILL-2** | Killed, not fixed: `PromoteSkill` now falls through to the embedded `UnimplementedCapabilityCoreServer.PromoteSkill` (plain `codes.Unimplemented`), with a doc-comment citing this section by name and `server_test.go`'s `TestPromoteSkillIsUnimplemented` pinning it. `orchestrator-core`'s `SkillPromotionWorkflow` remains registered (headline finding above) but has no live caller until an admin-gated promotion flow is built on top of a real RPC. |
 | *(bonus)* | Verb/Object/Outcome activity grammar and the six-tab Space cockpit shell, from the UI research document. |
 
 ## 2026-08-15 source progress: scoped scheduled-run authority

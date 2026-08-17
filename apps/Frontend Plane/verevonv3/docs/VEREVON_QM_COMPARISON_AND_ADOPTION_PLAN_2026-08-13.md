@@ -5,7 +5,42 @@ Last source update: 2026-08-17
 Status: active execution program
 Scope: Verevon v3 plus the active CoreSystem planes
 QM baseline: `d719f54075afee4648be75240fa02adb3a9071f0`
-CoreSystem baseline: working tree based on `6c951c6e8b3926da3d586efd7bea968f9452b37b`
+CoreSystem baseline: `520a7a6b410a79b4b368a33b949abea1a0da4e37`
+
+Path convention: every bare `scripts/tests/...` and `docs/CAPABILITY_PROMOTION_LEDGER.tsv`-style
+reference below lives under `apps/Model Plane/` unless already written with that
+prefix — only the small handful of genuinely repo-root scripts
+(`scripts/coresystem-conformance.sh`, `scripts/coresystem-cross-plane-preflight.sh`,
+`scripts/coresystem-acceptance-trace.sh`, `scripts/coresystem-conformance-artifact.sh`)
+sit at the bare path as written. This matches CLAUDE.md's own "cd into apps/Model
+Plane first" build convention; every script exists, none are dead references.
+
+### Current implementation snapshot — 2026-08-17 18:14 CEST
+
+- The QM clone is clean at `d719f540`. Its latest change is a narrow
+  command-form approval fix: command-derived approval patterns now match the
+  command at whitespace/end boundaries, with deployment-layer coverage. It
+  does not change QM's scope, monitor, delivery, keychain, or deployment
+  architecture described below.
+- CoreSystem is now reconciled against `520a7a6`. V3 UI-4 has a committed,
+  source- and test-backed **Definitions + Space installations** slice:
+  `GET /api/v1/agents/installations` composes the existing Control Space index
+  with the same Control-joined per-Space agent read used by the room Agent tab,
+  groups installations by `agent_ref`, and renders them at
+  `/agents/installations`.
+- The slice was read-only live-verified in the authenticated AQUATIQ AS
+  organization. A binding without a confirmed Control service-subject roster
+  row is intentionally absent, so the page does not turn a pending binding
+  into an executable installation. This is projection evidence, not proof of
+  a durable cross-Space registry or agent execution.
+- The full QM-style Agent Studio is **not** complete: blueprint activation
+  remains a showcase, Page/system installations have no storage contract,
+  Runs/receipts remain in the separate Task Console, and Chief/Core
+  cross-Space routing still needs an owner-approved registry read.
+- Release truth is unchanged. Capability promotion, owner effects, approval
+  continuation, provider/ZDR, HA delivery replay, signed candidate/rollback,
+  and the live Auth Core/service-principal registrations remain open. No
+  Model capability is promoted by the UI slice.
 
 ### 2026-08-17 05:05 UTC objective audit
 
@@ -178,7 +213,7 @@ not marked `[x]` merely because one of its PR slices compiles.
 | R-0 CoreSystem conformance and capability promotion | `[~]` 2026-08-16: the read-only `scripts/coresystem-conformance.sh` now composes the Model and cross-plane preflights and validates `docs/CAPABILITY_PROMOTION_LEDGER.tsv`; the aggregate report emits secret-free human/JSON status, evidence references, expiry, and named blockers (the child cross-plane probe remains human-readable). The non-secret `apps/Model Plane/docs/DEV_AUTHORITY_HANDOFF_MATRIX.md` now names each operator-owned runtime reference, scope, principal, and presence probe without values. The cross-plane check observes Control/Application/Data/Ingestion/Frontend/Temporal/NATS topology and owner-effect key presence, and the ledger covers every seeded capability while keeping every row `source_only`. The aggregate `scripts/tests/coresystem-qm-proof.sh` now packages the R-2, scheduled-step, `tickets.create`, and empty-default config proofs into one reproducible source/disposable result. Live cross-plane effect probes and promotion evidence are still missing. The current report is intentionally blocked by dirty source, absent candidate/rollback, runtime scheduled/ticket bindings, missing Conversation owner configuration, and open provider/approval/candidate evidence. Source-level Compose declarations and Auth Core scope requirements are now covered by dedicated config-contract tests, but runtime values/registrations remain intentionally absent. **2026-08-17 continuation:** `scripts/coresystem-cross-plane-preflight.sh` now also verifies the exact non-secret User Core/Auth Core principal + audience + scope tuples for scheduled and owner-action lanes, without printing credential values; the live registry currently lacks those tuples and the report names them as blockers. |
 | R-1 through R-5 release gates | `[~]` 2026-08-17: the generic dev-stack capability reporter is live and observed (`sandbox=available`, `shell=approval_required`), and Conversation Core now has a fail-closed, content-free owner-action reporter wired behind complete Control-bound configuration. R-2/scheduled-step/Application delivery source proofs pass, and the delivery worker is wired behind a disabled-by-default flag; dedicated owner-reporter observation, immutable signed candidate/rollback, stale/outage, provider/ZDR, continuation, HA delivery, and rollback evidence remain required. |
 | S0.1 Space ADR and ID inventory | `[~]` Source inventory is underway; the cross-plane decision review is not complete. |
-| S0.2 Action contract drift guard | `[~]` 2026-08-13: removed V3's handwritten `LIVE_ACTIONS`, added registry-to-Rust-dispatcher contract CI, added agent tool-set parity test, and covered `shipping.get_quotes`. Actor-specific Model availability is deliberately deferred to S2.2/S2.4. |
+| S0.2 Action contract drift guard | `[~]` 2026-08-13: removed V3's handwritten `LIVE_ACTIONS`, added `apps/gateway/scripts/action-surface-contract.test.mjs` (registry ↔ Rust dispatcher parity, one named dispatcher per ID) and `src/shared/actions/agent-tools.test.ts` (generated tool-spec parity), and covered `shipping.get_quotes`. Actor-specific Model availability is deliberately deferred to S2.2/S2.4. |
 | S0.3 authenticated cross-plane E2E harness | `[~]` Existing verified-user Playwright and two-tenant authority fixtures cover the current session/knowledge boundary. A 2026-08-16 dev browser proof completed Microsoft account selection and reached the server-derived Personal Space shell; Space decision, forged/expired, revocation, and cross-plane effect coverage remain open. |
 | S0.4 product-truth cleanup | `[~]` 2026-08-13: removed the dead generic project action and made Studio's gateway-local persistence an explicit `ephemeral` API/UI contract. Broader product-truth audit remains open. |
 | S1.1 Application Space aggregate | `[~]` 2026-08-13: Application now has the canonical lifecycle/state contract, one-personal-Space mutation, leased/retryable Control-registration outbox worker, and immutable lifecycle records. Deployment credentials, projections, migration, and live verification remain open. |
@@ -935,16 +970,16 @@ Legend: **QM lead** means QM has the more coherent current product implementatio
 | Capability | QM | Verevon v3 / CoreSystem | Verdict and action |
 |---|---|---|---|
 | Product focus | Focused multiplayer agent harness for Slack/web | Broad enterprise operating system spanning support, social, knowledge, ingestion, analytics, agents, studio, leads, and control | **Verevon lead in breadth.** Preserve domain products; add a Space layer across them. |
-| Canonical person/room/project scope | Every session has `scopeId`; active scope owns the computer and resources | Active organization and thread dominate; several unrelated workspace/project IDs exist | **QM lead. P0.** Introduce typed `SpaceRef` and mapping, not another isolated project. |
+| Canonical person/room/project scope | Every session has `scopeId`; active scope owns the computer and resources | Server-derived Space context and a Personal Space cockpit now exist; cross-plane resources, instructions, and work still do not resolve from one Space spine | **QM lead. P0.** Finish typed `SpaceRef` mappings and make the resolver the common parent, not another isolated project. |
 | Multi-tenancy, residency, ZDR | Explicitly single internal organization; not a hardened multi-tenant boundary | Multi-plane, tenant-bound authority with ZDR/residency contracts | **Verevon lead.** Never inherit QM's trust assumptions. |
-| Membership authority | Current shared membership checks plus versioned project roster | Strong Control authority and server-derived active org, but no Space authority revision on every effect | **Split. P0.** Keep Control authority; extend QM's roster fencing to membership, grants, entitlements, and privacy policy. |
+| Membership authority | Current shared membership checks plus versioned project roster | Strong Control authority and server-derived Space membership, but effect-time revision fencing is not release-proven | **Split. P0.** Keep Control authority; extend QM's roster fencing to membership, grants, entitlements, and privacy policy. |
 | Read/write/manage separation | Distinct checks for shared scopes | Permissions exist, but no one cross-plane Space decision | **QM pattern worth adopting** in a signed Control decision. |
 | Context resolution | One resolver composes layers, instructions, egress, security, approvals, and grants | Context packing, policy, memory, retrieval, and tools exist in different services | **QM lead in coherence; Verevon lead in depth.** Add `ResolvedSpaceContext`; do not move authority into Model. |
-| Space/project cockpit | Conversations + files + skills + crons + apps + people + model/policy in one view | Many rich top-level routes; no scope-centric home | **QM lead. P0/P1.** Build `/spaces/:spaceId` using existing V3 components. |
+| Space/project cockpit | Conversations + files + skills + crons + apps + people + model/policy in one view | V3 now has a server-derived Personal Space cockpit and a narrow `/agents/installations` cross-Space projection; it is not yet one all-resource Space home | **QM lead in coherence. P0/P1.** Extend the existing Space shell with resolved resources; do not build a second cockpit. |
 | Shared conversations and safe fork | Shared web sessions/threads; a fork copies only entries visible to the viewer and intersects visibility for project members | Durable Model threads and rich chat UI are primarily user/org scoped; the support “shared” thread is a browser mapping, not a collaborative room | **QM lead. P1.** Space-own threads, bind recipient-audience revisions per entry, and implement visibility-preserving fork/share only after resource intersection is enforced. |
 | Business action breadth | Small fixed tool surface plus shell/web apps | Broad typed catalog metadata across five owner planes (Application, Control, Data, Ingestion, Model), but runtime coverage is incomplete and some dispatchers return synthetic identifiers | **Verevon lead in catalog breadth, not proven execution breadth.** Do not reduce actions to shell commands; prove each owner path. |
-| Human/agent action contract parity | Fixed wrapped tool surface reduces dispatch drift, although some shared resources are not consumed at runtime | Registry is typed in TS, gateway accepts untyped JSON and independently string-matches; Model does not execute all V3 action IDs | **Verevon gap. P0.** One catalog version and owner contract for each eligible actor, with actor-specific views and human-only authority preserved; the gateway is ingress, not an effect broker. |
-| Action validation | Central wrapped tools | Browser Zod validation; gateway body is `serde_json::Value` | **QM lead in centralization.** Generate server validators and schema hashes from one contract. |
+| Human/agent action contract parity | Fixed wrapped tool surface reduces dispatch drift, although some shared resources are not consumed at runtime | Typed V3 registry, registry-to-Rust drift checks, and actor-specific Model view plumbing exist in source; gateway still receives untyped JSON and Model execution coverage is incomplete | **Split/source progress, not parity. P0.** Finish one owner-approved catalog version/schema hash per eligible actor; human-only authority stays outside Model. |
+| Action validation | Central wrapped tools | Browser Zod validation plus registry-to-Rust drift checks; gateway body remains `serde_json::Value` | **QM lead in centralization.** Generate server validators and schema hashes from the governed contract rather than relying on browser validation. |
 | Approvals and proof | Durable approvals and audit, with human-only authority walls | Strong source-level approval/proof/event/cost UI and ledgers, but successful durable continuation is not release-proven | **Verevon lead in primitives, not current readiness.** Clear R-3, extend proof semantics to owner operations, and remove synthetic IDs. |
 | Sessions and run durability | Postgres queue, leases, heartbeats, reaper, signal replay, per-attempt tool ledger | Durable Model run/checkpoint/replay and Temporal/NATS infrastructure in source, with release/recovery gates still open | **Verevon lead in platform design; QM has useful invariants.** Port tests/invariants, not its queue, and clear R-5. |
 | Cross-surface continuity | Same scoped identity/configuration in Slack and web | Web product is real; Channel Plane remains reference-only | **QM lead. P2.** Define a surface-neutral delivery contract now; implement web first and Slack only after ownership is ratified. |
@@ -2472,6 +2507,36 @@ These are dependency-complete milestones composed of the separate PR slices abov
 3. **One governed `tickets.create` operation.** Land S2.1 catalog codegen → S2.2 actor-specific views → S2.3 one owner-plane intent/receipt/outbox path → S2.4 Model adapter → S2.5 Activity correlation. Prove a human and an eligible agent use the same owner effect contract without giving the agent human-only authority.
 
 Only after these milestones should the product sequence move to **Space credential grants → governed skills and authored context → durable Space computer → scoped schedules/processes/watches/delivery**. External surfaces and internal app publishing follow those controls.
+
+## Post-UI-4 next sequence — what to work on now
+
+The UI-4 installation slice is a useful QM-shaped projection, but it must not
+be mistaken for a new authority or a completed Agent Studio. The next work is
+ordered by the missing contracts that keep the projection honest:
+
+1. **Owner-approved cross-Space registry contract.** Decide the canonical
+   Application/Control ownership for agent definitions, Space installations,
+   Page/system installations, and run/receipt references. Add a versioned
+   read model or outbox-fed projection only after that ownership decision;
+   `GET /api/v1/agents/installations` should remain a composed read until then.
+2. **Resolved Space context.** Carry one server-resolved context through chat,
+   retrieval, authored instructions, skills, schedules, approvals, runs, and
+   delivery. Its effective permission must be the intersection of Space
+   authority, current recipient audience, and the linked resource's owner ACL.
+3. **Release gates before new effectful UI.** Prove the existing source lanes
+   against an immutable candidate: Auth Core/service-principal registrations,
+   owner-effect reservation/receipt, approval continuation after restart,
+   provider/ZDR behavior, HA delivery replay, and rollback. Keep the Model
+   catalog empty or unavailable until these are observed.
+4. **QM watch/delivery loop.** Add a durable user-facing watch primitive and
+   connect it to the Application delivery state machine. Use at-least-once
+   processing with idempotency and explicit `unknown`; do not claim exactly
+   once delivery or add a second queue beside the existing owners.
+5. **Scope-owned resources.** After the resolver is live, add the durable
+   Space workspace, authored/revisioned memory, governed skills, and a scoped
+   credential broker. These are the features where QM is most coherent and
+   CoreSystem is still fragmented; they must reuse Data, Model, Control, and
+   Application ownership rather than create local V3 stores.
 
 ## Decision log
 
