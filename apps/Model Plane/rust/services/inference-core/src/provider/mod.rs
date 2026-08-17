@@ -362,8 +362,19 @@ pub enum Residency {
     #[default]
     Global,
     /// ML processing committed to the EU/EEA.
+    ///
+    /// This is where every Azure region belongs, **including `norwayeast`**. Being
+    /// physically in Norway is not the distinction — a Microsoft-operated resource
+    /// is a Tier B EU-resident provider no matter which EU region hosts it.
     Eu,
-    /// Processed and stored in Norway.
+    /// Sovereign: processed and stored in Norway on Norwegian-operated
+    /// infrastructure (Telenor AI Factory, or Bineric's own models over it).
+    ///
+    /// Reserved for the Tier A supplier in `PROVIDER_AND_PRIVACY_STRATEGY.md` §0.0.
+    /// Do **not** classify an Azure `norwayeast` deployment here: it would claim
+    /// sovereignty for a hyperscaler resource and let a Tier B provider serve
+    /// traffic sold as Tier A. `is_eu_region` already maps every Azure region —
+    /// Norwegian ones included — to [`Self::Eu`], which is correct.
     Norway,
 }
 
@@ -509,6 +520,23 @@ mod residency_tests {
     fn declared_global_overrides_an_eu_region() {
         assert_eq!(Residency::classify(true, true), Residency::Global);
         assert_eq!(Residency::classify(false, true), Residency::Global);
+    }
+
+    /// An Azure Norwegian region is EU-resident, not sovereign. Classifying it as
+    /// `Norway` would claim Tier A sovereignty for a Microsoft-operated resource
+    /// and let a Tier B provider serve traffic sold as Tier A.
+    #[test]
+    fn an_azure_norwegian_region_classifies_as_eu_not_sovereign() {
+        assert!(
+            super::is_eu_region("norwayeast"),
+            "norwayeast must be recognised as an EU region"
+        );
+        assert_eq!(
+            Residency::classify(super::is_eu_region("norwayeast"), false),
+            Residency::Eu,
+            "an Azure Norwegian region is EU-resident; Norway is reserved for \
+             Norwegian-operated sovereign infrastructure"
+        );
     }
 
     #[test]
