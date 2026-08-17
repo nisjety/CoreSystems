@@ -3758,6 +3758,27 @@ mod tests {
                 "run action authority not needed in gateway test",
             ))
         }
+
+        async fn get_scheduled_step_context(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetScheduledStepContextRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ScheduledStepContext>, Status> {
+            Err(Status::unimplemented(
+                "scheduled step context not needed in gateway test",
+            ))
+        }
+
+        async fn resolve_scheduled_step_authority(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ResolveScheduledStepAuthorityRequest>,
+        ) -> Result<
+            Response<mp_contracts::model_plane::v1::ResolveScheduledStepAuthorityResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented(
+                "scheduled step authority not needed in gateway test",
+            ))
+        }
     }
 
     async fn spawn_inference_client<S: InferenceCore>(

@@ -7778,6 +7778,28 @@ mod run_owner_publish_tests {
                 "run action authority not needed in route test",
             ))
         }
+
+        async fn get_scheduled_step_context(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::GetScheduledStepContextRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ScheduledStepContext>, Status>
+        {
+            Err(Status::unimplemented(
+                "scheduled step context not needed in route test",
+            ))
+        }
+
+        async fn resolve_scheduled_step_authority(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ResolveScheduledStepAuthorityRequest>,
+        ) -> Result<
+            TonicResponse<mp_contracts::model_plane::v1::ResolveScheduledStepAuthorityResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented(
+                "scheduled step authority not needed in route test",
+            ))
+        }
     }
 
     async fn owner_resolver_client() -> RunServiceClient<tonic::transport::Channel> {
