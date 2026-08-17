@@ -32,7 +32,7 @@ jobs:
     name: Fabrication guard (no fake "live" state)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Assert no fabricated state was re-introduced
         run: |
           set -uo pipefail
@@ -90,7 +90,7 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3/apps/gateway'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -118,7 +118,7 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
