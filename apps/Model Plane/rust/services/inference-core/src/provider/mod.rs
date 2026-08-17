@@ -251,6 +251,39 @@ pub struct ModelInfo {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProviderCapabilities {
+    /// Registry id this provider is addressed by (e.g. `azure-openai`).
+    ///
+    /// Declared here rather than inferred from the registration string so routing
+    /// stops matching on hardcoded name literals. Adding a provider is then a
+    /// declaration, not an edit to a `match` arm in the chain.
+    pub provider_id: String,
+
+    /// Additional `provider_hint` spellings that resolve to this provider.
+    ///
+    /// Replaces the fixed alias table that used to live in the chain. A hint is
+    /// normalised (lowercase, `_`→`-`) before comparison, so only genuine
+    /// synonyms belong here — not case or separator variants.
+    pub aliases: Vec<String>,
+
+    /// Which wire family this provider speaks, and therefore which model ids it
+    /// could plausibly serve.
+    pub model_family: ModelFamily,
+
+    /// The strongest residency guarantee this provider's traffic honors.
+    pub residency: Residency,
+
+    /// When true, this provider serves *only* the models in its own catalog.
+    ///
+    /// The default (`false`) preserves the historical family-shape behavior: an
+    /// `OpenAI`-shaped provider accepts any non-Claude model id, because the
+    /// direct vendor APIs accept any published id and there is nothing
+    /// authoritative to prune against.
+    ///
+    /// A sovereign provider must set this. Routing an unrecognised model to one
+    /// either 404s or — far worse — gets silently served from a brokered upstream
+    /// outside the residency boundary the tier was sold on.
+    pub exclusive_catalog: bool,
+
     pub supports_tools: bool,
     pub supports_vision: bool,
     pub supports_thinking: bool,
@@ -273,6 +306,14 @@ impl Default for ProviderCapabilities {
     /// never *assumed* to support a modality it cannot serve.
     fn default() -> Self {
         Self {
+            provider_id: String::new(),
+            aliases: Vec::new(),
+            model_family: ModelFamily::OpenAiCompatible,
+            // Deny-by-default: an undeclared provider gets the weakest residency,
+            // so the registration gate refuses it rather than letting it inherit
+            // an EU claim it never made.
+            residency: Residency::Global,
+            exclusive_catalog: false,
             supports_tools: false,
             supports_vision: false,
             supports_thinking: false,
@@ -282,6 +323,78 @@ impl Default for ProviderCapabilities {
             modalities: vec!["chat".to_owned()],
             max_context_tokens: 8_192,
             max_output_tokens: 4_096,
+        }
+    }
+}
+
+/// Which request/response wire family a provider speaks.
+///
+/// Replaces `matches!(provider_name, "anthropic" | "azure-anthropic")` in the
+/// chain: the provider declares its own family, so a new provider is added by
+/// declaring one rather than by extending a name-matching expression that every
+/// future provider would also have to be threaded through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelFamily {
+    /// `OpenAI` chat-completions shape, including Azure `OpenAI` and any
+    /// OpenAI-compatible third party.
+    #[default]
+    OpenAiCompatible,
+    /// Anthropic Messages shape, direct or via Azure AI Foundry.
+    Anthropic,
+}
+
+/// The strongest residency guarantee a provider's traffic honors.
+///
+/// Ordered weakest-to-strongest so a request can express a *minimum* and the
+/// comparison is a plain `>=`. Distinct from `supports_zdr`: retention and
+/// geography are independent axes. Azure `OpenAI` in an EU data zone with an
+/// approved retention exception is both `Eu` and ZDR; Azure Foundry Claude today
+/// is `Eu` without ZDR; a sovereign Norwegian deployment is `Norway`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Residency {
+    /// No residency commitment — may be processed in any region worldwide.
+    ///
+    /// After the decision to drop Grok (see `PROVIDER_AND_PRIVACY_STRATEGY.md`
+    /// §0.0) no configured provider should land here, which is why registration
+    /// refuses it without an explicit opt-in.
+    #[default]
+    Global,
+    /// ML processing committed to the EU/EEA.
+    Eu,
+    /// Processed and stored in Norway.
+    Norway,
+}
+
+impl Residency {
+    /// Parse an operator-declared residency token.
+    ///
+    /// Unrecognised values return `None` so the caller can fail loud rather than
+    /// silently downgrading to `Global` — a typo'd `MODEL_PLANE_..._RESIDENCY=noway`
+    /// must not quietly become "no commitment".
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', '_'], "")
+            .as_str()
+        {
+            "global" | "worldwide" => Some(Self::Global),
+            "eu" | "eea" | "euresident" => Some(Self::Eu),
+            "norway" | "no" | "sovereign" => Some(Self::Norway),
+            _ => None,
+        }
+    }
+
+    /// Human-readable label for logs and the provenance receipt.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Eu => "eu",
+            Self::Norway => "norway",
         }
     }
 }

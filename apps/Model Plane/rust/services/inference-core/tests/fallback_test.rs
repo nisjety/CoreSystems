@@ -277,6 +277,10 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         azure_anthropic_zdr: None,
         azure_openai_deployment_type: None,
         allow_global_deployment: false,
+        // These fixtures configure no region, so the Azure provider classifies as
+        // Global. The residency gate has its own tests; opt in here so these keep
+        // testing model routing rather than dying on the gate.
+        allow_global_residency_providers: true,
         allow_non_eu_embedding: false,
     };
 
@@ -322,6 +326,10 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
         azure_anthropic_zdr: None,
         azure_openai_deployment_type: None,
         allow_global_deployment: false,
+        // These fixtures configure no region, so the Azure provider classifies as
+        // Global. The residency gate has its own tests; opt in here so these keep
+        // testing model routing rather than dying on the gate.
+        allow_global_residency_providers: true,
         allow_non_eu_embedding: false,
     };
 

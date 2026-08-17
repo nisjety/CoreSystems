@@ -42,6 +42,14 @@ pub struct OpenAiProvider {
     /// Evidence-bound ZDR attestation for this exact deployment, or `None` when
     /// the operator makes no ZDR claim.
     zdr: Option<Arc<ZdrAttestation>>,
+    /// Registry id override. `None` uses the flavor-derived name (`openai` /
+    /// `azure-openai`); a third-party OpenAI-compatible endpoint sets its own so
+    /// it is addressable alongside them instead of colliding on one id.
+    provider_id: Option<String>,
+    /// The strongest residency guarantee this endpoint honors.
+    residency: super::Residency,
+    /// Whether this endpoint serves only its declared catalog.
+    exclusive_catalog: bool,
 }
 
 impl OpenAiProvider {
@@ -75,6 +83,9 @@ impl OpenAiProvider {
                 "text-embedding-3-large".to_owned(),
             ],
             zdr: None,
+            provider_id: None,
+            residency: super::Residency::Global,
+            exclusive_catalog: false,
         })
     }
 
@@ -122,6 +133,9 @@ impl OpenAiProvider {
             chat_models: Vec::new(),
             embedding_models: Vec::new(),
             zdr: None,
+            provider_id: None,
+            residency: super::Residency::Global,
+            exclusive_catalog: false,
         })
     }
 
@@ -137,6 +151,49 @@ impl OpenAiProvider {
     pub fn with_zdr_attestation(mut self, attestation: Option<Arc<ZdrAttestation>>) -> Self {
         self.zdr = attestation;
         self
+    }
+
+    /// Register this endpoint under its own id, with its own residency and a
+    /// catalog it must not stray outside.
+    ///
+    /// This is what makes a second OpenAI-compatible provider addressable. Before
+    /// it, every OpenAI-shaped provider registered as `openai`/`azure-openai`,
+    /// matched the same hints, and the first one registered won every non-Claude
+    /// model — so a sovereign endpoint could not coexist with Azure at all.
+    #[must_use]
+    pub fn with_identity(
+        mut self,
+        provider_id: impl Into<String>,
+        residency: super::Residency,
+        exclusive_catalog: bool,
+    ) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self.residency = residency;
+        self.exclusive_catalog = exclusive_catalog;
+        self
+    }
+
+    /// Declare this endpoint's residency without changing its id.
+    #[must_use]
+    pub const fn with_residency(mut self, residency: super::Residency) -> Self {
+        self.residency = residency;
+        self
+    }
+
+    /// `provider_hint` synonyms that should resolve to this provider.
+    ///
+    /// Only the built-in flavors carry synonyms: `openai`/`azure` are historical
+    /// spellings callers already send for the Azure deployment. A custom endpoint
+    /// gets none, so its id is the only way to address it and it can never absorb
+    /// a hint meant for Azure.
+    fn hint_aliases(&self) -> Vec<String> {
+        if self.provider_id.is_some() {
+            return Vec::new();
+        }
+        match &self.flavor {
+            OpenAiFlavor::OpenAi { .. } => Vec::new(),
+            OpenAiFlavor::Azure { .. } => vec!["openai".to_owned(), "azure".to_owned()],
+        }
     }
 
     /// Override the startup model/deployment catalogue returned by `ListModels`.
@@ -185,7 +242,10 @@ impl OpenAiProvider {
         }
     }
 
-    fn provider_name(&self) -> &'static str {
+    fn provider_name(&self) -> &str {
+        if let Some(id) = &self.provider_id {
+            return id;
+        }
         match &self.flavor {
             OpenAiFlavor::OpenAi { .. } => "openai",
             OpenAiFlavor::Azure { .. } => "azure-openai",
@@ -383,6 +443,11 @@ impl ProviderRouter for OpenAiProvider {
         // GPT-4o / GPT-5 / o-series: tools, vision, reasoning, streaming, and
         // a first-party embeddings API. Conservative context/output bounds.
         super::ProviderCapabilities {
+            provider_id: self.provider_name().to_owned(),
+            aliases: self.hint_aliases(),
+            model_family: super::ModelFamily::OpenAiCompatible,
+            residency: self.residency,
+            exclusive_catalog: self.exclusive_catalog,
             supports_tools: true,
             supports_vision: true,
             supports_thinking: true,

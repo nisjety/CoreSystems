@@ -5,6 +5,10 @@ use anyhow::{Context, Result};
 use crate::provider::zdr::ZdrAttestation;
 
 /// Top-level configuration for inference-core.
+// The flags are independent deny-by-default residency/retention opt-ins, not a
+// state machine: each guards a different boundary and any combination is valid.
+// Same rationale as `ProviderCapabilities`' capability bits.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct InferenceConfig {
     /// Ordered list of provider names to try (e.g. [`anthropic`, `openai`]).
@@ -120,6 +124,13 @@ pub struct InferenceConfig {
     /// honor.
     pub allow_global_deployment: bool,
 
+    /// Deny-by-default override for the provider residency registration gate
+    /// (from `MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY`, default `false`). When `false`,
+    /// a provider declaring no residency commitment refuses to register. The
+    /// direct vendor APIs (`api.openai.com`, `api.anthropic.com`) declare
+    /// `Global`, so a development box pointed at them needs this opt-in.
+    pub allow_global_residency_providers: bool,
+
     /// Deny-by-default override for the EU embedding residency gate (from
     /// `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING`, default `false`). When `false`, a
     /// non-EU embedding region/endpoint fails the service loud at startup and
@@ -201,6 +212,7 @@ impl InferenceConfig {
 
         // Deny-by-default, same shape as the EU embedding gate below.
         let allow_global_deployment = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT");
+        let allow_global_residency_providers = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY");
 
         // Deny-by-default: only an explicit truthy opt-in disables the EU
         // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
@@ -252,6 +264,7 @@ impl InferenceConfig {
             azure_anthropic_zdr,
             azure_openai_deployment_type,
             allow_global_deployment,
+            allow_global_residency_providers,
             allow_non_eu_embedding,
         })
     }

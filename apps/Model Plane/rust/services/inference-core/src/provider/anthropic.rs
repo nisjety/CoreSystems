@@ -62,6 +62,8 @@ pub struct AnthropicProvider {
     /// ZDR-capable provider returned `ZdrUnavailable`. The exclusion was silent:
     /// nothing distinguished "Claude cannot do ZDR" from "Claude was not asked".
     zdr: Option<Arc<ZdrAttestation>>,
+    /// The strongest residency guarantee this resource honors.
+    residency: super::Residency,
 }
 
 impl AnthropicProvider {
@@ -83,6 +85,7 @@ impl AnthropicProvider {
             api_key,
             flavor: AnthropicFlavor::Direct,
             zdr: None,
+            residency: super::Residency::Global,
         })
     }
 
@@ -117,6 +120,7 @@ impl AnthropicProvider {
             api_key,
             flavor: AnthropicFlavor::Azure { endpoint, models },
             zdr: None,
+            residency: super::Residency::Global,
         })
     }
 
@@ -128,6 +132,13 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_zdr_attestation(mut self, attestation: Option<Arc<ZdrAttestation>>) -> Self {
         self.zdr = attestation;
+        self
+    }
+
+    /// Declare the strongest residency guarantee this resource honors.
+    #[must_use]
+    pub const fn with_residency(mut self, residency: super::Residency) -> Self {
+        self.residency = residency;
         self
     }
 
@@ -544,6 +555,18 @@ impl ProviderRouter for AnthropicProvider {
         // Claude: tools, vision, extended thinking, streaming; 200k context.
         // No first-party embeddings API.
         super::ProviderCapabilities {
+            provider_id: self.provider_name().to_owned(),
+            // `claude` addresses either flavor; `anthropic` is the historical
+            // spelling callers send for the Foundry deployment.
+            aliases: match &self.flavor {
+                AnthropicFlavor::Direct => vec!["claude".to_owned()],
+                AnthropicFlavor::Azure { .. } => {
+                    vec!["claude".to_owned(), "anthropic".to_owned()]
+                }
+            },
+            model_family: super::ModelFamily::Anthropic,
+            residency: self.residency,
+            exclusive_catalog: false,
             supports_tools: true,
             supports_vision: true,
             supports_thinking: true,
