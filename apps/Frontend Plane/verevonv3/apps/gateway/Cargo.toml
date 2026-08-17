@@ -9,7 +9,7 @@ anyhow = "1.0"
 # the GDPR erasure pull consumer in `gdpr_nats.rs` behaves identically to its
 # siblings on the same stream — notably `get_consumer_from_stream`'s
 # STREAM.INFO-free bind, which the shared-broker ACLs are written against.
-async-nats = "0.49.1"
+async-nats = "0.50.0"
 async-stream = "0.3"
 axum = { version = "0.7", features = ["macros", "ws"] }
 base64 = "0.22"
