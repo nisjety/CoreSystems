@@ -1,4 +1,4 @@
-import { Route, Router, useNavigate } from '@solidjs/router'
+import { Route, Router, useNavigate, type RouteSectionProps } from '@solidjs/router'
 import { createEffect, lazy, Show, type JSX } from 'solid-js'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
@@ -142,7 +142,7 @@ export default function App() {
       />
       <Route
         path="/"
-        component={(props) => <RequireAuth>{props.children}</RequireAuth>}
+        component={(props: RouteSectionProps) => <RequireAuth>{props.children}</RequireAuth>}
       >
         <Route path="/" component={DashboardPage} />
         <Route path="/dashboard" component={DashboardPage} />
