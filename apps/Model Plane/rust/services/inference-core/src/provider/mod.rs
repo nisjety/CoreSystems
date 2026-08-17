@@ -14,6 +14,7 @@ pub mod speech;
 pub mod translation;
 pub mod video;
 pub mod vision;
+pub mod zdr;
 
 #[allow(unused_imports)]
 // ArtifactStore is part of the intended provider surface; not yet consumed

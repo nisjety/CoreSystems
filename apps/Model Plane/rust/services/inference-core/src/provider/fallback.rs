@@ -307,6 +307,11 @@ impl FallbackChain {
     #[allow(clippy::too_many_lines)]
     pub fn from_config(cfg: &InferenceConfig) -> Self {
         let mut providers: Vec<(String, BoxedProvider)> = Vec::new();
+
+        // Validated at config load; Arc'd once so each registration site shares
+        // one instance rather than cloning four Strings per provider.
+        let azure_openai_zdr = cfg.azure_openai_zdr.clone().map(Arc::new);
+        let azure_anthropic_zdr = cfg.azure_anthropic_zdr.clone().map(Arc::new);
         let has_explicit_azure = cfg
             .provider_order
             .iter()
@@ -324,7 +329,7 @@ impl FallbackChain {
                             cfg.azure_openai_api_version.clone(),
                         ) {
                             let p = p
-                                .with_zdr_confirmed(cfg.azure_openai_zdr_confirmed)
+                                .with_zdr_attestation(azure_openai_zdr.clone())
                                 .with_model_catalog(
                                     cfg.azure_openai_chat_deployments.clone(),
                                     cfg.azure_openai_embedding_deployments.clone(),
@@ -349,6 +354,7 @@ impl FallbackChain {
                             endpoint.clone(),
                             cfg.azure_anthropic_deployments.clone(),
                         ) {
+                            let p = p.with_zdr_attestation(azure_anthropic_zdr.clone());
                             providers.push(("azure-anthropic".to_owned(), Arc::new(p)));
                             info!(provider = "azure-anthropic", "provider registered");
                             registered_azure_anthropic = true;
@@ -376,7 +382,7 @@ impl FallbackChain {
                                 cfg.azure_openai_api_version.clone(),
                             ) {
                                 let p = p
-                                    .with_zdr_confirmed(cfg.azure_openai_zdr_confirmed)
+                                    .with_zdr_attestation(azure_openai_zdr.clone())
                                     .with_model_catalog(
                                         cfg.azure_openai_chat_deployments.clone(),
                                         cfg.azure_openai_embedding_deployments.clone(),
@@ -421,6 +427,52 @@ impl FallbackChain {
         let configured_region =
             normalize_region_token(cfg.azure_openai_region.as_deref().unwrap_or_default());
         let azure_registered = providers.iter().any(|(name, _)| name == "azure-openai");
+
+        // Global-deployment gate — STARTUP fail-loud (deny-by-default).
+        //
+        // A `Global`/`GlobalStandard` Azure deployment routes to whichever region
+        // has capacity, so data can be at rest in the European geography while
+        // *inference* runs anywhere in the world. The region check above cannot
+        // see this: an EU-region resource can still host a Global deployment, and
+        // the endpoint host carries neither fact. Left unchecked it silently voids
+        // the EU-boundary claim for every request, which is precisely the failure
+        // this gate exists to make impossible.
+        //
+        // Unset is a warning rather than a rejection: existing deployments
+        // predate the variable, and refusing to boot on absence would take the
+        // running stack down for a claim it may not even be making. Explicitly
+        // declaring Global is a rejection.
+        if azure_registered {
+            match cfg.azure_openai_deployment_type.as_deref() {
+                Some(declared) if crate::config::deployment_type_is_global(declared) => {
+                    assert!(
+                        cfg.allow_global_deployment,
+                        "global deployment residency: AZURE_OPENAI_DEPLOYMENT_TYPE={declared:?} \
+                         processes inference in any Azure region worldwide, which voids the EU \
+                         residency claim, and MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT is off. \
+                         Refusing to boot. Re-deploy the model as DataZoneStandard (EU) or a \
+                         regional Standard deployment, or set \
+                         MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT=1 to explicitly accept worldwide \
+                         processing."
+                    );
+                    warn!(
+                        deployment_type = %declared,
+                        "AZURE_OPENAI_DEPLOYMENT_TYPE is global and MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT \
+                         is set — inference may be processed outside the EU"
+                    );
+                }
+                Some(declared) => {
+                    info!(deployment_type = %declared, "azure openai deployment type declared");
+                }
+                None => {
+                    warn!(
+                        "AZURE_OPENAI_DEPLOYMENT_TYPE is unset — cannot prove the Azure OpenAI \
+                         deployment keeps inference inside the EU. Set it (e.g. DataZoneStandard) \
+                         so the global-deployment gate can enforce the residency claim."
+                    );
+                }
+            }
+        }
         if azure_registered && !cfg.allow_non_eu_embedding {
             let region_is_non_eu =
                 !configured_region.is_empty() && !is_eu_region(&configured_region);

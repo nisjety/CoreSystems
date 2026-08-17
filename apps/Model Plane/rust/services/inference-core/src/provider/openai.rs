@@ -1,9 +1,12 @@
 //! OpenAI-compatible provider — calls a configurable base URL with SSE streaming.
 
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use super::zdr::ZdrAttestation;
 use super::{
     narrow_f64, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
     ProviderError, ProviderRouter,
@@ -36,7 +39,9 @@ pub struct OpenAiProvider {
     flavor: OpenAiFlavor,
     chat_models: Vec<String>,
     embedding_models: Vec<String>,
-    zdr_confirmed: bool,
+    /// Evidence-bound ZDR attestation for this exact deployment, or `None` when
+    /// the operator makes no ZDR claim.
+    zdr: Option<Arc<ZdrAttestation>>,
 }
 
 impl OpenAiProvider {
@@ -69,7 +74,7 @@ impl OpenAiProvider {
                 "text-embedding-3-small".to_owned(),
                 "text-embedding-3-large".to_owned(),
             ],
-            zdr_confirmed: false,
+            zdr: None,
         })
     }
 
@@ -116,16 +121,21 @@ impl OpenAiProvider {
             },
             chat_models: Vec::new(),
             embedding_models: Vec::new(),
-            zdr_confirmed: false,
+            zdr: None,
         })
     }
 
-    /// Mark this exact deployment as covered by an independently verified ZDR
-    /// contract. The configuration default is false and direct `OpenAI` routes
-    /// are never promoted implicitly.
+    /// Attach an evidence-bound ZDR attestation to this exact deployment.
+    ///
+    /// Replaces the previous `with_zdr_confirmed(bool)`: a boolean recorded only
+    /// that someone typed `true`, which survives a copy-pasted `.env` and a stale
+    /// deployment. The attestation names the resource, the retention-exception
+    /// approval, its effective date and its reviewer, and is digest-bound over
+    /// all four — see [`ZdrAttestation`]. Direct `OpenAI` routes are never
+    /// promoted implicitly.
     #[must_use]
-    pub fn with_zdr_confirmed(mut self, confirmed: bool) -> Self {
-        self.zdr_confirmed = confirmed;
+    pub fn with_zdr_attestation(mut self, attestation: Option<Arc<ZdrAttestation>>) -> Self {
+        self.zdr = attestation;
         self
     }
 
@@ -378,7 +388,7 @@ impl ProviderRouter for OpenAiProvider {
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings: true,
-            supports_zdr: self.zdr_confirmed,
+            supports_zdr: self.zdr.is_some(),
             modalities: vec![
                 "chat".to_owned(),
                 "vision".to_owned(),

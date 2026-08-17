@@ -2,6 +2,8 @@
 
 use anyhow::{Context, Result};
 
+use crate::provider::zdr::ZdrAttestation;
+
 /// Top-level configuration for inference-core.
 #[derive(Debug, Clone)]
 pub struct InferenceConfig {
@@ -91,11 +93,32 @@ pub struct InferenceConfig {
     /// "unspecified" — the endpoint-substring heuristic is then the only signal.
     pub azure_openai_region: Option<String>,
 
-    /// Explicit operator attestation that the configured Azure `OpenAI`
+    /// Evidence-bound operator attestation that the configured Azure `OpenAI`
     /// deployment is covered by an independently verified ZDR contract (from
-    /// `AZURE_OPENAI_ZDR_CONFIRMED`, default `false`). Region alone is not
-    /// evidence of provider retention behavior.
-    pub azure_openai_zdr_confirmed: bool,
+    /// `AZURE_OPENAI_ZDR_*`). Region alone is not evidence of provider retention
+    /// behavior, and neither is a boolean — see [`ZdrAttestation`].
+    pub azure_openai_zdr: Option<ZdrAttestation>,
+
+    /// The same attestation for the Azure AI Foundry Claude resource (from
+    /// `AZURE_ANTHROPIC_ZDR_*`). Separate from the `OpenAI` one because they are
+    /// separate Azure resources under separate retention approvals; before this
+    /// existed, no Claude route could serve a ZDR request at all.
+    pub azure_anthropic_zdr: Option<ZdrAttestation>,
+
+    /// Declared Azure `OpenAI` deployment type (from
+    /// `AZURE_OPENAI_DEPLOYMENT_TYPE`, e.g. `DataZoneStandard`, `Standard`,
+    /// `GlobalStandard`). Azure endpoint hosts carry neither the region nor the
+    /// deployment type, so this is the only signal that distinguishes an
+    /// EU-boundary deployment from a `Global` one that may process the request
+    /// in any region worldwide — which silently voids the EU residency claim.
+    pub azure_openai_deployment_type: Option<String>,
+
+    /// Deny-by-default override for the global-deployment gate (from
+    /// `MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT`, default `false`). When `false`, an
+    /// explicitly `Global`/`Worldwide` Azure deployment type fails the service
+    /// loud at startup rather than serving traffic under an EU claim it cannot
+    /// honor.
+    pub allow_global_deployment: bool,
 
     /// Deny-by-default override for the EU embedding residency gate (from
     /// `MODEL_PLANE_ALLOW_NON_EU_EMBEDDING`, default `false`). When `false`, a
@@ -163,21 +186,26 @@ impl InferenceConfig {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(60);
 
-        let azure_openai_region = std::env::var("AZURE_OPENAI_REGION")
-            .ok()
-            .map(|v| v.trim().to_owned())
-            .filter(|v| !v.is_empty());
+        let azure_openai_region = trimmed_env("AZURE_OPENAI_REGION");
 
-        let azure_openai_zdr_confirmed = std::env::var("AZURE_OPENAI_ZDR_CONFIRMED")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-            .unwrap_or(false);
+        // One `today` for the whole boot so every provider surface evaluates its
+        // in-force window against the same date.
+        let today = chrono::Utc::now().date_naive();
+        let azure_openai_zdr = resolve_zdr("AZURE_OPENAI", "AZURE_OPENAI_ZDR_CONFIRMED", today)
+            .context("Azure OpenAI ZDR attestation")?;
+        let azure_anthropic_zdr =
+            resolve_zdr("AZURE_ANTHROPIC", "AZURE_ANTHROPIC_ZDR_CONFIRMED", today)
+                .context("Azure Anthropic (Foundry Claude) ZDR attestation")?;
+
+        let azure_openai_deployment_type = trimmed_env("AZURE_OPENAI_DEPLOYMENT_TYPE");
+
+        // Deny-by-default, same shape as the EU embedding gate below.
+        let allow_global_deployment = truthy_env("MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT");
 
         // Deny-by-default: only an explicit truthy opt-in disables the EU
         // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
         // shape but the embedding gate REJECTS rather than warn-and-fallback.
-        let allow_non_eu_embedding = std::env::var("MODEL_PLANE_ALLOW_NON_EU_EMBEDDING")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-            .unwrap_or(false);
+        let allow_non_eu_embedding = truthy_env("MODEL_PLANE_ALLOW_NON_EU_EMBEDDING");
 
         Ok(Self {
             provider_order,
@@ -220,10 +248,64 @@ impl InferenceConfig {
             session_core_url,
             router_policy_refresh_secs,
             azure_openai_region,
-            azure_openai_zdr_confirmed,
+            azure_openai_zdr,
+            azure_anthropic_zdr,
+            azure_openai_deployment_type,
+            allow_global_deployment,
             allow_non_eu_embedding,
         })
     }
+}
+
+/// Resolve one provider surface's evidence-bound ZDR attestation.
+///
+/// ZDR is evidence-bound as of the provider-strategy Phase 0 work. The legacy
+/// `*_ZDR_CONFIRMED` boolean is still read, but only so an operator who asserted
+/// ZDR without supplying the attestation fails boot: silently dropping the claim
+/// would leave them believing ZDR is on while requests fail later with
+/// `ZdrUnavailable`, far from the change that caused it.
+fn resolve_zdr(
+    prefix: &str,
+    legacy_var: &'static str,
+    today: chrono::NaiveDate,
+) -> Result<Option<ZdrAttestation>> {
+    let legacy_confirmed = std::env::var(legacy_var)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false);
+    Ok(ZdrAttestation::resolve(
+        prefix,
+        legacy_var,
+        legacy_confirmed,
+        today,
+    )?)
+}
+
+/// Whether a declared Azure deployment type processes requests outside a single
+/// geography.
+///
+/// `Global`/`GlobalStandard`/`GlobalBatch` and anything spelled `worldwide` route
+/// to whichever Azure region has capacity, so data at rest may sit in the
+/// European geography while inference happens anywhere. `DataZone*` and plain
+/// regional `Standard` deployments stay inside their declared boundary.
+#[must_use]
+pub fn deployment_type_is_global(declared: &str) -> bool {
+    let token = declared.trim().to_ascii_lowercase().replace(['-', '_'], "");
+    token.starts_with("global") || token.contains("worldwide")
+}
+
+/// An environment variable trimmed to `None` when unset or blank.
+fn trimmed_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// A deny-by-default boolean flag: only an explicit `1`/`true` enables it.
+fn truthy_env(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
 }
 
 fn csv_env(name: &str, default: &[&str]) -> Vec<String> {
@@ -249,4 +331,52 @@ fn parse_csv(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deployment_type_is_global;
+
+    /// Every spelling Azure uses for a deployment that may process a request in
+    /// any region worldwide. Getting this wrong silently voids the EU residency
+    /// claim, so the classifier is tested against the real value set rather than
+    /// one representative string.
+    #[test]
+    fn global_deployment_types_are_classified_as_global() {
+        for declared in [
+            "Global",
+            "GlobalStandard",
+            "GlobalProvisionedManaged",
+            "GlobalBatch",
+            "global-standard",
+            "global_standard",
+            "  GLOBALSTANDARD  ",
+            "Worldwide",
+        ] {
+            assert!(
+                deployment_type_is_global(declared),
+                "{declared:?} must be classified as a global deployment"
+            );
+        }
+    }
+
+    /// EU-boundary deployment types must not trip the gate, or the fix becomes a
+    /// boot failure for correctly configured deployments.
+    #[test]
+    fn boundary_respecting_deployment_types_are_not_global() {
+        for declared in [
+            "DataZoneStandard",
+            "DataZoneProvisionedManaged",
+            "DataZoneBatch",
+            "Standard",
+            "ProvisionedManaged",
+            "datazone-standard",
+            "",
+        ] {
+            assert!(
+                !deployment_type_is_global(declared),
+                "{declared:?} must not be classified as a global deployment"
+            );
+        }
+    }
 }
