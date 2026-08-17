@@ -37,7 +37,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // of dynamic ones, but keeping the order explicit means a reader does not
         // have to know that to see why `system` is not swallowed as a run id.
         .route("/api/v1/agents/runs/system", get(list_system_runs))
-        .route("/api/v1/agents/runs/:run_id", get(get_run))
+        .route("/api/v1/agents/runs/{run_id}", get(get_run))
         // Per-org/user rate limiting, ordered like `orchestration.rs`:
         // `require_session` (written last → outer) runs first and inserts
         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)

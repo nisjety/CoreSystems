@@ -34,23 +34,29 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/shipping/quotes/recommend", post(quotes_recommend))
         .route("/api/v1/shipping/bookings", post(create_booking))
         .route("/api/v1/shipping/bookings", get(list_bookings))
-        .route("/api/v1/shipping/bookings/:id", get(get_booking))
+        .route("/api/v1/shipping/bookings/{id}", get(get_booking))
         .route(
-            "/api/v1/shipping/bookings/:id/confirm",
+            "/api/v1/shipping/bookings/{id}/confirm",
             post(confirm_booking),
         )
-        .route("/api/v1/shipping/bookings/:id/cancel", post(cancel_booking))
-        .route("/api/v1/shipping/bookings/:id/label", get(booking_label))
         .route(
-            "/api/v1/shipping/bookings/:id/customs-document",
+            "/api/v1/shipping/bookings/{id}/cancel",
+            post(cancel_booking),
+        )
+        .route("/api/v1/shipping/bookings/{id}/label", get(booking_label))
+        .route(
+            "/api/v1/shipping/bookings/{id}/customs-document",
             get(booking_customs_document),
         )
-        .route("/api/v1/shipping/bookings/:id/pickup", post(booking_pickup))
         .route(
-            "/api/v1/shipping/bookings/:id/tracking",
+            "/api/v1/shipping/bookings/{id}/pickup",
+            post(booking_pickup),
+        )
+        .route(
+            "/api/v1/shipping/bookings/{id}/tracking",
             get(booking_tracking),
         )
-        .route("/api/v1/shipping/bookings/:id/audit", get(booking_audit))
+        .route("/api/v1/shipping/bookings/{id}/audit", get(booking_audit))
         .route("/api/v1/shipping/manifests", post(create_manifest))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

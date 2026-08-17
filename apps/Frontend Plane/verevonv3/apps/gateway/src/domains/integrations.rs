@@ -20,12 +20,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(providers::list_providers),
         )
         .route(
-            "/api/v1/integrations/providers/:provider/connect-session",
+            "/api/v1/integrations/providers/{provider}/connect-session",
             post(providers::start_connect_session),
         )
         // Connect sessions
         .route(
-            "/api/v1/integrations/connect-sessions/:id/status",
+            "/api/v1/integrations/connect-sessions/{id}/status",
             get(connect_sessions::connect_session_status),
         )
         // Connections — static "connections" route before param ":id" routes
@@ -34,23 +34,23 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(connections::list_connections),
         )
         .route(
-            "/api/v1/integrations/connections/:id",
+            "/api/v1/integrations/connections/{id}",
             get(connections::get_connection),
         )
         .route(
-            "/api/v1/integrations/connections/:id",
+            "/api/v1/integrations/connections/{id}",
             delete(connections::disconnect),
         )
         .route(
-            "/api/v1/integrations/connections/:id/sync",
+            "/api/v1/integrations/connections/{id}/sync",
             post(connections::trigger_sync),
         )
         .route(
-            "/api/v1/integrations/connections/:id/inbox-sync",
+            "/api/v1/integrations/connections/{id}/inbox-sync",
             post(connections::trigger_inbox_sync),
         )
         .route(
-            "/api/v1/integrations/connections/:id/inbox-history",
+            "/api/v1/integrations/connections/{id}/inbox-history",
             post(connections::extend_inbox_history),
         )
         // Sync jobs — static before param
@@ -59,11 +59,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(sync_jobs::list_sync_jobs),
         )
         .route(
-            "/api/v1/integrations/sync-jobs/:id/events",
+            "/api/v1/integrations/sync-jobs/{id}/events",
             get(sync_jobs::sync_job_events),
         )
         .route(
-            "/api/v1/integrations/sync-jobs/:id",
+            "/api/v1/integrations/sync-jobs/{id}",
             get(sync_jobs::get_sync_job),
         )
         // Profile projection

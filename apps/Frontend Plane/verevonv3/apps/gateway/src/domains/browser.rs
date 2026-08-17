@@ -369,65 +369,68 @@ fn default_include_screenshot() -> bool {
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/browser/sessions", post(create_session))
-        .route("/api/v1/browser/sessions/:session_id", get(get_session))
+        .route("/api/v1/browser/sessions/{session_id}", get(get_session))
         .route(
-            "/api/v1/browser/sessions/:session_id/timeline",
+            "/api/v1/browser/sessions/{session_id}/timeline",
             get(get_owner_timeline),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/actions",
+            "/api/v1/browser/sessions/{session_id}/actions",
             post(run_action),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/control",
+            "/api/v1/browser/sessions/{session_id}/control",
             post(set_control_mode),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/tabs",
+            "/api/v1/browser/sessions/{session_id}/tabs",
             get(get_tabs).post(new_tab),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/tabs/:tab_id/select",
+            "/api/v1/browser/sessions/{session_id}/tabs/{tab_id}/select",
             post(select_tab),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/tabs/:tab_id",
+            "/api/v1/browser/sessions/{session_id}/tabs/{tab_id}",
             delete(close_tab),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/suggestions",
+            "/api/v1/browser/sessions/{session_id}/suggestions",
             post(suggest_action),
         )
         // Phase 2: start/control a durable, server-side, multi-step
         // browser-agent run. Progress streams over the existing chat run-event
         // route (`GET /api/v1/runs/:run_id/events`), unchanged by this facade.
         .route(
-            "/api/v1/browser/sessions/:session_id/ai-runs",
+            "/api/v1/browser/sessions/{session_id}/ai-runs",
             post(start_ai_run),
         )
-        .route("/api/v1/browser/runs/:run_id/control", post(control_ai_run))
         .route(
-            "/api/v1/browser/sessions/:session_id/artifacts/:artifact_id",
+            "/api/v1/browser/runs/{run_id}/control",
+            post(control_ai_run),
+        )
+        .route(
+            "/api/v1/browser/sessions/{session_id}/artifacts/{artifact_id}",
             get(get_artifact),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/frame",
+            "/api/v1/browser/sessions/{session_id}/frame",
             get(get_live_frame),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/frames/stream",
+            "/api/v1/browser/sessions/{session_id}/frames/stream",
             get(stream_live_frames),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/frames/ws",
+            "/api/v1/browser/sessions/{session_id}/frames/ws",
             get(proxy_live_frames_ws),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id/devtools",
+            "/api/v1/browser/sessions/{session_id}/devtools",
             get(get_devtools_events),
         )
         .route(
-            "/api/v1/browser/sessions/:session_id",
+            "/api/v1/browser/sessions/{session_id}",
             delete(close_session),
         )
         .route(
@@ -435,11 +438,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_profiles).post(create_browser_profile),
         )
         .route(
-            "/api/v1/browser/profiles/:profile_id/restore-probe",
+            "/api/v1/browser/profiles/{profile_id}/restore-probe",
             post(restore_profile_probe),
         )
         .route(
-            "/api/v1/browser/profiles/:profile_id",
+            "/api/v1/browser/profiles/{profile_id}",
             patch(rename_browser_profile).delete(delete_profile),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
@@ -2009,7 +2012,9 @@ async fn browser_ws_proxy_loop(
 async fn send_client_ws_error(socket: &mut WebSocket, message: String) -> Result<(), axum::Error> {
     socket
         .send(AxumWsMessage::Text(
-            json!({ "type": "error", "message": message }).to_string().into(),
+            json!({ "type": "error", "message": message })
+                .to_string()
+                .into(),
         ))
         .await
 }

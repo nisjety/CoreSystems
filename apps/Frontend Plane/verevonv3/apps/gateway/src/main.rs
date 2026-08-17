@@ -167,11 +167,11 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
     }
 
     if uri.path().starts_with("/accept-invitation/") {
-        return "/accept-invitation/:invitationId".to_owned();
+        return "/accept-invitation/{invitationId}".to_owned();
     }
 
     if uri.path().starts_with("/api/v1/orgs/invitations/") {
-        return "/api/v1/orgs/invitations/:invitationId/accept".to_owned();
+        return "/api/v1/orgs/invitations/{invitationId}/accept".to_owned();
     }
 
     uri.path().to_owned()
@@ -244,7 +244,7 @@ mod tests {
             .expect("valid invitation URI");
         assert_eq!(
             super::request_target_for_log(&invitation),
-            "/accept-invitation/:invitationId"
+            "/accept-invitation/{invitationId}"
         );
 
         let invitation_api: Uri = "/api/v1/orgs/invitations/invitation-secret/accept"
@@ -252,7 +252,7 @@ mod tests {
             .expect("valid invitation API URI");
         assert_eq!(
             super::request_target_for_log(&invitation_api),
-            "/api/v1/orgs/invitations/:invitationId/accept"
+            "/api/v1/orgs/invitations/{invitationId}/accept"
         );
 
         let ordinary: Uri = "/api/v1/audit?limit=25".parse().expect("valid test URI");

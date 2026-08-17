@@ -33,53 +33,53 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/inbox/outbound-intents",
             get(list_organization_outbound_intents),
         )
-        .route("/api/v1/inbox/conversations/:id", get(get_conversation))
+        .route("/api/v1/inbox/conversations/{id}", get(get_conversation))
         .route(
-            "/api/v1/inbox/conversations/:id/activity",
+            "/api/v1/inbox/conversations/{id}/activity",
             get(list_conversation_activity),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/outbound-intents",
+            "/api/v1/inbox/conversations/{id}/outbound-intents",
             get(list_outbound_intents),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/draft",
+            "/api/v1/inbox/conversations/{id}/draft",
             get(get_conversation_draft)
                 .put(upsert_conversation_draft)
                 .delete(delete_conversation_draft),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/draft-lease",
+            "/api/v1/inbox/conversations/{id}/draft-lease",
             get(get_draft_lease)
                 .post(claim_draft_lease)
                 .delete(release_draft_lease),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/follow",
+            "/api/v1/inbox/conversations/{id}/follow",
             get(get_conversation_follow)
                 .post(follow_conversation)
                 .delete(unfollow_conversation),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/csat-preference",
+            "/api/v1/inbox/conversations/{id}/csat-preference",
             get(get_conversation_csat_preference).patch(patch_conversation_csat_preference),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/messages",
+            "/api/v1/inbox/conversations/{id}/messages",
             post(add_message),
         )
-        .route("/api/v1/inbox/conversations/:id/notes", post(add_note))
+        .route("/api/v1/inbox/conversations/{id}/notes", post(add_note))
         .route(
-            "/api/v1/inbox/conversations/:id/status",
+            "/api/v1/inbox/conversations/{id}/status",
             patch(patch_status),
         )
         .route(
-            "/api/v1/inbox/conversations/:id/assignment",
+            "/api/v1/inbox/conversations/{id}/assignment",
             patch(patch_assignment),
         )
-        .route("/api/v1/inbox/conversations/:id/tags", post(add_tag))
+        .route("/api/v1/inbox/conversations/{id}/tags", post(add_tag))
         .route(
-            "/api/v1/inbox/conversations/:id/tags/:tag",
+            "/api/v1/inbox/conversations/{id}/tags/{tag}",
             delete(remove_tag),
         )
         .route("/api/v1/inbox/feedback", post(submit_feedback))
@@ -91,11 +91,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_ai_actions).post(create_ai_text_proposal),
         )
         .route(
-            "/api/v1/inbox/ai-actions/:id/approve",
+            "/api/v1/inbox/ai-actions/{id}/approve",
             post(approve_ai_action),
         )
         .route(
-            "/api/v1/inbox/ai-actions/:id/reject",
+            "/api/v1/inbox/ai-actions/{id}/reject",
             post(reject_ai_action),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))

@@ -19,10 +19,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/billing/account", get(billing_account))
         .route(
-            "/api/v1/billing/entitlements/:feature",
+            "/api/v1/billing/entitlements/{feature}",
             get(billing_entitlement),
         )
-        .route("/api/v1/billing/quotas/:metric", get(billing_quota))
+        .route("/api/v1/billing/quotas/{metric}", get(billing_quota))
         .route("/api/v1/billing/checkout", post(billing_checkout))
         .route(
             "/api/v1/billing/checkout/confirm",

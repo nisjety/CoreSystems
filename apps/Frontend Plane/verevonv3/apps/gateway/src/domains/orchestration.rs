@@ -61,18 +61,18 @@ use crate::{
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         // ── reads ──────────────────────────────────────────────────────────
-        .route("/api/v1/orchestration/runs/:run_id/plans", get(list_plans))
-        .route("/api/v1/orchestration/plans/:plan_id", get(get_plan))
+        .route("/api/v1/orchestration/runs/{run_id}/plans", get(list_plans))
+        .route("/api/v1/orchestration/plans/{plan_id}", get(get_plan))
         .route(
-            "/api/v1/orchestration/threads/:thread_id/todos",
+            "/api/v1/orchestration/threads/{thread_id}/todos",
             get(list_todos),
         )
         .route(
-            "/api/v1/orchestration/runs/:run_id/approvals",
+            "/api/v1/orchestration/runs/{run_id}/approvals",
             get(list_approvals),
         )
         .route(
-            "/api/v1/orchestration/runs/:run_id/proof-bundle",
+            "/api/v1/orchestration/runs/{run_id}/proof-bundle",
             get(get_run_proof_bundle),
         )
         .route(
@@ -80,36 +80,36 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(get_verification_metrics),
         )
         .route(
-            "/api/v1/orchestration/approvals/:approval_id",
+            "/api/v1/orchestration/approvals/{approval_id}",
             get(get_approval),
         )
         .route(
-            "/api/v1/orchestration/threads/:thread_id/lineage",
+            "/api/v1/orchestration/threads/{thread_id}/lineage",
             get(get_lineage),
         )
         // ── decisions / run control ──────────────────────────────────────────
         .route(
-            "/api/v1/orchestration/approvals/:approval_id/decide",
+            "/api/v1/orchestration/approvals/{approval_id}/decide",
             post(decide_approval),
         )
         .route(
-            "/api/v1/orchestration/plans/:plan_id/approve",
+            "/api/v1/orchestration/plans/{plan_id}/approve",
             post(approve_plan),
         )
         .route(
-            "/api/v1/orchestration/plans/:plan_id/reject",
+            "/api/v1/orchestration/plans/{plan_id}/reject",
             post(reject_plan),
         )
         .route(
-            "/api/v1/orchestration/todos/:todo_id/status",
+            "/api/v1/orchestration/todos/{todo_id}/status",
             post(update_todo_status),
         )
         .route(
-            "/api/v1/orchestration/runs/:run_id/resume",
+            "/api/v1/orchestration/runs/{run_id}/resume",
             post(resume_run),
         )
         .route(
-            "/api/v1/orchestration/runs/:run_id/cancel",
+            "/api/v1/orchestration/runs/{run_id}/cancel",
             post(cancel_run),
         )
         // Per-org/user rate limiting on this high-risk human-in-the-loop group.

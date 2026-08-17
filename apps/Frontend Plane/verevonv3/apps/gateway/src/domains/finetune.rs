@@ -31,10 +31,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/finetune/jobs", get(list_jobs).post(create_job))
         .route("/api/v1/finetune/jobs/upload", post(upload_training_file))
         .route(
-            "/api/v1/finetune/jobs/:job_id",
+            "/api/v1/finetune/jobs/{job_id}",
             get(get_job).delete(cancel_job),
         )
-        .route("/api/v1/finetune/jobs/:job_id/deploy", post(deploy_job))
+        .route("/api/v1/finetune/jobs/{job_id}/deploy", post(deploy_job))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 

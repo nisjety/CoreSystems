@@ -47,8 +47,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/mcp/servers",
             get(list_servers).post(register_server),
         )
-        .route("/api/v1/mcp/servers/:server_id", delete(delete_server))
-        .route("/api/v1/mcp/servers/:server_id/share", post(share_server))
+        .route("/api/v1/mcp/servers/{server_id}", delete(delete_server))
+        .route("/api/v1/mcp/servers/{server_id}/share", post(share_server))
         .route("/api/v1/mcp/servers/oauth/start", post(oauth_start))
         .route("/api/v1/mcp/servers/oauth/callback", get(oauth_callback))
         .route("/api/v1/mcp/servers/connect", post(connect_server))

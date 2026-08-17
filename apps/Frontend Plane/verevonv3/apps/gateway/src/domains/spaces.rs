@@ -638,43 +638,43 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(list_personal_spaces).post(create_personal_space),
         )
         .route(
-            "/api/v1/spaces/:space_ref/membership",
+            "/api/v1/spaces/{space_ref}/membership",
             get(current_membership),
         )
-        .route("/api/v1/spaces/:space_ref/context", get(space_context))
-        .route("/api/v1/spaces/:space_ref/actions", get(space_actions))
+        .route("/api/v1/spaces/{space_ref}/context", get(space_context))
+        .route("/api/v1/spaces/{space_ref}/actions", get(space_actions))
 		.route(
-			"/api/v1/spaces/:space_ref/conversations/:conversation_id/agent-action-grants",
+			"/api/v1/spaces/{space_ref}/conversations/{conversation_id}/agent-action-grants",
 			post(create_agent_ticket_action_grant),
 		)
 		.route(
-			"/api/v1/spaces/:space_ref/conversations/:conversation_id/agent-action-grants/:grant_id",
+			"/api/v1/spaces/{space_ref}/conversations/{conversation_id}/agent-action-grants/{grant_id}",
 			delete(revoke_agent_ticket_action_grant),
 		)
-        .route("/api/v1/spaces/:space_ref/roster", get(space_roster))
+        .route("/api/v1/spaces/{space_ref}/roster", get(space_roster))
         .route(
             "/api/v1/agents/installations",
             get(list_org_agent_installations),
         )
         .route(
-            "/api/v1/spaces/:space_ref/agents",
+            "/api/v1/spaces/{space_ref}/agents",
             get(space_agents).post(create_space_agent),
         )
         .route(
-            "/api/v1/spaces/:space_ref/agents/available",
+            "/api/v1/spaces/{space_ref}/agents/available",
             get(list_installable_space_agents),
         )
         .route(
-            "/api/v1/spaces/:space_ref/agents/bind",
+            "/api/v1/spaces/{space_ref}/agents/bind",
             post(bind_existing_space_agent),
         )
-        .route("/api/v1/spaces/:space_ref/threads", get(list_space_threads))
+        .route("/api/v1/spaces/{space_ref}/threads", get(list_space_threads))
         .route(
-            "/api/v1/spaces/:space_ref/deletion-requests",
+            "/api/v1/spaces/{space_ref}/deletion-requests",
             post(request_personal_space_deletion),
         )
         .route(
-            "/api/v1/spaces/deletion-requests/:request_id",
+            "/api/v1/spaces/deletion-requests/{request_id}",
             get(personal_space_deletion_receipt),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
@@ -1531,7 +1531,8 @@ async fn list_org_agent_installations(
     });
     let per_space: Vec<(String, String, String, Vec<Value>)> = join_all(fetches).await;
 
-    let mut by_definition: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    let mut by_definition: std::collections::BTreeMap<String, Value> =
+        std::collections::BTreeMap::new();
     for (space_ref, space_name, space_kind, agents) in per_space {
         for agent in agents {
             // Only identity-published agents have a definition to group by; a
@@ -1968,9 +1969,7 @@ async fn compose_space_agents(
 
     let agents = members
         .iter()
-        .filter(|member| {
-            member.get("subject_type").and_then(Value::as_str) == Some("service")
-        })
+        .filter(|member| member.get("subject_type").and_then(Value::as_str) == Some("service"))
         .map(|member| {
             let subject_id = member
                 .get("subject_id")
@@ -2062,12 +2061,10 @@ async fn resolve_mentioned_space_agent(
     subject_id: &str,
 ) -> Result<Option<Value>, (StatusCode, Json<Value>)> {
     let agents = compose_space_agents(state, user, org_id, space_ref).await?;
-    Ok(agents
-        .into_iter()
-        .find(|agent| {
-            agent.get("subject_id").and_then(Value::as_str) == Some(subject_id)
-                && agent.get("status").and_then(Value::as_str) == Some("active")
-        }))
+    Ok(agents.into_iter().find(|agent| {
+        agent.get("subject_id").and_then(Value::as_str) == Some(subject_id)
+            && agent.get("status").and_then(Value::as_str) == Some("active")
+    }))
 }
 
 /// This agent's own instructions, resolved from its Convex definition. Never
@@ -3369,7 +3366,9 @@ mod tests {
             .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/action"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:confirmSpaceAgentMembershipForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:confirmSpaceAgentMembershipForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
             .mount(&application)
             .await;
@@ -3409,7 +3408,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, 201, "owner-created agent should be confirmed: {body}");
+        assert_eq!(
+            status, 201,
+            "owner-created agent should be confirmed: {body}"
+        );
         assert_eq!(body["data"]["subject_id"], "agent-agent123");
         assert_eq!(body["data"]["status"], "active");
 
@@ -3427,8 +3429,12 @@ mod tests {
         assert_eq!(mutation_body["args"]["name"], "Møtereferent");
         assert_eq!(mutation_body["args"]["instructions"], "Skriv referat.");
         assert_eq!(mutation_body["args"]["avatarColor"], "#2563eb");
-        assert!(received.iter().any(|request| request.url.path() == "/api/action"),
-            "Control roster confirmation must run");
+        assert!(
+            received
+                .iter()
+                .any(|request| request.url.path() == "/api/action"),
+            "Control roster confirmation must run"
+        );
     }
 
     #[tokio::test]
@@ -3497,7 +3503,9 @@ mod tests {
         let application = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:listInstallableSpaceAgentsForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:listInstallableSpaceAgentsForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": definitions})))
             .mount(&application)
             .await;
@@ -3543,7 +3551,10 @@ mod tests {
         assert_eq!(agents[0]["agent_ref"], "agent-1");
         assert_eq!(agents[0]["already_bound"], true);
         assert_eq!(agents[1]["agent_ref"], "agent-2");
-        assert_eq!(agents[1]["already_bound"], false, "an unbound definition must be offered, not hidden");
+        assert_eq!(
+            agents[1]["already_bound"], false,
+            "an unbound definition must be offered, not hidden"
+        );
     }
 
     #[tokio::test]
@@ -3595,7 +3606,9 @@ mod tests {
         let application = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/mutation"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:bindExistingSpaceAgentForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:bindExistingSpaceAgentForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": {"subjectId": "agent-agent2", "bindingRef": "sab_space-room_agent-agent2"}
             })))
@@ -3603,7 +3616,9 @@ mod tests {
             .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/action"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:confirmSpaceAgentMembershipForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:confirmSpaceAgentMembershipForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
             .mount(&application)
             .await;
@@ -3657,8 +3672,12 @@ mod tests {
         assert_eq!(mutation_body["args"]["externalOrgId"], "org-1");
         assert_eq!(mutation_body["args"]["spaceRef"], "space-room");
         assert_eq!(mutation_body["args"]["agentId"], "agent-2");
-        assert!(received.iter().any(|request| request.url.path() == "/api/action"),
-            "Control roster confirmation must run");
+        assert!(
+            received
+                .iter()
+                .any(|request| request.url.path() == "/api/action"),
+            "Control roster confirmation must run"
+        );
     }
 
     #[tokio::test]
@@ -3690,7 +3709,10 @@ mod tests {
         assert_eq!(status, 400);
         assert_eq!(body["error"]["code"], "agent_ref_required");
         let received = application.received_requests().await.expect("convex calls");
-        assert!(received.is_empty(), "a malformed request must reach no Application call");
+        assert!(
+            received.is_empty(),
+            "a malformed request must reach no Application call"
+        );
     }
 
     #[tokio::test]
@@ -3799,7 +3821,9 @@ mod tests {
             .collect();
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/v1/internal/spaces"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": index}})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": index}})),
+            )
             .mount(&user_core)
             .await;
         for (space_ref, roster) in roster_by_space {
@@ -3818,7 +3842,9 @@ mod tests {
             .collect();
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wm_body_partial_json(json!({"path": "spaces:spacesForOrgForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaces:spacesForOrgForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": labels})))
             .mount(&application)
             .await;
@@ -3883,14 +3909,27 @@ mod tests {
         .await;
 
         assert_eq!(status, 200, "{body}");
-        let definitions = body["data"]["definitions"].as_array().expect("definitions array");
-        assert_eq!(definitions.len(), 1, "the same definition must group, not duplicate: {body}");
+        let definitions = body["data"]["definitions"]
+            .as_array()
+            .expect("definitions array");
+        assert_eq!(
+            definitions.len(),
+            1,
+            "the same definition must group, not duplicate: {body}"
+        );
         let definition = &definitions[0];
         assert_eq!(definition["agent_ref"], "agent-1");
         assert_eq!(definition["name"], "Shared Agent");
-        let installations = definition["installations"].as_array().expect("installations array");
+        let installations = definition["installations"]
+            .as_array()
+            .expect("installations array");
         assert_eq!(installations.len(), 2);
-        let by_space_ref = |space_ref: &str| installations.iter().find(|row| row["space_ref"] == space_ref).unwrap();
+        let by_space_ref = |space_ref: &str| {
+            installations
+                .iter()
+                .find(|row| row["space_ref"] == space_ref)
+                .unwrap()
+        };
         assert_eq!(by_space_ref("space-a")["space_name"], "Team Room");
         assert_eq!(by_space_ref("space-a")["status"], "active");
         assert_eq!(by_space_ref("space-b")["space_name"], "Ops Room");
@@ -3952,7 +3991,10 @@ mod tests {
         let agent = &body["data"]["agents"][0];
         assert_eq!(agent["subject_id"], "svc-support");
         assert_eq!(agent["name"], "Kundestøtte");
-        assert_eq!(agent["role"], "editor", "role comes from Control, not the binding");
+        assert_eq!(
+            agent["role"], "editor",
+            "role comes from Control, not the binding"
+        );
         assert_eq!(agent["status"], "active");
         assert_eq!(agent["identity_published"], true);
         assert_eq!(agent["delivery_targets"][0]["channel"], "teams");
@@ -4078,7 +4120,10 @@ mod tests {
     // drop, so leaving it as a helper-local made the roster endpoint die at
     // return and survive only by socket-linger luck — a scheduling flake that
     // surfaced as "mentioned_agent_not_bound" 404s under parallel test load.
-    async fn mention_test_state(roster: Value, bindings: Value) -> (AppState, MockServer, MockServer) {
+    async fn mention_test_state(
+        roster: Value,
+        bindings: Value,
+    ) -> (AppState, MockServer, MockServer) {
         let user_core = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/v1/internal/spaces/space-1/roster"))
@@ -4090,7 +4135,9 @@ mod tests {
         let application = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:spaceAgentBindingsForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:spaceAgentBindingsForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
             .mount(&application)
             .await;
@@ -4132,7 +4179,9 @@ mod tests {
         .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:agentPersonaForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:agentPersonaForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": {"name": "Kundestøtte", "systemPrompt": "Answer in bullet points."}
             })))
@@ -4204,7 +4253,10 @@ mod tests {
         let (status, payload) = result.expect_err("a blocked binding must refuse");
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
         assert_eq!(payload.0["error"]["code"], "agent_invocation_blocked");
-        assert!(body.get("agent_name").is_none(), "no persona may be injected");
+        assert!(
+            body.get("agent_name").is_none(),
+            "no persona may be injected"
+        );
     }
 
     /// A present trigger list without "mention" refuses the mention: the
@@ -4269,7 +4321,9 @@ mod tests {
         .await;
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wm_body_partial_json(json!({"path": "spaceAgents:agentPersonaForGateway"})))
+            .and(wm_body_partial_json(
+                json!({"path": "spaceAgents:agentPersonaForGateway"}),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "value": {"name": "Kundestøtte", "systemPrompt": "Answer briefly."}
             })))
@@ -4294,9 +4348,15 @@ mod tests {
         std::env::remove_var("APPLICATION_CONVEX_URL");
         std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
-        assert!(result.is_ok(), "a mention-enabled binding must be authorized");
+        assert!(
+            result.is_ok(),
+            "a mention-enabled binding must be authorized"
+        );
         assert_eq!(body["agent_name"], "Kundestøtte");
-        assert_eq!(body["plan_mode"], false, "confirmation policy forbids autonomous runs");
+        assert_eq!(
+            body["plan_mode"], false,
+            "confirmation policy forbids autonomous runs"
+        );
         assert_eq!(
             body["features"],
             json!(["memory"]),
@@ -4319,13 +4379,9 @@ mod tests {
             "space_ref": "space-1",
             "mentioned_agent_ref": "svc-ghost",
         });
-        let result = inject_mentioned_space_agent_persona(
-            &state,
-            &authenticated_user(),
-            "org-1",
-            &mut body,
-        )
-        .await;
+        let result =
+            inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
+                .await;
         std::env::remove_var("APPLICATION_CONVEX_URL");
         std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
@@ -4363,13 +4419,9 @@ mod tests {
             "space_ref": "space-1",
             "mentioned_agent_ref": "svc-support",
         });
-        let result = inject_mentioned_space_agent_persona(
-            &state,
-            &authenticated_user(),
-            "org-1",
-            &mut body,
-        )
-        .await;
+        let result =
+            inject_mentioned_space_agent_persona(&state, &authenticated_user(), "org-1", &mut body)
+                .await;
         std::env::remove_var("APPLICATION_CONVEX_URL");
         std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
 
@@ -4394,7 +4446,10 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        assert_eq!(body, original, "an unmentioned turn must not be modified at all");
+        assert_eq!(
+            body, original,
+            "an unmentioned turn must not be modified at all"
+        );
     }
 
     /// A mention outside a Space is nonsensical — there is no roster to check
