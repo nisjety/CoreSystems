@@ -36,7 +36,6 @@ describe('AG-UI client adapter', () => {
     })
     expect((body.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
       'web_search',
-      'knowledge.recrawl_source',
     ])
     expect(body.data).toEqual(body.forwardedProps)
   })

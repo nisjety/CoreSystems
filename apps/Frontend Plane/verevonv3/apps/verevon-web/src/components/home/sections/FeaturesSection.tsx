@@ -11,7 +11,7 @@ import {
 import { createPortal } from "react-dom";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { ArrowLeft, ArrowRight, Hand } from "lucide-react";
+import { ArrowLeft, ArrowRight, Hand, MousePointerClick } from "lucide-react";
 import {
 	ModuleWorkflowCard,
 	moduleCards,
@@ -147,7 +147,7 @@ export function FeaturesSection() {
 		});
 	}, [getCards, getLastStartIndex]);
 
-	const handleViewportPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+	const handleViewportPointerMove = (event: React.PointerEvent<HTMLElement>) => {
 		setIsCursorVisible(true);
 		if (cursorRef.current) {
 			cursorRef.current.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
@@ -165,9 +165,9 @@ export function FeaturesSection() {
 			return;
 		}
 
-		const viewport = viewportRef.current;
-		if (!viewport) return;
-		const rect = viewport.getBoundingClientRect();
+		const section = sectionRef.current;
+		if (!section) return;
+		const rect = section.getBoundingClientRect();
 		setCursorMode(event.clientX - rect.left < rect.width / 2 ? "nav-left" : "nav-right");
 	};
 
@@ -202,7 +202,7 @@ export function FeaturesSection() {
 		carousel.scrollLeft = dragScrollLeftRef.current - distance;
 	};
 
-	const handleDragEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+	const handleDragEnd = (event: React.PointerEvent<HTMLElement>) => {
 		if (!isDraggingRef.current) return;
 
 		isDraggingRef.current = false;
@@ -228,9 +228,9 @@ export function FeaturesSection() {
 			return;
 		}
 
-		const viewport = viewportRef.current;
-		if (viewport) {
-			const rect = viewport.getBoundingClientRect();
+		const section = sectionRef.current;
+		if (section) {
+			const rect = section.getBoundingClientRect();
 			setCursorMode(event.clientX - rect.left < rect.width / 2 ? "nav-left" : "nav-right");
 		}
 	};
@@ -244,7 +244,7 @@ export function FeaturesSection() {
 		);
 	};
 
-	const handleViewportClick = (event: React.MouseEvent<HTMLDivElement>) => {
+	const handleViewportClick = (event: React.MouseEvent<HTMLElement>) => {
 		if (hasDraggedRef.current) {
 			event.preventDefault();
 			event.stopPropagation();
@@ -421,8 +421,17 @@ export function FeaturesSection() {
 	return (
 		<section
 			aria-labelledby="features-title"
-			className="relative isolate overflow-x-clip bg-background py-[clamp(96px,13vh,180px)] text-verevon-j-text"
+			className="relative isolate cursor-none overflow-x-clip bg-background py-[clamp(96px,13vh,180px)] text-verevon-j-text"
 			id="features"
+			onClickCapture={handleViewportClick}
+			onPointerEnter={() => setIsCursorVisible(true)}
+			onPointerLeave={(event) => {
+				if (!isDraggingRef.current) {
+					setIsCursorVisible(false);
+				}
+				handleDragEnd(event);
+			}}
+			onPointerMove={handleViewportPointerMove}
 			ref={sectionRef}
 		>
 			<div
@@ -455,14 +464,6 @@ export function FeaturesSection() {
 				<div className="[perspective:1400px]">
 					<div
 						className="relative left-1/2 w-[calc(100%+2*var(--verevon-page-pad))] -translate-x-1/2 cursor-none max-w-[1360px]"
-						onPointerEnter={() => setIsCursorVisible(true)}
-						onPointerLeave={(event) => {
-							if (!isDraggingRef.current) {
-								setIsCursorVisible(false);
-							}
-							handleDragEnd(event);
-						}}
-						onPointerMove={handleViewportPointerMove}
 						ref={viewportRef}
 					>
 						<div className="relative mx-auto w-full max-w-[1180px]">
@@ -536,8 +537,8 @@ export function FeaturesSection() {
 									<ArrowRight className="size-6" />
 								) : null}
 								{cursorMode === "select" ? (
-									<ArrowRight className="size-6 -rotate-45" />
-								) : null}
+									<MousePointerClick className="size-6" />
+									) : null}
 								{cursorMode === "drag" ? (
 									<Hand className="size-6" />
 								) : null}

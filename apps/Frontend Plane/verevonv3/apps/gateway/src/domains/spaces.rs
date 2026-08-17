@@ -10,9 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use axum::{
     extract::{Extension, Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
     Json, Router,
 };
+use futures_util::future::join_all;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -228,31 +230,51 @@ pub(crate) async fn inject_personal_thread_context(
     // Retrieval is a distinct Data-plane effect. Never reuse the scoped
     // thread:create bearer for it: Control must independently resolve the
     // current retrieval entitlement and issue the target-specific authority.
-    let retrieval_url = format!(
-        "{}/api/v1/internal/spaces/personal-retrieval-decision",
-        state.user_core_url
-    );
-    let (retrieval_status, Json(retrieval_response)) = proxy_json(
-        state,
-        Method::POST,
-        &retrieval_url,
-        Some(json!({
-            "space_ref": space_ref,
-            "idempotency_key": format!("space-retrieval-{counter}"),
-        })),
-        Some(org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    if !retrieval_status.is_success() {
-        return Err((retrieval_status, Json(retrieval_response)));
-    }
-    let retrieval_token = crate::envelope::unwrap_data(&retrieval_response)
-        .get("token")
+    //
+    // Control issues retrieval authority for personal Spaces only — no
+    // shared-Space retrieval decision exists yet. For rooms the token stays
+    // empty, which downstream reads as "retrieval authority absent":
+    // model-gateway suppresses knowledge-base grounding for the turn rather
+    // than downgrading a Space-scoped request to an unscoped Data call. An
+    // envelope without space_kind is treated as personal, preserving the
+    // stricter behavior.
+    let space_kind = data
+        .get("space_kind")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+        .unwrap_or("personal");
+    let retrieval_token = if space_kind == "personal" {
+        let retrieval_url = format!(
+            "{}/api/v1/internal/spaces/personal-retrieval-decision",
+            state.user_core_url
+        );
+        let (retrieval_status, Json(retrieval_response)) = proxy_json(
+            state,
+            Method::POST,
+            &retrieval_url,
+            Some(json!({
+                "space_ref": space_ref,
+                "idempotency_key": format!("space-retrieval-{}-{counter}", unix_nanos()),
+            })),
+            Some(org_id),
+            Some(&actor),
+            None,
+        )
+        .await;
+        if !retrieval_status.is_success() {
+            return Err((retrieval_status, Json(retrieval_response)));
+        }
+        let retrieval_token = crate::envelope::unwrap_data(&retrieval_response)
+            .get("token")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if retrieval_token.trim().is_empty() {
+            return Err(invalid_decision());
+        }
+        retrieval_token
+    } else {
+        String::new()
+    };
     let context = json!({
         "space_id": required_decision_string(decision, "space_ref")?,
         "space_decision_ref": required_decision_string(decision, "decision_ref")?,
@@ -268,7 +290,7 @@ pub(crate) async fn inject_personal_thread_context(
         "payload_digest": required_decision_string(decision, "payload_digest")?,
         "idempotency_key": required_decision_string(decision, "idempotency_key")?,
     });
-    if token.trim().is_empty() || retrieval_token.trim().is_empty() {
+    if token.trim().is_empty() {
         return Err(invalid_decision());
     }
     object.insert("space_context".to_owned(), context);
@@ -558,6 +580,13 @@ pub(crate) async fn inject_personal_schedule_create_context(
     Ok(())
 }
 
+fn unix_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
 fn required_or_generated(
     object: &mut Map<String, Value>,
     field: &str,
@@ -572,7 +601,11 @@ fn required_or_generated(
     {
         return value.to_owned();
     }
-    let generated = format!("{prefix}-{counter}");
+    // Timestamp + per-process counter, never the counter alone: Session Core's
+    // create-thread is get-or-create by session_key, so a bare process-local
+    // counter reissued the same keys after every gateway restart and silently
+    // resumed an unrelated old thread instead of creating a new one.
+    let generated = format!("{prefix}-{}-{counter}", unix_nanos());
     object.insert(field.to_owned(), Value::String(generated.clone()));
     generated
 }
@@ -610,7 +643,31 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/spaces/:space_ref/context", get(space_context))
         .route("/api/v1/spaces/:space_ref/actions", get(space_actions))
+		.route(
+			"/api/v1/spaces/:space_ref/conversations/:conversation_id/agent-action-grants",
+			post(create_agent_ticket_action_grant),
+		)
+		.route(
+			"/api/v1/spaces/:space_ref/conversations/:conversation_id/agent-action-grants/:grant_id",
+			delete(revoke_agent_ticket_action_grant),
+		)
         .route("/api/v1/spaces/:space_ref/roster", get(space_roster))
+        .route(
+            "/api/v1/agents/installations",
+            get(list_org_agent_installations),
+        )
+        .route(
+            "/api/v1/spaces/:space_ref/agents",
+            get(space_agents).post(create_space_agent),
+        )
+        .route(
+            "/api/v1/spaces/:space_ref/agents/available",
+            get(list_installable_space_agents),
+        )
+        .route(
+            "/api/v1/spaces/:space_ref/agents/bind",
+            post(bind_existing_space_agent),
+        )
         .route("/api/v1/spaces/:space_ref/threads", get(list_space_threads))
         .route(
             "/api/v1/spaces/:space_ref/deletion-requests",
@@ -621,6 +678,218 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(personal_space_deletion_receipt),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+#[derive(Debug, Deserialize)]
+struct OwnerGrantMutationRequest {
+    idempotency_key: String,
+}
+
+async fn create_agent_ticket_action_grant(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, conversation_id)): Path<(String, String)>,
+    Json(request): Json<OwnerGrantMutationRequest>,
+) -> Response {
+    forward_owner_grant_mutation(
+        &state,
+        &user,
+        &space_ref,
+        &conversation_id,
+        "create",
+        None,
+        request,
+    )
+    .await
+}
+
+async fn revoke_agent_ticket_action_grant(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, conversation_id, grant_id)): Path<(String, String, String)>,
+    Json(request): Json<OwnerGrantMutationRequest>,
+) -> Response {
+    forward_owner_grant_mutation(
+        &state,
+        &user,
+        &space_ref,
+        &conversation_id,
+        "revoke",
+        Some(&grant_id),
+        request,
+    )
+    .await
+}
+
+// The signed Control bearer never reaches the browser. The BFF receives an
+// authenticated user's narrow mutation request, resolves current membership,
+// obtains the bounded decision over its signed Control channel, checks the
+// returned binding structurally, and immediately forwards it to the owner.
+// This deliberately does not advertise or enable the Model action.
+async fn forward_owner_grant_mutation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    conversation_id: &str,
+    operation: &str,
+    grant_id: Option<&str>,
+    request: OwnerGrantMutationRequest,
+) -> Response {
+    let space_ref = space_ref.trim();
+    let conversation_id = conversation_id.trim();
+    let grant_id = grant_id.map(str::trim);
+    let idempotency_key = request.idempotency_key.trim();
+    if space_ref.is_empty()
+        || conversation_id.is_empty()
+        || idempotency_key.is_empty()
+        || space_ref.len() > 200
+        || conversation_id.len() > 200
+        || idempotency_key.len() > 200
+        || grant_id.is_some_and(|id| id.is_empty() || id.len() > 200)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_owner_grant_request",
+                "Space, conversation, grant selection, and idempotency key are invalid.",
+            )),
+        )
+            .into_response();
+    }
+    if !matches!(operation, "create" | "revoke")
+        || (operation == "create" && grant_id.is_some())
+        || (operation == "revoke" && grant_id.is_none())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_owner_grant_request",
+                "Owner grant operation is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    let role = user.auth_role.as_deref().unwrap_or_default().trim();
+    if role != "owner" && role != "admin" {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "owner_grant_role_required",
+                "An organization owner or admin must manage agent action grants.",
+            )),
+        )
+            .into_response();
+    }
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to manage agent action grants.",
+            )),
+        )
+            .into_response();
+    }
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let control_url = format!(
+        "{}/api/v1/internal/spaces/owner-grant-decision",
+        state.user_core_url
+    );
+    let (control_status, Json(control_response)) = proxy_json(
+        state,
+        Method::POST,
+        &control_url,
+        Some(json!({
+            "space_ref": space_ref,
+            "conversation_id": conversation_id,
+            "action_id": "tickets.create",
+            "operation": operation,
+            "grant_id": grant_id.unwrap_or_default(),
+            "idempotency_key": idempotency_key,
+        })),
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !control_status.is_success() {
+        return (control_status, Json(control_response)).into_response();
+    }
+    let data = crate::envelope::unwrap_data(&control_response);
+    let decision = match data.get("decision").and_then(Value::as_object) {
+        Some(decision) => decision,
+        None => return invalid_owner_grant_decision().into_response(),
+    };
+    let token = match data.get("token").and_then(Value::as_str).map(str::trim) {
+        Some(token) if !token.is_empty() && token.len() <= 16_384 => token,
+        _ => return invalid_owner_grant_decision().into_response(),
+    };
+    let decision_grant_id = decision
+        .get("grant_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let expected_grant_id = grant_id.unwrap_or_default();
+    let required_matches = [
+        ("org_id", org_id.as_str()),
+        ("conversation_id", conversation_id),
+        ("space_ref", space_ref),
+        ("subject_id", user.user_id.as_str()),
+        ("service_audience", "application-plane-conversation-core"),
+        ("action_id", "tickets.create"),
+        ("operation", operation),
+        ("idempotency_key", idempotency_key),
+    ];
+    if required_matches.into_iter().any(|(field, expected)| {
+        decision.get(field).and_then(Value::as_str).map(str::trim) != Some(expected)
+    }) || decision_grant_id != expected_grant_id
+    {
+        return invalid_owner_grant_decision().into_response();
+    }
+    let conversation_path = format!(
+        "/api/v1/conversations/{}/agent-action-grants{}",
+        urlencoding::encode(conversation_id),
+        if operation == "revoke" {
+            format!("/{}", urlencoding::encode(expected_grant_id))
+        } else {
+            String::new()
+        }
+    );
+    let method = if operation == "revoke" {
+        Method::DELETE
+    } else {
+        Method::POST
+    };
+    let url = format!("{}{}", state.conversation_core_url, conversation_path);
+    let (status, Json(response)) = crate::upstream::proxy_conversation_json(
+        state,
+        method,
+        &url,
+        Some(json!({
+            "control_decision_token": token,
+            "idempotency_key": idempotency_key,
+        })),
+        user,
+        None,
+    )
+    .await;
+    (status, Json(response)).into_response()
+}
+
+fn invalid_owner_grant_decision() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(error(
+            "invalid_owner_grant_decision",
+            "Control returned an invalid owner grant decision.",
+        )),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -783,11 +1052,9 @@ async fn list_space_threads(
             Json(error("invalid_space", "A Space reference is required.")),
         );
     }
-    let space = match personal_space_lifecycle(&state, &user, &org_id).await {
-        Ok(Some(space)) if space.get("spaceRef").and_then(Value::as_str) == Some(space_ref) => {
-            space
-        }
-        Ok(_) => {
+    let space = match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(space)) => space,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(error("space_not_found", "Space is not available.")),
@@ -1070,7 +1337,926 @@ async fn space_roster(
         user_name: user.user_name,
         user_role: user.auth_role.unwrap_or_default(),
     };
-    proxy_json(&state, Method::GET, &url, None, Some(&org_id), Some(&actor), None).await
+    proxy_json(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        Some(&org_id),
+        Some(&actor),
+        None,
+    )
+    .await
+}
+
+/// The active Space this ref names, at ANY kind — personal, room, project, case.
+///
+/// `space_context` and the thread projection used to resolve the caller's
+/// *personal* Space and then require the requested ref to equal it. That held
+/// while a personal Space was the only kind that existed. Once organization
+/// rooms started appearing in the sidebar, every one of them answered 404, and
+/// the room rendered as "your membership could not be confirmed" — a Space you
+/// can navigate to but can never open, with an error blaming your membership
+/// for what was really a personal-only lookup.
+///
+/// This answers "what and where is this room", nothing more. Whether the caller
+/// may act in it stays Control's decision, checked separately by every caller.
+async fn space_lifecycle_by_ref(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<Option<Value>, ()> {
+    if org_id.trim().is_empty() || space_ref.trim().is_empty() {
+        return Err(());
+    }
+    let value = convex_gateway_call(
+        state,
+        "query",
+        "spaces:spacesForOrgForGateway",
+        json!({ "externalAuthId": user.user_id, "externalOrgId": org_id }),
+    )
+    .await?;
+    let Some(spaces) = value.as_array() else {
+        return Err(());
+    };
+    Ok(spaces
+        .iter()
+        .find(|space| {
+            space.get("spaceRef").and_then(Value::as_str) == Some(space_ref)
+                && space.get("lifecycle").and_then(Value::as_str) == Some("active")
+        })
+        .cloned())
+}
+
+/// Space agent bindings from Application: identity for agents Control has
+/// already authorized. Display only, and degrade-safe — a failed read costs the
+/// names, never the roster.
+async fn space_agent_bindings(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Vec<Value> {
+    let Ok(value) = convex_gateway_call(
+        state,
+        "query",
+        "spaceAgents:spaceAgentBindingsForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    else {
+        return Vec::new();
+    };
+    value.as_array().cloned().unwrap_or_default()
+}
+
+/// The Space's agent participants.
+///
+/// Two planes answer two different questions here, and keeping them apart is
+/// the entire contract (`docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md` §3.2):
+///
+/// * **Control** answers *who may act in this room* — service-typed members of
+///   the Space. It is authoritative, and a caller who cannot read the roster
+///   gets an error rather than an empty list, because "I could not check" must
+///   never render as "this room has no agents".
+/// * **Application** answers *what that agent is called* — the binding
+///   projection carrying name, title, lifecycle and published channels.
+///
+/// The join runs Control-first. An agent Control authorizes but Application has
+/// not described still appears, flagged as having no published identity; the
+/// reverse — a binding with no Control membership — is dropped entirely. That
+/// asymmetry is deliberate: an unnamed participant is a gap in presentation,
+/// while an unauthorized one rendered as present is the false membership claim
+/// this whole split exists to prevent.
+async fn space_agents(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim().to_owned();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    match compose_space_agents(&state, &user, &org_id, &space_ref).await {
+        Ok(agents) => (StatusCode::OK, Json(json!({"data": {"agents": agents}}))),
+        Err(response) => response,
+    }
+}
+
+/// §UI-4 (narrow slice): every published agent definition the caller can see
+/// across the org's Spaces, grouped by definition with one row per Space it is
+/// installed in. Deliberately composes the SAME per-Space calls the Agent tab
+/// already uses (`control_space_index` for which Spaces the caller belongs to,
+/// `compose_space_agents` for that Space's live Control-joined roster) instead
+/// of a new cross-Space Convex query — an org-wide "list all bindings" read is
+/// exactly the kind of new backend contract the scope plan flags as undecided
+/// for the rest of UI-4 (Page/system installations, Chief/Core routing), so
+/// this reuses only what already has an owner and a truthfulness guarantee.
+/// One consequence worth naming: this can only see Spaces the caller
+/// themselves belongs to, same as the Agent tab — it is not an org-wide admin
+/// view of every room's agents, only "your view of your definitions."
+async fn list_org_agent_installations(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required.",
+            )),
+        );
+    }
+    let Some(index) = control_space_index(&state, &user, &org_id).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "space_index_unavailable",
+                "The organization's Spaces could not be resolved.",
+            )),
+        );
+    };
+    let labels = organization_space_labels(&state, &user, &org_id).await;
+
+    let spaces: Vec<(String, String, String)> = index
+        .iter()
+        .filter_map(|entry| {
+            let space_ref = entry.get("space_ref").and_then(Value::as_str)?.to_owned();
+            let label = labels.iter().find(|candidate| {
+                candidate.get("spaceRef").and_then(Value::as_str) == Some(space_ref.as_str())
+            });
+            let space_name = label
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("Space")
+                .to_owned();
+            let space_kind = entry
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("room")
+                .to_owned();
+            Some((space_ref, space_name, space_kind))
+        })
+        .collect();
+
+    // Fetched concurrently: each is an independent Control+Convex round trip,
+    // and an org with several rooms should not pay for them one at a time. A
+    // Space whose read fails is skipped rather than failing the whole page —
+    // this is a presentation aggregate, not an authority decision, so a
+    // partial truthful answer beats an all-or-nothing one.
+    let fetches = spaces.iter().map(|(space_ref, space_name, space_kind)| {
+        let space_ref = space_ref.clone();
+        let space_name = space_name.clone();
+        let space_kind = space_kind.clone();
+        async {
+            let agents = compose_space_agents(&state, &user, &org_id, &space_ref)
+                .await
+                .unwrap_or_default();
+            (space_ref, space_name, space_kind, agents)
+        }
+    });
+    let per_space: Vec<(String, String, String, Vec<Value>)> = join_all(fetches).await;
+
+    let mut by_definition: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    for (space_ref, space_name, space_kind, agents) in per_space {
+        for agent in agents {
+            // Only identity-published agents have a definition to group by; a
+            // Control-authorized subject Application has not described yet
+            // still renders per-Space (in the Agent tab) but has no
+            // cross-Space definition to attach an installation row to here.
+            let Some(agent_ref) = agent.get("agent_ref").and_then(Value::as_str) else {
+                continue;
+            };
+            let entry = by_definition.entry(agent_ref.to_owned()).or_insert_with(|| {
+                json!({
+                    "agent_ref": agent_ref,
+                    "name": agent.get("name").cloned().unwrap_or(Value::Null),
+                    "description": agent.get("description").cloned().unwrap_or(Value::Null),
+                    "definition_status": agent.get("definition_status").cloned().unwrap_or(Value::Null),
+                    "installations": [],
+                })
+            });
+            entry["installations"]
+                .as_array_mut()
+                .expect("literal array")
+                .push(json!({
+                    "space_ref": space_ref,
+                    "space_name": space_name,
+                    "space_kind": space_kind,
+                    "status": agent.get("status").cloned().unwrap_or(Value::Null),
+                }));
+        }
+    }
+
+    let definitions: Vec<Value> = by_definition.into_values().collect();
+    (
+        StatusCode::OK,
+        Json(json!({"data": {"definitions": definitions}})),
+    )
+}
+
+const CREATE_AGENT_ROLES: [&str; 2] = ["owner", "manager"];
+const MAX_CREATE_AGENT_NAME_CHARS: usize = 60;
+const MAX_CREATE_AGENT_INSTRUCTIONS_CHARS: usize = 4000;
+
+/// Creates a simple agent from inside the room — the scope plan's §UI-3b
+/// two-step, server-confirmed flow, sequenced here so the browser never holds
+/// authority: (1) Application lands the definition and a `pending` binding in
+/// one transaction; (2) Application declares the room's full service roster to
+/// Control, and only Control's acceptance flips the binding `active`. The
+/// creating human's room role is the authorizing decision (QM: authority for
+/// future agent behavior comes from outside the agent) — resolved from
+/// Control under the caller's own signed delegation, never from the body.
+async fn create_space_agent(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim().to_owned();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    if name.chars().count() < 2 || name.chars().count() > MAX_CREATE_AGENT_NAME_CHARS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_agent_name",
+                "An agent name must be between 2 and 60 characters.",
+            )),
+        );
+    }
+    let instructions = body
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if instructions
+        .as_deref()
+        .is_some_and(|value| value.chars().count() > MAX_CREATE_AGENT_INSTRUCTIONS_CHARS)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_agent_instructions",
+                "Agent instructions must stay under 4000 characters.",
+            )),
+        );
+    }
+    let avatar_color = body
+        .get("avatar_color")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            value.len() == 7
+                && value.starts_with('#')
+                && value[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+        })
+        .map(str::to_owned);
+
+    // Who may create is a Control fact about THIS room, not an org role: the
+    // caller's own membership is resolved under their signed delegation.
+    if let Err(response) = require_space_agent_grant_role(&state, &user, &org_id, &space_ref).await
+    {
+        return response;
+    }
+
+    // Convex `v.optional` accepts an absent key, never an explicit null —
+    // optional fields are inserted only when present.
+    let mut create_args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+        "spaceRef": space_ref,
+        "name": name,
+    });
+    if let Some(instructions) = instructions {
+        create_args["instructions"] = json!(instructions);
+    }
+    if let Some(avatar_color) = avatar_color {
+        create_args["avatarColor"] = json!(avatar_color);
+    }
+    let Ok(created) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaceAgents:createSpaceAgentForGateway",
+        create_args,
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "agent_creation_unavailable",
+                "The agent could not be created. Nothing was provisioned.",
+            )),
+        );
+    };
+
+    if !confirm_space_agent_membership(&state, &org_id, &space_ref).await {
+        // The definition and its pending binding exist and render truthfully
+        // as not-yet-a-member; nothing may invoke the agent until Control
+        // accepts the roster. The caller learns exactly that.
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "agent_membership_unconfirmed",
+                "The agent was created, but Control has not confirmed its room membership yet. It stays pending in the Agent tab.",
+            )),
+        );
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({"data": {
+            "agent_ref": created.get("agentRef").and_then(Value::as_str).unwrap_or_default(),
+            "subject_id": created.get("subjectId").and_then(Value::as_str).unwrap_or_default(),
+            "status": "active",
+        }})),
+    )
+}
+
+/// Who may grant a new agent (created or bound) a place in this room: the
+/// caller's own Control-resolved room role, checked under their signed
+/// delegation — never an org-wide role, and never something the request body
+/// could assert. Shared by §UI-3b (create new) and §UI-3 (bind existing) so
+/// the two routes can never quietly diverge on who is allowed to grant.
+async fn require_space_agent_grant_role(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership_response)) = proxy_json(
+        state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return Err((membership_status, Json(membership_response)));
+    }
+    let role = crate::envelope::unwrap_data(&membership_response)
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if !CREATE_AGENT_ROLES.contains(&role.as_str()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "space_role_cannot_create_agent",
+                "Only a Space owner or manager can add an agent here.",
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Step 2 of the governed two-step, shared by create and bind: declare the
+/// room's full service roster to Control and report whether it accepted.
+async fn confirm_space_agent_membership(state: &AppState, org_id: &str, space_ref: &str) -> bool {
+    let confirmation = convex_gateway_call(
+        state,
+        "action",
+        "spaceAgents:confirmSpaceAgentMembershipForGateway",
+        json!({
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await;
+    confirmation
+        .as_ref()
+        .ok()
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        == Some("applied")
+}
+
+/// §UI-3: agent definitions this org has, for an owner/manager browsing what
+/// they can add to THIS room. `already_bound` is reported, not filtered out —
+/// hiding an already-added definition would look like it silently vanished
+/// rather than telling the truth about its state.
+async fn list_installable_space_agents(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim().to_owned();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    if let Err(response) = require_space_agent_grant_role(&state, &user, &org_id, &space_ref).await
+    {
+        return response;
+    }
+
+    let Ok(definitions) = convex_gateway_call(
+        &state,
+        "query",
+        "spaceAgents:listInstallableSpaceAgentsForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+        }),
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "installable_agents_unavailable",
+                "The organization's agent definitions could not be loaded.",
+            )),
+        );
+    };
+    let agents = definitions.as_array().cloned().unwrap_or_default();
+    let agents: Vec<Value> = agents
+        .into_iter()
+        .map(|definition| {
+            json!({
+                "agent_ref": definition.get("agentRef").cloned().unwrap_or(Value::Null),
+                "name": definition.get("name").cloned().unwrap_or(Value::Null),
+                "description": definition.get("description").cloned().unwrap_or(Value::Null),
+                "definition_status": definition.get("definitionStatus").cloned().unwrap_or(Value::Null),
+                "already_bound": definition.get("alreadyBound").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(json!({"data": {"agents": agents}})))
+}
+
+/// §UI-3: bind an EXISTING agent definition to this room. Distinct from
+/// `create_space_agent` (§UI-3b) only in step 1 — an `agent_ref` the caller
+/// picked from `list_installable_space_agents`, not a freshly authored name.
+async fn bind_existing_space_agent(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    let space_ref = space_ref.trim().to_owned();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    let agent_ref = body
+        .get("agent_ref")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let Some(agent_ref) = agent_ref else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "agent_ref_required",
+                "An existing agent_ref is required to bind an agent.",
+            )),
+        );
+    };
+
+    if let Err(response) = require_space_agent_grant_role(&state, &user, &org_id, &space_ref).await
+    {
+        return response;
+    }
+
+    let Ok(bound) = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaceAgents:bindExistingSpaceAgentForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "agentId": agent_ref,
+        }),
+    )
+    .await
+    else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "agent_binding_unavailable",
+                "The agent could not be bound. Nothing was provisioned.",
+            )),
+        );
+    };
+
+    if !confirm_space_agent_membership(&state, &org_id, &space_ref).await {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "agent_membership_unconfirmed",
+                "The agent was bound, but Control has not confirmed its room membership yet. It stays pending in the Agent tab.",
+            )),
+        );
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({"data": {
+            "subject_id": bound.get("subjectId").and_then(Value::as_str).unwrap_or_default(),
+            "status": "active",
+        }})),
+    )
+}
+
+/// Control roster ∩ Application binding, composed into the same agent shape
+/// `space_agents` returns to the browser. Pulled out so the invocation path
+/// (`resolve_mentioned_space_agent`, below) authorizes a mention against
+/// exactly what the room's own Agent tab shows — one join, two callers,
+/// rather than a second copy that could quietly drift from the first.
+async fn compose_space_agents(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<Vec<Value>, (StatusCode, Json<Value>)> {
+    let roster_url = format!(
+        "{}/api/v1/internal/spaces/{}/roster",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let (status, Json(roster_response)) = proxy_json(
+        state,
+        Method::GET,
+        &roster_url,
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !status.is_success() {
+        return Err((status, Json(roster_response)));
+    }
+
+    // Control's envelope is `{data: {members: [...], count: N}}` — not a bare
+    // array. Reading it as one silently yields zero agents, which is the exact
+    // "empty room" lie this handler is built to avoid.
+    let members = crate::envelope::unwrap_data(&roster_response)
+        .get("members")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let bindings = space_agent_bindings(state, user, org_id, space_ref).await;
+
+    let agents = members
+        .iter()
+        .filter(|member| {
+            member.get("subject_type").and_then(Value::as_str) == Some("service")
+        })
+        .map(|member| {
+            let subject_id = member
+                .get("subject_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let binding = bindings.iter().find(|binding| {
+                binding.get("subjectId").and_then(Value::as_str) == Some(subject_id)
+            });
+
+            let mut agent = json!({
+                "subject_id": subject_id,
+                "role": member.get("role").and_then(Value::as_str).unwrap_or_default(),
+                "revision": member.get("revision").and_then(Value::as_i64).unwrap_or_default(),
+                "identity_published": binding.is_some(),
+            });
+            let object = agent.as_object_mut().expect("literal object");
+
+            match binding {
+                Some(binding) => {
+                    for (from, to) in [
+                        ("bindingRef", "binding_ref"),
+                        ("agentRef", "agent_ref"),
+                        ("name", "name"),
+                        ("title", "title"),
+                        ("description", "description"),
+                        ("status", "status"),
+                        ("definitionStatus", "definition_status"),
+                        ("updatedAt", "updated_at"),
+                        // Binding policy — absent on legacy bindings, and the
+                        // invocation path treats absence as the legacy default.
+                        ("triggerModes", "trigger_modes"),
+                        ("allowedTools", "allowed_tools"),
+                        ("approvalMode", "approval_mode"),
+                    ] {
+                        if let Some(value) = binding.get(from) {
+                            if !value.is_null() {
+                                object.insert(to.to_owned(), value.clone());
+                            }
+                        }
+                    }
+                    object.insert(
+                        "delivery_targets".to_owned(),
+                        binding
+                            .get("deliveryTargets")
+                            .cloned()
+                            .unwrap_or_else(|| json!([])),
+                    );
+                }
+                None => {
+                    // Control's own label for the subject, when it has one. Left
+                    // absent otherwise so the browser renders its own honest
+                    // "identity not published" state rather than a name we made up.
+                    if let Some(display_name) = member
+                        .get("display_name")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        object.insert("name".to_owned(), json!(display_name));
+                    }
+                    object.insert("delivery_targets".to_owned(), json!([]));
+                }
+            }
+
+            agent
+        })
+        .collect();
+
+    Ok(agents)
+}
+
+/// The one field the browser may name a mention by: the Control subject id
+/// already visible on every `SpaceAgent` the room's roster returns. Never a
+/// binding ref, an agent ref, or anything Convex-internal — those are gateway
+/// implementation detail the browser has no business carrying.
+const MENTIONED_AGENT_FIELDS: [&str; 2] = ["mentioned_agent_ref", "mentionedAgentRef"];
+
+/// Exchange a browser-supplied agent mention for the two facts that actually
+/// authorize and voice it: an active Control membership for that subject in
+/// this Space, and the Application binding naming it. Only a hit on both
+/// counts as "this agent may answer here" — the same rule `compose_space_agents`
+/// draws for what to show, applied here to what to allow
+/// (`docs/space-defenition.md`, "Invocation rule": a mention invokes, it never
+/// grants — this is the check that keeps that true).
+async fn resolve_mentioned_space_agent(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    subject_id: &str,
+) -> Result<Option<Value>, (StatusCode, Json<Value>)> {
+    let agents = compose_space_agents(state, user, org_id, space_ref).await?;
+    Ok(agents
+        .into_iter()
+        .find(|agent| {
+            agent.get("subject_id").and_then(Value::as_str) == Some(subject_id)
+                && agent.get("status").and_then(Value::as_str) == Some("active")
+        }))
+}
+
+/// This agent's own instructions, resolved from its Convex definition. Never
+/// forwarded to the browser — the mention UI only ever carries `subject_id`;
+/// this is the one place `agent_ref` (a Convex id) is read, and it goes
+/// straight into the outbound model turn.
+async fn fetch_agent_persona(state: &AppState, org_id: &str, agent_ref: &str) -> Option<Value> {
+    convex_gateway_call(
+        state,
+        "query",
+        "spaceAgents:agentPersonaForGateway",
+        json!({ "externalOrgId": org_id, "agentId": agent_ref }),
+    )
+    .await
+    .ok()
+    .filter(|value| !value.is_null())
+}
+
+/// Read (never consume) whichever spelling of the Space reference the request
+/// carries. `inject_personal_thread_context` is the one that actually removes
+/// it once it has issued its own decision — this only needs to know the ref is
+/// there before that happens.
+fn peek_space_ref(object: &serde_json::Map<String, Value>) -> Option<String> {
+    object
+        .get("space_ref")
+        .or_else(|| object.get("spaceRef"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Exchange a client-supplied `@` mention for a Control- and
+/// Application-verified agent persona, injected into the outbound turn as
+/// `agent_name`/`agent_system_prompt` — the two fields
+/// `model-gateway`'s `agent_persona_message` reads. Absent on every turn
+/// nobody addressed to an agent; unchanged behavior in that case.
+///
+/// Must run before [`inject_personal_thread_context`], which is the call that
+/// actually removes the Space reference fields from the body.
+pub(crate) async fn inject_mentioned_space_agent_persona(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_chat_request",
+                "Chat request must be an object.",
+            )),
+        )
+    })?;
+
+    let mentioned = MENTIONED_AGENT_FIELDS
+        .iter()
+        .find_map(|field| object.remove(*field))
+        .and_then(|value| value.as_str().map(str::trim).map(str::to_owned))
+        .filter(|value| !value.is_empty());
+    let Some(subject_id) = mentioned else {
+        return Ok(());
+    };
+
+    let Some(space_ref) = peek_space_ref(object) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "agent_mention_requires_space",
+                "An agent can only be mentioned inside a Space.",
+            )),
+        ));
+    };
+    if org_id.trim().is_empty() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to mention an agent.",
+            )),
+        ));
+    }
+
+    let agent = resolve_mentioned_space_agent(state, user, org_id, &space_ref, &subject_id)
+        .await?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(error(
+                    "mentioned_agent_not_bound",
+                    "This agent is not bound to this Space.",
+                )),
+            )
+        })?;
+
+    // Binding policy enforcement (space-defenition.md "Binding model"). An
+    // ABSENT field is the legacy default — bindings created before policy
+    // fields existed keep behaving exactly as they did — while a PRESENT
+    // field is a human decision and binds.
+    apply_mention_binding_policy(object, &agent)?;
+
+    let name = agent
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(&subject_id)
+        .to_owned();
+    object.insert("agent_name".to_owned(), json!(name));
+
+    // Best-effort: a persona missing its instructions still answers, in its
+    // own name, on the framing message alone.
+    if let Some(agent_ref) = agent.get("agent_ref").and_then(Value::as_str) {
+        if let Some(persona) = fetch_agent_persona(state, org_id, agent_ref).await {
+            if let Some(system_prompt) = persona.get("systemPrompt").and_then(Value::as_str) {
+                object.insert("agent_system_prompt".to_owned(), json!(system_prompt));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Enforces the mentioned binding's policy on the outbound turn.
+///
+/// * `trigger_modes` — a present list without `"mention"` refuses the mention
+///   itself: the binding says this agent is not invoked that way.
+/// * `approval_mode: "blocked"` — refuses the invocation outright.
+/// * `approval_mode: "require_confirmation"` (and the legacy absent case) —
+///   the turn may never run autonomously: `plan_mode` is forced off and the
+///   `agentic` feature is stripped, so a room mention cannot start an
+///   unattended run. Only an explicit `"auto"` leaves them untouched.
+/// * `allowed_tools: []` — strips the `tools` feature and any tool specs, so
+///   the agent answers from its instructions and the conversation alone.
+///   A non-empty list keeps the tool surface on; per-tool filtering belongs
+///   to the model plane and no flow writes a non-empty list yet.
+fn apply_mention_binding_policy(
+    object: &mut Map<String, Value>,
+    agent: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if let Some(trigger_modes) = agent.get("trigger_modes").and_then(Value::as_array) {
+        let mentionable = trigger_modes
+            .iter()
+            .any(|mode| mode.as_str() == Some("mention"));
+        if !mentionable {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "agent_mention_not_enabled",
+                    "This agent's binding does not allow @-mention invocation.",
+                )),
+            ));
+        }
+    }
+
+    let approval_mode = agent
+        .get("approval_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("require_confirmation");
+    match approval_mode {
+        "blocked" => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "agent_invocation_blocked",
+                    "This agent's binding blocks invocation in this Space.",
+                )),
+            ));
+        }
+        "auto" => {}
+        _ => {
+            object.insert("plan_mode".to_owned(), json!(false));
+            if let Some(features) = object.get_mut("features").and_then(Value::as_array_mut) {
+                features.retain(|feature| feature.as_str() != Some("agentic"));
+            }
+        }
+    }
+
+    if agent
+        .get("allowed_tools")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        if let Some(features) = object.get_mut("features").and_then(Value::as_array_mut) {
+            features.retain(|feature| feature.as_str() != Some("tools"));
+        }
+        object.insert("tools".to_owned(), json!([]));
+    }
+
+    Ok(())
 }
 
 /// Control's actor-filtered Space index: which Spaces this caller belongs to,
@@ -1280,11 +2466,9 @@ async fn space_context(
             Json(error("invalid_space", "A Space reference is required.")),
         );
     }
-    let space = match personal_space_lifecycle(&state, &user, &org_id).await {
-        Ok(Some(space)) if space.get("spaceRef").and_then(Value::as_str) == Some(space_ref) => {
-            space
-        }
-        Ok(_) => {
+    let space = match space_lifecycle_by_ref(&state, &user, &org_id, space_ref).await {
+        Ok(Some(space)) => space,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(error("space_not_found", "Space is not available.")),
@@ -1423,9 +2607,12 @@ async fn space_actions(
 #[cfg(test)]
 mod tests {
     use super::{
+        forward_owner_grant_mutation, inject_mentioned_space_agent_persona,
         inject_personal_schedule_create_context, inject_personal_thread_context,
         personal_import_ingress_decision, space_actions, thread_items_match_space,
+        OwnerGrantMutationRequest,
     };
+    use crate::config::AppState;
     use axum::{
         body::Body,
         extract::{Extension, Path, State},
@@ -1434,7 +2621,9 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::{json, Value};
     use tower::ServiceExt;
-    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::matchers::{
+        body_partial_json as wm_body_partial_json, method as wm_method, path as wm_path,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::middleware::AuthenticatedUser;
@@ -1481,6 +2670,160 @@ mod tests {
             &json!([{"thread_id": "thread-1"}]),
             "space-1"
         ));
+    }
+
+    #[tokio::test]
+    async fn owner_grant_mutation_rejects_a_member_before_control_or_owner_lookup() {
+        let state = crate::tests::test_state(false);
+        let response = forward_owner_grant_mutation(
+            &state,
+            &authenticated_user(),
+            "space-1",
+            "conversation-1",
+            "create",
+            None,
+            OwnerGrantMutationRequest {
+                idempotency_key: "owner-grant-1".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    /// Drive the real gateway router through session validation, live Control
+    /// membership, Control decision issuance, and Conversation Core forwarding.
+    /// The signed Control bearer is an internal hop credential: it may appear
+    /// in the gateway -> Conversation Core request body, but must never be
+    /// returned in the browser response (or be accepted from the browser).
+    #[tokio::test]
+    async fn owner_grant_control_token_stays_internal_to_conversation_core() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {
+                    "id": "user-1",
+                    "email": "owner@example.com",
+                    "emailVerified": true
+                },
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": "user-1",
+                "orgId": "org-1",
+                "role": "owner",
+                "onboardingStatus": "COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/owner-grant-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "token": "control-secret-token",
+                    "decision": {
+                        "grant_id": "",
+                        "org_id": "org-1",
+                        "conversation_id": "conversation-1",
+                        "space_ref": "space-1",
+                        "subject_id": "user-1",
+                        "service_audience": "application-plane-conversation-core",
+                        "action_id": "tickets.create",
+                        "operation": "create",
+                        "idempotency_key": "grant-1"
+                    }
+                }
+            })))
+            .mount(&user_core)
+            .await;
+
+        let conversation = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(
+                "/api/v1/conversations/conversation-1/agent-action-grants",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "grant_id": "grant-1",
+                    "status": "active",
+                    "receipt_id": "receipt-1"
+                }
+            })))
+            .mount(&conversation)
+            .await;
+
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.conversation_core_url = conversation.uri();
+
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/spaces/space-1/conversations/conversation-1/agent-action-grants")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("content-type", "application/json")
+                    // Unknown authority fields are deliberately supplied here
+                    // to prove the browser cannot smuggle a usable bearer.
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "idempotency_key": "grant-1",
+                            "control_decision_token": "browser-forged-token"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let browser_body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(
+            browser_body,
+            json!({
+                "data": {
+                    "grant_id": "grant-1",
+                    "status": "active",
+                    "receipt_id": "receipt-1"
+                }
+            })
+        );
+        assert!(!browser_body.to_string().contains("control-secret-token"));
+        assert!(!browser_body.to_string().contains("browser-forged-token"));
+
+        let conversation_requests = conversation.received_requests().await.unwrap();
+        assert_eq!(conversation_requests.len(), 1);
+        let forwarded = &conversation_requests[0];
+        let forwarded_body: Value = serde_json::from_slice(&forwarded.body).unwrap();
+        assert_eq!(
+            forwarded_body["control_decision_token"],
+            "control-secret-token"
+        );
+        assert_eq!(forwarded_body["idempotency_key"], "grant-1");
+        assert!(forwarded.headers.get("x-delegation-signature").is_some());
+        assert!(forwarded.headers.get("x-service-token").is_none());
+
+        let control_requests = user_core.received_requests().await.unwrap();
+        let control_request = control_requests
+            .iter()
+            .find(|request| request.url.path() == "/api/v1/internal/spaces/owner-grant-decision")
+            .expect("Control decision request");
+        let control_body: Value = serde_json::from_slice(&control_request.body).unwrap();
+        assert_eq!(control_body["action_id"], "tickets.create");
+        assert_eq!(control_body["operation"], "create");
+        assert_eq!(control_body["idempotency_key"], "grant-1");
+        assert!(!control_body.to_string().contains("browser-forged-token"));
     }
 
     #[tokio::test]
@@ -1673,8 +3016,66 @@ mod tests {
         let retrieval_body: Value =
             serde_json::from_slice(&retrieval_request.body).expect("retrieval JSON");
         assert_eq!(retrieval_body["space_ref"], "personal-1");
-        assert_eq!(retrieval_body["idempotency_key"], "space-retrieval-1");
+        // The suffix is a process-wide monotonic counter, so it must not be
+        // coupled to test ordering. The scoped prefix is the contract: this
+        // retrieval authority is a fresh effect, distinct from thread create.
+        assert!(retrieval_body["idempotency_key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("space-retrieval-")));
         assert!(retrieval_body.get("session_key").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_room_thread_gets_authority_without_a_personal_retrieval_grant() {
+        // Serialized: reads process-global service URLs mutated by siblings.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "token": "control-signed-token",
+                    "space_kind": "room",
+                    "decision": {
+                        "space_ref": "room-1", "decision_ref": "decision-1",
+                        "recipient_audience_ref": "space:room-1:recipient-audience:1", "privacy_policy_ref": "privacy-1",
+                        "recipient_audience_revision": 1, "recipient_audience_hash": "sha256:audience-1", "authority_revision": 7, "resource_authorization_ref": "resource-1",
+                        "action_schema_hash": "sha256:schema", "payload_digest": "sha256:payload",
+                        "idempotency_key": "idem-1"
+                    }
+                }
+            })))
+            .mount(&user_core)
+            .await;
+        // Deliberately no personal-retrieval-decision mock: a room turn must
+        // never request one — Control issues retrieval authority only for
+        // personal Spaces, and grounding degrades instead of the turn failing.
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "content": "hello", "space_ref": "room-1", "session_key": "session-1",
+            "idempotency_key": "idem-1"
+        });
+
+        inject_personal_thread_context(&state, &authenticated_user(), "org-1", &mut outbound)
+            .await
+            .expect("room thread authority should be injected");
+
+        assert_eq!(
+            outbound["space_context"]["space_decision_token"],
+            "control-signed-token"
+        );
+        assert_eq!(outbound["space_context"]["retrieval_decision_token"], "");
+        let received = user_core
+            .received_requests()
+            .await
+            .expect("Control request");
+        assert!(
+            received.iter().all(|request| {
+                request.url.path() != "/api/v1/internal/spaces/personal-retrieval-decision"
+            }),
+            "a room turn must not request a personal retrieval decision"
+        );
     }
 
     #[tokio::test]
@@ -1849,6 +3250,1172 @@ mod tests {
         assert_eq!(body["args"]["externalOrgId"], "org-1");
     }
 
+    /// A shared organization room must open like any other Space.
+    ///
+    /// `space_context` used to resolve the caller's PERSONAL Space and then
+    /// require the requested ref to match it, so every organization room in the
+    /// sidebar answered 404 and the UI said "your membership could not be
+    /// confirmed" — blaming membership for a personal-only lookup. Live UI
+    /// testing found this; no unit test covered opening a non-personal room.
+    #[tokio::test]
+    async fn an_organization_room_opens_instead_of_reporting_unconfirmed_membership() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "role": "editor"}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        // The org's Spaces: the caller's personal room AND a shared room. The
+        // requested ref is the shared one, which the old lookup could not reach.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-personal","name":"Personal Space","kind":"personal","lifecycle":"active"},
+                {"spaceRef":"space-room","name":"AQUATIQ AS","kind":"room","lifecycle":"active","isOrganizationRoom":true}
+            ]})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/context")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "a shared organization room must open, not 404"
+        );
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["data"]["space"]["space_ref"], "space-room");
+        assert_eq!(body["data"]["space"]["name"], "AQUATIQ AS");
+        assert_eq!(body["data"]["space"]["kind"], "room");
+    }
+
+    /// Drive `POST /spaces/space-room/agents` with a given Control-resolved
+    /// room role and given Convex step outcomes; returns (status, body) plus
+    /// the Application mock for request-shape assertions.
+    async fn create_space_agent_response(
+        role: &str,
+        confirmation: Value,
+        body: Value,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:createSpaceAgentForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"agentRef": "agent123", "subjectId": "agent-agent123", "bindingRef": "sab_space-room_agent-agent123"}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/action"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:confirmSpaceAgentMembershipForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/spaces/space-room/agents")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let status = response.status().as_u16();
+        let parsed: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, parsed, application)
+    }
+
+    #[tokio::test]
+    async fn an_owner_creates_a_room_agent_through_the_governed_two_step_flow() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) = create_space_agent_response(
+            "owner",
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent", "instructions": "Skriv referat.", "avatar_color": "#2563eb"}),
+        )
+        .await;
+
+        assert_eq!(status, 201, "owner-created agent should be confirmed: {body}");
+        assert_eq!(body["data"]["subject_id"], "agent-agent123");
+        assert_eq!(body["data"]["status"], "active");
+
+        let received = application.received_requests().await.expect("convex calls");
+        let mutation = received
+            .iter()
+            .find(|request| request.url.path() == "/api/mutation")
+            .expect("definition + pending binding request");
+        let mutation_body: Value = serde_json::from_slice(&mutation.body).expect("mutation JSON");
+        // Identity comes from the verified session and resolved org — the
+        // browser body cannot supply it.
+        assert_eq!(mutation_body["args"]["externalAuthId"], "user-1");
+        assert_eq!(mutation_body["args"]["externalOrgId"], "org-1");
+        assert_eq!(mutation_body["args"]["spaceRef"], "space-room");
+        assert_eq!(mutation_body["args"]["name"], "Møtereferent");
+        assert_eq!(mutation_body["args"]["instructions"], "Skriv referat.");
+        assert_eq!(mutation_body["args"]["avatarColor"], "#2563eb");
+        assert!(received.iter().any(|request| request.url.path() == "/api/action"),
+            "Control roster confirmation must run");
+    }
+
+    #[tokio::test]
+    async fn an_editor_cannot_create_a_room_agent() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) = create_space_agent_response(
+            "editor",
+            json!({"status": "applied"}),
+            json!({"name": "Møtereferent"}),
+        )
+        .await;
+
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_role_cannot_create_agent");
+        let received = application.received_requests().await.expect("convex calls");
+        assert!(
+            received.is_empty(),
+            "a denied role must reach no Application write at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_control_roster_leaves_the_agent_pending() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _application) = create_space_agent_response(
+            "owner",
+            json!({"status": "rejected", "httpStatus": 403}),
+            json!({"name": "Møtereferent"}),
+        )
+        .await;
+
+        assert_eq!(status, 502);
+        assert_eq!(body["error"]["code"], "agent_membership_unconfirmed");
+    }
+
+    /// Drive `GET /spaces/space-room/agents/available` with a given
+    /// Control-resolved room role and a given Application definitions list.
+    async fn list_installable_space_agents_response(
+        role: &str,
+        definitions: Value,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:listInstallableSpaceAgentsForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": definitions})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-room/agents/available")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let status = response.status().as_u16();
+        let parsed: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, parsed, application)
+    }
+
+    #[tokio::test]
+    async fn an_owner_browses_installable_agents_with_bound_state_reported_truthfully() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _application) = list_installable_space_agents_response(
+            "owner",
+            json!([
+                {"agentRef": "agent-1", "name": "Driftsassistent", "description": "", "definitionStatus": "active", "alreadyBound": true},
+                {"agentRef": "agent-2", "name": "Møtereferent", "description": "Skriver referat", "definitionStatus": "active", "alreadyBound": false}
+            ]),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let agents = body["data"]["agents"].as_array().expect("agents array");
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0]["agent_ref"], "agent-1");
+        assert_eq!(agents[0]["already_bound"], true);
+        assert_eq!(agents[1]["agent_ref"], "agent-2");
+        assert_eq!(agents[1]["already_bound"], false, "an unbound definition must be offered, not hidden");
+    }
+
+    #[tokio::test]
+    async fn an_editor_cannot_browse_installable_agents() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) =
+            list_installable_space_agents_response("editor", json!([])).await;
+
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_role_cannot_create_agent");
+        let received = application.received_requests().await.expect("convex calls");
+        assert!(
+            received.is_empty(),
+            "a denied role must reach no Application read at all"
+        );
+    }
+
+    /// Drive `POST /spaces/space-room/agents/bind` with a given
+    /// Control-resolved room role and given Convex step outcomes.
+    async fn bind_existing_space_agent_response(
+        role: &str,
+        confirmation: Value,
+        body: Value,
+    ) -> (u16, Value, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-room/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-room", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:bindExistingSpaceAgentForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"subjectId": "agent-agent2", "bindingRef": "sab_space-room_agent-agent2"}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/action"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:confirmSpaceAgentMembershipForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": confirmation})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/spaces/space-room/agents/bind")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let status = response.status().as_u16();
+        let parsed: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, parsed, application)
+    }
+
+    #[tokio::test]
+    async fn an_owner_binds_an_existing_agent_through_the_governed_two_step_flow() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) = bind_existing_space_agent_response(
+            "owner",
+            json!({"status": "applied"}),
+            json!({"agent_ref": "agent-2"}),
+        )
+        .await;
+
+        assert_eq!(status, 201, "owner-bound agent should be confirmed: {body}");
+        assert_eq!(body["data"]["subject_id"], "agent-agent2");
+        assert_eq!(body["data"]["status"], "active");
+
+        let received = application.received_requests().await.expect("convex calls");
+        let mutation = received
+            .iter()
+            .find(|request| request.url.path() == "/api/mutation")
+            .expect("bind-existing-definition request");
+        let mutation_body: Value = serde_json::from_slice(&mutation.body).expect("mutation JSON");
+        assert_eq!(mutation_body["args"]["externalAuthId"], "user-1");
+        assert_eq!(mutation_body["args"]["externalOrgId"], "org-1");
+        assert_eq!(mutation_body["args"]["spaceRef"], "space-room");
+        assert_eq!(mutation_body["args"]["agentId"], "agent-2");
+        assert!(received.iter().any(|request| request.url.path() == "/api/action"),
+            "Control roster confirmation must run");
+    }
+
+    #[tokio::test]
+    async fn an_editor_cannot_bind_an_existing_agent() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) = bind_existing_space_agent_response(
+            "editor",
+            json!({"status": "applied"}),
+            json!({"agent_ref": "agent-2"}),
+        )
+        .await;
+
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "space_role_cannot_create_agent");
+        let received = application.received_requests().await.expect("convex calls");
+        assert!(
+            received.is_empty(),
+            "a denied role must reach no Application write at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_without_an_agent_ref_is_rejected() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, application) =
+            bind_existing_space_agent_response("owner", json!({"status": "applied"}), json!({}))
+                .await;
+
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "agent_ref_required");
+        let received = application.received_requests().await.expect("convex calls");
+        assert!(received.is_empty(), "a malformed request must reach no Application call");
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_control_roster_leaves_the_bound_agent_pending() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _application) = bind_existing_space_agent_response(
+            "owner",
+            json!({"status": "rejected", "httpStatus": 403}),
+            json!({"agent_ref": "agent-2"}),
+        )
+        .await;
+
+        assert_eq!(status, 502);
+        assert_eq!(body["error"]["code"], "agent_membership_unconfirmed");
+    }
+
+    /// Drive `GET /spaces/space-1/agents` with a given Control roster and a
+    /// given Application binding projection, and return the parsed response.
+    async fn space_agents_response(roster: Value, bindings: Value) -> (u16, Value) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        // Control's real envelope, verified against user-core's `spaceRoster`
+        // handler: `{data: {members, count}}`. Mocking a bare array here would
+        // encode the caller's assumption instead of the contract, and the join
+        // would pass its tests while returning nothing in production.
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-1/roster"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"members": roster, "count": roster.as_array().map(Vec::len).unwrap_or(0)}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-1/agents")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        (status, body)
+    }
+
+    /// Drive `GET /agents/installations` with a given Control Space index and
+    /// per-space rosters/bindings. `spaces` is `(space_ref, kind, role, name)`;
+    /// `roster_by_space`/`bindings_by_space` key the same `space_ref`.
+    async fn list_org_agent_installations_response(
+        spaces: &[(&str, &str, &str, &str)],
+        roster_by_space: &[(&str, Value)],
+        bindings_by_space: &[(&str, Value)],
+    ) -> (u16, Value) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        let index: Vec<Value> = spaces
+            .iter()
+            .map(|(space_ref, kind, role, _name)| json!({"space_ref": space_ref, "kind": kind, "role": role}))
+            .collect();
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": index}})))
+            .mount(&user_core)
+            .await;
+        for (space_ref, roster) in roster_by_space {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/api/v1/internal/spaces/{space_ref}/roster")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"members": roster, "count": roster.as_array().map(Vec::len).unwrap_or(0)}
+                })))
+                .mount(&user_core)
+                .await;
+        }
+        let application = MockServer::start().await;
+        let labels: Vec<Value> = spaces
+            .iter()
+            .map(|(space_ref, kind, _role, name)| json!({"spaceRef": space_ref, "name": name, "kind": kind, "lifecycle": "active"}))
+            .collect();
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaces:spacesForOrgForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": labels})))
+            .mount(&application)
+            .await;
+        for (space_ref, bindings) in bindings_by_space {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/api/query"))
+                .and(wm_body_partial_json(json!({
+                    "path": "spaceAgents:spaceAgentBindingsForGateway",
+                    "args": {"spaceRef": space_ref},
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
+                .mount(&application)
+                .await;
+        }
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/installations")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn an_agent_bound_in_two_rooms_reports_one_definition_with_two_installations() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let binding = |status: &str| {
+            json!({
+                "bindingRef": format!("sab_{status}"), "agentRef": "agent-1", "subjectId": "svc-shared",
+                "name": "Shared Agent", "status": status, "definitionStatus": "active", "deliveryTargets": [],
+            })
+        };
+        let (status, body) = list_org_agent_installations_response(
+            &[
+                ("space-a", "room", "owner", "Team Room"),
+                ("space-b", "room", "owner", "Ops Room"),
+            ],
+            &[
+                ("space-a", json!([service_member("svc-shared")])),
+                ("space-b", json!([service_member("svc-shared")])),
+            ],
+            &[
+                ("space-a", json!([binding("active")])),
+                ("space-b", json!([binding("pending")])),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        let definitions = body["data"]["definitions"].as_array().expect("definitions array");
+        assert_eq!(definitions.len(), 1, "the same definition must group, not duplicate: {body}");
+        let definition = &definitions[0];
+        assert_eq!(definition["agent_ref"], "agent-1");
+        assert_eq!(definition["name"], "Shared Agent");
+        let installations = definition["installations"].as_array().expect("installations array");
+        assert_eq!(installations.len(), 2);
+        let by_space_ref = |space_ref: &str| installations.iter().find(|row| row["space_ref"] == space_ref).unwrap();
+        assert_eq!(by_space_ref("space-a")["space_name"], "Team Room");
+        assert_eq!(by_space_ref("space-a")["status"], "active");
+        assert_eq!(by_space_ref("space-b")["space_name"], "Ops Room");
+        assert_eq!(by_space_ref("space-b")["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn a_control_authorized_agent_with_no_published_identity_has_no_installation_row() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = list_org_agent_installations_response(
+            &[("space-a", "room", "owner", "Team Room")],
+            &[("space-a", json!([service_member("svc-orphan")]))],
+            &[("space-a", json!([]))],
+        )
+        .await;
+
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(
+            body["data"]["definitions"], json!([]),
+            "an unpublished Control subject has no definition to attach an installation row to: {body}"
+        );
+    }
+
+    fn service_member(subject_id: &str) -> Value {
+        json!({
+            "subject_type": "service",
+            "subject_id": subject_id,
+            "role": "editor",
+            "revision": 4,
+            "display_name": ""
+        })
+    }
+
+    /// The happy path: Control authorizes the agent, Application names it, and
+    /// the published channels reach the browser intact.
+    #[tokio::test]
+    async fn space_agents_join_control_authority_to_application_identity() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_agents_response(
+            json!([service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_space-1_svc-support",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "title": "Support",
+                "status": "active",
+                "definitionStatus": "active",
+                "deliveryTargets": [
+                    {"channel": "teams", "label": "Drift", "status": "active"},
+                    {"channel": "messenger", "label": "Verevon AS", "status": "pending"}
+                ],
+                "projectionVersion": 2
+            }]),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let agent = &body["data"]["agents"][0];
+        assert_eq!(agent["subject_id"], "svc-support");
+        assert_eq!(agent["name"], "Kundestøtte");
+        assert_eq!(agent["role"], "editor", "role comes from Control, not the binding");
+        assert_eq!(agent["status"], "active");
+        assert_eq!(agent["identity_published"], true);
+        assert_eq!(agent["delivery_targets"][0]["channel"], "teams");
+        assert_eq!(agent["delivery_targets"][1]["channel"], "messenger");
+        assert_eq!(agent["delivery_targets"][1]["status"], "pending");
+    }
+
+    /// Control authorized an agent that Application has not described. It must
+    /// still appear — dropping it would hide a participant that can genuinely
+    /// act in the room — but nothing may invent a name for it.
+    #[tokio::test]
+    async fn an_authorized_agent_without_a_published_identity_is_still_listed() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) =
+            space_agents_response(json!([service_member("svc-orphan")]), json!([])).await;
+
+        assert_eq!(status, 200);
+        let agent = &body["data"]["agents"][0];
+        assert_eq!(agent["subject_id"], "svc-orphan");
+        assert_eq!(agent["identity_published"], false);
+        assert!(
+            agent.get("name").is_none(),
+            "an unnamed agent must not be given a manufactured name"
+        );
+        assert_eq!(agent["delivery_targets"], json!([]));
+    }
+
+    /// The asymmetry that matters: a binding Control does not back is not a
+    /// participant. Rendering it would be the false membership claim the whole
+    /// definition/binding split exists to prevent.
+    #[tokio::test]
+    async fn a_binding_without_control_membership_is_never_a_participant() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_agents_response(
+            json!([]),
+            json!([{
+                "bindingRef": "sab_space-1_svc-ghost",
+                "agentRef": "agent-9",
+                "subjectId": "svc-ghost",
+                "name": "Spøkelse",
+                "status": "active",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["agents"], json!([]));
+        assert!(!body.to_string().contains("Spøkelse"));
+    }
+
+    /// People are not agents. The Agent view reads the same roster as Members,
+    /// so the service filter is what keeps the two views distinct.
+    #[tokio::test]
+    async fn human_members_never_appear_as_agents() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_agents_response(
+            json!([
+                {"subject_type": "user", "subject_id": "user-1", "role": "owner", "revision": 1, "display_name": "Ima"},
+                service_member("svc-support")
+            ]),
+            json!([]),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["data"]["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(body["data"]["agents"][0]["subject_id"], "svc-support");
+    }
+
+    /// A roster we could not read must not render as "this room has no agents".
+    #[tokio::test]
+    async fn an_unreadable_roster_fails_rather_than_reporting_no_agents() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-1/roster"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-1/agents")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_ne!(
+            response.status(),
+            axum::http::StatusCode::OK,
+            "an unreadable roster must not answer 200 with an empty agent list"
+        );
+    }
+
+    /// Common upstream wiring for `inject_mentioned_space_agent_persona` tests:
+    /// a Control roster and an Application binding, both mountable per case.
+    /// Returns the state plus the Convex mock so a test can additionally stub
+    /// `agentPersonaForGateway` and later inspect what it received.
+    // Returns the user-core MockServer too: wiremock shuts a server down on
+    // drop, so leaving it as a helper-local made the roster endpoint die at
+    // return and survive only by socket-linger luck — a scheduling flake that
+    // surfaced as "mentioned_agent_not_bound" 404s under parallel test load.
+    async fn mention_test_state(roster: Value, bindings: Value) -> (AppState, MockServer, MockServer) {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-1/roster"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"members": roster, "count": roster.as_array().map(Vec::len).unwrap_or(0)}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:spaceAgentBindingsForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        (state, application, user_core)
+    }
+
+    fn mention_service_member(subject_id: &str) -> Value {
+        json!({
+            "subject_type": "service",
+            "subject_id": subject_id,
+            "role": "editor",
+            "revision": 1,
+            "display_name": ""
+        })
+    }
+
+    /// The full happy path: Control authorizes the agent, Application names
+    /// it, Convex supplies its own instructions, and both land in the outbound
+    /// body — while the client's mention field itself does not survive, since
+    /// it was never authority, only a hint.
+    #[tokio::test]
+    async fn a_bound_active_agent_mention_injects_its_persona() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "active",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:agentPersonaForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"name": "Kundestøtte", "systemPrompt": "Answer in bullet points."}
+            })))
+            .mount(&application)
+            .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_ok(), "an active bound agent must be authorized");
+        assert_eq!(body["agent_name"], "Kundestøtte");
+        assert_eq!(body["agent_system_prompt"], "Answer in bullet points.");
+        assert!(
+            body.get("mentioned_agent_ref").is_none(),
+            "the client's mention hint must not survive into the outbound turn"
+        );
+        // The Space reference is left untouched here: that field belongs to
+        // `inject_personal_thread_context`, which runs next and removes it.
+        assert_eq!(body["space_ref"], "space-1");
+    }
+
+    /// A binding whose policy says `approval_mode: blocked` refuses the
+    /// invocation outright — the agent stays visible in the room, but a
+    /// mention may not reach the model.
+    #[tokio::test]
+    async fn a_blocked_binding_refuses_the_mention() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, _application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "active",
+                "approvalMode": "blocked",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        let (status, payload) = result.expect_err("a blocked binding must refuse");
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(payload.0["error"]["code"], "agent_invocation_blocked");
+        assert!(body.get("agent_name").is_none(), "no persona may be injected");
+    }
+
+    /// A present trigger list without "mention" refuses the mention: the
+    /// binding says this agent is not invoked that way.
+    #[tokio::test]
+    async fn a_binding_without_the_mention_trigger_refuses_the_mention() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, _application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "active",
+                "triggerModes": ["group"],
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        let (status, payload) = result.expect_err("a non-mention binding must refuse");
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(payload.0["error"]["code"], "agent_mention_not_enabled");
+    }
+
+    /// The room-born policy (`mention`, no tools, require_confirmation) binds
+    /// the turn itself: autonomy and the tool surface are stripped before the
+    /// request leaves the gateway, while the persona still lands.
+    #[tokio::test]
+    async fn a_room_born_binding_strips_autonomy_and_tools_from_the_turn() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (application_state, application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "active",
+                "triggerModes": ["mention"],
+                "allowedTools": [],
+                "approvalMode": "require_confirmation",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(json!({"path": "spaceAgents:agentPersonaForGateway"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"name": "Kundestøtte", "systemPrompt": "Answer briefly."}
+            })))
+            .mount(&application)
+            .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+            "plan_mode": true,
+            "features": ["tools", "agentic", "memory"],
+            "tools": [{"name": "web_search"}],
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &application_state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_ok(), "a mention-enabled binding must be authorized");
+        assert_eq!(body["agent_name"], "Kundestøtte");
+        assert_eq!(body["plan_mode"], false, "confirmation policy forbids autonomous runs");
+        assert_eq!(
+            body["features"],
+            json!(["memory"]),
+            "agentic and tools features must both be stripped"
+        );
+        assert_eq!(body["tools"], json!([]), "tool specs must be cleared");
+    }
+
+    /// A mention naming an agent with no Control membership, or no Application
+    /// binding, is rejected rather than silently answered by an unauthorized
+    /// agent or silently ignored — either would let a mention grant reach
+    /// (`docs/space-defenition.md`: "A mention never grants access").
+    #[tokio::test]
+    async fn mentioning_an_agent_not_bound_to_the_space_is_rejected() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = mention_test_state(json!([]), json!([])).await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-ghost",
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        let (status, response) = result.expect_err("an unbound mention must be rejected");
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(response.0["error"]["code"], "mentioned_agent_not_bound");
+        assert!(
+            body.get("agent_name").is_none(),
+            "a rejected mention must never inject a persona"
+        );
+    }
+
+    /// A binding that exists but has moved to `paused`/`revoked`/`failed` must
+    /// be rejected exactly like an absent one — `compose_space_agents` only
+    /// calls a binding `active` when its own status says so, and this is that
+    /// filter applied to the invocation path.
+    #[tokio::test]
+    async fn mentioning_a_paused_agent_binding_is_rejected() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = mention_test_state(
+            json!([mention_service_member("svc-support")]),
+            json!([{
+                "bindingRef": "sab_1",
+                "agentRef": "agent-1",
+                "subjectId": "svc-support",
+                "name": "Kundestøtte",
+                "status": "paused",
+                "deliveryTargets": []
+            }]),
+        )
+        .await;
+
+        let mut body = json!({
+            "content": "hello",
+            "space_ref": "space-1",
+            "mentioned_agent_ref": "svc-support",
+        });
+        let result = inject_mentioned_space_agent_persona(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        let (status, _) = result.expect_err("a paused binding must not answer");
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// An ordinary turn nobody addressed to an agent must be a complete
+    /// no-op: no upstream call, no error, no injected field. This is what
+    /// keeps every non-Space, non-mention Chat turn behaving exactly as it did
+    /// before this feature existed.
+    #[tokio::test]
+    async fn a_turn_with_no_mention_is_untouched() {
+        let mut body = json!({ "content": "hello", "space_ref": "space-1" });
+        let original = body.clone();
+        let result = inject_mentioned_space_agent_persona(
+            &crate::tests::test_state(false),
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(body, original, "an unmentioned turn must not be modified at all");
+    }
+
+    /// A mention outside a Space is nonsensical — there is no roster to check
+    /// it against — and must fail closed rather than silently answering as the
+    /// plain Verevon voice with an unauthorized name attached.
+    #[tokio::test]
+    async fn mentioning_an_agent_with_no_space_ref_is_rejected() {
+        let mut body = json!({ "content": "hello", "mentioned_agent_ref": "svc-support" });
+        let result = inject_mentioned_space_agent_persona(
+            &crate::tests::test_state(false),
+            &authenticated_user(),
+            "org-1",
+            &mut body,
+        )
+        .await;
+
+        let (status, response) = result.expect_err("a mention with no Space must be rejected");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(response.0["error"]["code"], "agent_mention_requires_space");
+    }
+
     #[tokio::test]
     async fn deletion_request_uses_the_bff_service_facade_and_never_accepts_browser_identity() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
@@ -1957,11 +4524,14 @@ mod tests {
             .mount(&user_core)
             .await;
         let application = MockServer::start().await;
+        // The org's Space list, which is what the ref lookup now reads. It was
+        // a single personal-Space object before; resolving any room by ref made
+        // it a list.
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": {
-                "spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"
-            }})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"}
+            ]})))
             .mount(&application)
             .await;
         std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
@@ -2031,11 +4601,12 @@ mod tests {
             .mount(&user_core)
             .await;
         let application = MockServer::start().await;
+        // The org's Space list — see the note in the context test above.
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": {
-                "spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"
-            }})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-personal", "name":"Personal Space", "kind":"personal", "lifecycle":"active"}
+            ]})))
             .mount(&application)
             .await;
         let model = MockServer::start().await;

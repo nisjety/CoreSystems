@@ -1152,6 +1152,21 @@ func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (*T
 // and returns the exact durable receipt on a retry.
 func (s *Service) CreateTicketOperation(ctx context.Context, input CreateTicketInput) (*TicketOperationReceipt, error) {
 	input = normalizeCreateTicketInput(input)
+	if input.AgentActionAuthorization != nil {
+		if err := input.AgentActionAuthorization.Validate(); err != nil {
+			return nil, err
+		}
+		// Normalize a copied authorization value. The owner transaction is the
+		// only downstream consumer; callers never receive a mutable pointer.
+		authorization := *input.AgentActionAuthorization
+		authorization.DecisionRef = strings.TrimSpace(authorization.DecisionRef)
+		authorization.SpaceRef = strings.TrimSpace(authorization.SpaceRef)
+		authorization.SubjectID = strings.TrimSpace(authorization.SubjectID)
+		authorization.RecipientAudienceRef = strings.TrimSpace(authorization.RecipientAudienceRef)
+		authorization.RecipientAudienceHash = strings.TrimSpace(authorization.RecipientAudienceHash)
+		authorization.PrivacyPolicyRef = strings.TrimSpace(authorization.PrivacyPolicyRef)
+		input.AgentActionAuthorization = &authorization
+	}
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	if input.IdempotencyKey == "" || len(input.IdempotencyKey) > 200 {
 		return nil, fmt.Errorf("%w: idempotency_key is required and must be at most 200 characters", ErrInvalidInput)
@@ -1185,6 +1200,182 @@ func (s *Service) CreateTicketOperation(ctx context.Context, input CreateTicketI
 	return receipt, nil
 }
 
+// ResolveAgentTicketActionGrant obtains the opaque current grant identifier
+// solely to bind a Control owner-effect reservation. It is intentionally not
+// an effect authorization: the eventual ticket transaction must resolve the
+// exact same grant again under its local lock.
+func (s *Service) ResolveAgentTicketActionGrant(ctx context.Context, input CreateTicketInput) (string, error) {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	if input.OrgID == "" || input.ConversationID == "" || input.AgentActionAuthorization == nil {
+		return "", fmt.Errorf("%w: agent ticket grant lookup requires owner authorization", ErrInvalidInput)
+	}
+	authorization := *input.AgentActionAuthorization
+	if err := authorization.Validate(); err != nil {
+		return "", err
+	}
+	input.AgentActionAuthorization = &authorization
+	grantID, err := s.repository.ResolveAgentTicketActionGrant(ctx, input)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(grantID) == "" || len(strings.TrimSpace(grantID)) > 200 {
+		return "", fmt.Errorf("agent ticket grant lookup returned an invalid grant")
+	}
+	return strings.TrimSpace(grantID), nil
+}
+
+// BeginAgentTicketOperationIntent persists the content-free owner intent
+// before any Control reservation is attempted. The private route must fail
+// closed when the repository has not adopted owner-effect-reservation-v1.
+func (s *Service) BeginAgentTicketOperationIntent(ctx context.Context, input TicketOperationIntentInput) (*TicketOperationReceipt, error) {
+	store, ok := s.repository.(AgentTicketOperationIntentStore)
+	if !ok {
+		return nil, ErrTicketOperationIntentUnavailable
+	}
+	return store.BeginAgentTicketOperationIntent(ctx, input)
+}
+
+// BindAgentTicketOperationReservation records the committed Control receipt
+// before the owner effect is attempted. A replay of the same reservation is
+// idempotent; a different reservation or commitment is a conflict.
+func (s *Service) BindAgentTicketOperationReservation(ctx context.Context, input TicketOperationReservationInput) (*TicketOperationReceipt, error) {
+	store, ok := s.repository.(AgentTicketOperationIntentStore)
+	if !ok {
+		return nil, ErrTicketOperationIntentUnavailable
+	}
+	return store.BindAgentTicketOperationReservation(ctx, input)
+}
+
+func (s *Service) MarkAgentTicketOperationUnknown(ctx context.Context, input TicketOperationOutcomeInput) error {
+	store, ok := s.repository.(AgentTicketOperationIntentStore)
+	if !ok {
+		return ErrTicketOperationIntentUnavailable
+	}
+	return store.MarkAgentTicketOperationUnknown(ctx, input)
+}
+
+func (s *Service) MarkAgentTicketOperationCancelled(ctx context.Context, input TicketOperationOutcomeInput) error {
+	store, ok := s.repository.(AgentTicketOperationIntentStore)
+	if !ok {
+		return ErrTicketOperationIntentUnavailable
+	}
+	return store.MarkAgentTicketOperationCancelled(ctx, input)
+}
+
+// CreateAgentTicketActionGrant persists Conversation Core's own exact
+// owner-resource permission for the currently disabled Model ticket action.
+// Control supplies a short-lived, current Space/policy decision at HTTP
+// ingress; this service receives only its verified, non-secret claims and
+// keeps the owner write and durable receipt transactional.
+func (s *Service) CreateAgentTicketActionGrant(ctx context.Context, input CreateAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {
+	input = normalizeCreateAgentTicketActionGrantInput(input)
+	if err := validateCreateAgentTicketActionGrantInput(input); err != nil {
+		return nil, err
+	}
+	receipt, err := s.repository.CreateAgentTicketActionGrant(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil || receipt.Grant == nil || receipt.Grant.ID == "" || receipt.Status != "created" {
+		return nil, fmt.Errorf("agent ticket grant returned an invalid durable receipt")
+	}
+	return receipt, nil
+}
+
+// RevokeAgentTicketActionGrant removes the owner-resource intersection before
+// returning a receipt. The repository locks the grant and a Model ticket
+// effect takes a compatible lock in its own transaction, so revoke cannot race
+// an unchecked effect into existence.
+func (s *Service) RevokeAgentTicketActionGrant(ctx context.Context, input RevokeAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {
+	input = normalizeRevokeAgentTicketActionGrantInput(input)
+	if err := validateRevokeAgentTicketActionGrantInput(input); err != nil {
+		return nil, err
+	}
+	receipt, err := s.repository.RevokeAgentTicketActionGrant(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil || receipt.Grant == nil || receipt.Grant.ID != input.GrantID || receipt.Status != "revoked" {
+		return nil, fmt.Errorf("agent ticket grant revoke returned an invalid durable receipt")
+	}
+	return receipt, nil
+}
+
+func normalizeCreateAgentTicketActionGrantInput(input CreateAgentTicketActionGrantInput) CreateAgentTicketActionGrantInput {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	input.ActionID = strings.TrimSpace(input.ActionID)
+	input.SpaceRef = strings.TrimSpace(input.SpaceRef)
+	input.SubjectID = strings.TrimSpace(input.SubjectID)
+	input.RecipientAudienceRef = strings.TrimSpace(input.RecipientAudienceRef)
+	input.RecipientAudienceHash = strings.TrimSpace(input.RecipientAudienceHash)
+	input.PrivacyPolicyRef = strings.TrimSpace(input.PrivacyPolicyRef)
+	input.CreatedByUserID = strings.TrimSpace(input.CreatedByUserID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.RequestSHA256 = strings.TrimSpace(input.RequestSHA256)
+	input.ControlDecisionRef = strings.TrimSpace(input.ControlDecisionRef)
+	return input
+}
+
+func normalizeRevokeAgentTicketActionGrantInput(input RevokeAgentTicketActionGrantInput) RevokeAgentTicketActionGrantInput {
+	input.OrgID = strings.TrimSpace(input.OrgID)
+	input.ConversationID = strings.TrimSpace(input.ConversationID)
+	input.GrantID = strings.TrimSpace(input.GrantID)
+	input.SpaceRef = strings.TrimSpace(input.SpaceRef)
+	input.SubjectID = strings.TrimSpace(input.SubjectID)
+	input.RevokedByUserID = strings.TrimSpace(input.RevokedByUserID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	input.RequestSHA256 = strings.TrimSpace(input.RequestSHA256)
+	input.ControlDecisionRef = strings.TrimSpace(input.ControlDecisionRef)
+	return input
+}
+
+func validateCreateAgentTicketActionGrantInput(input CreateAgentTicketActionGrantInput) error {
+	for name, value := range map[string]string{
+		"org_id": input.OrgID, "conversation_id": input.ConversationID, "action_id": input.ActionID,
+		"space_ref": input.SpaceRef, "subject_id": input.SubjectID,
+		"recipient_audience_ref": input.RecipientAudienceRef, "recipient_audience_hash": input.RecipientAudienceHash,
+		"privacy_policy_ref": input.PrivacyPolicyRef, "created_by_user_id": input.CreatedByUserID,
+		"idempotency_key": input.IdempotencyKey, "request_sha256": input.RequestSHA256,
+		"control_decision_ref": input.ControlDecisionRef,
+	} {
+		if value == "" || len(value) > 200 {
+			return fmt.Errorf("%w: agent ticket grant %s is invalid", ErrInvalidInput, name)
+		}
+	}
+	if input.ActionID != "tickets.create" || input.RecipientAudienceRevision <= 0 || input.AuthorityRevision <= 0 || !validTicketGrantSHA256(input.RequestSHA256) {
+		return fmt.Errorf("%w: agent ticket grant authority is invalid", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validateRevokeAgentTicketActionGrantInput(input RevokeAgentTicketActionGrantInput) error {
+	for name, value := range map[string]string{
+		"org_id": input.OrgID, "conversation_id": input.ConversationID, "grant_id": input.GrantID,
+		"space_ref": input.SpaceRef, "subject_id": input.SubjectID,
+		"revoked_by_user_id": input.RevokedByUserID, "idempotency_key": input.IdempotencyKey,
+		"request_sha256": input.RequestSHA256, "control_decision_ref": input.ControlDecisionRef,
+	} {
+		if value == "" || len(value) > 200 {
+			return fmt.Errorf("%w: agent ticket grant revoke %s is invalid", ErrInvalidInput, name)
+		}
+	}
+	if !validTicketGrantSHA256(input.RequestSHA256) {
+		return fmt.Errorf("%w: agent ticket grant revoke request is invalid", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validTicketGrantSHA256(value string) bool {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "sha256:") || len(value) != len("sha256:")+64 {
+		return false
+	}
+	_, err := hex.DecodeString(value[len("sha256:"):])
+	return err == nil
+}
+
 // GetTicketOperation reconciles an ambiguous request without attempting the
 // effect again. The repository binds the lookup to the same authenticated
 // actor that created the operation, so an organization peer cannot probe
@@ -1200,8 +1391,14 @@ func (s *Service) GetTicketOperation(ctx context.Context, orgID, actorUserID, id
 	if err != nil {
 		return nil, err
 	}
-	if receipt == nil || receipt.OperationID == "" || receipt.AuditEventID == "" || receipt.Status == "" || receipt.Ticket == nil {
+	if receipt == nil || receipt.OperationID == "" || receipt.Status == "" {
 		return nil, fmt.Errorf("ticket operation lookup returned an invalid durable receipt")
+	}
+	if receipt.Status == "completed" && (receipt.AuditEventID == "" || receipt.Ticket == nil) {
+		return nil, fmt.Errorf("completed ticket operation lookup returned an invalid durable receipt")
+	}
+	if receipt.Status != "completed" && receipt.Ticket != nil {
+		return nil, fmt.Errorf("non-completed ticket operation lookup returned ticket content")
 	}
 	return receipt, nil
 }
@@ -1225,6 +1422,13 @@ func ticketOperationRequestSHA256(input CreateTicketInput) string {
 	})
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
+}
+
+// TicketOperationRequestSHA256 exposes the same canonical, content-minimized
+// request binding used by the owner transaction so a pre-reservation intent
+// can be created with the exact digest that finalization will verify.
+func TicketOperationRequestSHA256(input CreateTicketInput) string {
+	return ticketOperationRequestSHA256(normalizeCreateTicketInput(input))
 }
 
 func (s *Service) UpdateTicket(ctx context.Context, input UpdateTicketInput) (*Ticket, error) {

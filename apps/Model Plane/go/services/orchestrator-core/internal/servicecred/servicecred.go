@@ -39,7 +39,7 @@
 //
 // # What is deliberately NOT wired
 //
-// execution-core has no minter and must not get one. Its `ExecuteStep`
+// execution-core's user-bound methods have no minter and must not get one. Its `ExecuteStep`
 // authorizes with `caller.authorize(&req.org_id, Some(&req.user_id))` — the
 // request's user must equal the CALLER's own user — and resolves run ownership
 // by that same user id. A minted service token's subject is the service itself
@@ -71,6 +71,10 @@ const (
 	AudienceInferenceCore  = "inference-core"
 	AudienceCapabilityCore = "capability-core"
 	AudienceLettaBridge    = "letta-bridge"
+	// AudienceExecutionCore is used only for the dedicated scheduled-step RPC.
+	// The connection interceptor filters this audience to that method, so the
+	// user-bound ExecuteStep/RunAgent methods never receive a service token.
+	AudienceExecutionCore = "execution-core"
 )
 
 // metadataAuthorization is the gRPC metadata key every Model Plane service reads
@@ -174,6 +178,14 @@ func resolveOrg(ctx context.Context, req any) string {
 // deployment that has not configured minting behaves exactly as it did before
 // this package existed instead of breaking the working proxy path.
 func UnaryInterceptor(minter Minter, logger *slog.Logger) grpc.UnaryClientInterceptor {
+	return UnaryInterceptorForMethods(minter, logger, nil)
+}
+
+// UnaryInterceptorForMethods is the narrow variant used by execution-core:
+// an activity service credential may be minted for the one explicitly
+// approved owner-authority method, but must never be attached to the
+// user-bound ExecuteStep or RunAgent calls on the same connection.
+func UnaryInterceptorForMethods(minter Minter, logger *slog.Logger, allowedMethods map[string]struct{}) grpc.UnaryClientInterceptor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -185,6 +197,11 @@ func UnaryInterceptor(minter Minter, logger *slog.Logger) grpc.UnaryClientInterc
 		invoker grpc.UnaryInvoker,
 		opts ...grpc.CallOption,
 	) error {
+		if allowedMethods != nil {
+			if _, allowed := allowedMethods[method]; !allowed {
+				return invoker(forwardInbound(ctx), method, req, reply, cc, opts...)
+			}
+		}
 		if hasForwardableCredential(ctx) || minter == nil {
 			return invoker(forwardInbound(ctx), method, req, reply, cc, opts...)
 		}

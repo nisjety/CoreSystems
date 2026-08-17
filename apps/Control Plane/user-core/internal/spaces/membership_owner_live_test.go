@@ -117,6 +117,96 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 	}
 }
 
+// A human-roster sync must not revoke the room's agents. org-core knows people
+// and nothing else, so an unscoped convergence from it deactivates every bound
+// agent as a side effect — a Space agent binding destroyed by a sync that never
+// knew the binding existed.
+func TestUserScopedReplacementLeavesAgentsBound(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL not set; skipping live membership scope test")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer pool.Close()
+	repo := &Repository{db: &database.DB{Pool: pool}}
+
+	const (
+		spaceRef = "test-space-agent-scope"
+		orgID    = "test-org-agent-scope"
+		owner    = "test-owner-agent-scope"
+		agent    = "test-agent-subject"
+	)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM space_memberships WHERE space_ref=$1`, spaceRef)
+		_, _ = pool.Exec(ctx, `DELETE FROM space_authority_revisions WHERE space_ref=$1`, spaceRef)
+		_, _ = pool.Exec(ctx, `DELETE FROM registered_spaces WHERE space_ref=$1`, spaceRef)
+	})
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO registered_spaces (space_ref, org_id, space_kind, owner_principal_id,
+		    application_lifecycle_revision, registration_state)
+		VALUES ($1,$2,'room',$3,1,'active')
+		ON CONFLICT (space_ref) DO NOTHING`, spaceRef, orgID, owner); err != nil {
+		t.Fatalf("seed Space: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO space_authority_revisions (space_ref) VALUES ($1) ON CONFLICT DO NOTHING`, spaceRef); err != nil {
+		t.Fatalf("seed revisions: %v", err)
+	}
+	// An agent bound to the room by a different, agent-aware decision.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, granted_by)
+		VALUES ($1,'service',$2,'editor','test')
+		ON CONFLICT (space_ref, subject_type, subject_id) DO UPDATE SET active=TRUE`,
+		spaceRef, agent); err != nil {
+		t.Fatalf("seed agent membership: %v", err)
+	}
+
+	// The human roster converges and never mentions the agent.
+	if _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
+		SpaceRef:            spaceRef,
+		ManagedSubjectTypes: []string{"user"},
+		Members: []MemberGrant{
+			{SubjectType: "user", SubjectID: owner, Role: "owner"},
+		},
+	}); err != nil {
+		t.Fatalf("replace memberships: %v", err)
+	}
+
+	var active bool
+	if err := pool.QueryRow(ctx,
+		`SELECT active FROM space_memberships WHERE space_ref=$1 AND subject_type='service' AND subject_id=$2`,
+		spaceRef, agent).Scan(&active); err != nil {
+		t.Fatalf("read agent membership: %v", err)
+	}
+	if !active {
+		t.Fatal("a human roster sync revoked the room's agent")
+	}
+
+	// Without a declared scope the same call still owns the whole roster, so an
+	// agent-aware caller can genuinely revoke one.
+	if _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
+		SpaceRef: spaceRef,
+		Members: []MemberGrant{
+			{SubjectType: "user", SubjectID: owner, Role: "owner"},
+		},
+	}); err != nil {
+		t.Fatalf("unscoped replace: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT active FROM space_memberships WHERE space_ref=$1 AND subject_type='service' AND subject_id=$2`,
+		spaceRef, agent).Scan(&active); err != nil {
+		t.Fatalf("read agent membership after unscoped replace: %v", err)
+	}
+	if active {
+		t.Fatal("an unscoped replacement must still be able to revoke an agent")
+	}
+}
+
 // The index answers with the Spaces a subject actually belongs to, and the
 // organization-membership backstop removes them all when the person leaves the
 // organization — even before the per-Space revocation syncs.

@@ -135,9 +135,19 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	admins.PATCH("/ticket-automation-rules/:id", handler.PatchTicketAutomationRule)
 	admins.POST("/sla-policies", handler.CreateSLAPolicy)
 	admins.PATCH("/sla-policies/:id", handler.PatchSLAPolicy)
+	admins.POST("/conversations/:id/agent-action-grants", handler.CreateAgentTicketActionGrant)
+	admins.DELETE("/conversations/:id/agent-action-grants/:grant_id", handler.RevokeAgentTicketActionGrant)
 
 	ingest := router.Group("/internal", delegated, requireServicePrincipal("conversation-ingest"), requireOrganizationPrincipal())
 	ingest.POST("/conversation-events", handler.IngestEvent)
+
+	// This workload lane intentionally does not accept a delegated browser
+	// scope. execution-core transport identity only reaches the handler; the
+	// target organization and actor are derived from its signed Control
+	// decision, and Conversation Core performs its own target lookup.
+	agentActions := router.Group("/internal/v1", delegated, requireServicePrincipal("execution-core"))
+	agentActions.POST("/agent-ticket-operations", handler.CreateAgentTicketOperation)
+	agentActions.POST("/agent-ticket-operations/reconcile", handler.ReconcileAgentTicketOperation)
 
 	return router
 }

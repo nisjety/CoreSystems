@@ -1,9 +1,33 @@
 # Space cockpit: what's ready to wire in
 
-Date: 2026-08-13
+Date: 2026-08-13 · **Updated: 2026-08-16 — the handoff was accepted; see status below**
 For: whoever owns `src/features/spaces/components/SpacePage.tsx`
 From: the QM-improvement workstream (`apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md`,
 `apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md`)
+
+> **Status 2026-08-16 — this handoff is complete.** Everything proposed below is
+> now wired, plus more. Keep this document for the three design rules in
+> "Three things to know", which still hold and are still load-bearing. For
+> current product intent read `space-defenition.md`; for the plan read
+> `SPACE_AGENT_SCOPE_PLAN_2026-08-14.md`.
+>
+> What changed since:
+> - `SpacePage.tsx` adopted `SpaceCockpit` and `SpaceActivityFeed`, and is fully
+>   translated through `useI18n()` — including the Space `kind`/`lifecycle`/`role`
+>   enums and the cockpit's own tab labels, which were hardcoded Norwegian.
+> - The **Members** tab is no longer a shell: Control publishes a roster
+>   (`GET /api/v1/spaces/:space_ref/roster`) and the tab renders it.
+> - The **Agent** tab renders real Space-bound agents
+>   (`GET /api/v1/spaces/:space_ref/agents`), joining Control's authoritative
+>   roster with an Application binding projection, with Teams / Messenger /
+>   embed delivery targets.
+> - Work and Knowledge still have no Space-scoped endpoint and still render the
+>   honest unavailable state — deliberately.
+> - The two `solid/prefer-for` lint errors flagged at the bottom are fixed.
+>
+> Open question §"Language" is settled: Norwegian is the default (`defaultLocale
+> = 'no'`), everything user-facing goes through `i18n.tr(no, en)`, and "Rom" is
+> the user-facing word while `Space` stays in identifiers.
 
 Three components are committed and tested against the Space home spec in
 `VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md`. **`SpacePage.tsx`,
@@ -113,13 +137,26 @@ better user-facing word — it carries the Slack/Teams mental model in one
 Norwegian syllable, where "Space" reads as jargon. These components say "rom"
 in prose and keep `Space` in identifiers.
 
-**Roster.** The Members tab is a shell because there's no endpoint behind it —
-`/actions` replaced `/membership`, and nothing returns more than the caller's
-own role. Whenever S1.2's membership list surfaces, that tab is a
-`<SpaceMemberList members={...} />` away.
+**Roster.** ~~The Members tab is a shell because there's no endpoint behind it.~~
+**Resolved 2026-08-15:** Control publishes `GET /api/v1/spaces/:space_ref/roster`,
+gated on the caller's own membership. Note its two honest edges — an empty roster
+answers 404 rather than an empty array, because "you cannot see this" is not "the
+room is empty"; and `display_name` may be blank, since a membership can exist
+before its user projection does.
 
 ## Not fixed, on purpose
 
-`SpacePage.tsx` has two lint errors — `Array#map` instead of `<For>` at lines
-60 and 87 (`solid/prefer-for`). Your file, your call; flagged only because
-`pnpm lint` currently reports 2 errors and they're both there.
+~~`SpacePage.tsx` has two lint errors — `Array#map` instead of `<For>`.~~
+**Fixed.** `pnpm lint` is clean.
+
+## One trap added since, worth the same warning as the `<Show>` one
+
+Control's roster envelope is `{data: {members: [...], count: N}}` — **not** a bare
+array. The first version of the agents join read it as an array, which silently
+produced zero agents while its tests passed, because the test mock encoded the
+author's assumption instead of the contract. The room would have reported "no
+agents are bound here" in production while Control was returning several.
+
+Read the owner's handler before writing the mock. The same applies to Better
+Auth's `get-session`, which answers a dead cookie with HTTP 200 and a bare `null`
+body rather than `{"user": null}`.

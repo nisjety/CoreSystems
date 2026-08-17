@@ -353,6 +353,13 @@ services:
             context: ./user-core
             dockerfile: Dockerfile
             args: *build-metadata
+            # user-core's go.mod `replace`s the Model Plane gen module to a
+            # sibling path, which Go resolves on the filesystem. The build
+            # context above is ./user-core, so the module is outside it and only
+            # a real image build reveals the gap — `go build` on the host works
+            # fine because the path exists there.
+            additional_contexts:
+                model-plane-go-gen: "../Model Plane/go/gen"
         container_name: user-service
         init: true
         restart: unless-stopped
@@ -385,11 +392,16 @@ services:
             # Data Plane authz visibility/grant stays disabled until its org/resource
             # delegation contract is equivalently bound.
             USER_CORE_SERVICE_CREDENTIALS: >-
-                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self","spaces:resolve"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read"]},{"principal":"application-space-lifecycle","audience":"user-core","token":"${APPLICATION_SPACE_LIFECYCLE_TOKEN:?APPLICATION_SPACE_LIFECYCLE_TOKEN is required}","scopes":["spaces:register","spaces:membership:write"]}]
+                [{"principal":"verevon-gateway","audience":"user-core","token":"${USER_CORE_GATEWAY_TOKEN:?USER_CORE_GATEWAY_TOKEN is required}","scopes":["users:read:self","users:write:self","spaces:resolve","spaces:issue"]},{"principal":"session-core","audience":"user-core","token":"${USER_CORE_SESSION_TOKEN:?USER_CORE_SESSION_TOKEN is required}","scopes":["users:read:self"]},{"principal":"org-core","audience":"user-core","token":"${USER_CORE_ORG_TOKEN:?USER_CORE_ORG_TOKEN is required}","scopes":["users:read:any"]},{"principal":"auth-core","audience":"user-core","token":"${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}","scopes":["users:read:any","users:write:any","users:sync","memberships:write"]},{"principal":"retrieval-engine","audience":"user-core","token":"${USER_CORE_RETRIEVAL_TOKEN:?USER_CORE_RETRIEVAL_TOKEN is required}","scopes":["authz:read"]},{"principal":"documents-api","audience":"user-core","token":"${USER_CORE_DOCUMENTS_TOKEN:?USER_CORE_DOCUMENTS_TOKEN is required}","scopes":["authz:read"]},{"principal":"application-space-lifecycle","audience":"user-core","token":"${APPLICATION_SPACE_LIFECYCLE_TOKEN:?APPLICATION_SPACE_LIFECYCLE_TOKEN is required}","scopes":["spaces:register","spaces:membership:write","spaces:audience:publish"]},{"principal":"control-space-policy","audience":"user-core","token":"${CONTROL_SPACE_POLICY_TOKEN:?CONTROL_SPACE_POLICY_TOKEN is required}","scopes":["spaces:policy:write"]}]
             USER_CORE_GRPC_SERVICE_CREDENTIALS: >-
                 [{"credentialId":"auth-core-primary","principal":"auth-core","audience":"user-core-grpc","token":"${AUTH_USER_CORE_GRPC_SERVICE_TOKEN:?AUTH_USER_CORE_GRPC_SERVICE_TOKEN is required}","methods":["/user.v1.UserService/CreateUser","/user.v1.UserService/UpdateUser","/user.v1.UserService/GetUserByEmail","/user.v1.UserService/CreateSession","/user.v1.UserService/GetUser","/user.v1.UserService/DeleteUser","/user.v1.UserService/HealthCheck"]},{"credentialId":"execution-core-primary","principal":"execution-core","audience":"user-core-grpc","token":"${EXECUTION_CORE_USER_CORE_GRPC_TOKEN:?EXECUTION_CORE_USER_CORE_GRPC_TOKEN is required}","methods":["/user.v1.UserService/GetUser","/user.v1.UserService/GetUserProfile"]}]
             USER_AUTH_INTERNAL_CLIENT_CREDENTIAL: >-
                 {"credentialId":"user-core-primary","principal":"user-core","audience":"auth-core-internal","token":"${USER_AUTH_INTERNAL_SERVICE_TOKEN:?USER_AUTH_INTERNAL_SERVICE_TOKEN is required}"}
+            # Ed25519 signer for Control Space decisions (thread/action authority
+            # tokens). Verifiers (Model Plane session-core et al) hold only the
+            # public half; the private key never leaves user-core.
+            CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:?CONTROL_SPACE_DECISION_KEY_ID is required}
+            CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64: ${CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64:?CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 is required}
             AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
             AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
             DATA_PLANE_AUTH_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}

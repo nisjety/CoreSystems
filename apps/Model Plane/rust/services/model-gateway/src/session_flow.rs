@@ -233,6 +233,7 @@ async fn append_user_message(
             role: "user".to_owned(),
             content: goal.to_owned(),
             metadata: None,
+            agent_name: String::new(),
             space_id: space.space_id,
             space_decision_ref: space.space_decision_ref,
             recipient_audience_ref: space.recipient_audience_ref,
@@ -948,7 +949,7 @@ pub async fn append_assistant_message(
     thread_id: &str,
     content: &str,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, None).await
+    append_assistant_message_with_bearer(state, thread_id, content, None, None).await
 }
 
 /// Persist an assistant message with an independently verified Session Core
@@ -962,8 +963,16 @@ pub async fn append_assistant_message_authenticated(
     thread_id: &str,
     content: &str,
     bearer: &VerifiedSessionBearer,
+    agent_name: Option<&str>,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer.as_str())).await
+    append_assistant_message_with_bearer(
+        state,
+        thread_id,
+        content,
+        Some(bearer.as_str()),
+        agent_name,
+    )
+    .await
 }
 
 /// Crate-internal adapter for an ingress boundary that has already verified a
@@ -974,7 +983,7 @@ pub(crate) async fn append_assistant_message_with_token(
     content: &str,
     bearer: &str,
 ) -> Result<()> {
-    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer)).await
+    append_assistant_message_with_bearer(state, thread_id, content, Some(bearer), None).await
 }
 
 async fn append_assistant_message_with_bearer(
@@ -982,6 +991,9 @@ async fn append_assistant_message_with_bearer(
     thread_id: &str,
     content: &str,
     bearer: Option<&str>,
+    // The persona this turn answered as, recorded on the message for the
+    // room's per-turn attribution. Identity history, never authority.
+    agent_name: Option<&str>,
 ) -> Result<()> {
     let trimmed = content.trim();
     if trimmed.is_empty() {
@@ -996,6 +1008,7 @@ async fn append_assistant_message_with_bearer(
                 role: "assistant".to_owned(),
                 content: trimmed.to_owned(),
                 metadata: None,
+                agent_name: agent_name.unwrap_or_default().trim().to_owned(),
                 ..Default::default()
             },
             bearer,

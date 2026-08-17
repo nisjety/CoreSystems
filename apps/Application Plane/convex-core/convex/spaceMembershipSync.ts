@@ -114,7 +114,11 @@ export const syncOrganizationRoom = internalAction({
             "X-Service-Id": SERVICE_PRINCIPAL,
             "X-Service-Token": APPLICATION_SPACE_LIFECYCLE_TOKEN,
           },
-          body: JSON.stringify({ members }),
+          // org-core's roster is people and nothing else. Saying so keeps
+          // Control's convergence from revoking the room's agents as a side
+          // effect of a human roster syncing — they are bound by a different
+          // decision that this call knows nothing about.
+          body: JSON.stringify({ members, managed_subject_types: ["user"] }),
         },
       );
     } catch {

@@ -49,11 +49,11 @@ describe('SupportPage navigation', () => {
 
     const centerTabs = screen.getByRole('tablist', { name: /outbound content|utgående innhold/i })
     fireEvent.click(within(centerTabs).getByRole('tab', { name: /delivery|levering/i }))
-    expect(screen.getByRole('heading', { name: /delivery status is not available yet|leveringsstatus er ikke tilgjengelig ennå/i })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /select a receipt|velg en kvittering/i })).toBeTruthy()
 
     const railTabs = screen.getByRole('tablist', { name: /outbound context|utgående kontekst/i })
     fireEvent.click(within(railTabs).getByRole('tab', { name: 'Verevon' }))
-    expect(screen.getByText(/select a message before verevon receives outbound context|velg en melding før verevon får utgående kontekst/i)).toBeTruthy()
+    expect(screen.getByText(/select a receipt for verevon context|velg en kvittering for verevon-kontekst|velg en kvittering for verif|velg en kvittering før verevon får utgående kontekst/i)).toBeTruthy()
   })
 
 })

@@ -405,10 +405,21 @@ describe('TicketingPage', () => {
     const statusUpdates = vi.mocked(fetch).mock.calls
       .filter(([url, init]) => String(url).endsWith('/api/v1/actions/execute') && init?.method === 'POST')
       .map(([, init]) => JSON.parse(String(init?.body)))
-    expect(statusUpdates).toEqual([
-      { actionId: 'tickets.update', input: { ticketId: ticketFixture.id, status: 'waiting_team' } },
-      { actionId: 'tickets.update', input: { ticketId: relatedTicketFixture.id, status: 'waiting_team' } },
-    ])
+    expect(statusUpdates).toHaveLength(2)
+    expect(statusUpdates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          actionId: 'tickets.update',
+          idempotencyKey: expect.any(String),
+          input: { ticketId: ticketFixture.id, status: 'waiting_team' },
+        }),
+        expect.objectContaining({
+          actionId: 'tickets.update',
+          idempotencyKey: expect.any(String),
+          input: { ticketId: relatedTicketFixture.id, status: 'waiting_team' },
+        }),
+      ]),
+    )
   })
 
   it('renders the V2 ticket workspace with saved views, macros, SLA, checklist, and links', async () => {

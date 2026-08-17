@@ -68,6 +68,142 @@ func (x *GetRunRequest) GetRunId() string {
 	return ""
 }
 
+type GetScheduledStepContextRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ThreadId      string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	OrgId         string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetScheduledStepContextRequest) Reset() {
+	*x = GetScheduledStepContextRequest{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetScheduledStepContextRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetScheduledStepContextRequest) ProtoMessage() {}
+
+func (x *GetScheduledStepContextRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetScheduledStepContextRequest.ProtoReflect.Descriptor instead.
+func (*GetScheduledStepContextRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *GetScheduledStepContextRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *GetScheduledStepContextRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *GetScheduledStepContextRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+type ScheduledStepContext struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ThreadId      string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	OrgId         string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	Goal          string                 `protobuf:"bytes,4,opt,name=goal,proto3" json:"goal,omitempty"`
+	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ScheduledStepContext) Reset() {
+	*x = ScheduledStepContext{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ScheduledStepContext) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ScheduledStepContext) ProtoMessage() {}
+
+func (x *ScheduledStepContext) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ScheduledStepContext.ProtoReflect.Descriptor instead.
+func (*ScheduledStepContext) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ScheduledStepContext) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetGoal() string {
+	if x != nil {
+		return x.Goal
+	}
+	return ""
+}
+
+func (x *ScheduledStepContext) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
 type ListRunsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Thread to list runs for.
@@ -84,7 +220,7 @@ type ListRunsRequest struct {
 
 func (x *ListRunsRequest) Reset() {
 	*x = ListRunsRequest{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[1]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -96,7 +232,7 @@ func (x *ListRunsRequest) String() string {
 func (*ListRunsRequest) ProtoMessage() {}
 
 func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[1]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -109,7 +245,7 @@ func (x *ListRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsRequest.ProtoReflect.Descriptor instead.
 func (*ListRunsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{1}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ListRunsRequest) GetThreadId() string {
@@ -152,7 +288,7 @@ type ListRunsResponse struct {
 
 func (x *ListRunsResponse) Reset() {
 	*x = ListRunsResponse{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[2]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -164,7 +300,7 @@ func (x *ListRunsResponse) String() string {
 func (*ListRunsResponse) ProtoMessage() {}
 
 func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[2]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -177,7 +313,7 @@ func (x *ListRunsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRunsResponse.ProtoReflect.Descriptor instead.
 func (*ListRunsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{2}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ListRunsResponse) GetRuns() []*RunDetail {
@@ -211,7 +347,7 @@ type ListSystemRunsRequest struct {
 
 func (x *ListSystemRunsRequest) Reset() {
 	*x = ListSystemRunsRequest{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[3]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -223,7 +359,7 @@ func (x *ListSystemRunsRequest) String() string {
 func (*ListSystemRunsRequest) ProtoMessage() {}
 
 func (x *ListSystemRunsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[3]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -236,7 +372,7 @@ func (x *ListSystemRunsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSystemRunsRequest.ProtoReflect.Descriptor instead.
 func (*ListSystemRunsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{3}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ListSystemRunsRequest) GetOrgId() string {
@@ -279,7 +415,7 @@ type CancelRunRequest struct {
 
 func (x *CancelRunRequest) Reset() {
 	*x = CancelRunRequest{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[4]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -291,7 +427,7 @@ func (x *CancelRunRequest) String() string {
 func (*CancelRunRequest) ProtoMessage() {}
 
 func (x *CancelRunRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[4]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -304,7 +440,7 @@ func (x *CancelRunRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRunRequest.ProtoReflect.Descriptor instead.
 func (*CancelRunRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{4}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *CancelRunRequest) GetRunId() string {
@@ -331,7 +467,7 @@ type CancelRunResponse struct {
 
 func (x *CancelRunResponse) Reset() {
 	*x = CancelRunResponse{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[5]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -343,7 +479,7 @@ func (x *CancelRunResponse) String() string {
 func (*CancelRunResponse) ProtoMessage() {}
 
 func (x *CancelRunResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[5]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -356,7 +492,7 @@ func (x *CancelRunResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelRunResponse.ProtoReflect.Descriptor instead.
 func (*CancelRunResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{5}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CancelRunResponse) GetCancelled() bool {
@@ -377,7 +513,7 @@ type ResolveRunOwnerRequest struct {
 
 func (x *ResolveRunOwnerRequest) Reset() {
 	*x = ResolveRunOwnerRequest{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[6]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -389,7 +525,7 @@ func (x *ResolveRunOwnerRequest) String() string {
 func (*ResolveRunOwnerRequest) ProtoMessage() {}
 
 func (x *ResolveRunOwnerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[6]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -402,7 +538,7 @@ func (x *ResolveRunOwnerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveRunOwnerRequest.ProtoReflect.Descriptor instead.
 func (*ResolveRunOwnerRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ResolveRunOwnerRequest) GetRunId() string {
@@ -435,7 +571,7 @@ type ResolveRunOwnerResponse struct {
 
 func (x *ResolveRunOwnerResponse) Reset() {
 	*x = ResolveRunOwnerResponse{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[7]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -447,7 +583,7 @@ func (x *ResolveRunOwnerResponse) String() string {
 func (*ResolveRunOwnerResponse) ProtoMessage() {}
 
 func (x *ResolveRunOwnerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[7]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -460,7 +596,7 @@ func (x *ResolveRunOwnerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResolveRunOwnerResponse.ProtoReflect.Descriptor instead.
 func (*ResolveRunOwnerResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ResolveRunOwnerResponse) GetAuthorized() bool {
@@ -468,6 +604,473 @@ func (x *ResolveRunOwnerResponse) GetAuthorized() bool {
 		return x.Authorized
 	}
 	return false
+}
+
+// ResolveRunActionAuthorityRequest is intentionally limited to the run and
+// tenant. Subject, Space, audience, resource, and privacy values are derived
+// only from the durable run/thread rows; callers cannot restate them.
+type ResolveRunActionAuthorityRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	OrgId         string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResolveRunActionAuthorityRequest) Reset() {
+	*x = ResolveRunActionAuthorityRequest{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveRunActionAuthorityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveRunActionAuthorityRequest) ProtoMessage() {}
+
+func (x *ResolveRunActionAuthorityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveRunActionAuthorityRequest.ProtoReflect.Descriptor instead.
+func (*ResolveRunActionAuthorityRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ResolveRunActionAuthorityRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+// ResolveRunActionAuthorityResponse carries no transcript, goal, model output,
+// tool input, or decision bearer. Control must re-resolve current membership,
+// entitlement, privacy, recipient audience, and owner-resource authorization
+// before it issues an effect decision. `resolved=false` has no authority and
+// all other fields are empty/default.
+type ResolveRunActionAuthorityResponse struct {
+	state                     protoimpl.MessageState `protogen:"open.v1"`
+	Resolved                  bool                   `protobuf:"varint,1,opt,name=resolved,proto3" json:"resolved,omitempty"`
+	RunId                     string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	OrgId                     string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	SubjectId                 string                 `protobuf:"bytes,4,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	ThreadId                  string                 `protobuf:"bytes,5,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	SpaceId                   string                 `protobuf:"bytes,6,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	RecipientAudienceRef      string                 `protobuf:"bytes,7,opt,name=recipient_audience_ref,json=recipientAudienceRef,proto3" json:"recipient_audience_ref,omitempty"`
+	RecipientAudienceRevision uint64                 `protobuf:"varint,8,opt,name=recipient_audience_revision,json=recipientAudienceRevision,proto3" json:"recipient_audience_revision,omitempty"`
+	RecipientAudienceHash     string                 `protobuf:"bytes,9,opt,name=recipient_audience_hash,json=recipientAudienceHash,proto3" json:"recipient_audience_hash,omitempty"`
+	PrivacyPolicyRef          string                 `protobuf:"bytes,10,opt,name=privacy_policy_ref,json=privacyPolicyRef,proto3" json:"privacy_policy_ref,omitempty"`
+	// This is the thread's original resource binding, not authority for a
+	// Conversation Core ticket/case resource. The target owner still checks its
+	// own current resource ACL immediately before the effect.
+	ThreadResourceAuthorizationRef string `protobuf:"bytes,11,opt,name=thread_resource_authorization_ref,json=threadResourceAuthorizationRef,proto3" json:"thread_resource_authorization_ref,omitempty"`
+	AuthorityRevision              uint64 `protobuf:"varint,12,opt,name=authority_revision,json=authorityRevision,proto3" json:"authority_revision,omitempty"`
+	RunStatus                      string `protobuf:"bytes,13,opt,name=run_status,json=runStatus,proto3" json:"run_status,omitempty"`
+	unknownFields                  protoimpl.UnknownFields
+	sizeCache                      protoimpl.SizeCache
+}
+
+func (x *ResolveRunActionAuthorityResponse) Reset() {
+	*x = ResolveRunActionAuthorityResponse{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveRunActionAuthorityResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveRunActionAuthorityResponse) ProtoMessage() {}
+
+func (x *ResolveRunActionAuthorityResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveRunActionAuthorityResponse.ProtoReflect.Descriptor instead.
+func (*ResolveRunActionAuthorityResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetResolved() bool {
+	if x != nil {
+		return x.Resolved
+	}
+	return false
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetRecipientAudienceRef() string {
+	if x != nil {
+		return x.RecipientAudienceRef
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetRecipientAudienceRevision() uint64 {
+	if x != nil {
+		return x.RecipientAudienceRevision
+	}
+	return 0
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetRecipientAudienceHash() string {
+	if x != nil {
+		return x.RecipientAudienceHash
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetPrivacyPolicyRef() string {
+	if x != nil {
+		return x.PrivacyPolicyRef
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetThreadResourceAuthorizationRef() string {
+	if x != nil {
+		return x.ThreadResourceAuthorizationRef
+	}
+	return ""
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetAuthorityRevision() uint64 {
+	if x != nil {
+		return x.AuthorityRevision
+	}
+	return 0
+}
+
+func (x *ResolveRunActionAuthorityResponse) GetRunStatus() string {
+	if x != nil {
+		return x.RunStatus
+	}
+	return ""
+}
+
+type ResolveScheduledStepAuthorityRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ThreadId       string                 `protobuf:"bytes,2,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	OrgId          string                 `protobuf:"bytes,3,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	ScheduleId     string                 `protobuf:"bytes,4,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	FireKey        string                 `protobuf:"bytes,5,opt,name=fire_key,json=fireKey,proto3" json:"fire_key,omitempty"`
+	TemplateDigest string                 `protobuf:"bytes,6,opt,name=template_digest,json=templateDigest,proto3" json:"template_digest,omitempty"`
+	PolicyDigest   string                 `protobuf:"bytes,7,opt,name=policy_digest,json=policyDigest,proto3" json:"policy_digest,omitempty"`
+	StepId         string                 `protobuf:"bytes,8,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	StepIndex      uint32                 `protobuf:"varint,9,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	IdempotencyKey string                 `protobuf:"bytes,10,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) Reset() {
+	*x = ResolveScheduledStepAuthorityRequest{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveScheduledStepAuthorityRequest) ProtoMessage() {}
+
+func (x *ResolveScheduledStepAuthorityRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveScheduledStepAuthorityRequest.ProtoReflect.Descriptor instead.
+func (*ResolveScheduledStepAuthorityRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetScheduleId() string {
+	if x != nil {
+		return x.ScheduleId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetFireKey() string {
+	if x != nil {
+		return x.FireKey
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetTemplateDigest() string {
+	if x != nil {
+		return x.TemplateDigest
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetPolicyDigest() string {
+	if x != nil {
+		return x.PolicyDigest
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetStepIndex() uint32 {
+	if x != nil {
+		return x.StepIndex
+	}
+	return 0
+}
+
+func (x *ResolveScheduledStepAuthorityRequest) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
+}
+
+type ResolveScheduledStepAuthorityResponse struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Resolved       bool                   `protobuf:"varint,1,opt,name=resolved,proto3" json:"resolved,omitempty"`
+	RunId          string                 `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ThreadId       string                 `protobuf:"bytes,3,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
+	OrgId          string                 `protobuf:"bytes,4,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	SubjectId      string                 `protobuf:"bytes,5,opt,name=subject_id,json=subjectId,proto3" json:"subject_id,omitempty"`
+	SpaceId        string                 `protobuf:"bytes,6,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	ScheduleId     string                 `protobuf:"bytes,7,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	FireKey        string                 `protobuf:"bytes,8,opt,name=fire_key,json=fireKey,proto3" json:"fire_key,omitempty"`
+	TemplateDigest string                 `protobuf:"bytes,9,opt,name=template_digest,json=templateDigest,proto3" json:"template_digest,omitempty"`
+	PolicyDigest   string                 `protobuf:"bytes,10,opt,name=policy_digest,json=policyDigest,proto3" json:"policy_digest,omitempty"`
+	StepId         string                 `protobuf:"bytes,11,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	StepIndex      uint32                 `protobuf:"varint,12,opt,name=step_index,json=stepIndex,proto3" json:"step_index,omitempty"`
+	IdempotencyKey string                 `protobuf:"bytes,13,opt,name=idempotency_key,json=idempotencyKey,proto3" json:"idempotency_key,omitempty"`
+	RunStatus      string                 `protobuf:"bytes,14,opt,name=run_status,json=runStatus,proto3" json:"run_status,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) Reset() {
+	*x = ResolveScheduledStepAuthorityResponse{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResolveScheduledStepAuthorityResponse) ProtoMessage() {}
+
+func (x *ResolveScheduledStepAuthorityResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResolveScheduledStepAuthorityResponse.ProtoReflect.Descriptor instead.
+func (*ResolveScheduledStepAuthorityResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetResolved() bool {
+	if x != nil {
+		return x.Resolved
+	}
+	return false
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetThreadId() string {
+	if x != nil {
+		return x.ThreadId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetSubjectId() string {
+	if x != nil {
+		return x.SubjectId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetScheduleId() string {
+	if x != nil {
+		return x.ScheduleId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetFireKey() string {
+	if x != nil {
+		return x.FireKey
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetTemplateDigest() string {
+	if x != nil {
+		return x.TemplateDigest
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetPolicyDigest() string {
+	if x != nil {
+		return x.PolicyDigest
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetStepIndex() uint32 {
+	if x != nil {
+		return x.StepIndex
+	}
+	return 0
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetIdempotencyKey() string {
+	if x != nil {
+		return x.IdempotencyKey
+	}
+	return ""
+}
+
+func (x *ResolveScheduledStepAuthorityResponse) GetRunStatus() string {
+	if x != nil {
+		return x.RunStatus
+	}
+	return ""
 }
 
 // RunDetail — full run metadata.
@@ -509,7 +1112,7 @@ type RunDetail struct {
 
 func (x *RunDetail) Reset() {
 	*x = RunDetail{}
-	mi := &file_model_plane_v1_runs_proto_msgTypes[8]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -521,7 +1124,7 @@ func (x *RunDetail) String() string {
 func (*RunDetail) ProtoMessage() {}
 
 func (x *RunDetail) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_runs_proto_msgTypes[8]
+	mi := &file_model_plane_v1_runs_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -534,7 +1137,7 @@ func (x *RunDetail) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunDetail.ProtoReflect.Descriptor instead.
 func (*RunDetail) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{8}
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *RunDetail) GetRunId() string {
@@ -655,7 +1258,17 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\n" +
 	"\x19model_plane/v1/runs.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\"&\n" +
 	"\rGetRunRequest\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\x8b\x01\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"k\n" +
+	"\x1eGetScheduledStepContextRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x8d\x01\n" +
+	"\x14ScheduledStepContext\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x12\n" +
+	"\x04goal\x18\x04 \x01(\tR\x04goal\x12\x16\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\"\x8b\x01\n" +
 	"\x0fListRunsRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\x12 \n" +
@@ -683,7 +1296,61 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x17ResolveRunOwnerResponse\x12\x1e\n" +
 	"\n" +
 	"authorized\x18\x01 \x01(\bR\n" +
-	"authorized\"\xbe\x04\n" +
+	"authorized\"P\n" +
+	" ResolveRunActionAuthorityRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"\xb9\x04\n" +
+	"!ResolveRunActionAuthorityResponse\x12\x1a\n" +
+	"\bresolved\x18\x01 \x01(\bR\bresolved\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x15\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x04 \x01(\tR\tsubjectId\x12\x1b\n" +
+	"\tthread_id\x18\x05 \x01(\tR\bthreadId\x12\x19\n" +
+	"\bspace_id\x18\x06 \x01(\tR\aspaceId\x124\n" +
+	"\x16recipient_audience_ref\x18\a \x01(\tR\x14recipientAudienceRef\x12>\n" +
+	"\x1brecipient_audience_revision\x18\b \x01(\x04R\x19recipientAudienceRevision\x126\n" +
+	"\x17recipient_audience_hash\x18\t \x01(\tR\x15recipientAudienceHash\x12,\n" +
+	"\x12privacy_policy_ref\x18\n" +
+	" \x01(\tR\x10privacyPolicyRef\x12I\n" +
+	"!thread_resource_authorization_ref\x18\v \x01(\tR\x1ethreadResourceAuthorizationRef\x12-\n" +
+	"\x12authority_revision\x18\f \x01(\x04R\x11authorityRevision\x12\x1d\n" +
+	"\n" +
+	"run_status\x18\r \x01(\tR\trunStatus\"\xdc\x02\n" +
+	"$ResolveScheduledStepAuthorityRequest\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
+	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x1f\n" +
+	"\vschedule_id\x18\x04 \x01(\tR\n" +
+	"scheduleId\x12\x19\n" +
+	"\bfire_key\x18\x05 \x01(\tR\afireKey\x12'\n" +
+	"\x0ftemplate_digest\x18\x06 \x01(\tR\x0etemplateDigest\x12#\n" +
+	"\rpolicy_digest\x18\a \x01(\tR\fpolicyDigest\x12\x17\n" +
+	"\astep_id\x18\b \x01(\tR\x06stepId\x12\x1d\n" +
+	"\n" +
+	"step_index\x18\t \x01(\rR\tstepIndex\x12'\n" +
+	"\x0fidempotency_key\x18\n" +
+	" \x01(\tR\x0eidempotencyKey\"\xd2\x03\n" +
+	"%ResolveScheduledStepAuthorityResponse\x12\x1a\n" +
+	"\bresolved\x18\x01 \x01(\bR\bresolved\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1b\n" +
+	"\tthread_id\x18\x03 \x01(\tR\bthreadId\x12\x15\n" +
+	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x1d\n" +
+	"\n" +
+	"subject_id\x18\x05 \x01(\tR\tsubjectId\x12\x19\n" +
+	"\bspace_id\x18\x06 \x01(\tR\aspaceId\x12\x1f\n" +
+	"\vschedule_id\x18\a \x01(\tR\n" +
+	"scheduleId\x12\x19\n" +
+	"\bfire_key\x18\b \x01(\tR\afireKey\x12'\n" +
+	"\x0ftemplate_digest\x18\t \x01(\tR\x0etemplateDigest\x12#\n" +
+	"\rpolicy_digest\x18\n" +
+	" \x01(\tR\fpolicyDigest\x12\x17\n" +
+	"\astep_id\x18\v \x01(\tR\x06stepId\x12\x1d\n" +
+	"\n" +
+	"step_index\x18\f \x01(\rR\tstepIndex\x12'\n" +
+	"\x0fidempotency_key\x18\r \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
+	"\n" +
+	"run_status\x18\x0e \x01(\tR\trunStatus\"\xbe\x04\n" +
 	"\tRunDetail\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\"\n" +
@@ -703,14 +1370,17 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"created_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x123\n" +
-	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata2\xb0\x03\n" +
+	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata2\xb3\x06\n" +
 	"\n" +
 	"RunService\x12B\n" +
-	"\x06GetRun\x12\x1d.model_plane.v1.GetRunRequest\x1a\x19.model_plane.v1.RunDetail\x12M\n" +
+	"\x06GetRun\x12\x1d.model_plane.v1.GetRunRequest\x1a\x19.model_plane.v1.RunDetail\x12o\n" +
+	"\x17GetScheduledStepContext\x12..model_plane.v1.GetScheduledStepContextRequest\x1a$.model_plane.v1.ScheduledStepContext\x12M\n" +
 	"\bListRuns\x12\x1f.model_plane.v1.ListRunsRequest\x1a .model_plane.v1.ListRunsResponse\x12P\n" +
 	"\tCancelRun\x12 .model_plane.v1.CancelRunRequest\x1a!.model_plane.v1.CancelRunResponse\x12Y\n" +
 	"\x0eListSystemRuns\x12%.model_plane.v1.ListSystemRunsRequest\x1a .model_plane.v1.ListRunsResponse\x12b\n" +
-	"\x0fResolveRunOwner\x12&.model_plane.v1.ResolveRunOwnerRequest\x1a'.model_plane.v1.ResolveRunOwnerResponseB\xb1\x01\n" +
+	"\x0fResolveRunOwner\x12&.model_plane.v1.ResolveRunOwnerRequest\x1a'.model_plane.v1.ResolveRunOwnerResponse\x12\x80\x01\n" +
+	"\x19ResolveRunActionAuthority\x120.model_plane.v1.ResolveRunActionAuthorityRequest\x1a1.model_plane.v1.ResolveRunActionAuthorityResponse\x12\x8c\x01\n" +
+	"\x1dResolveScheduledStepAuthority\x124.model_plane.v1.ResolveScheduledStepAuthorityRequest\x1a5.model_plane.v1.ResolveScheduledStepAuthorityResponseB\xb1\x01\n" +
 	"\x12com.model_plane.v1B\tRunsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -725,37 +1395,49 @@ func file_model_plane_v1_runs_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_runs_proto_rawDescData
 }
 
-var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_model_plane_v1_runs_proto_goTypes = []any{
-	(*GetRunRequest)(nil),           // 0: model_plane.v1.GetRunRequest
-	(*ListRunsRequest)(nil),         // 1: model_plane.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),        // 2: model_plane.v1.ListRunsResponse
-	(*ListSystemRunsRequest)(nil),   // 3: model_plane.v1.ListSystemRunsRequest
-	(*CancelRunRequest)(nil),        // 4: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),       // 5: model_plane.v1.CancelRunResponse
-	(*ResolveRunOwnerRequest)(nil),  // 6: model_plane.v1.ResolveRunOwnerRequest
-	(*ResolveRunOwnerResponse)(nil), // 7: model_plane.v1.ResolveRunOwnerResponse
-	(*RunDetail)(nil),               // 8: model_plane.v1.RunDetail
-	(*timestamppb.Timestamp)(nil),   // 9: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),         // 10: google.protobuf.Struct
+	(*GetRunRequest)(nil),                         // 0: model_plane.v1.GetRunRequest
+	(*GetScheduledStepContextRequest)(nil),        // 1: model_plane.v1.GetScheduledStepContextRequest
+	(*ScheduledStepContext)(nil),                  // 2: model_plane.v1.ScheduledStepContext
+	(*ListRunsRequest)(nil),                       // 3: model_plane.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),                      // 4: model_plane.v1.ListRunsResponse
+	(*ListSystemRunsRequest)(nil),                 // 5: model_plane.v1.ListSystemRunsRequest
+	(*CancelRunRequest)(nil),                      // 6: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),                     // 7: model_plane.v1.CancelRunResponse
+	(*ResolveRunOwnerRequest)(nil),                // 8: model_plane.v1.ResolveRunOwnerRequest
+	(*ResolveRunOwnerResponse)(nil),               // 9: model_plane.v1.ResolveRunOwnerResponse
+	(*ResolveRunActionAuthorityRequest)(nil),      // 10: model_plane.v1.ResolveRunActionAuthorityRequest
+	(*ResolveRunActionAuthorityResponse)(nil),     // 11: model_plane.v1.ResolveRunActionAuthorityResponse
+	(*ResolveScheduledStepAuthorityRequest)(nil),  // 12: model_plane.v1.ResolveScheduledStepAuthorityRequest
+	(*ResolveScheduledStepAuthorityResponse)(nil), // 13: model_plane.v1.ResolveScheduledStepAuthorityResponse
+	(*RunDetail)(nil),                             // 14: model_plane.v1.RunDetail
+	(*timestamppb.Timestamp)(nil),                 // 15: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                       // 16: google.protobuf.Struct
 }
 var file_model_plane_v1_runs_proto_depIdxs = []int32{
-	8,  // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
-	9,  // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
-	10, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
+	14, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
+	15, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
+	15, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
+	16, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
 	0,  // 4: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
-	1,  // 5: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
-	4,  // 6: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	3,  // 7: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
-	6,  // 8: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
-	8,  // 9: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
-	2,  // 10: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
-	5,  // 11: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	2,  // 12: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
-	7,  // 13: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
-	9,  // [9:14] is the sub-list for method output_type
-	4,  // [4:9] is the sub-list for method input_type
+	1,  // 5: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
+	3,  // 6: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
+	6,  // 7: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	5,  // 8: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
+	8,  // 9: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
+	10, // 10: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
+	12, // 11: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
+	14, // 12: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
+	2,  // 13: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
+	4,  // 14: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
+	7,  // 15: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	4,  // 16: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
+	9,  // 17: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
+	11, // 18: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
+	13, // 19: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
+	12, // [12:20] is the sub-list for method output_type
+	4,  // [4:12] is the sub-list for method input_type
 	4,  // [4:4] is the sub-list for extension type_name
 	4,  // [4:4] is the sub-list for extension extendee
 	0,  // [0:4] is the sub-list for field type_name
@@ -772,7 +1454,7 @@ func file_model_plane_v1_runs_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_runs_proto_rawDesc), len(file_model_plane_v1_runs_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

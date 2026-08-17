@@ -62,10 +62,15 @@ describe('ticket chat launch', () => {
     expect(payload.text).toContain('TCK-001')
     expect(payload.startNewThread).toBe(true)
     expect(payload.supportHandoff).toEqual({ conversationId: 'conv-1', orgId: 'org-1', userId: 'user-1' })
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith('/api/v1/actions/execute', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ actionId: 'tickets.record_chat_handoff', input: { ticketId: 'ticket-1' } }),
-    }))
+    const executeCall = vi.mocked(fetch).mock.calls
+      .find(([url, init]) => String(url) === '/api/v1/actions/execute' && init?.method === 'POST')
+    expect(executeCall).toBeTruthy()
+    const callBody = JSON.parse(String(executeCall?.[1]?.body ?? '{}')) as { actionId?: string; idempotencyKey?: string; input?: unknown }
+    expect(callBody).toMatchObject({
+      actionId: 'tickets.record_chat_handoff',
+      idempotencyKey: expect.any(String),
+      input: { ticketId: 'ticket-1' },
+    })
   })
 
   it('includes only the bounded permission-aware conversation evidence when supplied', () => {

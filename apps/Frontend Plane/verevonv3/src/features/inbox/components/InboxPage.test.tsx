@@ -879,8 +879,9 @@ describe('InboxPage', () => {
         String(input).endsWith('/api/v1/actions/execute') && init?.method === 'POST',
       )
       expect(actionCall).toBeTruthy()
-      expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
+      expect(JSON.parse(String(actionCall?.[1]?.body))).toMatchObject({
         actionId: 'tickets.create',
+        idempotencyKey: expect.any(String),
         input: {
           conversationId: conversationSummary.id,
           priority: 'high',

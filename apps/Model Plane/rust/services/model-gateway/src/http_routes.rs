@@ -5807,6 +5807,21 @@ pub struct InvokeRequest {
     /// `org_name`. Used to tell the model who "I"/"me"/"my" refers to.
     #[serde(default)]
     pub user_name: Option<String>,
+    /// Present only when this turn was addressed to a Space agent by `@`
+    /// mention. Stamped by the BFF gateway after it re-resolved the mention
+    /// against Control's live Space membership and the Application binding —
+    /// same provenance/trust notes as `org_name`: the raw browser cannot reach
+    /// this endpoint directly, and a mention that failed that check never
+    /// reaches here at all. Framing text only; a Space agent is not a security
+    /// boundary and this field grants nothing by itself
+    /// (`docs/space-defenition.md`, "Security model").
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    /// The mentioned agent's own instructions, resolved server-side from its
+    /// definition. Never sent by, or shown to, the browser — the mention UI
+    /// only ever carries the agent's `subject_id` ref.
+    #[serde(default)]
+    pub agent_system_prompt: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -6089,6 +6104,10 @@ async fn create_document(
 struct ThreadMessage {
     role: String,
     content: String,
+    /// The persona this turn answered as, when it had one. Identity history
+    /// from session-core's record — never an authority claim.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    agent_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6583,6 +6602,7 @@ async fn list_thread_messages(
         .map(|m| ThreadMessage {
             role: m.role,
             content: m.content,
+            agent_name: m.agent_name,
         })
         .collect();
 
@@ -7062,6 +7082,7 @@ async fn invoke(
             &session_run.thread_id,
             &infer_resp.content,
             &model_bearer,
+            req.agent_name.as_deref(),
         )
         .await
         {
@@ -7684,7 +7705,8 @@ mod run_owner_publish_tests {
         run_service_client::RunServiceClient,
         run_service_server::{RunService, RunServiceServer},
         CancelRunRequest, CancelRunResponse, GetRunRequest, ListRunsRequest, ListRunsResponse,
-        ListSystemRunsRequest, ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
+        ListSystemRunsRequest, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse,
+        ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail,
     };
     use mp_events::publisher::InMemoryPublisher;
     use std::sync::Arc;
@@ -7746,6 +7768,15 @@ mod run_owner_publish_tests {
                     && request.org_id == "org-owner"
                     && request.user_id == "user-owner",
             }))
+        }
+
+        async fn resolve_run_action_authority(
+            &self,
+            _: TonicRequest<ResolveRunActionAuthorityRequest>,
+        ) -> Result<TonicResponse<ResolveRunActionAuthorityResponse>, Status> {
+            Err(Status::unimplemented(
+                "run action authority not needed in route test",
+            ))
         }
     }
 

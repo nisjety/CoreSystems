@@ -16,9 +16,33 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
 
-const maxAvailabilityBodyBytes = 16 << 10
+const (
+	maxAvailabilityBodyBytes = 16 << 10
+
+	// ownerActionTicketCapabilityID is intentionally excluded from the generic
+	// execution-runtime health path. A sandbox probe can truthfully attest only
+	// execution-core's own command capabilities; it cannot establish the live
+	// Control, Conversation Core, approval, and run-bound authority predicates
+	// required before an owner-action ticket may be offered or executed. A
+	// future owner-action attester must have its own contract and route instead
+	// of widening this credential.
+	ownerActionTicketCapabilityID = "cap.tool.ticket.create"
+
+	// genericGlobalHealthAttesterID is the only workload currently permitted to
+	// use the generic global-health route. Its Rust reporter probes precisely
+	// the two capabilities listed below; a scope alone is intentionally not a
+	// universal availability authority.
+	// Auth Core's service-token contract prefixes service identities in both
+	// `sub` and `service_id`; keep the exact signed namespace in this comparison.
+	genericGlobalHealthAttesterID = authz.ExecutionCoreServiceID
+)
 
 var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
+
+var genericGlobalHealthCapabilityIDs = map[string]struct{}{
+	"cap.command.sandbox": {},
+	"cap.command.shell":   {},
+}
 
 type availabilityRequest struct {
 	ID            string `json:"id"`
@@ -83,15 +107,49 @@ type availabilityStoreBackend interface {
 }
 
 func mayAttestGlobalCapability(principal authctx.Principal) bool {
-	return principal.PrincipalType == "service" && principal.HasScope(authz.GlobalHealthWriteScope)
+	// Keep this invariant at the handler boundary as well as in the public
+	// HTTP authorizer. A miswired route or an internal caller must not turn a
+	// global-health scope into cross-tenant authority: only the exact
+	// execution-core workload, with the reserved global organization binding,
+	// may select GetGlobal/AttestAvailabilityGlobal.
+	return principal.PrincipalType == "service" &&
+		principal.OrganizationID == "global" &&
+		principal.ActorID == authz.ExecutionCoreServiceID &&
+		principal.HasScope(authz.GlobalHealthWriteScope)
+}
+
+// mayUseGenericGlobalHealthAttestation narrows the generic health credential
+// to capabilities whose runtime it can actually measure. It deliberately
+// remains separate from mayAttestGlobalCapability: that scope chooses the
+// global registry lane, while this predicate prevents it from becoming a
+// universal "make available" authority.
+func mayUseGenericGlobalHealthAttestation(principal authctx.Principal, capabilityID string) bool {
+	if !mayAttestGlobalCapability(principal) ||
+		principal.ActorID != genericGlobalHealthAttesterID {
+		return false
+	}
+	_, allowed := genericGlobalHealthCapabilityIDs[strings.TrimSpace(capabilityID)]
+	return allowed
 }
 
 func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request *http.Request) {
+	h.attestAvailabilityForLane(w, request, false)
+}
+
+// attestOwnerActionHealth is intentionally a different route and service
+// identity from generic runtime health. Conversation Core can only attest its
+// ticket adapter and only after Capability Core itself has a Control public-key
+// verifier; it cannot make arbitrary Model capabilities runnable.
+func (h *CapabilitiesHandler) attestOwnerActionHealth(w http.ResponseWriter, request *http.Request) {
+	h.attestAvailabilityForLane(w, request, true)
+}
+
+func (h *CapabilitiesHandler) attestAvailabilityForLane(w http.ResponseWriter, request *http.Request, ownerActionLane bool) {
 	if request.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if h.availabilityStore == nil {
+	if h.availabilityStore == nil || (ownerActionLane && h.modelActionViews == nil) {
 		jsonErr(w, "availability update failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -109,15 +167,42 @@ func (h *CapabilitiesHandler) attestAvailability(w http.ResponseWriter, request 
 		return
 	}
 
+	capabilityID := strings.TrimSpace(input.ID)
 	principal, principalPresent := authctx.PrincipalFromContext(request.Context())
 	organizationID := verifiedOrganizationID(request)
 	globalAuthority := principalPresent && mayAttestGlobalCapability(principal)
+	if ownerActionLane {
+		if !principalPresent || principal.PrincipalType != "service" ||
+			principal.ActorID != authz.ConversationCoreServiceID ||
+			!principal.HasScope(authz.OwnerActionHealthWriteScope) ||
+			organizationID != "global" || capabilityID != ownerActionTicketCapabilityID {
+			jsonErr(w, "owner-action health attestation is not authorized", http.StatusForbidden)
+			return
+		}
+		globalAuthority = true
+	}
+	// Owner actions are never eligible for the generic health route, including
+	// its tenant lane. This independently backs up the HTTP authorizer: a
+	// future route-policy regression cannot let a tenant health reporter make a
+	// globally registered owner action runnable.
+	if !ownerActionLane && capabilityID == ownerActionTicketCapabilityID {
+		jsonErr(w, "owner-action capability requires a dedicated health attester", http.StatusForbidden)
+		return
+	}
+	if !ownerActionLane && !globalAuthority && organizationID == "global" {
+		jsonErr(w, "tenant health attester may not target global capability health", http.StatusForbidden)
+		return
+	}
+	if !ownerActionLane && globalAuthority && !mayUseGenericGlobalHealthAttestation(principal, capabilityID) {
+		jsonErr(w, "generic global health attester may not attest this capability", http.StatusForbidden)
+		return
+	}
 	var row *registry.CapabilityRow
 	var err error
 	if globalAuthority {
-		row, err = h.availabilityStore.GetGlobal(request.Context(), strings.TrimSpace(input.ID))
+		row, err = h.availabilityStore.GetGlobal(request.Context(), capabilityID)
 	} else {
-		row, err = h.availabilityStore.GetForOrg(request.Context(), strings.TrimSpace(input.ID), organizationID)
+		row, err = h.availabilityStore.GetForOrg(request.Context(), capabilityID, organizationID)
 	}
 	if err != nil || row == nil || (!globalAuthority && row.OrgID != organizationID) || (globalAuthority && row.OrgID != "global") {
 		jsonErr(w, "not found", http.StatusNotFound)

@@ -450,6 +450,14 @@ services:
             AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
             CONVERSATION_INTEGRATION_SERVICE_ID: ${CONVERSATION_INTEGRATION_SERVICE_ID:-conversation-core}
             CONVERSATION_INTEGRATION_SERVICE_API_KEY: ${CONVERSATION_INTEGRATION_SERVICE_API_KEY:?CONVERSATION_INTEGRATION_SERVICE_API_KEY must be provisioned in the Auth Core service-principal registry}
+            # Optional Capability Core owner-action health reporter. Leaving the
+            # URL and credential empty keeps tickets.create unavailable until the
+            # complete Control-bound execution lane is provisioned.
+            CAPABILITY_CORE_HTTP_URL: ${CAPABILITY_CORE_HTTP_URL:-}
+            CONVERSATION_CAPABILITY_HEALTH_AUTH_CORE_URL: ${CONVERSATION_CAPABILITY_HEALTH_AUTH_CORE_URL:-http://auth-core:3011}
+            CONVERSATION_CAPABILITY_HEALTH_SERVICE_ID: ${CONVERSATION_CAPABILITY_HEALTH_SERVICE_ID:-conversation-core}
+            CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY: ${CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY:-}
+            CONVERSATION_CAPABILITY_HEALTH_INTERVAL_SECONDS: ${CONVERSATION_CAPABILITY_HEALTH_INTERVAL_SECONDS:-120}
             # Effect-bound Ed25519 proof required by integration-corev2 for every
             # provider mutation. Only the matching public key leaves this service.
             CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: ${CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY:?CONVERSATION_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY must be a secret reference containing a standard-base64 64-byte Ed25519 private key}
@@ -826,6 +834,12 @@ services:
             NATS_USER: application-notification
             NATS_PASSWORD: ${APPLICATION_NOTIFICATION_NATS_PASSWORD:?APPLICATION_NOTIFICATION_NATS_PASSWORD must be set}
             NOTIFICATION_DELIVERY_MODE: ${NOTIFICATION_DELIVERY_MODE:-disabled}
+            # Separate provider callback HMAC; empty keeps the callback route
+            # fail-closed until an operator supplies the existing dev reference.
+            NOTIFICATION_DELIVERY_CALLBACK_SECRET: ${NOTIFICATION_DELIVERY_CALLBACK_SECRET:-}
+            NOTIFICATION_DELIVERY_WORKER_ENABLED: ${NOTIFICATION_DELIVERY_WORKER_ENABLED:-false}
+            NOTIFICATION_DELIVERY_WORKER_POLL_INTERVAL: ${NOTIFICATION_DELIVERY_WORKER_POLL_INTERVAL:-5s}
+            NOTIFICATION_DELIVERY_WORKER_LEASE: ${NOTIFICATION_DELIVERY_WORKER_LEASE:-30s}
             NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
             NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
             # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS

@@ -4,9 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,6 +341,151 @@ func TestServiceCallerCannotImpersonateAUser(t *testing.T) {
 	})
 	assert.Equal(t, codes.PermissionDenied, codeOf(err))
 	assert.Empty(t, starter.starts)
+}
+
+func scheduledTemplateInput(t *testing.T, template map[string]any) (string, string) {
+	t.Helper()
+	encoded, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal scheduled template: %v", err)
+	}
+	return string(encoded), fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
+}
+
+func TestScheduledRunWorkflowAcceptsOnlyCapabilityCoreAndRetainsNonSecretBindings(t *testing.T) {
+	auth, key := testAuth(t)
+	starter := &fakeStarter{}
+	svc := NewWorkflowStartService(auth, starter, testQueue)
+	templateJSON, templateDigest := scheduledTemplateInput(t, map[string]any{
+		"title":       "Nightly queue review",
+		"description": "Summarise overdue work.",
+		"policy":      "execute",
+	})
+
+	request := func() *mpv1.StartWorkflowRequest {
+		return &mpv1.StartWorkflowRequest{
+			WorkflowType: "ScheduledRunSupervision",
+			RunId:        "task_scheduled_1",
+			Input: mustStruct(t, map[string]any{
+				"thread_id":          "thread-scheduled-1",
+				"task_template_json": templateJSON,
+				"space_ref":          "space-1",
+				"subject_id":         "user-1",
+				"schedule_id":        "schedule-1",
+				"fire_key":           "2026-08-14T00:00:00Z",
+				"template_digest":    templateDigest,
+				"idempotency_key":    "schedule-1:2026-08-14T00:00:00Z",
+			}),
+		}
+	}
+
+	_, err := svc.Start(bearerCtx(sign(t, key, userClaims("org-a", "user-a"))), request())
+	assert.Equal(t, codes.PermissionDenied, codeOf(err))
+
+	// Give the shared-secret path an allowed tenant so this assertion reaches
+	// the scheduled-run policy gate rather than failing earlier on its required
+	// tenant input. The credential itself carries no service identity and must
+	// therefore still be refused.
+	internalRequest := request()
+	internalRequest.OrgId = "org-allowed"
+	_, err = svc.Start(internalCtx(internalTok), internalRequest)
+	assert.Equal(t, codes.PermissionDenied, codeOf(err))
+
+	wrongService := testClaims{
+		OrgID: "org-a", ServiceID: "another-service", PrincipalType: "service",
+		Scopes: []string{ScopeWorkflowStart}, ZDR: boolPtr(false),
+	}
+	_, err = svc.Start(bearerCtx(sign(t, key, wrongService)), request())
+	assert.Equal(t, codes.PermissionDenied, codeOf(err))
+
+	capabilityCore := testClaims{
+		OrgID: "org-a", ServiceID: "capability-core", PrincipalType: "service",
+		Scopes: []string{ScopeWorkflowStart}, ZDR: boolPtr(false),
+	}
+	_, err = svc.Start(bearerCtx(sign(t, key, capabilityCore)), request())
+	require.NoError(t, err)
+	require.Len(t, starter.starts, 1)
+	input, ok := starter.starts[0].arg.(workflows.ScheduledRunInput)
+	require.True(t, ok)
+	assert.Equal(t, "task_scheduled_1", input.RunID)
+	assert.Equal(t, "org-a", input.OrgID)
+	assert.Equal(t, "thread-scheduled-1", input.ThreadID)
+	assert.Equal(t, "schedule-1", input.ScheduleID)
+	assert.Equal(t, "2026-08-14T00:00:00Z", input.FireKey)
+	assert.Equal(t, "Nightly queue review\n\nSummarise overdue work.", input.Goal)
+	assert.Equal(t, "execute", input.Policy)
+	assert.Equal(t, activities.RetentionDurable, input.Retention)
+}
+
+func TestScheduledRunWorkflowRejectsUnknownInputFields(t *testing.T) {
+	auth, key := testAuth(t)
+	starter := &fakeStarter{}
+	svc := NewWorkflowStartService(auth, starter, testQueue)
+
+	_, err := svc.Start(bearerCtx(sign(t, key, testClaims{
+		OrgID:         "org-a",
+		ServiceID:     "capability-core",
+		PrincipalType: "service",
+		Scopes:        []string{ScopeWorkflowStart},
+		ZDR:           boolPtr(false),
+	}),
+	), &mpv1.StartWorkflowRequest{
+		WorkflowType: "ScheduledRunSupervision",
+		RunId:        "task_scheduled_1",
+		Input: mustStruct(t, map[string]any{
+			"thread_id":              "thread-scheduled-1",
+			"goal":                   "Summarise the work queue",
+			"policy":                 "execute",
+			"space_ref":              "space-1",
+			"subject_id":             "user-1",
+			"schedule_id":            "schedule-1",
+			"fire_key":               "2026-08-14T00:00:00Z",
+			"template_digest":        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"idempotency_key":        "schedule-1:2026-08-14T00:00:00Z",
+			"control_decision_token": "do-not-pass-through",
+		}),
+	})
+	assert.Equal(t, codes.InvalidArgument, codeOf(err))
+	assert.Empty(t, starter.starts)
+}
+
+func TestScheduledRunInputRejectsDetachedTemplateAndForgedExecutionFields(t *testing.T) {
+	templateJSON, templateDigest := scheduledTemplateInput(t, map[string]any{
+		"workflow_input": map[string]any{"goal": "authorized scheduled work", "policy": "execute"},
+	})
+	base := map[string]any{
+		"thread_id": "thread-scheduled-1", "task_template_json": templateJSON,
+		"space_ref": "space-1", "subject_id": "user-1", "schedule_id": "schedule-1",
+		"fire_key": "2026-08-14T00:00:00Z", "template_digest": templateDigest,
+		"idempotency_key": "schedule-1:2026-08-14T00:00:00Z",
+	}
+	encode := func(input map[string]any) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(input)
+		require.NoError(t, err)
+		return raw
+	}
+	clone := func(input map[string]any) map[string]any {
+		output := make(map[string]any, len(input))
+		for key, value := range input {
+			output[key] = value
+		}
+		return output
+	}
+	tenancy := Tenancy{OrgID: "org-a", RunID: "task_scheduled_1", RetentionAttested: true}
+
+	detached := clone(base)
+	detached["template_digest"] = "sha256:" + strings.Repeat("f", 64)
+	if _, err := buildScheduledRunInput(encode(detached), tenancy); err == nil {
+		t.Fatal("scheduled run accepted a detached template digest")
+	}
+
+	forged := clone(base)
+	forged["goal"] = "attacker-selected goal"
+	forged["policy"] = "attacker-selected policy"
+	if _, err := buildScheduledRunInput(encode(forged), tenancy); err == nil {
+		t.Fatal("scheduled run accepted independent goal or policy fields")
+	}
 }
 
 func TestForgedIdentityMetadataIsRejected(t *testing.T) {

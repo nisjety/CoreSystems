@@ -2,8 +2,10 @@ package taskexec
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
@@ -22,6 +25,21 @@ func detail(status, org, title, description, config string) taskDetail {
 		d.config = json.RawMessage(config)
 	}
 	return d
+}
+
+func scheduledTaskConfig(t *testing.T, template map[string]any, intent cron.FireIntent) (json.RawMessage, cron.FireIntent) {
+	t.Helper()
+	templateJSON, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal scheduled template: %v", err)
+	}
+	intent.TemplateDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(templateJSON))
+	template["schedule_fire_intent"] = intent
+	config, err := json.Marshal(template)
+	if err != nil {
+		t.Fatalf("marshal scheduled task config: %v", err)
+	}
+	return config, intent
 }
 
 func TestDispatchPlanUsesTaskIDAsRunID(t *testing.T) {
@@ -97,23 +115,45 @@ func TestWorkflowDispatchLoadFenceRefusesDeletedCronSchedule(t *testing.T) {
 type recordingFireAuthorizer struct {
 	intent cron.FireIntent
 	err    error
+	calls  int
 }
 
 func (a *recordingFireAuthorizer) AuthorizeFire(_ context.Context, intent cron.FireIntent) error {
+	a.calls++
 	a.intent = intent
 	return a.err
+}
+
+type recordingScheduledRunAuthorizer struct {
+	recordingFireAuthorizer
+	preparation cron.ScheduledRunPreparation
+	taskID      string
+}
+
+func (a *recordingScheduledRunAuthorizer) AuthorizeScheduledRun(_ context.Context, _ cron.FireIntent, taskID string) (cron.ScheduledRunPreparation, error) {
+	a.taskID = taskID
+	return a.preparation, nil
+}
+
+type recordingScheduledRunSession struct {
+	request  *mpv1.PrepareScheduledRunThreadRequest
+	response *mpv1.PrepareScheduledRunThreadResponse
+}
+
+func (s *recordingScheduledRunSession) PrepareScheduledRunThread(_ context.Context, req *mpv1.PrepareScheduledRunThreadRequest, _ ...grpc.CallOption) (*mpv1.PrepareScheduledRunThreadResponse, error) {
+	s.request = req
+	return s.response, nil
 }
 
 func TestWorkflowDispatchReauthorizesOnlyBoundCronIntent(t *testing.T) {
 	intent := cron.FireIntent{
 		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
-		FireKey: "2026-08-13T00:00:00Z", TemplateDigest: "sha256:" + strings.Repeat("a", 64),
+		FireKey:        "2026-08-13T00:00:00Z",
 		IdempotencyKey: "schedule-1:2026-08-13T00:00:00Z",
 	}
-	config, err := json.Marshal(map[string]any{"schedule_fire_intent": intent})
-	if err != nil {
-		t.Fatalf("marshal intent: %v", err)
-	}
+	config, intent := scheduledTaskConfig(t, map[string]any{
+		"workflow_input": map[string]any{"goal": "scheduled work", "policy": "execute"},
+	}, intent)
 	authorizer := &recordingFireAuthorizer{}
 	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer}
 	detail := taskDetail{config: config, scheduleID: "schedule-1"}
@@ -137,6 +177,129 @@ func TestWorkflowDispatchReauthorizesOnlyBoundCronIntent(t *testing.T) {
 		}
 		if _, err := dispatcher.reauthorizeScheduleFire(context.Background(), task, altered); err == nil {
 			t.Fatal("schedule mismatch must fail closed")
+		}
+	}
+}
+
+func TestScheduledRunRejectsDetachedTemplateBeforeControlReauthorization(t *testing.T) {
+	// The Control decision's template digest is a commitment, not merely a
+	// label. A task whose executable template no longer hashes to that value
+	// must fail before it can obtain a fresh fire or preparation decision.
+	intent := cron.FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
+		FireKey: "2026-08-15T00:00:00Z", TemplateDigest: "sha256:" + strings.Repeat("f", 64),
+		IdempotencyKey: "schedule-1:2026-08-15T00:00:00Z",
+	}
+	config, err := json.Marshal(map[string]any{
+		"workflow_type": "InteractiveRunSupervision",
+		"workflow_input": map[string]any{
+			"goal":   "an attacker-substituted goal",
+			"policy": "execute",
+		},
+		"schedule_fire_intent": intent,
+	})
+	if err != nil {
+		t.Fatalf("marshal detached task template: %v", err)
+	}
+	authorizer := &recordingFireAuthorizer{}
+	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer}
+	_, err = dispatcher.reauthorizeScheduleFire(context.Background(), TaskRef{ID: "task-1", OrgID: "org-1"}, taskDetail{
+		config: config, scheduleID: "schedule-1",
+	})
+	if err == nil {
+		t.Fatal("detached schedule template reached reauthorization")
+	}
+	if authorizer.calls != 0 {
+		t.Fatalf("detached schedule template called Control %d times", authorizer.calls)
+	}
+}
+
+func TestWorkflowDispatchConsumesDecisionBeforeTemporalHandoff(t *testing.T) {
+	intent := cron.FireIntent{
+		OrgID: "org-1", SpaceRef: "space-1", SubjectID: "user-1", ScheduleID: "schedule-1",
+		FireKey:        "2026-08-14T00:00:00Z",
+		IdempotencyKey: "schedule-1:2026-08-14T00:00:00Z",
+	}
+	config, intent := scheduledTaskConfig(t, map[string]any{
+		"workflow_input": map[string]any{"goal": "scheduled work", "policy": "execute"},
+	}, intent)
+	authorizer := &recordingScheduledRunAuthorizer{preparation: cron.ScheduledRunPreparation{
+		Token: "one-fire-control-bearer", SystemThreadKey: "schedule/schedule-1/2026-08-14T00:00:00Z",
+	}}
+	session := &recordingScheduledRunSession{response: &mpv1.PrepareScheduledRunThreadResponse{
+		ThreadId: "thread-scheduled-1", RunId: "task-1", OwnerId: "service:orchestrator-core",
+	}}
+	dispatcher := &WorkflowDispatcher{fireAuthorizer: authorizer, scheduledRunSession: session}
+	prepared, err := dispatcher.reauthorizeScheduleFire(context.Background(), TaskRef{ID: "task-1", OrgID: "org-1"}, taskDetail{
+		config: config, scheduleID: "schedule-1",
+	})
+	if err != nil {
+		t.Fatalf("reauthorizeScheduleFire: %v", err)
+	}
+	if authorizer.taskID != "task-1" || session.request.GetControlDecisionToken() != "one-fire-control-bearer" {
+		t.Fatalf("Control decision was not consumed only by Session preparation: task=%q request=%+v", authorizer.taskID, session.request)
+	}
+	if prepared == nil || prepared.threadID != "thread-scheduled-1" || prepared.spaceRef != intent.SpaceRef ||
+		prepared.subjectID != intent.SubjectID || prepared.scheduleID != "schedule-1" ||
+		prepared.fireKey != intent.FireKey || prepared.templateDigest != intent.TemplateDigest ||
+		prepared.templateJSON == "" ||
+		prepared.idempotencyKey != intent.IdempotencyKey {
+		t.Fatalf("prepared non-secret handoff = %#v", prepared)
+	}
+}
+
+func TestAttachScheduledRunInputCarriesOnlyNonSecretPreparationFacts(t *testing.T) {
+	req, err := dispatchPlan(
+		TaskRef{ID: "task-1", OrgID: "org-1"},
+		detail("running", "org-1", "Nightly sweep", "", ""),
+		"",
+	)
+	if err != nil {
+		t.Fatalf("dispatchPlan: %v", err)
+	}
+	// A stale/wrong template must never be able to copy the one-fire authority
+	// into the durable workflow input.
+	req.Input.Fields["schedule_fire_intent"] = structpb.NewStringValue("secret")
+	req.Input.Fields["control_decision_token"] = structpb.NewStringValue("secret")
+	req.Input.Fields["payload_digest"] = structpb.NewStringValue("secret")
+
+	if err := attachScheduledRunInput(req, preparedScheduledRun{
+		threadID: "thread-scheduled-1", spaceRef: "space-1", subjectID: "user-1",
+		scheduleID: "schedule-1", fireKey: "2026-08-14T00:00:00Z",
+		templateDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		templateJSON:   `{"workflow_input":{"goal":"Nightly sweep"}}`,
+		idempotencyKey: "schedule-1:2026-08-14T00:00:00Z",
+	}, "task-1"); err != nil {
+		t.Fatalf("attachScheduledRunInput: %v", err)
+	}
+
+	input := req.GetInput().AsMap()
+	if got := input["thread_id"]; got != "thread-scheduled-1" {
+		t.Fatalf("thread_id = %#v, want prepared scheduled-run thread", got)
+	}
+	if got := input["schedule_id"]; got != "schedule-1" {
+		t.Fatalf("schedule_id = %#v", got)
+	}
+	if got := input["fire_key"]; got != "2026-08-14T00:00:00Z" {
+		t.Fatalf("fire_key = %#v", got)
+	}
+	for field, want := range map[string]string{
+		"space_ref": "space-1", "subject_id": "user-1",
+		"template_digest":    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"task_template_json": `{"workflow_input":{"goal":"Nightly sweep"}}`,
+		"idempotency_key":    "schedule-1:2026-08-14T00:00:00Z",
+	} {
+		if got := input[field]; got != want {
+			t.Fatalf("%s = %#v, want %q", field, got, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"schedule_fire_intent", "control_decision_token", "decision", "token", "payload_digest",
+		"authority_revision", "recipient_audience_hash", "resource_authorization_ref",
+		"goal", "policy",
+	} {
+		if _, found := input[forbidden]; found {
+			t.Fatalf("scheduled workflow input leaked %q: %#v", forbidden, input)
 		}
 	}
 }

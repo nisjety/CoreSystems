@@ -98,6 +98,7 @@ type PersonalThreadDecisionEvidence struct {
 	ThreadCreateEntitled     bool
 	RetrievalReadEntitled    bool
 	ImportWriteEntitled      bool
+	AgentActionEntitled      bool
 	ScheduleFireEntitled     bool
 	ResourceAuthorizationRef string
 }
@@ -181,6 +182,30 @@ func (e PersonalThreadDecisionEvidence) ValidateForImport() error {
 	}
 	if !e.ImportWriteEntitled {
 		return fmt.Errorf("import entitlement is not active")
+	}
+	return nil
+}
+
+// ValidateForAgentAction is intentionally independent from a thread-create
+// decision. A Model run can request a target-specific owner action only when
+// the current Control policy permits it; the target owner must still authorize
+// its own resource immediately before the effect.
+func (e PersonalThreadDecisionEvidence) ValidateForAgentAction() error {
+	if e.Membership.Kind == KindPersonal {
+		if err := e.validatePersonalAuthority(); err != nil {
+			return err
+		}
+	} else if err := e.ValidateForSharedThread(); err != nil {
+		return err
+	}
+	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
+		return fmt.Errorf("Space role %q cannot request an agent action", e.Membership.Role)
+	}
+	if !e.AgentActionEntitled {
+		return fmt.Errorf("agent action entitlement is not active")
+	}
+	if e.Privacy.ZeroDataRetention {
+		return fmt.Errorf("zero data retention forbids durable owner actions")
 	}
 	return nil
 }

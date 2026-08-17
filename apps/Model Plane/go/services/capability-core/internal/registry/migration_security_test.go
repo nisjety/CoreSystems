@@ -139,3 +139,47 @@ func TestSandboxCommandCapabilityMigrationSeedsLowRiskHermeticExecution(t *testi
 		}
 	}
 }
+
+func TestConversationTicketActionStartsUnavailableAndKeepsOwnerBoundFields(t *testing.T) {
+	t.Parallel()
+
+	contents, err := os.ReadFile(filepath.Join("..", "..", "migrations", "0011_conversation_ticket_action_capability.up.sql"))
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	sql := string(contents)
+	for _, required := range []string{
+		"'cap.tool.ticket.create'",
+		"'tickets.create'",
+		"'medium'",
+		"'application'",
+		"'conversation-core'",
+		"'control-plane-user-core'",
+		"'conversation-core-current-resource-check'",
+		"'unavailable'",
+		"'health_not_attested'",
+		"'migration:0011_conversation_ticket_action_capability'",
+		"'actor'",
+		"'org'",
+		"'idempotency_key'",
+		"ON CONFLICT (id) DO UPDATE SET",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("migration missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "availability_state = 'available'") {
+		t.Fatal("ticket action migration must not fabricate a live health attestation")
+	}
+	upsert := sql[strings.Index(sql, "ON CONFLICT (id) DO UPDATE SET"):]
+	for _, forbidden := range []string{
+		"availability_state = EXCLUDED",
+		"availability_reason_code = EXCLUDED",
+		"execution_mode = EXCLUDED",
+		"health_checked_at = EXCLUDED",
+	} {
+		if strings.Contains(upsert, forbidden) {
+			t.Fatalf("upsert must not overwrite a runtime attestation via %q", forbidden)
+		}
+	}
+}

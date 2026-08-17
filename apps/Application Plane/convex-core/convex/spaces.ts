@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { assertServiceKey, requireViewerMembership } from "./authz";
+import { assertServiceKey, requireGatewayMember, requireViewerMembership } from "./authz";
 import {
   acknowledgeSpaceLifecycleDelivery,
   canClaimSpaceLifecycleDelivery,
@@ -207,25 +207,6 @@ export const ensurePersonalSpace = mutation({
  * them is a separate change), but a new copy of an authorization check is not
  * something to add.
  */
-async function requireGatewayMember(ctx: any, externalAuthId: string, externalOrgId: string) {
-  const organizations = await ctx.db
-    .query("organizations")
-    .withIndex("by_external_id", (q: any) => q.eq("externalOrgId", externalOrgId))
-    .collect();
-  const organization = organizations.find((candidate: any) => candidate.syncStatus !== "deleted");
-  if (!organization) throw new Error("Organization not found");
-  const members = await ctx.db
-    .query("users")
-    .withIndex("by_external_and_org", (q: any) =>
-      q.eq("externalAuthId", externalAuthId).eq("orgId", organization._id),
-    )
-    .collect();
-  if (!members.some((candidate: any) => candidate.syncStatus !== "deleted")) {
-    throw new Error("Unauthorized");
-  }
-  return organization;
-}
-
 /**
  * Service-key counterpart of `ensurePersonalSpace`, so the BFF can provision a
  * caller's own personal Space. Convex identity is unavailable on that path —

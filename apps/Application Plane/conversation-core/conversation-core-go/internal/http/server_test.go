@@ -65,6 +65,7 @@ func TestWriteServiceErrorMapsEveryPublicOutcome(t *testing.T) {
 		status int
 		code   string
 	}{
+		{name: "forbidden", err: conversation.ErrForbidden, status: stdhttp.StatusForbidden, code: "forbidden"},
 		{name: "not found", err: conversation.ErrNotFound, status: stdhttp.StatusNotFound, code: "not_found"},
 		{name: "conflict", err: conversation.ErrConflict, status: stdhttp.StatusConflict, code: "conflict"},
 		{name: "validation", err: fmt.Errorf("%w: bad input", conversation.ErrInvalidInput), status: stdhttp.StatusUnprocessableEntity, code: "validation_error"},
@@ -90,7 +91,7 @@ func testVerifier(t *testing.T) *delegation.Verifier {
 	verifier, err := delegation.NewVerifier(delegation.Config{
 		Audience: "conversation-core",
 		Keys: map[string]string{
-			"verevon-gateway":      testGatewaySecret,
+			"verevon-gateway":     testGatewaySecret,
 			"conversation-ingest": testIngestSecret,
 		},
 	})

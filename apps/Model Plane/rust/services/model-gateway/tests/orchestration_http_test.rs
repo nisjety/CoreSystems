@@ -18,15 +18,18 @@ use mp_contracts::model_plane::v1::{
     CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
     GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest,
-    GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest, GetSubagentLineageRequest,
-    GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, LineageEdge, ListApprovalsRequest,
-    ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunsRequest, ListRunsResponse,
-    ListSystemRunsRequest, ListTodosRequest, ListTodosResponse, OrchestrationEvent,
-    OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, Plan, PlanState,
-    RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse,
-    RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse,
-    RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, ResolveRunOwnerRequest,
-    ResolveRunOwnerResponse, RunDetail, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
+    GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
+    GetScheduledStepContextRequest, GetSubagentLineageRequest, GetSubagentLineageResponse,
+    GetTodoRequest, GetTodoResponse, LineageEdge, ListApprovalsRequest, ListApprovalsResponse,
+    ListPlansRequest, ListPlansResponse, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest,
+    ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest,
+    OrgPendingApprovalsResponse, Plan, PlanState, RecordApprovalContinuationOutcomeRequest,
+    RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest,
+    RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest,
+    RecordOrchestrationEventResponse, ResolveRunActionAuthorityRequest,
+    ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse,
+    ResolveScheduledStepAuthorityRequest, ResolveScheduledStepAuthorityResponse, RunDetail,
+    ScheduledStepContext, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
     TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
 };
 use mp_events::publisher::InMemoryPublisher;
@@ -693,6 +696,33 @@ impl RunService for MockRunOwner {
                 && request.org_id == "org-owner"
                 && request.user_id == "owner-user",
         }))
+    }
+
+    async fn resolve_run_action_authority(
+        &self,
+        _: TonicRequest<ResolveRunActionAuthorityRequest>,
+    ) -> Result<Response<ResolveRunActionAuthorityResponse>, Status> {
+        Err(Status::unimplemented(
+            "run action authority not needed in orchestration route test",
+        ))
+    }
+
+    async fn resolve_scheduled_step_authority(
+        &self,
+        _: TonicRequest<ResolveScheduledStepAuthorityRequest>,
+    ) -> Result<Response<ResolveScheduledStepAuthorityResponse>, Status> {
+        Err(Status::unimplemented(
+            "scheduled step authority not needed in orchestration route test",
+        ))
+    }
+
+    async fn get_scheduled_step_context(
+        &self,
+        _: TonicRequest<GetScheduledStepContextRequest>,
+    ) -> Result<Response<ScheduledStepContext>, Status> {
+        Err(Status::unimplemented(
+            "scheduled step context not needed in orchestration route test",
+        ))
     }
 }
 

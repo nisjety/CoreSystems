@@ -1,6 +1,6 @@
 # Verevon Roadmap
 
-**Last updated:** 2026-08-14. Synthesizes `verevon-vision.md` (what Verevon
+**Last updated:** 2026-08-15. Synthesizes `verevon-vision.md` (what Verevon
 should become), `VEREVON.md` and `Verevon-ai-first.md` (what is verifiably
 live today), and `verevon-feature-map.md` (the feature-by-feature reality
 map, including its own §5 recommended sequence, which this roadmap absorbs
@@ -27,7 +27,7 @@ not swept under anything — §7 is the concrete plan to close it.
 
 ---
 
-## Current execution ledger — 2026-08-14
+## Current execution ledger — 2026-08-15
 
 This is the current execution source of truth for the six Verevon strategy
 documents. Their dated audit notes remain useful evidence, but where an older
@@ -40,7 +40,7 @@ the affected services, apply configuration or migrations, verify the running
 flow, fix what fails, and continue. No statement in this ledger authorizes or
 claims an external customer deployment.
 
-### 2026-08-14 delta: Space, operations, and scheduled work
+### 2026-08-15 delta: Space, operations, and scheduled work
 
 The current cross-plane program is now the
 [Verevon v3 × QM comparison and adoption plan](apps/Frontend%20Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md).
@@ -51,19 +51,24 @@ No sequence is complete merely because a source slice compiles.
 | Work | Current status | What is true now | What still closes it |
 | --- | --- | --- | --- |
 | Canonical Space and Action Catalog | `[~]` | Initial Application/Control/Model slices and V3 contract-drift guards exist. | ADR/ID inventory, resource-intersection enforcement, actor-specific owner contracts, migration/cutover evidence, and the Space cockpit. |
+| Personal Space S1.1–S1.4 | `[~]` | Application lifecycle registration, Control's current-authority decision, the V3 resolver/cockpit, and the Model thread/run context are source- and local-dev-config-verified. Browser authority is stripped; Control bears the create/append decisions; Session Core persists only non-secret bindings. | An authenticated create → thread/run → membership/entitlement/privacy revoke proof against disposable Control/Postgres and the running dev artifacts; then continuation/sandbox/cost propagation, migration backfill, and cutover evidence. |
+| First governed owner operation S2.1–S2.4 | `[~]` | `tickets.create` is the sole durable owner-receipt action. The source vertical has a content-free Session run projection, Control target decision, strict private Conversation Core verifier, transactional exact conversation grant, narrow Execution Core adapter, and unavailable capability seed. A personal-Space owner grant lifecycle now adds a separate short-lived Control `owner-grant-v1` decision, bearer-contained V3 BFF forwarding, owner/admin Conversation Core create/revoke routes, and content-free receipts. The active effect intersection includes audience hash/revision and authority revision. The Model action allowlist remains deliberately empty. | Prove concurrent revoke/effect, forged/expired/replay, private-resource, and cross-Space cases against disposable Postgres; run an authenticated dev Control → BFF → Conversation Core journey with dedicated dev credentials; then require Capability Core health attestation before any server-resolved Model view or Activity projection. A service credential must never stand in for the owner decision. |
 | Release gates R-1–R-5 | `[~]` | Local contracts and several focused recovery/durability tests exist. | Immutable candidate, provider ZDR attestation, deployed approval continuation, notification/replay proof, and rollback rehearsal. |
-| Scheduled work S4.1 | `[~]` | Commit `fa2d1eff` adds a short-lived, owner-approved single-fire decision from Control; Capability Core verifies it and uses its bearer only for the direct Session Core preparation RPC; Session Core fences a deterministic `service:orchestrator-core` thread; Orchestrator preserves that prepared thread. Focused Control, Capability Core, Session Core, and Orchestrator checks pass. | Disposable end-to-end fire/revocation/ZDR tests; real Control → Session → Temporal → receipt observation; exact owner effect authorization; candidate/rollback evidence. |
+| Scheduled work S4.1 | `[~]` | Control now issues separate preparation and effect-time execution decisions. Capability Core uses the former only to prepare the deterministic `service:orchestrator-core` thread; Orchestrator obtains the latter immediately before the Session Core run effect. No bearer is written to tasks or Temporal history. Focused Control, Capability Core, Session Core, and Orchestrator checks pass. | The distinct Orchestrator → Control service credential is intentionally absent, so the dev path fails closed. Provision it only for a dedicated test fixture, then run disposable end-to-end fire/revocation/ZDR proof, capture Control → Session → Temporal receipts, and rehearse rollback. |
 | Local stack | `[~]` | The canonical `build-verevon-services.sh` launcher rebuilt and started the selected dev stacks without rotating existing credentials; migration-version and environment checks passed. | Repeatable user journeys and fault/recovery drills for each claimed loop. |
 | Quarry agent web/browser | `[~]` | Quarry-native search/read/browser execution is retained. Local Chromium is dynamically promoted only with its DNS-pinned egress proxy; focused proxy/DNS and real-browser redirect/frame/XHR/subresource proof is green. | Keep remote providers disabled until equivalent containment proof; close native AX/OOPIF stale-target, artifact transfer/quarantine, dialog-approval replay, and authoritative provider-meter gates. |
 
-**Immediate sequence.** First make the scheduled-run slice observable end to
-end and prove its denied paths. In parallel, clear the release gates that make
-all effectful Space work honest. Then deliver the Personal Space vertical slice
-(Control decision, V3 resolver, thread/run/Data propagation), one governed
-owner operation, scoped credentials/instructions/skills, durable workspace
-state, watches/delivery, and only then additional surfaces. This order adopts
-QM's scope coherence while retaining CoreSystem's stronger owner-plane,
-privacy, and evidence boundaries.
+**Immediate sequence.** First give the existing Personal Space and scheduled-
+run slices disposable authenticated/revocation proof, while clearing the
+release gates that make all effectful Space work honest. In parallel, complete
+the remaining `tickets.create` owner boundary: disposable-Postgres revoke/effect
+and adversarial decision proof plus an authenticated dev journey. Do not expose
+it to the Model until the private owner effect route is independently
+authorized, exercised with dedicated dev credentials, and health-attested.
+Then continue with scoped credentials/instructions/skills,
+durable workspace state, watches/delivery, and only then additional surfaces.
+This order adopts QM's scope coherence while retaining CoreSystem's stronger
+owner-plane, privacy, and evidence boundaries.
 
 **Support state today.** The unified Support workspace has working
 Conversation, Ticketing, and content-free Outbound surfaces. Gmail and

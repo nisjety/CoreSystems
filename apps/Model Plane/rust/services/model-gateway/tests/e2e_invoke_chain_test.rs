@@ -38,10 +38,10 @@ use mp_contracts::model_plane::v1::{
     ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
     SaveCheckpointRequest, SaveCheckpointResponse, SessionMessage, SpeechVoiceInfo,
     StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse,
-    StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse,
-    SynthesizeSpeechRequest, SynthesizeSpeechResponse, TerminalOutcome, TranscribeSpeechRequest,
-    TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse, TranslationDetection,
-    TranslationLanguageInfo,
+    StartScheduledRunRequest, StreamVideoGenerationContentRequest,
+    StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse,
+    TerminalOutcome, TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest,
+    TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
 };
 use mp_events::publisher::InMemoryPublisher;
 use std::pin::Pin;
@@ -881,6 +881,15 @@ impl SessionCore for MockSessionCore {
         ))
     }
 
+    async fn start_scheduled_run(
+        &self,
+        _: TReq<StartScheduledRunRequest>,
+    ) -> Result<Response<StartRunResponse>, Status> {
+        Err(Status::unimplemented(
+            "scheduled StartRun is not part of the gateway test path",
+        ))
+    }
+
     async fn complete_step(
         &self,
         _: TReq<CompleteStepRequest>,
@@ -957,6 +966,7 @@ impl SessionCore for MockSessionCore {
             .map(|(role, _, content)| SessionMessage {
                 role: role.clone(),
                 content: content.clone(),
+                agent_name: String::new(),
             })
             .collect();
         Ok(Response::new(ListConversationResponse { messages }))
@@ -1031,6 +1041,25 @@ impl SessionCore for MockSessionCore {
     {
         Err(Status::unimplemented(
             "prepare_scheduled_run_thread not needed in this test",
+        ))
+    }
+
+    async fn claim_scheduled_step(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::ClaimScheduledStepRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::ClaimScheduledStepResponse>, Status> {
+        Err(Status::unimplemented(
+            "claim_scheduled_step not needed in this test",
+        ))
+    }
+
+    async fn record_scheduled_step_receipt(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::RecordScheduledStepReceiptRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::RecordScheduledStepReceiptResponse>, Status>
+    {
+        Err(Status::unimplemented(
+            "record_scheduled_step_receipt not needed in this test",
         ))
     }
 

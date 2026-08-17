@@ -3,6 +3,7 @@ package workflows
 import (
 	"fmt"
 
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/triodelab/model-plane/services/orchestrator-core/cmd/activities"
@@ -86,5 +87,50 @@ func executeStepLoop(ctx workflow.Context, in activities.StepLoopInput) (activit
 		Steps:     steps,
 		Completed: len(steps) > 0 && steps[len(steps)-1].Completed,
 		Summary:   fmt.Sprintf("executed %d steps for run %s", len(steps), in.RunID),
+	}, nil
+}
+
+// executeScheduledStepLoop is the schedule-only driver. It never constructs a
+// user-bound ExecuteStep request; each turn carries only the immutable,
+// template-bound identifiers needed by Control, Session Core, and the
+// dedicated Execution Core service lane.
+func executeScheduledStepLoop(ctx workflow.Context, in ScheduledRunInput) (activities.StepLoopOutput, error) {
+	var steps []activities.StepResult
+	for i := range defaultMaxTurns {
+		stepIndex := uint32(i)
+		intent := activities.ScheduledStepExecutionIntent{
+			OrgID:          in.OrgID,
+			SpaceRef:       in.SpaceRef,
+			SubjectID:      in.SubjectID,
+			RunID:          in.RunID,
+			ThreadID:       in.ThreadID,
+			ScheduleID:     in.ScheduleID,
+			FireKey:        in.FireKey,
+			TemplateDigest: in.TemplateDigest,
+			StepID:         fmt.Sprintf("%s:step:%d", in.RunID, i),
+			StepIndex:      stepIndex,
+			PolicyDigest:   in.PolicyDigest,
+			IdempotencyKey: fmt.Sprintf("%s:step:%d", in.IdempotencyKey, i),
+		}
+		var step activities.StepResult
+		if err := workflow.ExecuteActivity(ctx, "ExecuteScheduledStepActivity", intent).Get(ctx, &step); err != nil {
+			return activities.StepLoopOutput{Steps: steps, Completed: false}, err
+		}
+		steps = append(steps, step)
+		if step.UnknownOutcome {
+			return activities.StepLoopOutput{Steps: steps, Completed: false}, temporal.NewNonRetryableApplicationError(
+				"scheduled-step provider outcome is unknown; reconcile its durable receipt before retrying",
+				"ScheduledStepUnknownOutcome",
+				nil,
+			)
+		}
+		if step.Completed || step.NeedsApproval {
+			break
+		}
+	}
+	return activities.StepLoopOutput{
+		Steps:     steps,
+		Completed: len(steps) > 0 && steps[len(steps)-1].Completed,
+		Summary:   fmt.Sprintf("executed %d scheduled steps for run %s", len(steps), in.RunID),
 	}, nil
 }

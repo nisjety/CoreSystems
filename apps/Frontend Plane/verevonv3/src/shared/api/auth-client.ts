@@ -97,14 +97,35 @@ export async function signOut(): Promise<void> {
   await requestJson('/api/v1/auth/sign-out', { method: 'POST' })
 }
 
+/**
+ * Strict session probe: resolves to `null` only for a definitive "there is no
+ * session" answer (the endpoint replies 200 with a null body), and throws when
+ * the answer could not be obtained at all — a timeout, a 5xx, a rate limit.
+ *
+ * The session store needs that distinction. Collapsing an unreachable backend
+ * into `null` is indistinguishable from a real sign-out, and the store reacts by
+ * clearing a session that is in fact still valid — which is precisely how a
+ * momentary blip used to bounce a signed-in user back to the login screen.
+ */
+export async function probeAuthSession(options?: {
+  disableCookieCache?: boolean
+}): Promise<{ user: AuthUser } | null> {
+  const path = options?.disableCookieCache
+    ? '/api/v1/auth/session?disableCookieCache=true'
+    : '/api/v1/auth/session'
+  return await requestJson(path)
+}
+
+/**
+ * Forgiving variant for callers that only want to render an optional signed-in
+ * hint and have no session to lose. Prefer {@link probeAuthSession} anywhere the
+ * answer decides whether the user stays logged in.
+ */
 export async function getAuthSession(options?: {
   disableCookieCache?: boolean
 }): Promise<{ user: AuthUser } | null> {
   try {
-    const path = options?.disableCookieCache
-      ? '/api/v1/auth/session?disableCookieCache=true'
-      : '/api/v1/auth/session'
-    return await requestJson(path)
+    return await probeAuthSession(options)
   } catch {
     return null
   }

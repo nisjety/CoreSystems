@@ -3,7 +3,7 @@ import { ArrowUpRight, Sparkles } from 'lucide-solid'
 import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import { SourceRow } from '@/features/inbox/components/InboxAsidePrimitives'
 import { runAssist, type AssistResult, type AssistSource } from '@/features/inbox/lib/inbox-ai'
-import { readChatThreadTranscript, setActiveChatThreadId, type ChatThreadTranscriptTurn } from '@/features/chat/lib/chat-thread-history'
+import { readChatThreadTranscript, type ChatThreadTranscriptTurn } from '@/features/chat/lib/chat-thread-history'
 import { getChatThreadTranscript } from '@/shared/api/chat-client'
 import { type OutboundIntent } from '@/shared/api/inbox-client'
 import { bindSupportChatThread, readSupportChatThread, type SupportChatThreadScope } from '@/shared/chat/support-chat-thread'
@@ -159,7 +159,7 @@ export function OutboundVerevonRail(props: { intent: OutboundIntent | null; orgI
           <>
             <header class="verevon-outbound-verevon__header">
               <div><Sparkles class="size-4" /><strong>Verevon</strong></div>
-              <Show when={threadId()}>{(id) => <A href="/chat" onClick={() => setActiveChatThreadId(id())}>{i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" /></A>}</Show>
+              <Show when={threadId()}>{(id) => <A href={`/chat?thread_id=${encodeURIComponent(id())}`}>{i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" /></A>}</Show>
             </header>
 
             <section class="verevon-outbound-verevon__context" aria-label={i18n.tr('Kvitteringskontekst', 'Receipt context')}>
@@ -205,7 +205,6 @@ function bindResultThread(scope: SupportChatThreadScope, result: AssistResult): 
   const threadId = result.threadId?.trim()
   if (!threadId) return null
   bindSupportChatThread(scope, threadId)
-  setActiveChatThreadId(threadId)
   return threadId
 }
 

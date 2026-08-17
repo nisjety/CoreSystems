@@ -19,6 +19,8 @@ const controlSpacePolicyPrincipal = "control-space-policy"
 const importsCorePrincipal = "imports-core"
 const capabilityCorePrincipal = "capability-core"
 const orchestratorCorePrincipal = "orchestrator-core"
+const executionCorePrincipal = "execution-core"
+const conversationCorePrincipal = "conversation-core"
 
 // requireSpaceLifecycleRegistrar admits only the narrowly-scoped Application
 // lifecycle workload. A general service credential, bearer token, or forged
@@ -137,6 +139,75 @@ func (s *Server) requireSpaceScheduledRunExecutor(c *gin.Context) {
 		c.GetString("service_id") != orchestratorCorePrincipal ||
 		!hasServiceScope(c, "spaces:schedule:execute") {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Orchestrator Core scheduled-run executor principal required"})
+		return
+	}
+	c.Next()
+}
+
+// requireSpaceScheduledStepExecutor is narrower than scheduled-run start:
+// Orchestrator receives a fresh decision for each deterministic turn and may
+// not reuse the run-creation credential as Model execution authority.
+func (s *Server) requireSpaceScheduledStepExecutor(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != orchestratorCorePrincipal ||
+		!hasServiceScope(c, "spaces:schedule:step") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Orchestrator Core scheduled-step principal required"})
+		return
+	}
+	c.Next()
+}
+
+// requireSpaceAgentActionAuthorizer lets only the execution workload request a
+// fresh Control decision for a run it is actively supervising. It cannot name
+// a subject or target resource: Control resolves the former from Session Core,
+// and the owning plane authorizes the latter at effect time.
+func (s *Server) requireSpaceAgentActionAuthorizer(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != executionCorePrincipal ||
+		!hasServiceScope(c, "spaces:agent-action:reauthorize") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Execution Core agent action authorizer required"})
+		return
+	}
+	c.Next()
+}
+
+// requireSpaceAgentActionViewer lets only Execution Core request the view-only
+// model catalog binding. It is strictly narrower than the payload-bound effect
+// decision scope and neither Capability Core nor a browser can mint a view.
+func (s *Server) requireSpaceAgentActionViewer(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != executionCorePrincipal ||
+		!hasServiceScope(c, "spaces:agent-action:view") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Execution Core model action viewer required"})
+		return
+	}
+	c.Next()
+}
+
+// requireCurrentRunActionAuthorityChecker is deliberately separate from the
+// execution-time decision issuer. Conversation Core gets only the ability to
+// re-check Control's already-signed, non-secret claims immediately before its
+// own owner-plane effect; it cannot mint a decision or bypass that owner
+// resource authorization.
+func (s *Server) requireCurrentRunActionAuthorityChecker(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != conversationCorePrincipal ||
+		!hasServiceScope(c, "spaces:agent-action:current-authority") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Conversation Core current agent authority checker required"})
+		return
+	}
+	c.Next()
+}
+
+// requireOwnerEffectReservationCoordinator is the only Control reservation
+// caller. Conversation Core may reserve/commit one already signed decision;
+// it cannot issue a decision, widen an owner grant, or ask for another
+// workload's reservation.
+func (s *Server) requireOwnerEffectReservationCoordinator(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != conversationCorePrincipal ||
+		!hasServiceScope(c, "spaces:agent-action:reservation") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Conversation Core owner effect reservation principal required"})
 		return
 	}
 	c.Next()
@@ -506,7 +577,11 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+	// space_kind travels in the envelope, not the signed decision: the gateway
+	// needs it to know which follow-up authorities exist for this Space kind
+	// (retrieval decisions are personal-only today), while verifiers of the
+	// token itself must keep deriving kind from Control state, never a claim.
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token, "space_kind": membership.Kind}})
 }
 
 // issueThreadAppendDecision resolves fresh current evidence for every append.
@@ -788,6 +863,25 @@ type scheduledRunExecutionDecisionRequest struct {
 	} `json:"intent"`
 }
 
+type scheduledStepDecisionRequest struct {
+	Intent scheduledStepIntent `json:"intent"`
+}
+
+type scheduledStepIntent struct {
+	OrgID          string `json:"org_id"`
+	SpaceRef       string `json:"space_ref"`
+	SubjectID      string `json:"subject_id"`
+	RunID          string `json:"run_id"`
+	ThreadID       string `json:"thread_id"`
+	ScheduleID     string `json:"schedule_id"`
+	FireKey        string `json:"fire_key"`
+	TemplateDigest string `json:"template_digest"`
+	StepID         string `json:"step_id"`
+	StepIndex      uint32 `json:"step_index"`
+	PolicyDigest   string `json:"policy_digest"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
 type scheduledRunIntent struct {
 	OrgID          string `json:"org_id"`
 	SpaceRef       string `json:"space_ref"`
@@ -972,6 +1066,90 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 	decision, err := spaces.IssueScheduledRunExecutionDecision(evidence, intent, request.Intent.ThreadID, decisionRef, nonce, time.Now().UTC())
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space scheduled run execution is not authorized"})
+		return
+	}
+	token, err := spaces.SignDecision(key, decision)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+// issueScheduledStepDecision refreshes the full current Space authority for a
+// single turn. The signed envelope is target-bound to Execution Core and is
+// returned only to the authenticated Orchestrator workload; it is never a
+// user delegation and never authorizes an owner-plane effect by itself.
+func (s *Server) issueScheduledStepDecision(c *gin.Context) {
+	if s.spaceRepo == nil || s.scheduledStepAuthority == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	var request scheduledStepDecisionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled step intent is required"})
+		return
+	}
+	intent := spaces.ScheduledStepIntent{
+		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef,
+		RunID: request.Intent.RunID, ThreadID: request.Intent.ThreadID, ScheduleID: request.Intent.ScheduleID,
+		FireKey: request.Intent.FireKey, TemplateDigest: request.Intent.TemplateDigest,
+		StepID: request.Intent.StepID, StepIndex: request.Intent.StepIndex,
+		PolicyDigest: request.Intent.PolicyDigest, IdempotencyKey: request.Intent.IdempotencyKey,
+	}
+	if err := intent.ValidateAuthorityRequest(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled step intent is required"})
+		return
+	}
+	prepared, err := s.scheduledStepAuthority.ResolveScheduledStepAuthority(c.Request.Context(), intent)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "prepared scheduled step authority unavailable"})
+		return
+	}
+	if prepared.OrgID != intent.OrgID || prepared.SpaceRef != intent.SpaceRef ||
+		prepared.RunID != intent.RunID || prepared.ThreadID != intent.ThreadID ||
+		prepared.ScheduleID != intent.ScheduleID || prepared.FireKey != intent.FireKey ||
+		prepared.TemplateDigest != intent.TemplateDigest || prepared.StepID != intent.StepID ||
+		prepared.StepIndex != intent.StepIndex || prepared.PolicyDigest != intent.PolicyDigest ||
+		prepared.IdempotencyKey != intent.IdempotencyKey ||
+		(strings.TrimSpace(request.Intent.SubjectID) != "" && request.Intent.SubjectID != prepared.SubjectID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "prepared scheduled step authority does not match intent"})
+		return
+	}
+	// SubjectID is now sourced from Session Core's prepared-run metadata, never
+	// from the Orchestrator request body.
+	intent.SubjectID = prepared.SubjectID
+	if err := intent.Validate(); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "prepared scheduled step authority is invalid"})
+		return
+	}
+	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID)
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space scheduled step authority unavailable"})
+		return
+	}
+	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
+		return
+	}
+	decisionRef, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	nonce, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	decision, err := spaces.IssueScheduledStepDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "scheduled step is not authorized"})
 		return
 	}
 	token, err := spaces.SignDecision(key, decision)

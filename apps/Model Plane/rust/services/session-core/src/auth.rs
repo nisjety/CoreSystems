@@ -244,6 +244,74 @@ pub fn authorize_space_deletion_service(caller: &VerifiedIdentity) -> Result<(),
     caller.require_service_scope(SPACE_DELETION_SCOPE)
 }
 
+/// Scope and exact identity reserved for Control's action-decision issuer.
+/// The resulting read is deliberately narrower than ordinary `session:read`:
+/// it derives only a run's non-secret, durable Space bindings and is never an
+/// API for a Model workload to impersonate a user or inspect a transcript.
+pub const RUN_ACTION_AUTHORITY_SCOPE: &str = "session:run-action-authority";
+pub const RUN_ACTION_AUTHORITY_SERVICE: &str = "service:control-action-authorizer";
+
+/// Separate least-privilege scope for Control's scheduled-step authority
+/// read. The caller may resolve only the exact prepared scheduled run tuple;
+/// it cannot use this scope to read ordinary runs or human-owned context.
+pub const SCHEDULED_STEP_AUTHORITY_SCOPE: &str = "session:scheduled-step-authority";
+
+/// Dedicated Session Core scope for Execution Core's service-owned scheduled
+/// step claim/receipt lane. It is intentionally distinct from `session:write`
+/// and cannot be used to create or mutate human-owned runs.
+pub const SCHEDULED_STEP_SCOPE: &str = "session:scheduled-step";
+pub const SCHEDULED_STEP_SERVICE: &str = "service:execution-core";
+
+#[allow(clippy::result_large_err)]
+pub fn authorize_scheduled_step_service(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(Status::failed_precondition(
+            "ZDR credentials cannot access durable scheduled-step receipts",
+        ));
+    }
+    if !caller.is_service() || caller.principal_id() != SCHEDULED_STEP_SERVICE {
+        return Err(Status::permission_denied(
+            "only Execution Core may claim scheduled steps",
+        ));
+    }
+    caller.require_service_scope(SCHEDULED_STEP_SCOPE)
+}
+
+/// Verify the single Control workload allowed to resolve durable run bindings
+/// before it issues an owner-targeted action decision.
+#[allow(clippy::result_large_err)]
+pub fn authorize_run_action_authority_service(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(Status::failed_precondition(
+            "ZDR credentials cannot resolve durable run action authority",
+        ));
+    }
+    if !caller.is_service() || caller.principal_id() != RUN_ACTION_AUTHORITY_SERVICE {
+        return Err(Status::permission_denied(
+            "only the Control action-authorizer may resolve run action authority",
+        ));
+    }
+    caller.require_service_scope(RUN_ACTION_AUTHORITY_SCOPE)
+}
+
+/// Verify the Control workload allowed to resolve one prepared scheduled run
+/// before it issues a per-step decision. Keep this identity separate from
+/// Execution Core's claim/receipt scope and from generic run inspection.
+#[allow(clippy::result_large_err)]
+pub fn authorize_scheduled_step_authority_service(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr() {
+        return Err(Status::failed_precondition(
+            "ZDR credentials cannot resolve durable scheduled-step authority",
+        ));
+    }
+    if !caller.is_service() || caller.principal_id() != RUN_ACTION_AUTHORITY_SERVICE {
+        return Err(Status::permission_denied(
+            "only the Control scheduled-step authorizer may resolve scheduled-step authority",
+        ));
+    }
+    caller.require_service_scope(SCHEDULED_STEP_AUTHORITY_SCOPE)
+}
+
 /// The closed set of principals allowed to own a run with no human behind it.
 ///
 /// A run row is normally owned by a person. A durable workflow fired by cron has
@@ -1152,6 +1220,53 @@ mod tests {
                 .code(),
             Code::FailedPrecondition,
         );
+    }
+
+    #[test]
+    fn run_action_authority_requires_exact_control_identity_scope_and_non_zdr() {
+        let authorized = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            RUN_ACTION_AUTHORITY_SERVICE,
+            &[RUN_ACTION_AUTHORITY_SCOPE],
+            false,
+        );
+        authorize_run_action_authority_service(&authorized)
+            .expect("exact Control action-authorizer may resolve run bindings");
+
+        for (principal, scopes, zdr, expected) in [
+            (
+                RUN_ACTION_AUTHORITY_SERVICE,
+                Vec::<&str>::new(),
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:control-action-authorizer-copy",
+                vec![RUN_ACTION_AUTHORITY_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                "service:execution-core",
+                vec![RUN_ACTION_AUTHORITY_SCOPE],
+                false,
+                Code::PermissionDenied,
+            ),
+            (
+                RUN_ACTION_AUTHORITY_SERVICE,
+                vec![RUN_ACTION_AUTHORITY_SCOPE],
+                true,
+                Code::FailedPrecondition,
+            ),
+        ] {
+            let caller = VerifiedIdentity::service_for_test_as("org-1", principal, &scopes, zdr);
+            assert_eq!(
+                authorize_run_action_authority_service(&caller)
+                    .expect_err("only the exact non-ZDR Control principal may resolve authority")
+                    .code(),
+                expected,
+            );
+        }
     }
 
     /// A human never reaches the system branch: the kind is asserted explicitly

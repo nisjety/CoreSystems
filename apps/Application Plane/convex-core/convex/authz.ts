@@ -117,6 +117,39 @@ export async function requireEditorMembershipByOrgId(ctx: any, orgId: string) {
   return viewer;
 }
 
+/**
+ * Membership check for the service-key gateway path, where Convex identity is
+ * unavailable: the BFF holds a Control session, not a Convex one, so the caller
+ * is presented as an `externalAuthId` + `externalOrgId` pair that this function
+ * must verify against the projection rather than trust.
+ *
+ * `assertServiceKey` proves the *caller* is the gateway; this proves the
+ * *subject* it is acting for really belongs to the org. Both are required —
+ * the service key alone would let any gateway route read any org.
+ */
+export async function requireGatewayMember(
+  ctx: any,
+  externalAuthId: string,
+  externalOrgId: string,
+) {
+  const organizations = await ctx.db
+    .query('organizations')
+    .withIndex('by_external_id', (q: any) => q.eq('externalOrgId', externalOrgId))
+    .collect();
+  const organization = organizations.find((candidate: any) => candidate.syncStatus !== 'deleted');
+  if (!organization) throw new Error('Organization not found');
+  const members = await ctx.db
+    .query('users')
+    .withIndex('by_external_and_org', (q: any) =>
+      q.eq('externalAuthId', externalAuthId).eq('orgId', organization._id),
+    )
+    .collect();
+  if (!members.some((candidate: any) => candidate.syncStatus !== 'deleted')) {
+    throw new Error('Unauthorized');
+  }
+  return organization;
+}
+
 export async function requireConversationViewer(
   ctx: any,
   conversationId: string,

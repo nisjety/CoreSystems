@@ -2,9 +2,11 @@ package orchestration
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -24,6 +26,11 @@ const (
 	// PolicyRunScoped covers workflows whose effects stay inside one run of one
 	// organization. Interactive user principals may start these.
 	PolicyRunScoped StartPolicy = iota + 1
+	// PolicyScheduledRun is a narrower service-only lane for a Space cron fire.
+	// It is distinct from a generic run-scoped workflow because the input names a
+	// pre-authorized service-owned thread; Capability Core is the only caller
+	// allowed to introduce that thread/run correlation to Temporal.
+	PolicyScheduledRun
 	// PolicyMaintenance covers org-wide background jobs. Only service
 	// principals may start these — a signed-in user has no business kicking off
 	// their whole organization's nightly job.
@@ -102,6 +109,13 @@ var workflowAllowlist = map[string]WorkflowSpec{
 		Policy:        PolicyRunScoped,
 		RequiresRunID: true,
 		BuildInput:    buildInteractiveRunInput,
+	},
+	"ScheduledRunSupervision": {
+		Type:          "ScheduledRunSupervision",
+		Policy:        PolicyScheduledRun,
+		RequiresRunID: true,
+		DeniesZDR:     true,
+		BuildInput:    buildScheduledRunInput,
 	},
 	"DeepTaskWorkflow": {
 		Type:          "DeepTaskWorkflow",
@@ -219,6 +233,118 @@ func buildInteractiveRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 		in.ThreadID = t.RunID
 	}
 	return in, nil
+}
+
+type scheduledRunRequest struct {
+	ThreadID         string `json:"thread_id"`
+	TaskTemplateJSON string `json:"task_template_json"`
+	SpaceRef         string `json:"space_ref"`
+	SubjectID        string `json:"subject_id"`
+	ScheduleID       string `json:"schedule_id"`
+	FireKey          string `json:"fire_key"`
+	TemplateDigest   string `json:"template_digest"`
+	IdempotencyKey   string `json:"idempotency_key"`
+}
+
+func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
+	var req scheduledRunRequest
+	if err := decodeInput(raw, &req); err != nil {
+		return nil, err
+	}
+	if t.UserID != "" {
+		return nil, errors.New("orchestration: scheduled runs require a service caller")
+	}
+	for label, value := range map[string]string{
+		"thread_id": req.ThreadID, "task_template_json": req.TaskTemplateJSON, "space_ref": req.SpaceRef,
+		"subject_id": req.SubjectID, "schedule_id": req.ScheduleID, "fire_key": req.FireKey,
+		"template_digest": req.TemplateDigest, "idempotency_key": req.IdempotencyKey,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("orchestration: ScheduledRunSupervision requires %s", label)
+		}
+	}
+	for _, value := range []string{req.ScheduleID, req.FireKey} {
+		if strings.ContainsAny(value, "/. \t\r\n*>") {
+			return nil, errors.New("orchestration: scheduled-run identifiers are invalid")
+		}
+	}
+	goal, policy, err := scheduledTemplateGoalAndPolicy(req.TaskTemplateJSON, req.TemplateDigest)
+	if err != nil {
+		return nil, fmt.Errorf("orchestration: scheduled run template is not bound to its execution input: %w", err)
+	}
+	return workflows.ScheduledRunInput{
+		RunID:          t.RunID,
+		ThreadID:       strings.TrimSpace(req.ThreadID),
+		Goal:           goal,
+		Policy:         policy,
+		OrgID:          t.OrgID,
+		SpaceRef:       strings.TrimSpace(req.SpaceRef),
+		SubjectID:      strings.TrimSpace(req.SubjectID),
+		ScheduleID:     strings.TrimSpace(req.ScheduleID),
+		FireKey:        strings.TrimSpace(req.FireKey),
+		TemplateDigest: strings.TrimSpace(req.TemplateDigest),
+		PolicyDigest:   fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(policy))),
+		IdempotencyKey: strings.TrimSpace(req.IdempotencyKey),
+		Retention:      t.Retention(),
+	}, nil
+}
+
+// scheduledTemplateGoalAndPolicy verifies the immutable task template against
+// the Control-bound digest, then derives the only two executable fields the
+// scheduled workflow accepts. Goal and policy must never be trusted as
+// independent Temporal input: they are the workload Control authorized by way
+// of the template commitment.
+func scheduledTemplateGoalAndPolicy(templateJSON, expectedDigest string) (string, string, error) {
+	templateJSON = strings.TrimSpace(templateJSON)
+	expectedDigest = strings.TrimSpace(expectedDigest)
+	if templateJSON == "" || expectedDigest == "" || len(templateJSON) > 64<<10 {
+		return "", "", errors.New("template binding is invalid")
+	}
+	var rawTemplate map[string]json.RawMessage
+	decoder := json.NewDecoder(strings.NewReader(templateJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&rawTemplate); err != nil || rawTemplate == nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return "", "", errors.New("template is not a JSON object")
+	}
+	canonical, err := json.Marshal(rawTemplate)
+	if err != nil || fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)) != expectedDigest {
+		return "", "", errors.New("template digest mismatch")
+	}
+	var template struct {
+		Title         string          `json:"title"`
+		Description   string          `json:"description"`
+		Policy        string          `json:"policy"`
+		WorkflowInput json.RawMessage `json:"workflow_input"`
+	}
+	if err := json.Unmarshal(canonical, &template); err != nil {
+		return "", "", errors.New("template is invalid")
+	}
+	if len(bytes.TrimSpace(template.WorkflowInput)) > 0 {
+		var workflowInput map[string]json.RawMessage
+		if err := json.Unmarshal(template.WorkflowInput, &workflowInput); err != nil || workflowInput == nil {
+			return "", "", errors.New("workflow input is invalid")
+		}
+		var goal, policy string
+		goalRaw, ok := workflowInput["goal"]
+		if !ok || json.Unmarshal(goalRaw, &goal) != nil || strings.TrimSpace(goal) == "" {
+			return "", "", errors.New("workflow input goal is required")
+		}
+		if policyRaw, present := workflowInput["policy"]; present && json.Unmarshal(policyRaw, &policy) != nil {
+			return "", "", errors.New("workflow input policy is invalid")
+		}
+		return strings.TrimSpace(goal), strings.TrimSpace(policy), nil
+	}
+	goal := strings.TrimSpace(template.Title)
+	if description := strings.TrimSpace(template.Description); description != "" {
+		if goal != "" {
+			goal += "\n\n"
+		}
+		goal += description
+	}
+	if goal == "" {
+		return "", "", errors.New("template has no goal")
+	}
+	return goal, strings.TrimSpace(template.Policy), nil
 }
 
 func buildDeepTaskInput(raw json.RawMessage, t Tenancy) (any, error) {

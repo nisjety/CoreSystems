@@ -21,6 +21,11 @@ service SessionCore {
   // Start a new run within a thread.
   rpc StartRun(StartRunRequest) returns (StartRunResponse);
 
+  // Start one prepared, deterministic service-owned scheduled run. This is
+  // intentionally distinct from StartRun: only orchestrator-core may use a
+  // thread that Capability Core prepared for a freshly authorized cron fire.
+  rpc StartScheduledRun(StartScheduledRunRequest) returns (StartRunResponse);
+
   // Prepare the deterministic service-owned thread for one freshly
   // Control-authorized schedule fire. The decision bearer is consumed only by
   // this RPC and is never persisted or forwarded to Temporal.
@@ -118,6 +123,17 @@ service SessionCore {
   // write-throughs here so plan mode survives restart — auditability/resume
   // (GOAL.md §7). The in-memory cache stays authoritative for the request.
   rpc SetRunMode(SetRunModeRequest) returns (SetRunModeResponse);
+
+  // Claim one service-owned scheduled step before Execution Core dispatches
+  // it. The request is content-free and must match the deterministic run
+  // bindings persisted by StartScheduledRun. A duplicate claim returns the
+  // original receipt and never opens a second effect attempt.
+  rpc ClaimScheduledStep(ClaimScheduledStepRequest) returns (ClaimScheduledStepResponse);
+
+  // Record the metadata-only outcome for a previously claimed scheduled step.
+  // `unknown_outcome` is explicit: a lost transport response is not converted
+  // into success or an immediate blind retry.
+  rpc RecordScheduledStepReceipt(RecordScheduledStepReceiptRequest) returns (RecordScheduledStepReceiptResponse);
 }
 
 // ManagedRunLifecycle owns the additive, durable terminalization protocol for
@@ -232,6 +248,13 @@ message AppendMessageRequest {
   string action_schema_hash = 14;
   string payload_digest = 15;
   string idempotency_key = 16;
+
+  // Display name of the agent persona this assistant message answered as, at
+  // the time of the turn. Presentation history only — never an authority
+  // claim: the invocation itself was authorized upstream (Control membership
+  // ∩ binding), and a later rename must not rewrite what the room saw. Empty
+  // for user/system/tool messages and for un-personified assistant turns.
+  string agent_name = 17;
 }
 
 message AppendMessageResponse {
@@ -279,6 +302,44 @@ message StartRunResponse {
   // `runs.user_id` and a different, locally-invented one on its NATS events,
   // and nothing downstream can join the two.
   string owner_id = 3;
+}
+
+// StartScheduledRunRequest contains the non-secret preparation outcome plus a
+// fresh direct-hop Control decision Orchestrator Core obtains immediately
+// before Session Core creates/reuses the deterministic scheduled run. That
+// execution bearer is never persisted in Temporal/task/event payloads.
+message StartScheduledRunRequest {
+  // Exact service-owned thread returned by PrepareScheduledRunThread.
+  string thread_id = 1;
+
+  // Deterministic task-backed Model run identifier. Retries of the same fire
+  // return the existing exact run; it must never name a human-owned run.
+  string run_id = 2;
+
+  // Tenant and immutable schedule-fire identity.
+  string org_id = 3;
+  string schedule_id = 4;
+  string fire_key = 5;
+
+  // The run's non-secret execution details. Provider/effect authorization is
+  // still rechecked by its owning plane before any effect.
+  string goal = 6;
+  string mode = 7;
+  string agent_id = 8;
+
+  // Fresh, Session-targeted decision for exactly this thread/run/fire. It is
+  // carried only on the Orchestrator Core -> Session Core RPC and must never
+  // be copied into durable workflow input or event data.
+  string control_execution_decision_token = 9;
+
+  // Non-secret bindings used only to verify the direct-hop execution decision.
+  // They are intentionally absent from Temporal history and durable events.
+  string human_subject_id = 10;
+  string template_digest = 11;
+  string idempotency_key = 12;
+  // Canonical digest of the Control policy snapshot used for each scheduled
+  // step. The policy body never enters this request or durable workflow input.
+  string policy_digest = 13;
 }
 
 message PrepareScheduledRunThreadRequest {
@@ -667,6 +728,9 @@ message SessionMessage {
   // "user" | "assistant" | "system" | "tool".
   string role = 1;
   string content = 2;
+  // The persona name this turn answered as (see AppendMessageRequest
+  // .agent_name). Empty when the turn had no persona.
+  string agent_name = 3;
 }
 
 message ListConversationResponse {
@@ -836,4 +900,42 @@ message SetRunModeRequest {
 message SetRunModeResponse {
   string run_id = 1;
   string mode = 2;
+}
+
+message ClaimScheduledStepRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string space_id = 4;
+  string schedule_id = 5;
+  string fire_key = 6;
+  string template_digest = 7;
+  string step_id = 8;
+  uint32 step_index = 9;
+  string policy_digest = 10;
+  string idempotency_key = 11;
+}
+
+message ClaimScheduledStepResponse {
+  bool claimed = 1;
+  string receipt_id = 2;
+  string status = 3;
+}
+
+message RecordScheduledStepReceiptRequest {
+  string run_id = 1;
+  string step_id = 2;
+  string org_id = 3;
+  string idempotency_key = 4;
+  string receipt_id = 5;
+  string status = 6;
+  string output_digest = 7;
+  string error_code = 8;
+  bool unknown_outcome = 9;
+}
+
+message RecordScheduledStepReceiptResponse {
+  string receipt_id = 1;
+  string status = 2;
+  bool recorded = 3;
 }

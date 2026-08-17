@@ -32,6 +32,44 @@ service ExecutionCore {
   // gateway after StartRun so a chat turn produces a durable answer instead of
   // stalling in `'queued'`.
   rpc RunAgent(RunAgentRequest) returns (RunAgentResponse);
+
+  // Execute one service-owned scheduled turn. This is intentionally separate
+  // from ExecuteStep: the latter is user-delegated and must never be widened
+  // to make Temporal work. The lane remains disabled until Session Core's
+  // current-run claim/receipt and Control's per-step decision are deployed.
+  rpc ExecuteScheduledStep(ExecuteScheduledStepRequest) returns (ExecuteScheduledStepResponse);
+}
+
+// ExecuteScheduledStepRequest contains only non-secret, immutable bindings.
+// The Control decision is carried as direct-hop metadata by the eventual
+// implementation, never in Temporal input, events, checkpoints, or tool
+// payloads. Keeping the request content-free prevents a caller from selecting
+// a goal, tool, credential, or user identity at the execution boundary.
+message ExecuteScheduledStepRequest {
+  string run_id = 1;
+  string thread_id = 2;
+  string org_id = 3;
+  string space_id = 4;
+  string subject_id = 5;
+  string schedule_id = 6;
+  string fire_key = 7;
+  string template_digest = 8;
+  string step_id = 9;
+  uint32 step_index = 10;
+  string policy_digest = 11;
+  string idempotency_key = 12;
+  // Ephemeral direct-hop Control decision. It must never be persisted in
+  // Temporal history, Session metadata, events, checkpoints, or tool output.
+  string control_decision_token = 13;
+}
+
+message ExecuteScheduledStepResponse {
+  string step_id = 1;
+  string status = 2;
+  string receipt_id = 3;
+  string output = 4;
+  string error = 5;
+  bool unknown_outcome = 6;
 }
 
 // RunAgentRequest — drive one agent run from goal to terminal answer.

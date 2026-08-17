@@ -534,6 +534,12 @@ async fn execute_step_inner(
             session_bearer,
         )
         .await
+    } else if tool_name == crate::ticket_tools::TOOL_NAME {
+        // This adapter cannot make a direct owner effect: it obtains a fresh
+        // Control decision and submits it to Conversation Core's private
+        // verifier. Missing/partial deployment authority is a tool failure,
+        // not a fallback to a generic HTTP executor.
+        crate::ticket_tools::execute_if_configured(tool_input, run_id, org_id, step_id).await
     } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
         execute_mcp(tool_name, tool_input, org_id, user_id).await
     } else if subagent::is_subagent_tool(tool_name) {
@@ -1533,6 +1539,57 @@ mod tests {
             assert_eq!(out.status, expected);
             assert!(!out.output.contains("must-not-dispatch"));
         }
+    }
+
+    #[tokio::test]
+    async fn ticket_owner_action_never_reaches_its_adapter_from_auto_or_malformed_modes() {
+        let policy = allow_policy();
+        for mode in ["auto", "", "malformed"] {
+            let out = execute_step(
+                crate::ticket_tools::TOOL_NAME,
+                r#"{}"#,
+                mode,
+                "",
+                "org_test",
+                "user_test",
+                "run_test",
+                "step_test",
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                &policy,
+            )
+            .await;
+            assert_eq!(
+                out.status, "awaiting_approval",
+                "mode {mode:?} must pause before the owner-effect adapter"
+            );
+        }
+
+        let denied = execute_step(
+            crate::ticket_tools::TOOL_NAME,
+            r#"{}"#,
+            "deny",
+            "",
+            "org_test",
+            "user_test",
+            "run_test",
+            "step_test",
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &policy,
+        )
+        .await;
+        assert_eq!(denied.status, "permission_denied");
     }
 
     // "auto" mode -> Allow (even for the risky "shell" tool). A missing local

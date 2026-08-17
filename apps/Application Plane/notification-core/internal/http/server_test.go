@@ -257,6 +257,25 @@ func TestReadyEndpointReflectsDeliveryMode(t *testing.T) {
 	}
 }
 
+func TestDeliveryCallbackRouteFailsClosedWhenUnconfigured(t *testing.T) {
+	handler := NewHandler(&config.Config{ServiceName: "notification-core", DeliveryMode: "disabled"}, HandlerDeps{})
+	server := httptest.NewServer(newRouter(handler, newTestVerifier(t)))
+	defer server.Close()
+
+	request, err := stdhttp.NewRequest(stdhttp.MethodPost, server.URL+"/api/v1/internal/notification-delivery-callback", strings.NewReader(`{"attempt_id":"a","provider_request_id":"p","receipt_digest":"d"}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	response, err := stdhttp.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST callback error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != stdhttp.StatusServiceUnavailable {
+		t.Fatalf("POST callback status = %d, want %d", response.StatusCode, stdhttp.StatusServiceUnavailable)
+	}
+}
+
 func TestCreateNotificationRequestWithValidKey(t *testing.T) {
 	handler := NewHandler(&config.Config{ServiceName: "notification-core"}, HandlerDeps{Notifications: newTestNotificationService(nil)})
 	server := httptest.NewServer(newRouter(handler, newTestVerifier(t)))

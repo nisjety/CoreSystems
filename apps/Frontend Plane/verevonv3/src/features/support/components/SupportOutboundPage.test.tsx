@@ -167,7 +167,7 @@ describe('SupportOutboundPage', () => {
     ))
 
     expect((await screen.findByRole('region', { name: /verevon answer|verevon-svar/i })).textContent).toMatch(/delivery remains unconfirmed/i)
-    expect(screen.getByRole('link', { name: /open in chat|åpne i chat/i }).getAttribute('href')).toBe('/chat')
+    expect(screen.getByRole('link', { name: /open in chat|åpne i chat/i }).getAttribute('href')).toBe('/chat?thread_id=support_outbound_1')
     expect(screen.queryByRole('button', { name: /prepare customer reply|forbered kundesvar|retry|prøv igjen/i })).toBeNull()
     expect(screen.getByText(/cannot send|kan ikke sende/i)).toBeTruthy()
   })

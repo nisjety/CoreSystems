@@ -186,6 +186,7 @@ func (err RuntimeDispatchError) Unwrap() error {
 
 type Service struct {
 	repository        Repository
+	deliveryQueue     DeliveryQueue
 	runtimeClient     RuntimeClient
 	publisher         EventPublisher
 	generateID        IDGenerator
@@ -257,6 +258,14 @@ func WithPreferenceGate(gate PreferenceGate) Option {
 	return func(s *Service) { s.preferenceGate = gate }
 }
 
+// WithDeliveryQueue enables the durable outbox path. It is intentionally an
+// opt-in wiring change so old synchronous test/compatibility callers do not
+// silently change delivery semantics before the worker and callback contract
+// are deployed together.
+func WithDeliveryQueue(queue DeliveryQueue) Option {
+	return func(s *Service) { s.deliveryQueue = queue }
+}
+
 // NewService constructs the service with optional behaviour hooks.
 func NewService(repository Repository, runtimeClient RuntimeClient, publisher EventPublisher, opts ...Option) *Service {
 	s := &Service{
@@ -283,6 +292,13 @@ func (s *Service) Accept(ctx context.Context, request Request) (*AcceptedRequest
 	}
 	if s.repository == nil {
 		return nil, errors.New("notification repository is not configured")
+	}
+	if s.deliveryQueue != nil && validatedRequest.RetentionMode == RetentionModeZDR {
+		// The durable queue intentionally stores no payload. Until a provider
+		// contract supplies an encrypted, expiry-bound transient descriptor,
+		// accepting ZDR work into an async queue would strand it or require
+		// persisting content that ZDR forbids.
+		return nil, errors.New("asynchronous ZDR notification delivery is unavailable")
 	}
 	resolvedRecipient, err := s.resolveRecipient(ctx, validatedRequest)
 	if err != nil {
@@ -357,6 +373,12 @@ func (s *Service) Accept(ctx context.Context, request Request) (*AcceptedRequest
 	}
 
 	s.publishLifecycleEvent(ctx, SubjectNotificationRequestAccepted, storedRequest, occurredAt)
+	if s.deliveryQueue != nil {
+		if err := s.enqueueDeliveryAttempt(ctx, storedRequest, occurredAt); err != nil {
+			return nil, fmt.Errorf("enqueue notification delivery attempt: %w", err)
+		}
+		return buildAcceptedResponse(storedRequest), nil
+	}
 
 	return s.dispatchAndFinalize(ctx, storedRequest, resolvedRecipient.ProviderSubscriberID, validatedRequest.Payload, occurredAt)
 }
@@ -379,7 +401,15 @@ func (s *Service) resumeExisting(
 	switch existingRequest.Status {
 	case StatusSubmitted, StatusSuppressed:
 		return buildAcceptedResponse(existingRequest), nil
-	case StatusAccepted, StatusFailed:
+	case StatusAccepted:
+		if s.deliveryQueue != nil {
+			if err := s.enqueueDeliveryAttempt(ctx, existingRequest, s.now().UTC()); err != nil {
+				return nil, fmt.Errorf("enqueue existing notification delivery attempt: %w", err)
+			}
+			return buildAcceptedResponse(existingRequest), nil
+		}
+		fallthrough
+	case StatusFailed:
 		enabled, err := s.isNotificationEnabled(ctx, request)
 		if err != nil {
 			return nil, err
@@ -395,6 +425,22 @@ func (s *Service) resumeExisting(
 			cause: fmt.Errorf("notification has non-delivery status %q", existingRequest.Status),
 		}
 	}
+}
+
+func (s *Service) enqueueDeliveryAttempt(ctx context.Context, storedRequest *StoredRequest, occurredAt time.Time) error {
+	if s.deliveryQueue == nil {
+		return errors.New("notification delivery queue is not configured")
+	}
+	if storedRequest == nil || strings.TrimSpace(storedRequest.ID) == "" {
+		return errors.New("notification request is required")
+	}
+	_, err := s.deliveryQueue.EnqueueDeliveryAttempt(ctx, DeliveryAttemptParams{
+		ID:             storedRequest.ID + ":attempt:1",
+		NotificationID: storedRequest.ID,
+		AttemptNumber:  1,
+		OccurredAt:     occurredAt,
+	})
+	return err
 }
 
 func (s *Service) isNotificationEnabled(ctx context.Context, request Request) (bool, error) {

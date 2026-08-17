@@ -63,6 +63,10 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 
 	internal := router.Group("/api/v1", delegated)
 	internal.POST("/notification-requests", handler.CreateNotificationRequest)
+	// Provider callbacks use their own HMAC/timestamp/nonce contract. They do
+	// not enter the delegated browser/service surface and remain unavailable
+	// until the provider callback secret and HA replay store are configured.
+	router.POST("/api/v1/internal/notification-delivery-callback", handler.ReconcileNotificationDeliveryCallback)
 
 	// U5-2 (ui-ux-verevon-gap.md): the wire surface verevon's
 	// src/lib/notifications/client.ts expects. All routes are gated on the

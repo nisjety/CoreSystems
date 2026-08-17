@@ -741,8 +741,10 @@ describe('workspace settings page', () => {
 
     render(() => <VerevonWorkspaceSettingsPage section="integrations" />)
 
-    expect(await screen.findByText('ima@example.com')).toBeTruthy()
-    expect(screen.getByText('second@example.com')).toBeTruthy()
+    const workspaceRows = await screen.findAllByText('Google Workspace')
+    const imaRow = workspaceRows.find((row) => row.closest('.verevon-settings-integration-row')?.textContent?.includes('ima@example.com') ?? false)
+    expect(imaRow).toBeTruthy()
+    expect(workspaceRows.find((row) => row.closest('.verevon-settings-integration-row')?.textContent?.includes('second@example.com'))).toBeTruthy()
     expect(screen.getAllByRole('button', { name: 'Koble til annen konto' })).toHaveLength(2)
   })
 

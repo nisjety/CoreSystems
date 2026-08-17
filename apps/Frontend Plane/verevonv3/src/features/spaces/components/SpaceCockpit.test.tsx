@@ -1,10 +1,14 @@
 import { fireEvent, render, screen, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { I18nProvider, localeStorageKey } from '@/shared/i18n'
 import { SpaceCockpit } from './SpaceCockpit'
 
 afterEach(() => {
-  if (typeof window !== 'undefined') window.location.hash = ''
+  if (typeof window !== 'undefined') {
+    window.location.hash = ''
+    window.localStorage.removeItem(localeStorageKey)
+  }
 })
 
 describe('SpaceCockpit', () => {
@@ -13,6 +17,23 @@ describe('SpaceCockpit', () => {
     for (const label of ['Samtaler', 'Arbeid', 'Kunnskap', 'Aktivitet', 'Agent', 'Medlemmer']) {
       expect(screen.getByRole('tab', { name: label })).toBeTruthy()
     }
+  })
+
+  describe('locale', () => {
+    it('renders English tab labels and copy under an English locale, not hardcoded Norwegian', () => {
+      window.localStorage.setItem(localeStorageKey, 'en')
+      render(() => (
+        <I18nProvider>
+          <SpaceCockpit initialTab="kunnskap" />
+        </I18nProvider>
+      ))
+      for (const label of ['Chat', 'Work', 'Knowledge', 'Activity', 'Agent', 'Members']) {
+        expect(screen.getByRole('tab', { name: label })).toBeTruthy()
+      }
+      expect(screen.getByRole('tablist').getAttribute('aria-label')).toBe('Space views')
+      expect(screen.getByText(/Data Plane has not published/)).toBeTruthy()
+      expect(within(screen.getByRole('tabpanel')).getByText(/missing connection, not an empty Space/)).toBeTruthy()
+    })
   })
 
   it('shows supplied content for the active tab', () => {

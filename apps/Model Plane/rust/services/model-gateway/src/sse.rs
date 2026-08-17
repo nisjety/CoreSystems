@@ -910,6 +910,13 @@ pub async fn invoke_stream_sse(
     if let Some(identity_message) = identity_context_message(&req) {
         messages.insert(0, identity_message);
     }
+    // Persona goes first of all — ahead of identity context — so a mentioned
+    // agent's own instructions are the first thing the model reads, exactly
+    // the way `identity_context_message` primes the grounding content that
+    // follows it. Absent on every turn nobody addressed to an agent.
+    if let Some(persona_message) = agent_persona_message(&req) {
+        messages.insert(0, persona_message);
+    }
     // Skills: match this turn against the org's skill catalogue (disk-loaded +
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
@@ -1068,6 +1075,9 @@ pub async fn invoke_stream_sse(
     let session_run_id = session_run.run_id.clone();
     let session_run_for_terminal = session_run.clone();
     let session_bearer = model_bearer.clone();
+    // Cloned into the persist task so the assistant message records which
+    // persona this turn answered as (server-stamped by the gateway).
+    let session_agent_name = req.agent_name.clone();
     let structured_output_schema = req.structured_output_schema.clone().unwrap_or_default();
     let tool_phase_query = req.content.clone();
     // Provider-bound copy for the title inference: `user_content` already has
@@ -1677,6 +1687,7 @@ pub async fn invoke_stream_sse(
                         &session_thread_id,
                         &assistant_output,
                         &session_bearer,
+                        session_agent_name.as_deref(),
                     )
                     .await
                     {
@@ -2579,6 +2590,7 @@ fn vision_stream(
                     &thread_id,
                     &description,
                     &session_bearer,
+                    None,
                 )
                 .await
                 {
@@ -2785,6 +2797,7 @@ fn image_gen_stream(
                         &thread_id,
                         &assistant_content,
                         &session_bearer,
+                        None,
                     ),
                 )
                 .await
@@ -3045,6 +3058,41 @@ fn temporal_awareness_message() -> ChatMessage {
     }
 }
 
+/// Persona for a turn addressed to a Space agent by `@` mention
+/// (`docs/space-defenition.md`, "Invocation rule"). Absent on every ordinary
+/// Chat turn and on a Space turn nobody mentioned — the room's default
+/// behavior is the plain Verevon voice, not a bound agent's.
+///
+/// Deliberately separate from `identity_context_message`: that message frames
+/// who the *user* is; this frames who is *answering*. Both can be present on
+/// the same turn (a mentioned agent still knows which org and user it's
+/// talking to).
+fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
+    let agent_name = req
+        .agent_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut content = format!(
+        "You are currently answering as {agent_name}, an agent bound to this room. Stay in character as {agent_name} for this reply."
+    );
+    if let Some(instructions) = req
+        .agent_system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        content.push_str(&format!(
+            " {agent_name}'s own instructions, which take precedence over Verevon's default behavior for this turn: {instructions}"
+        ));
+    }
+    Some(ChatMessage {
+        role: "system".to_owned(),
+        content,
+        name: String::new(),
+    })
+}
+
 fn identity_context_message(req: &InvokeRequest) -> Option<ChatMessage> {
     let org_name = req
         .org_name
@@ -3135,6 +3183,7 @@ async fn serve_cached_answer(
         &run.thread_id,
         cached,
         session_bearer,
+        None,
     )
     .await
     {
@@ -3323,6 +3372,7 @@ async fn run_infer_fallback(
                 &thread_id,
                 &resp.content,
                 session_bearer,
+                None,
             )
             .await
             {
@@ -5534,10 +5584,63 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_stream_envelope, build_usage_envelope, classify_agentic_run_outcome,
-        is_confirmed_agent_dispatch_rejection, orchestration_event_to_step_update,
-        sanitize_follow_up_suggestions, sanitize_thread_title, AgenticRunOutcome,
+        agent_persona_message, build_stream_envelope, build_usage_envelope,
+        classify_agentic_run_outcome, is_confirmed_agent_dispatch_rejection,
+        orchestration_event_to_step_update, sanitize_follow_up_suggestions, sanitize_thread_title,
+        AgenticRunOutcome,
     };
+    use crate::http_routes::InvokeRequest;
+
+    fn invoke_request(extra: serde_json::Value) -> InvokeRequest {
+        let mut body = serde_json::json!({
+            "content": "hello",
+            "model": null,
+            "session_key": null,
+            "thread_id": null,
+            "space_append_context": null,
+        });
+        body.as_object_mut()
+            .expect("object")
+            .extend(extra.as_object().expect("object").clone());
+        serde_json::from_value(body).expect("valid InvokeRequest fixture")
+    }
+
+    // ── Space agent persona message ─────────────────────────────────────────
+    // `docs/space-defenition.md`, "Invocation rule": a mention invokes with a
+    // persona, never silently — and an ordinary turn must never acquire one.
+
+    #[test]
+    fn no_persona_on_an_ordinary_turn_nobody_mentioned() {
+        let req = invoke_request(serde_json::json!({}));
+        assert!(agent_persona_message(&req).is_none());
+    }
+
+    #[test]
+    fn mentioned_agent_with_no_instructions_still_gets_a_named_persona() {
+        let req = invoke_request(serde_json::json!({ "agent_name": "Driftsassistent" }));
+        let message = agent_persona_message(&req).expect("persona message");
+        assert_eq!(message.role, "system");
+        assert!(message.content.contains("Driftsassistent"));
+    }
+
+    #[test]
+    fn mentioned_agent_instructions_are_carried_verbatim_and_take_precedence() {
+        let req = invoke_request(serde_json::json!({
+            "agent_name": "Driftsassistent",
+            "agent_system_prompt": "Always answer in bullet points.",
+        }));
+        let message = agent_persona_message(&req).expect("persona message");
+        assert!(message.content.contains("Always answer in bullet points."));
+        assert!(message.content.contains("take precedence"));
+    }
+
+    #[test]
+    fn blank_agent_name_is_treated_as_absent() {
+        // A field present but empty must behave exactly like an absent one —
+        // never render a personaless "You are currently answering as ." line.
+        let req = invoke_request(serde_json::json!({ "agent_name": "   " }));
+        assert!(agent_persona_message(&req).is_none());
+    }
 
     // ── AI thread-title sanitizer ───────────────────────────────────────────
 

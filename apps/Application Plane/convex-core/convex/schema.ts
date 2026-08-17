@@ -306,6 +306,9 @@ export default defineSchema({
     orgId: v.id("organizations"),
     name: v.string(),
     description: v.optional(v.string()),
+    // Room-created agents pick an identity color (Grok-style). Presentation
+    // only — never part of any authority decision.
+    avatarColor: v.optional(v.string()),
     useCase: v.union(
       v.literal("customer_support"),
       v.literal("sales"),
@@ -559,6 +562,86 @@ export default defineSchema({
     .index("by_space_ref", ["spaceRef"])
     .index("by_external_org", ["externalOrgId"])
     .index("by_personal_owner", ["externalOrgId", "kind", "ownerExternalAuthId"]),
+
+  // An agent definition bound to ONE Space, per
+  // `docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md` §3.2. The plan's central rule is
+  // that a definition is not a membership: `agents` says what an agent *is*,
+  // this table says where it is allowed to appear as a room participant. A
+  // second Space needs a second row, and a page/system install is a different
+  // binding entirely — never this one.
+  //
+  // # This table is presentation and policy, NOT authority
+  //
+  // Control owns whether an agent may actually reach a Space: it already models
+  // that as a `space_memberships` row with `subject_type='service'`. Duplicating
+  // that decision here would create two answers to one question, and the stale
+  // one would eventually win. So the gateway intersects: Control decides who is
+  // bound, this projection supplies the identity to render. A row here whose
+  // Control membership is gone must never appear as an active participant.
+  spaceAgentBindings: defineTable({
+    bindingRef: v.string(),
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    // The definition this binding points at. Kept as a real reference so a
+    // deleted definition cannot leave a binding rendering a ghost name.
+    agentId: v.id("agents"),
+    // The Control-side subject this binding corresponds to, so the gateway can
+    // match a binding to the authoritative roster row without guessing by name.
+    subjectId: v.string(),
+    // Space-local presentation override. Absent means "use the definition's own
+    // name/description", which is the common case.
+    displayName: v.optional(v.string()),
+    title: v.optional(v.string()),
+    // Binding policy (space-defenition.md "Binding model"). These are human
+    // decisions about how the agent may be invoked here, enforced at the
+    // gateway's invocation path. ABSENT means the pre-policy legacy behavior
+    // (mention allowed, confirmation required, legacy tool surface) so old
+    // bindings keep working exactly as they did. The doc's remaining policy
+    // fields (knowledge_scope, default_thread_policy, audit_visibility) are
+    // deliberately NOT stored yet: nothing enforces them, and a stored-but-
+    // unenforced policy is a false promise.
+    triggerModes: v.optional(v.array(v.union(v.literal("mention"), v.literal("group")))),
+    allowedTools: v.optional(v.array(v.string())),
+    approvalMode: v.optional(
+      v.union(v.literal("auto"), v.literal("require_confirmation"), v.literal("blocked")),
+    ),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("active"),
+      v.literal("paused"),
+      v.literal("revoked"),
+      v.literal("failed"),
+    ),
+    // Where this agent's work can be delivered besides the room itself. These
+    // are the surfaces the operator has actually configured — an empty list
+    // means no channel is published, and the UI must say exactly that rather
+    // than implying the agent is reachable somewhere it is not.
+    deliveryTargets: v.optional(
+      v.array(
+        v.object({
+          channel: v.union(
+            v.literal("teams"),
+            v.literal("messenger"),
+            v.literal("embed"),
+          ),
+          // Operator-facing label for the specific destination (a Teams channel
+          // name, a Messenger page). Never a token or a secret.
+          label: v.string(),
+          status: v.union(
+            v.literal("active"),
+            v.literal("pending"),
+            v.literal("failed"),
+          ),
+        }),
+      ),
+    ),
+    projectionVersion: v.number(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_binding_ref", ["bindingRef"])
+    .index("by_space_ref", ["spaceRef"])
+    .index("by_space_and_subject", ["spaceRef", "subjectId"]),
 
   // Transactional outbox for Space lifecycle notifications. Consumers dedupe
   // by the immutable event ID and never infer authorization from this event.

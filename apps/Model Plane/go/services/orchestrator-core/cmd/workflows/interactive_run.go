@@ -28,6 +28,26 @@ type InteractiveRunInput struct {
 	Retention activities.Retention `json:"retention"`
 }
 
+// ScheduledRunInput is the non-secret handoff from Capability Core after it
+// consumed Control's one-fire preparation decision with Session Core. The
+// immutable owner/schedule facts let the first activity request fresh execution
+// authority; no Control bearer is ever persisted in Temporal history.
+type ScheduledRunInput struct {
+	RunID          string               `json:"run_id"`
+	ThreadID       string               `json:"thread_id"`
+	Goal           string               `json:"goal"`
+	Policy         string               `json:"policy"`
+	OrgID          string               `json:"org_id"`
+	SpaceRef       string               `json:"space_ref"`
+	SubjectID      string               `json:"subject_id"`
+	ScheduleID     string               `json:"schedule_id"`
+	FireKey        string               `json:"fire_key"`
+	TemplateDigest string               `json:"template_digest"`
+	PolicyDigest   string               `json:"policy_digest"`
+	IdempotencyKey string               `json:"idempotency_key"`
+	Retention      activities.Retention `json:"retention"`
+}
+
 const (
 	// SignalApproval is sent to approve a pending human-approval step.
 	SignalApproval = "approval"
@@ -35,6 +55,11 @@ const (
 	SignalCancel = "cancel"
 
 	defaultMaxTurns = 10
+
+	// scheduledStepLaneChange keeps already-running scheduled workflows
+	// replayable while new fires use the dedicated service-owned step activity.
+	scheduledStepLaneChange  = "scheduled-step-lane"
+	scheduledStepLaneVersion = 1
 )
 
 // InteractiveRunSupervision orchestrates an interactive agent run.
@@ -152,6 +177,84 @@ func InteractiveRunSupervision(ctx workflow.Context, input InteractiveRunInput) 
 	}
 
 	logger.Info("InteractiveRunSupervision completed", "run_id", input.RunID)
+	return nil
+}
+
+// ScheduledRunSupervision is the one owner-only lane for a Space cron fire.
+// The short-lived Control decision is deliberately absent: Capability Core used
+// it only to prepare the exact service-owned thread. This workflow receives
+// that non-secret result and asks Session Core's dedicated RPC to create/reuse
+// the deterministic task-backed run before it executes the ordinary step loop.
+func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) error {
+	logger := workflow.GetLogger(ctx)
+	logger.Info("ScheduledRunSupervision started",
+		"run_id", input.RunID,
+		"thread_id", input.ThreadID,
+		"schedule_id", input.ScheduleID,
+		"fire_key", input.FireKey,
+	)
+
+	activityOpts := workflow.ActivityOptions{
+		StartToCloseTimeout: 2 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumAttempts:    3,
+		},
+	}
+	actCtx := workflow.WithActivityOptions(ctx, activityOpts)
+
+	cancelled := false
+	cancelCh := workflow.GetSignalChannel(ctx, SignalCancel)
+	workflow.Go(ctx, func(gCtx workflow.Context) {
+		cancelCh.Receive(gCtx, nil)
+		cancelled = true
+		logger.Info("cancel signal received", "run_id", input.RunID)
+	})
+
+	var runMeta activities.RunMetadata
+	err := workflow.ExecuteActivity(actCtx,
+		"StartScheduledRunActivity",
+		input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+		input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+	).Get(ctx, &runMeta)
+	if err != nil {
+		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("start scheduled run: %v", err))
+	}
+	if cancelled {
+		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, "cancelled before step loop")
+	}
+
+	var stepOutput activities.StepLoopOutput
+	if workflow.GetVersion(ctx, scheduledStepLaneChange, workflow.DefaultVersion, scheduledStepLaneVersion) == workflow.DefaultVersion {
+		// Replay-only compatibility for histories created before the dedicated
+		// service-owned lane existed. New fires must never take this branch.
+		stepOutput, err = runStepLoop(actCtx, activities.StepLoopInput{
+			RunID: input.RunID, ThreadID: input.ThreadID, Goal: input.Goal,
+			Policy: input.Policy, MaxTurns: defaultMaxTurns, OrgID: input.OrgID,
+		})
+	} else {
+		stepOutput, err = executeScheduledStepLoop(actCtx, input)
+	}
+	if err != nil {
+		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("step loop: %v", err))
+	}
+	if len(stepOutput.Steps) > 0 && stepOutput.Steps[len(stepOutput.Steps)-1].NeedsApproval {
+		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, "scheduled runs cannot continue without a separately authorized approval")
+	}
+	if cancelled {
+		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, "cancelled")
+	}
+	completionInput := activities.CompletionInput{
+		RunID:     input.RunID,
+		OrgID:     input.OrgID,
+		Summary:   stepOutput.Summary,
+		Retention: input.Retention,
+	}
+	if err := workflow.ExecuteActivity(actCtx, "CompleteRunActivity", completionInput).Get(ctx, nil); err != nil {
+		return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, fmt.Sprintf("complete scheduled run: %v", err))
+	}
+	logger.Info("ScheduledRunSupervision completed", "run_id", input.RunID)
 	return nil
 }
 

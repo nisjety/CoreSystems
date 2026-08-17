@@ -92,6 +92,47 @@ func oversizedRoster() []MemberGrant {
 	return members
 }
 
+// A replacement that manages one subject kind must not be able to declare
+// members of another: the row would be inserted and then never converged,
+// so the roster would drift by construction.
+func TestValidateRejectsMembersOutsideTheManagedScope(t *testing.T) {
+	replacement := MembershipReplacement{
+		SpaceRef:            "space-1",
+		ManagedSubjectTypes: []string{"user"},
+		Members: []MemberGrant{
+			{SubjectType: "service", SubjectID: "agent-1", Role: "editor"},
+		},
+	}
+	if err := replacement.Validate(); err == nil {
+		t.Fatal("expected a service member to be rejected under a user-only scope")
+	}
+}
+
+func TestValidateRejectsAnUnknownManagedSubjectType(t *testing.T) {
+	replacement := MembershipReplacement{
+		SpaceRef:            "space-1",
+		ManagedSubjectTypes: []string{"robot"},
+	}
+	if err := replacement.Validate(); err == nil {
+		t.Fatal("expected an unknown managed subject type to be rejected")
+	}
+}
+
+// An absent scope still means "the whole roster", so callers that genuinely own
+// every subject kind keep working unchanged.
+func TestValidateAllowsEverySubjectTypeWhenNoScopeIsDeclared(t *testing.T) {
+	replacement := MembershipReplacement{
+		SpaceRef: "space-1",
+		Members: []MemberGrant{
+			{SubjectType: "user", SubjectID: "user-1", Role: "owner"},
+			{SubjectType: "service", SubjectID: "agent-1", Role: "editor"},
+		},
+	}
+	if err := replacement.Validate(); err != nil {
+		t.Fatalf("an unscoped replacement must accept every subject type: %v", err)
+	}
+}
+
 func itoa(value int) string {
 	if value == 0 {
 		return "0"

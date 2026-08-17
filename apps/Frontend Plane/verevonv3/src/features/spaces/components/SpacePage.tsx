@@ -1,27 +1,45 @@
-import { A, useParams } from '@solidjs/router'
-import { ArrowUpRight, Bot, Clock3, MessageCircle, Plus, Sparkles, Users } from 'lucide-solid'
-import { createResource, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { useParams } from '@solidjs/router'
+import { Bot, Clock3, MessageCircle, Puzzle, Sparkles, Users } from 'lucide-solid'
+import { createResource, createSignal, For, onCleanup, onMount, Show, type Resource } from 'solid-js'
 
 import {
   getPersonalSpaceDeletionReceipt,
+  getSpaceAgents,
   getSpaceContext,
   getSpaceRoster,
   getSpaceThreads,
   requestPersonalSpaceDeletion,
+  type SpaceAgent,
   type SpaceDeletionReceipt,
   type SpaceRosterMember,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
+import { spaceDisplayName } from '../lib/space-name'
+import {
+  ACTIVE_RUN_STATUSES,
+  formatLabel,
+  threadStatus,
+  threadTitle,
+} from '../lib/space-thread-presentation'
 import { SpaceActivityFeed } from './SpaceActivityFeed'
+import { SpaceBindAgentDialog } from './SpaceBindAgentDialog'
 import { SpaceCockpit } from './SpaceCockpit'
+import { SpaceCreateAgentDialog } from './SpaceCreateAgentDialog'
+import { SpaceRoomComposer } from './SpaceRoomComposer'
+import { SpaceRoomTimeline } from './SpaceRoomTimeline'
+
+// Mirrors the gateway's own gate (`CREATE_AGENT_ROLES`): creation is a
+// governed grant, so only roles that may grant get the entry points. The
+// server enforces this regardless; hiding the door is presentation.
+function canCreateAgent(role: string): boolean {
+  return role === 'owner' || role === 'manager'
+}
 
 // Membership is authoritative only at the server. Revalidate while the Space
 // is open so a removal/revocation cannot leave an old resolved value usable in
 // the cockpit between navigations.
 const SPACE_CONTEXT_RECHECK_MS = 30_000
-
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'awaiting_approval'])
 
 /**
  * The Space is a workroom, not a second application shell. It composes the
@@ -53,6 +71,14 @@ export default function SpacePage() {
   // every page load for a request nobody had made.
   const [deletionRequestId, setDeletionRequestId] = createSignal<string | undefined>(undefined)
   const [deletionReceipt] = createResource(deletionRequestId, getPersonalSpaceDeletionReceipt)
+  // Shared by SpaceAgentPanel and the room composer's mention list: every tab
+  // stays mounted underneath SpaceCockpit (panels hide, they don't unmount),
+  // so fetching this per-panel would mean two independent network calls for
+  // the same room's agents on every page load.
+  const [roster] = createResource(spaceRef, getSpaceRoster)
+  const [agents, { refetch: refetchAgents }] = createResource(spaceRef, getSpaceAgents)
+  const [createAgentOpen, setCreateAgentOpen] = createSignal(false)
+  const [bindAgentOpen, setBindAgentOpen] = createSignal(false)
   const [deletionError, setDeletionError] = createSignal('')
   const [deletionSubmitting, setDeletionSubmitting] = createSignal(false)
   const currentThreads = () => threads()?.threads ?? []
@@ -113,7 +139,7 @@ export default function SpacePage() {
               <header class="verevon-space-header">
                 <div class="verevon-space-header__title">
                   <p class="verevon-space-eyebrow">{spaceWorkroomLabel(current().space.kind, i18n.tr)}</p>
-                  <h1 id="space-title">{current().space.name}</h1>
+                  <h1 id="space-title">{spaceDisplayName(current().space, i18n.tr)}</h1>
                   <div class="verevon-space-meta" aria-label={i18n.tr('Status for rommet', 'Current Space status')}>
                     <span>{spaceKindLabel(current().space.kind, i18n.tr)}</span>
                     <span aria-hidden="true">·</span>
@@ -133,15 +159,41 @@ export default function SpacePage() {
                 </p>
               </Show>
 
+              <SpaceCreateAgentDialog
+                spaceRef={current().space.space_ref}
+                open={createAgentOpen}
+                onClose={() => setCreateAgentOpen(false)}
+                onCreated={() => {
+                  void refetchAgents()
+                }}
+              />
+              <SpaceBindAgentDialog
+                spaceRef={current().space.space_ref}
+                open={bindAgentOpen}
+                onClose={() => setBindAgentOpen(false)}
+                onBound={() => {
+                  void refetchAgents()
+                }}
+              />
               <SpaceCockpit
                 tabs={{
                   chat: (
                     <SpaceConversationPanel
                       spaceRef={current().space.space_ref}
-                      spaceName={current().space.name}
+                      spaceName={spaceDisplayName(current().space, i18n.tr)}
                       threads={currentThreads}
                       loading={() => threads.loading}
                       unavailable={threadsUnavailable}
+                      roster={() => (roster.error ? [] : roster() ?? [])}
+                      agents={() => (agents.error ? [] : agents() ?? [])}
+                      onExchangeSettled={() => {
+                        void refetchThreads()
+                      }}
+                      onCreateAgent={
+                        canCreateAgent(current().membership.role)
+                          ? () => setCreateAgentOpen(true)
+                          : undefined
+                      }
                     />
                   ),
                   aktivitet: (
@@ -150,12 +202,27 @@ export default function SpacePage() {
                       loading={() => threads.loading}
                     />
                   ),
-                  agent: <SpaceAgentPanel spaceRef={current().space.space_ref} />,
+                  agent: (
+                    <SpaceAgentPanel
+                      agents={agents}
+                      onCreateAgent={
+                        canCreateAgent(current().membership.role)
+                          ? () => setCreateAgentOpen(true)
+                          : undefined
+                      }
+                      onBindAgent={
+                        canCreateAgent(current().membership.role)
+                          ? () => setBindAgentOpen(true)
+                          : undefined
+                      }
+                    />
+                  ),
                   medlemmer: (
                     <SpaceMembersPanel
                       spaceRef={current().space.space_ref}
                       role={current().membership.role}
                       kind={current().space.kind}
+                      roster={roster}
                       deletionError={deletionError}
                       deletionReceipt={deletionReceipt}
                       deletionSubmitting={deletionSubmitting}
@@ -180,8 +247,14 @@ function SpaceConversationPanel(props: {
   readonly threads: () => readonly SpaceThread[]
   readonly loading: () => boolean
   readonly unavailable: () => boolean
+  readonly roster: () => readonly SpaceRosterMember[]
+  readonly agents: () => readonly SpaceAgent[]
+  readonly onExchangeSettled?: () => void
+  readonly onCreateAgent?: () => void
 }) {
   const i18n = useI18n()
+  let focusComposer: (() => void) | undefined
+  const [replyTarget, setReplyTarget] = createSignal<{ threadId: string; title: string } | undefined>(undefined)
 
   return (
     <section class="verevon-space-view verevon-space-view--conversations" aria-labelledby="space-conversations-title">
@@ -194,10 +267,10 @@ function SpaceConversationPanel(props: {
             'The shared record for people and agent work connected to this Space.',
           )}</p>
         </div>
-        <a class="verevon-space-secondary-action" href={spaceChatHref(props.spaceRef)}>
+        <button type="button" class="verevon-space-secondary-action" onClick={() => focusComposer?.()}>
           <Sparkles size={15} aria-hidden="true" />
           {i18n.tr('Start en samtale', 'Start a conversation')}
-        </a>
+        </button>
       </div>
 
       <Show when={props.loading()}>
@@ -205,88 +278,45 @@ function SpaceConversationPanel(props: {
       </Show>
       <Show when={!props.loading()}>
         <Show
-          when={!props.unavailable() && props.threads().length > 0}
+          when={!props.unavailable()}
           fallback={
-            <Show
-              when={props.unavailable()}
-              fallback={
-                <div class="verevon-space-fresh-conversation" aria-labelledby="space-fresh-conversation-title">
-                  <span class="verevon-space-fresh-conversation__mark" aria-hidden="true" />
-                  <h3 id="space-fresh-conversation-title">{i18n.tr('Utforsk boter i Agent Studio', 'Explore bots in Agent Studio')}</h3>
-                  <p>{i18n.tr(
-                    'Åpne Agent Studio for å utforske bot-malene som er tilgjengelige for organisasjonen din.',
-                    'Open Agent Studio to explore the bot blueprints available to your organization.',
-                  )}</p>
-                  <A
-                    class="verevon-space-fresh-conversation__action"
-                    href="/agents?agent=chatbot&view=playground"
-                    aria-label={i18n.tr('Åpne Agent Studio', 'Open Agent Studio')}
-                  >
-                    <Bot size={16} aria-hidden="true" />
-                    {i18n.tr('Åpne Agent Studio', 'Open Agent Studio')}
-                  </A>
-                </div>
-              }
-            >
-              <div class="verevon-space-empty-state" role="status">
-                <MessageCircle size={20} aria-hidden="true" />
-                <div>
-                  <h3>{i18n.tr('Samtalearkivet er utilgjengelig', 'Conversation record unavailable')}</h3>
-                  <p>{i18n.tr(
-                    'Prøv igjen om litt. Vi kunne ikke bekrefte om dette rommet har samtaler.',
-                    'Try again shortly. We could not confirm whether this Space has conversations.',
-                  )}</p>
-                </div>
+            <div class="verevon-space-empty-state" role="status">
+              <MessageCircle size={20} aria-hidden="true" />
+              <div>
+                <h3>{i18n.tr('Samtalearkivet er utilgjengelig', 'Conversation record unavailable')}</h3>
+                <p>{i18n.tr(
+                  'Prøv igjen om litt. Vi kunne ikke bekrefte om dette rommet har samtaler.',
+                  'Try again shortly. We could not confirm whether this Space has conversations.',
+                )}</p>
               </div>
-            </Show>
+            </div>
           }
         >
-          <ul class="verevon-space-conversation-list">
-            <For each={props.threads()}>
-              {(thread) => <SpaceConversationRow thread={thread} />}
-            </For>
-          </ul>
+          <SpaceRoomTimeline
+            spaceName={props.spaceName}
+            threads={props.threads}
+            roster={props.roster}
+            agents={props.agents}
+            onStartConversation={() => focusComposer?.()}
+            onCreateAgent={props.onCreateAgent}
+            onReply={(thread) => {
+              setReplyTarget({ threadId: thread.thread_id, title: threadTitle(thread, i18n.tr) })
+              focusComposer?.()
+            }}
+          />
         </Show>
       </Show>
 
-      <a
-        class="verevon-space-composer-link"
-        href={spaceChatHref(props.spaceRef)}
-        aria-label={`${i18n.tr('Skriv til', 'Message')} ${props.spaceName}`}
-      >
-        <span class="verevon-space-composer-link__plus" aria-hidden="true"><Plus size={16} /></span>
-        <span>{i18n.tr('Skriv til', 'Message')} {props.spaceName}</span>
-        <ArrowUpRight size={16} aria-hidden="true" />
-      </a>
+      <SpaceRoomComposer
+        spaceRef={props.spaceRef}
+        roster={props.roster}
+        agents={props.agents}
+        onExchangeSettled={props.onExchangeSettled}
+        registerFocusHandle={(focus) => { focusComposer = focus }}
+        replyTarget={replyTarget}
+        onClearReplyTarget={() => setReplyTarget(undefined)}
+      />
     </section>
-  )
-}
-
-function SpaceConversationRow(props: { readonly thread: SpaceThread }) {
-  const i18n = useI18n()
-  const status = () => props.thread.latest_run_status
-  const isActive = () => ACTIVE_RUN_STATUSES.has(status() ?? '')
-
-  return (
-    <li class="verevon-space-conversation-row" data-active={isActive() || undefined}>
-      <a href={threadHref(props.thread.thread_id)}>
-        <span class="verevon-space-conversation-row__icon" aria-hidden="true">
-          <MessageCircle size={16} />
-        </span>
-        <span class="verevon-space-conversation-row__body">
-          <strong>{threadTitle(props.thread, i18n.tr)}</strong>
-          <span>{props.thread.preview || i18n.tr('Åpne samtale', 'Open conversation')}</span>
-        </span>
-        <span class="verevon-space-conversation-row__meta">
-          <span classList={{ 'verevon-space-status': true, 'verevon-space-status--active': isActive() }}>
-            {threadStatus(props.thread, i18n.tr)}
-          </span>
-          <Show when={props.thread.updated_at ?? props.thread.latest_run_updated_at}>
-            {(at) => <time>{formatWhen(at())}</time>}
-          </Show>
-        </span>
-      </a>
-    </li>
   )
 }
 
@@ -345,68 +375,210 @@ function SpaceActivityPanel(props: {
  * model, and a card implying them from a membership row would be the false
  * promise this tab was left honest to avoid.
  */
-function SpaceAgentPanel(props: { readonly spaceRef: string }) {
+/**
+ * The Space's agents, rendered as room participants rather than as a catalog.
+ *
+ * The presentation follows the coworker model the scope plan names (Grok/Buzz):
+ * an agent is someone who is *in the room*, with a name, a standing, and a
+ * reachable set of channels — not a configuration row. What it must not borrow
+ * from those products is their looseness about authority: every field here is
+ * server-published, and the two states people conflate are kept visibly apart.
+ *
+ * * **No agents** is an answer — Control was asked and no agent is bound.
+ * * **Could not load** is not an answer, and never renders as an empty room.
+ * * **No published identity** is a third state: Control authorizes the agent,
+ *   but Application has not described it. It appears, honestly unnamed.
+ *
+ * Status is carried by text and shape, never colour alone, per the plan's
+ * accessibility rule.
+ */
+function SpaceAgentPanel(props: {
+  readonly agents: Resource<readonly SpaceAgent[] | undefined>
+  readonly onCreateAgent?: () => void
+  readonly onBindAgent?: () => void
+}) {
   const i18n = useI18n()
-  const [roster] = createResource(() => props.spaceRef, getSpaceRoster)
-  const agents = () => (roster() ?? []).filter((member) => member.subject_type === 'service')
+  const agents = props.agents
+  const current = () => agents() ?? []
 
   return (
     <section class="verevon-space-view" aria-labelledby="space-agents-title">
       <div class="verevon-space-view__heading">
         <div>
           <p class="verevon-space-eyebrow">{i18n.tr('Agenter', 'Agents')}</p>
-          <h2 id="space-agents-title">Agent</h2>
+          <h2 id="space-agents-title">{i18n.tr('Agenter i rommet', 'Agents in this room')}</h2>
           <p>{i18n.tr(
-            'Agenter som er gitt tilgang til dette rommet, med rollen de har her.',
-            'Agents granted access to this room, with the role they hold here.',
+            'Agenter som deltar her, med rollen Control har gitt dem og kanalene de kan nås gjennom.',
+            'Agents taking part here, with the role Control granted them and the channels they can be reached through.',
           )}</p>
+        </div>
+        <div class="verevon-space-view__actions">
+          <Show when={props.onBindAgent}>
+            {(bind) => (
+              <button type="button" class="verevon-space-secondary-action" onClick={() => bind()()}>
+                <Puzzle size={15} aria-hidden="true" />
+                {i18n.tr('Legg til eksisterende agent', 'Add existing agent')}
+              </button>
+            )}
+          </Show>
+          <Show when={props.onCreateAgent}>
+            {(create) => (
+              <button type="button" class="verevon-space-secondary-action" onClick={() => create()()}>
+                <Bot size={15} aria-hidden="true" />
+                {i18n.tr('Opprett en agent', 'Create an agent')}
+              </button>
+            )}
+          </Show>
         </div>
       </div>
 
-      <Show when={roster.loading}>
+      <Show when={agents.loading}>
         <p class="verevon-space-inline-status" role="status">{i18n.tr('Henter agenter …', 'Loading agents…')}</p>
       </Show>
 
-      <Show when={roster.error}>
+      <Show when={agents.error}>
         <p class="verevon-space-projection-error" role="alert">
           {i18n.tr(
-            'Agentlisten kunne ikke hentes. Din egen tilgang er uendret.',
-            'The agent list could not be loaded. Your own access is unchanged.',
+            'Agentlisten kunne ikke hentes, så vi vet ikke hvem som deltar her nå. Din egen tilgang er uendret.',
+            'The agent list could not be loaded, so we do not know who is taking part right now. Your own access is unchanged.',
           )}
         </p>
       </Show>
 
-      <Show when={roster.error ? undefined : roster()}>
+      <Show when={agents.error ? undefined : agents()}>
         <Show
-          when={agents().length > 0}
+          when={current().length > 0}
           fallback={
-            /* An empty list here is a real answer, not a missing projection:
-               Control was asked and no agent holds a binding in this room. */
-            <p>{i18n.tr('Ingen agenter er bundet til dette rommet ennå.', 'No agents are bound to this room yet.')}</p>
+            /* A real answer: Control was asked, and no agent is bound here. */
+            <p>{i18n.tr(
+              'Ingen agenter er bundet til dette rommet ennå.',
+              'No agents are bound to this room yet.',
+            )}</p>
           }
         >
-          <ul class="verevon-space-roster">
-            <For each={agents()}>
-              {(agent: SpaceRosterMember) => (
-                <li class="verevon-space-roster__row">
-                  <span class="verevon-space-roster__name">
-                    {agent.display_name || agent.subject_id}
+          <ul class="verevon-space-agents">
+            <For each={current()}>
+              {(agent) => <SpaceAgentCard agent={agent} />}
+            </For>
+          </ul>
+        </Show>
+      </Show>
+    </section>
+  )
+}
+
+/** One agent as a room participant. */
+function SpaceAgentCard(props: { readonly agent: SpaceAgent }) {
+  const i18n = useI18n()
+  const agent = () => props.agent
+  const displayName = () =>
+    agent().name?.trim() || i18n.tr('Agent uten publisert navn', 'Agent with no published name')
+  // The initial is decoration over a name we already show; when there is no
+  // name it must not invent a letter, so it falls back to a neutral mark.
+  const initial = () => (agent().name?.trim()?.[0] ?? '·').toUpperCase()
+
+  return (
+    <li class="verevon-space-agent">
+      <span class="verevon-space-agent__avatar" aria-hidden="true">{initial()}</span>
+      <div class="verevon-space-agent__body">
+        <p class="verevon-space-agent__name">
+          {displayName()}
+          <Show when={agent().title?.trim()}>
+            {(title) => <span class="verevon-space-agent__title"> · {title()}</span>}
+          </Show>
+        </p>
+
+        <p class="verevon-space-agent__meta">
+          <span>{spaceRoleLabel(agent().role, i18n.tr)}</span>
+          <Show when={agent().status}>
+            {(status) => (
+              <>
+                <span aria-hidden="true"> · </span>
+                <span>
+                  <span aria-hidden="true">{agentStatusMark(status())} </span>
+                  {agentStatusLabel(status(), i18n.tr)}
+                </span>
+              </>
+            )}
+          </Show>
+        </p>
+
+        <Show when={agent().description?.trim()}>
+          {(description) => <p class="verevon-space-agent__description">{description()}</p>}
+        </Show>
+
+        {/* Binding policy chips — rendered only for fields that exist, since
+            absence means legacy behavior rather than a policy someone chose. */}
+        <Show when={agent().trigger_modes || agent().approval_mode || agent().allowed_tools}>
+          <ul class="verevon-space-agent__policy" aria-label={i18n.tr('Bindingspolicy', 'Binding policy')}>
+            <Show when={agent().trigger_modes?.includes('mention')}>
+              <li>{i18n.tr('Kun @-nevning', 'Mention only')}</li>
+            </Show>
+            <Show when={agent().approval_mode}>
+              {(mode) => <li>{approvalModeLabel(mode(), i18n.tr)}</li>}
+            </Show>
+            <Show when={agent().allowed_tools}>
+              {(tools) => (
+                <li>
+                  {tools().length === 0
+                    ? i18n.tr('Uten verktøy', 'No tools')
+                    : `${i18n.tr('Verktøy', 'Tools')}: ${tools().length}`}
+                </li>
+              )}
+            </Show>
+          </ul>
+        </Show>
+
+        {/* Control granted the access, but no plane has described the agent.
+            Saying so is more useful than a blank card, and far more honest than
+            dressing the subject id up as a name. */}
+        <Show when={!agent().identity_published}>
+          <p class="verevon-space-agent__unpublished">
+            {i18n.tr(
+              'Control har gitt denne agenten tilgang, men ingen identitet er publisert for den ennå.',
+              'Control has granted this agent access, but no identity has been published for it yet.',
+            )}
+          </p>
+        </Show>
+
+        {/* A definition can be draft or inactive while its binding is active.
+            That mismatch is worth surfacing rather than flattening. */}
+        <Show when={agent().definition_status === 'active' ? undefined : agent().definition_status}>
+          {(definitionStatus) => (
+            <p class="verevon-space-agent__unpublished">
+              {i18n.tr(
+                `Agentdefinisjonen er ${definitionStatus() === 'draft' ? 'et utkast' : 'inaktiv'}, selv om bindingen står aktiv her.`,
+                `The agent definition is ${definitionStatus() === 'draft' ? 'a draft' : 'inactive'}, even though its binding is active here.`,
+              )}
+            </p>
+          )}
+        </Show>
+
+        <Show
+          when={agent().delivery_targets.length > 0}
+          fallback={
+            <p class="verevon-space-agent__channels-empty">
+              {i18n.tr('Ingen kanaler publisert', 'No channels published')}
+            </p>
+          }
+        >
+          <ul class="verevon-space-agent__channels" aria-label={i18n.tr('Kanaler', 'Channels')}>
+            <For each={agent().delivery_targets}>
+              {(target) => (
+                <li class="verevon-space-agent__channel">
+                  <span aria-hidden="true">{deliveryStatusMark(target.status)} </span>
+                  {channelLabel(target.channel, i18n.tr)}
+                  <span class="verevon-space-agent__channel-target"> · {target.label}</span>
+                  <span class="verevon-space-agent__channel-status">
+                    {' '}({deliveryStatusLabel(target.status, i18n.tr)})
                   </span>
-                  <span class="verevon-space-roster__meta">{i18n.tr('Agent', 'Agent')} · {spaceRoleLabel(agent.role, i18n.tr)}</span>
                 </li>
               )}
             </For>
           </ul>
         </Show>
-      </Show>
-
-      <p class="verevon-space-inline-status">
-        {i18n.tr(
-          'Ferdigheter, koblinger og kjørestatus per agent kommer når bindingsmodellen publiserer dem; dette viser tilgangen Control faktisk har gitt.',
-          'Skills, connectors and run status per agent arrive once the binding model publishes them; this shows the access Control has actually granted.',
-        )}
-      </p>
-    </section>
+      </div>
+    </li>
   )
 }
 
@@ -414,13 +586,14 @@ function SpaceMembersPanel(props: {
   readonly spaceRef: string
   readonly role: string
   readonly kind: string
+  readonly roster: Resource<readonly SpaceRosterMember[] | undefined>
   readonly deletionError: () => string
   readonly deletionReceipt: (() => SpaceDeletionReceipt | undefined) & { readonly loading: boolean }
   readonly deletionSubmitting: () => boolean
   readonly onRequestDeletion: () => Promise<void>
 }) {
   const i18n = useI18n()
-  const [roster] = createResource(() => props.spaceRef, getSpaceRoster)
+  const roster = props.roster
 
   return (
     <section class="verevon-space-view" aria-labelledby="space-members-title">
@@ -462,7 +635,7 @@ function SpaceMembersPanel(props: {
         </p>
       </Show>
 
-      <Show when={roster()}>
+      <Show when={roster.error ? undefined : roster()}>
         {(members) => (
           <ul class="verevon-space-roster">
             <For each={members()}>
@@ -556,7 +729,7 @@ function SpacePulse(props: {
         }
       >
         {(run) => (
-          <a class="verevon-space-pulse-card verevon-space-pulse-card--active" href={threadHref(run().thread_id)}>
+          <div class="verevon-space-pulse-card verevon-space-pulse-card--active">
             <span class="verevon-space-pulse-card__icon" aria-hidden="true"><Bot size={17} /></span>
             <span>
               <strong>{i18n.tr('Verevon jobber', 'Verevon is working')}</strong>
@@ -566,7 +739,7 @@ function SpacePulse(props: {
                 {threadStatus(run(), i18n.tr)}
               </span>
             </span>
-          </a>
+          </div>
         )}
       </Show>
 
@@ -589,45 +762,6 @@ function SpacePulse(props: {
       </p>
     </aside>
   )
-}
-
-function threadHref(threadId: string): string {
-  return `/chat?thread_id=${encodeURIComponent(threadId)}`
-}
-
-function spaceChatHref(spaceRef: string): string {
-  return `/chat?space_ref=${encodeURIComponent(spaceRef)}`
-}
-
-function threadTitle(thread: SpaceThread, tr: (no: string, en: string) => string): string {
-  return thread.title?.trim() || thread.preview?.trim() || tr('Samtale uten tittel', 'Untitled conversation')
-}
-
-function threadStatus(thread: SpaceThread, tr: (no: string, en: string) => string): string {
-  const status = thread.latest_run_status
-  if (!status) return tr('Samtale åpen', 'Conversation open')
-  if (status === 'awaiting_approval') return tr('Venter på godkjenning', 'Needs approval')
-  if (status === 'running') return tr('Arbeider', 'Working')
-  if (status === 'queued') return tr('I kø', 'Queued')
-  if (status === 'completed') return tr('Fullført', 'Completed')
-  return formatLabel(status)
-}
-
-// Humanizes a raw server enum token this file has NOT given a translated
-// dictionary — currently only the deletion receipt's `state`/`purgeStatus`/
-// `ownerPlane.status`. Space `kind`/`lifecycle` and membership `role` used to
-// fall through to this too; they now go through the dictionaries below
-// instead, because those three are read on every page view (the header meta
-// line, the membership card, every roster row) and a user asked for them
-// translated. The receipt vocabulary stays here: it is seen rarely — only
-// mid-deletion — and building that dictionary without a confirmed, complete
-// value list would risk the same silent-gap problem this comment used to warn
-// against for the other three.
-function formatLabel(value: string): string {
-  return value
-    .trim()
-    .replace(/[_-]+/g, ' ')
-    .replace(/\b\w/g, (letter) => letter.toUpperCase())
 }
 
 // Space.kind, per Control's authority.go `Kind` enum (ADR-0001). Falls back to
@@ -680,14 +814,75 @@ function spaceRoleLabel(role: string, tr: (no: string, en: string) => string): s
   return translatedEnumLabel(role, SPACE_ROLE_LABELS, tr)
 }
 
-function spaceWorkroomLabel(kind: string, tr: (no: string, en: string) => string): string {
-  return kind === 'personal' ? tr('Personlig rom', 'Personal room') : tr('Delt arbeidsrom', 'Shared workroom')
+// Space agent binding lifecycle, per the Convex `spaceAgentBindings.status`
+// union. `revoked` is filtered out server-side and so never reaches here, but
+// it stays mapped: a value arriving unmapped would render as a raw token.
+const AGENT_STATUS_LABELS: Record<string, { no: string; en: string }> = {
+  pending: { no: 'Venter', en: 'Pending' },
+  active: { no: 'Aktiv', en: 'Active' },
+  paused: { no: 'Satt på pause', en: 'Paused' },
+  revoked: { no: 'Tilbakekalt', en: 'Revoked' },
+  failed: { no: 'Feilet', en: 'Failed' },
 }
 
-function formatWhen(value: string): string {
-  try {
-    return new Date(value).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' })
-  } catch {
-    return value
-  }
+// Status must never be carried by colour alone (scope plan §UI-1), so each
+// state gets a shape that reads without colour and survives a screenshot in
+// greyscale. Marked aria-hidden wherever used — the adjacent text is the
+// accessible answer, and a screen reader announcing punctuation helps nobody.
+const AGENT_STATUS_MARKS: Record<string, string> = {
+  pending: '◔',
+  active: '●',
+  paused: '❙❙',
+  revoked: '✕',
+  failed: '▲',
+}
+
+const DELIVERY_STATUS_LABELS: Record<string, { no: string; en: string }> = {
+  active: { no: 'aktiv', en: 'active' },
+  pending: { no: 'venter', en: 'pending' },
+  failed: { no: 'feilet', en: 'failed' },
+}
+
+const DELIVERY_STATUS_MARKS: Record<string, string> = {
+  active: '●',
+  pending: '◔',
+  failed: '▲',
+}
+
+// Channel display names. These are product names, so only the surrounding
+// wording is translated — "Microsoft Teams" is called that in both languages.
+const CHANNEL_LABELS: Record<string, { no: string; en: string }> = {
+  teams: { no: 'Microsoft Teams', en: 'Microsoft Teams' },
+  messenger: { no: 'Messenger', en: 'Messenger' },
+  embed: { no: 'Innebygd widget', en: 'Embedded widget' },
+}
+
+function approvalModeLabel(mode: string, tr: (no: string, en: string) => string): string {
+  if (mode === 'auto') return tr('Autonom', 'Autonomous')
+  if (mode === 'blocked') return tr('Blokkert', 'Blocked')
+  return tr('Krever bekreftelse', 'Requires confirmation')
+}
+
+function agentStatusLabel(status: string, tr: (no: string, en: string) => string): string {
+  return translatedEnumLabel(status, AGENT_STATUS_LABELS, tr)
+}
+
+function agentStatusMark(status: string): string {
+  return AGENT_STATUS_MARKS[status] ?? '·'
+}
+
+function deliveryStatusLabel(status: string, tr: (no: string, en: string) => string): string {
+  return translatedEnumLabel(status, DELIVERY_STATUS_LABELS, tr)
+}
+
+function deliveryStatusMark(status: string): string {
+  return DELIVERY_STATUS_MARKS[status] ?? '·'
+}
+
+function channelLabel(channel: string, tr: (no: string, en: string) => string): string {
+  return translatedEnumLabel(channel, CHANNEL_LABELS, tr)
+}
+
+function spaceWorkroomLabel(kind: string, tr: (no: string, en: string) => string): string {
+  return kind === 'personal' ? tr('Personlig rom', 'Personal room') : tr('Delt arbeidsrom', 'Shared workroom')
 }

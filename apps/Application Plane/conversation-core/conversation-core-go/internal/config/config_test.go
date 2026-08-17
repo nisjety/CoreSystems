@@ -20,6 +20,14 @@ func conversationEnvironment(t *testing.T) {
 	t.Setenv("CONVERSATION_PROVIDER_WRITE_ATTESTATION_KEY_ID", "")
 	t.Setenv("CONVERSATION_GATEWAY_SERVICE_TOKEN", "gateway-test-secret-at-least-32-bytes")
 	t.Setenv("CONVERSATION_CORE_INGEST_SERVICE_TOKEN", "ingest-test-secret-at-least-32-bytes-1")
+	t.Setenv("CONTROL_RUN_ACTION_AUTHORITY_URL", "")
+	t.Setenv("CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN", "")
+	t.Setenv("CONTROL_OWNER_EFFECT_RESERVATION_URL", "")
+	t.Setenv("CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN", "")
+	t.Setenv("CONVERSATION_ALLOW_INSECURE_CONTROL_AUTHORITY_LOOPBACK", "")
+	t.Setenv("CAPABILITY_CORE_HTTP_URL", "")
+	t.Setenv("CONVERSATION_CAPABILITY_HEALTH_SERVICE_ID", "conversation-core")
+	t.Setenv("CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY", "")
 }
 
 func configureCompleteIntegration(t *testing.T) {
@@ -207,5 +215,137 @@ func TestLoadRejectsReusedDelegationToken(t *testing.T) {
 	t.Setenv("CONVERSATION_CORE_INGEST_SERVICE_TOKEN", "gateway-test-secret-at-least-32-bytes")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() error = nil, want reused delegation token rejection")
+	}
+}
+
+func TestLoadRequiresControlDecisionKeyPairAndExecutionNeedsIt(t *testing.T) {
+	for _, missing := range []string{
+		"CONTROL_RUN_ACTION_DECISION_KEY_ID",
+		"CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64",
+	} {
+		t.Run(missing, func(t *testing.T) {
+			conversationEnvironment(t)
+			t.Setenv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "control-run-action-test")
+			t.Setenv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+			t.Setenv(missing, "")
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() error = nil, want incomplete Control key %s rejection", missing)
+			}
+		})
+	}
+	t.Run("execution requires Control key pair", func(t *testing.T) {
+		conversationEnvironment(t)
+		t.Setenv("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN", "execution-core-test-secret-at-least-32-bytes")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want execution lane to require Control verification")
+		}
+	})
+	t.Run("execution requires current Control authority validator and owner-effect reservation", func(t *testing.T) {
+		conversationEnvironment(t)
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "control-run-action-test")
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+		t.Setenv("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN", "execution-core-test-secret-at-least-32-bytes")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want execution lane to require Control owner-action configuration")
+		}
+	})
+	t.Run("execution accepts distinct current Control authority validator", func(t *testing.T) {
+		conversationEnvironment(t)
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "control-run-action-test")
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+		t.Setenv("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN", "execution-core-test-secret-at-least-32-bytes")
+		t.Setenv("CONTROL_RUN_ACTION_AUTHORITY_URL", "https://user-core:8443")
+		t.Setenv("CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN", "control-authority-test-secret-at-least-32-bytes")
+		t.Setenv("CONTROL_OWNER_EFFECT_RESERVATION_URL", "https://user-core:8443")
+		t.Setenv("CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN", "control-owner-effect-reservation-test-secret")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.ControlRunActionAuthorityURL == "" || cfg.ControlRunActionAuthorityToken == "" ||
+			cfg.ControlOwnerEffectReservationURL == "" || cfg.ControlOwnerEffectReservationToken == "" {
+			t.Fatal("Control owner-action configuration is incomplete")
+		}
+	})
+	t.Run("execution rejects plaintext Control authority without an explicit loopback development opt-in", func(t *testing.T) {
+		conversationEnvironment(t)
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "control-run-action-test")
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+		t.Setenv("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN", "execution-core-test-secret-at-least-32-bytes")
+		t.Setenv("CONTROL_RUN_ACTION_AUTHORITY_URL", "http://127.0.0.1:8080")
+		t.Setenv("CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN", "control-authority-test-secret-at-least-32-bytes")
+		t.Setenv("CONTROL_OWNER_EFFECT_RESERVATION_URL", "https://user-core:8443")
+		t.Setenv("CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN", "control-owner-effect-reservation-test-secret")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want plaintext Control authority rejection")
+		}
+		t.Setenv("CONVERSATION_ALLOW_INSECURE_CONTROL_AUTHORITY_LOOPBACK", "true")
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() explicit loopback development opt-in error = %v", err)
+		}
+		t.Setenv("CONTROL_RUN_ACTION_AUTHORITY_URL", "http://user-core:8080")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want non-loopback plaintext rejection")
+		}
+	})
+	t.Run("execution rejects reused owner-effect reservation credential", func(t *testing.T) {
+		conversationEnvironment(t)
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "control-run-action-test")
+		t.Setenv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+		t.Setenv("CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN", "execution-core-test-secret-at-least-32-bytes")
+		t.Setenv("CONTROL_RUN_ACTION_AUTHORITY_URL", "https://user-core:8443")
+		t.Setenv("CONVERSATION_CONTROL_RUN_ACTION_AUTHORITY_TOKEN", "control-authority-test-secret-at-least-32-bytes")
+		t.Setenv("CONTROL_OWNER_EFFECT_RESERVATION_URL", "https://user-core:8443")
+		t.Setenv("CONVERSATION_CONTROL_OWNER_EFFECT_RESERVATION_TOKEN", "control-authority-test-secret-at-least-32-bytes")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load() error = nil, want credential reuse rejection")
+		}
+	})
+}
+
+func TestLoadAllowsOwnerGrantVerificationWithoutExecutionTransport(t *testing.T) {
+	conversationEnvironment(t)
+	t.Setenv("CONTROL_RUN_ACTION_DECISION_KEY_ID", "control-run-action-test")
+	t.Setenv("CONTROL_RUN_ACTION_DECISION_PUBLIC_KEY_BASE64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.ExecutionCoreServiceToken != "" || cfg.DelegationKeys["execution-core"] != "" {
+		t.Fatalf("owner grant verification unexpectedly enabled execution transport: %#v", cfg)
+	}
+}
+
+func TestLoadRequiresCompleteCapabilityHealthReporterConfiguration(t *testing.T) {
+	conversationEnvironment(t)
+	t.Setenv("CAPABILITY_CORE_HTTP_URL", "http://capability-core:8085")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted a capability-health URL without its dedicated service credential")
+	}
+
+	conversationEnvironment(t)
+	t.Setenv("CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY", "capability-health-service-credential-32-bytes")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted a capability-health credential without Capability Core URL")
+	}
+
+	conversationEnvironment(t)
+	t.Setenv("CAPABILITY_CORE_HTTP_URL", "http://capability-core:8085")
+	t.Setenv("CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY", "capability-health-service-credential-32-bytes")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() complete capability-health configuration error = %v", err)
+	}
+	if cfg.CapabilityCoreURL == "" || cfg.CapabilityHealthServiceCredential == "" {
+		t.Fatal("complete capability-health configuration was not retained")
+	}
+}
+
+func TestLoadRejectsReusedCapabilityHealthCredential(t *testing.T) {
+	conversationEnvironment(t)
+	t.Setenv("CAPABILITY_CORE_HTTP_URL", "http://capability-core:8085")
+	t.Setenv("CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY", "gateway-test-secret-at-least-32-bytes")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() accepted a capability-health credential reused from gateway delegation")
 	}
 }

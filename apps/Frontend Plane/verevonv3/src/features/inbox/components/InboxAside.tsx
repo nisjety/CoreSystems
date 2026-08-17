@@ -39,7 +39,6 @@ import {
   type ZammadTicket,
 } from '@/features/inbox/lib/inbox-model'
 import { runAssist, type AssistMessage, type AssistMode, type AssistSource } from '@/features/inbox/lib/inbox-ai'
-import { setActiveChatThreadId } from '@/features/chat/lib/chat-thread-history'
 import { bindSupportChatThread, readSupportChatThread, type SupportChatThreadScope } from '@/shared/chat/support-chat-thread'
 import type { SupportAIMode } from '@/shared/api/organization-client'
 import { buildInboxAssistContext } from '@/features/inbox/lib/inbox-ai-context'
@@ -619,7 +618,6 @@ function VerevonPanel(props: {
       if (res.threadId && scope && supportThreadScope()?.userId === scope.userId && supportThreadScope()?.orgId === scope.orgId && supportThreadScope()?.conversationId === scope.conversationId) {
         bindSupportChatThread(scope, res.threadId)
         setSharedThreadId(res.threadId)
-        setActiveChatThreadId(res.threadId)
       }
       setAnswer(res.text || i18n.tr('Verevon hadde ikke noe svar.', 'Verevon had no answer.'))
       applySources(res.sources)
@@ -918,7 +916,7 @@ function VerevonPanel(props: {
             fallback={<em>{i18n.tr('Spør for å starte delt tråd', 'Ask to start a shared thread')}</em>}
           >
             {(threadId) => (
-              <a href="/chat" onClick={() => setActiveChatThreadId(threadId())}>
+              <a href={`/chat?thread_id=${encodeURIComponent(threadId())}`}>
                 {i18n.tr('Åpne i Chat', 'Open in Chat')}
                 <ArrowUpRight class="size-3.5" />
               </a>

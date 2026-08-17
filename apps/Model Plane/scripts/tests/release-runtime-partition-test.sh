@@ -21,6 +21,9 @@ printf 'AZURE_OPENAI_DEPLOYMENT\tpublic\nAZURE_OPENAI_EMBEDDING_DEPLOYMENT\tpubl
 printf 'INFERENCE_PROVIDER_ORDER\tpublic\nMODEL_PLANE_RESIDENCY\tpublic\n' >>"$config_policy"
 printf 'AZURE_OPENAI_API_KEY\tsecret\nMODEL_NATS_RUNTIME_PASSWORD\tsecret\n' >>"$config_policy"
 printf 'MODEL_POSTGRES_PASSWORD\tsecret\n' >>"$config_policy"
+printf 'CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN\tsecret\n' >>"$config_policy"
+printf 'ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN\tsecret\n' >>"$config_policy"
+printf 'ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN\tsecret\n' >>"$config_policy"
 printf 'SOURCE_REVISION\tartifact\nBUILD_DATE\tartifact\nMODEL_GATEWAY_RELEASE_IMAGE\tartifact\n' >>"$config_policy"
 
 write_gates() {
@@ -46,6 +49,9 @@ printf 'AUTH_CORE_URL=https://auth.release.example\n' >>"$public_non_zdr"
 printf 'AZURE_OPENAI_ZDR_CONFIRMED=false\nINFERENCE_PROVIDER_ORDER=azure,anthropic,openai\n' \
   >>"$public_non_zdr"
 printf 'MODEL_POSTGRES_PASSWORD=fixture-only\n' >"$runtime_secrets"
+printf 'CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN=fixture-capability-schedule\n' >>"$runtime_secrets"
+printf 'ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN=fixture-orchestrator-schedule\n' >>"$runtime_secrets"
+printf 'ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN=fixture-orchestrator-step\n' >>"$runtime_secrets"
 # Compatibility with the currently committed v3 Compose input. The working
 # tree uses per-principal NATS credentials, but rollback/source snapshots may
 # still contain this audited legacy secret until that migration is released.

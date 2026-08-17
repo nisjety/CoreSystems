@@ -44,6 +44,10 @@ type Caller struct {
 	// shared-secret path carries no identity of its own and leaves them empty.
 	OrgID  string
 	UserID string
+	// PrincipalID is retained for service callers even though UserID remains
+	// empty. Narrow owner-only lanes (such as scheduled runs) must distinguish
+	// Capability Core from another otherwise valid service principal.
+	PrincipalID string
 	// Service marks a non-interactive principal (JWT principal_type=service, or
 	// the internal shared secret).
 	Service bool
@@ -158,6 +162,7 @@ func (a *StartWorkflowAuth) Authenticate(ctx context.Context) (Caller, error) {
 	}
 	caller := Caller{
 		OrgID:                  principal.OrganizationID,
+		PrincipalID:            principal.ActorID,
 		Service:                principal.PrincipalType == "service",
 		Scopes:                 principal.Scopes,
 		RetentionPolicyPresent: principal.RetentionPolicyPresent,
@@ -423,6 +428,18 @@ func authorizePolicy(caller Caller, spec WorkflowSpec) error {
 		}
 		if !caller.Service {
 			return nil
+		}
+		if caller.hasScope(ScopeWorkflowStart) {
+			return nil
+		}
+		return status.Error(codes.PermissionDenied, "service principal lacks "+ScopeWorkflowStart)
+	case PolicyScheduledRun:
+		// This is deliberately bearer-only. The shared internal credential has no
+		// principal identity, so accepting it here would turn a secret shared by a
+		// deployment into a capability to attach prepared service threads.
+		if caller.Internal || !caller.Service || caller.PrincipalID != "capability-core" {
+			return status.Error(codes.PermissionDenied,
+				"scheduled runs require the capability-core service principal")
 		}
 		if caller.hasScope(ScopeWorkflowStart) {
 			return nil

@@ -12,7 +12,7 @@ import type { JsonObject, Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/runs.proto.
  */
 export const file_model_plane_v1_runs: GenFile = /*@__PURE__*/
-  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJgCg9MaXN0UnVuc1JlcXVlc3QSEQoJdGhyZWFkX2lkGAEgASgJEhUKDXN0YXR1c19maWx0ZXIYAiABKAkSFAoMYWZ0ZXJfcnVuX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNIk0KEExpc3RSdW5zUmVzcG9uc2USJwoEcnVucxgBIAMoCzIZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBIQCghoYXNfbW9yZRgCIAEoCCJjChVMaXN0U3lzdGVtUnVuc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJEhUKDXN0YXR1c19maWx0ZXIYAiABKAkSFAoMYWZ0ZXJfcnVuX2lkGAMgASgJEg0KBWxpbWl0GAQgASgNIjIKEENhbmNlbFJ1blJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBnJlYXNvbhgCIAEoCSImChFDYW5jZWxSdW5SZXNwb25zZRIRCgljYW5jZWxsZWQYASABKAgiSQoWUmVzb2x2ZVJ1bk93bmVyUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJEg8KB3VzZXJfaWQYAyABKAkiLQoXUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2USEgoKYXV0aG9yaXplZBgBIAEoCCKTAwoJUnVuRGV0YWlsEg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSFQoNcGFyZW50X3J1bl9pZBgDIAEoCRIQCghhZ2VudF9pZBgEIAEoCRIOCgZzdGF0dXMYBSABKAkSDAoEbW9kZRgGIAEoCRIMCgRnb2FsGAcgASgJEhQKDGZpbmFsX291dHB1dBgIIAEoCRINCgVlcnJvchgJIAEoCRIYChBjaGVja3BvaW50X2luZGV4GAogASgNEhcKD3N0ZXBzX2NvbXBsZXRlZBgLIAEoDRIUCgxpbnB1dF90b2tlbnMYDCABKA0SFQoNb3V0cHV0X3Rva2VucxgNIAEoDRIuCgpjcmVhdGVkX2F0GA4gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GA8gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIpCghtZXRhZGF0YRgQIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QysAMKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJNCghMaXN0UnVucxIfLm1vZGVsX3BsYW5lLnYxLkxpc3RSdW5zUmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLkxpc3RSdW5zUmVzcG9uc2USUAoJQ2FuY2VsUnVuEiAubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVxdWVzdBohLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlc3BvbnNlElkKDkxpc3RTeXN0ZW1SdW5zEiUubW9kZWxfcGxhbmUudjEuTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJiCg9SZXNvbHZlUnVuT3duZXISJi5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXF1ZXN0GicubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVJ1bk93bmVyUmVzcG9uc2VCsQEKEmNvbS5tb2RlbF9wbGFuZS52MUIJUnVuc1Byb3RvUAFaO2dpdGh1Yi5jb20vdHJpb2RlbGFiL21vZGVsLXBsYW5lL2dlbi9nby9tb2RlbF9wbGFuZS92MTttcHYxogIDTVhYqgINTW9kZWxQbGFuZS5WMcoCDU1vZGVsUGxhbmVcVjHiAhlNb2RlbFBsYW5lXFYxXEdQQk1ldGFkYXRh6gIOTW9kZWxQbGFuZTo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
+  fileDesc("Chltb2RlbF9wbGFuZS92MS9ydW5zLnByb3RvEg5tb2RlbF9wbGFuZS52MSIfCg1HZXRSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCSJTCh5HZXRTY2hlZHVsZWRTdGVwQ29udGV4dFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkiZwoUU2NoZWR1bGVkU3RlcENvbnRleHQSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSDAoEZ29hbBgEIAEoCRIOCgZzdGF0dXMYBSABKAkiYAoPTGlzdFJ1bnNSZXF1ZXN0EhEKCXRocmVhZF9pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSJNChBMaXN0UnVuc1Jlc3BvbnNlEicKBHJ1bnMYASADKAsyGS5tb2RlbF9wbGFuZS52MS5SdW5EZXRhaWwSEAoIaGFzX21vcmUYAiABKAgiYwoVTGlzdFN5c3RlbVJ1bnNSZXF1ZXN0Eg4KBm9yZ19pZBgBIAEoCRIVCg1zdGF0dXNfZmlsdGVyGAIgASgJEhQKDGFmdGVyX3J1bl9pZBgDIAEoCRINCgVsaW1pdBgEIAEoDSIyChBDYW5jZWxSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoRQ2FuY2VsUnVuUmVzcG9uc2USEQoJY2FuY2VsbGVkGAEgASgIIkkKFlJlc29sdmVSdW5Pd25lclJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCRIPCgd1c2VyX2lkGAMgASgJIi0KF1Jlc29sdmVSdW5Pd25lclJlc3BvbnNlEhIKCmF1dGhvcml6ZWQYASABKAgiQgogUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCSLrAgohUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlc3BvbnNlEhAKCHJlc29sdmVkGAEgASgIEg4KBnJ1bl9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEgoKc3ViamVjdF9pZBgEIAEoCRIRCgl0aHJlYWRfaWQYBSABKAkSEAoIc3BhY2VfaWQYBiABKAkSHgoWcmVjaXBpZW50X2F1ZGllbmNlX3JlZhgHIAEoCRIjChtyZWNpcGllbnRfYXVkaWVuY2VfcmV2aXNpb24YCCABKAQSHwoXcmVjaXBpZW50X2F1ZGllbmNlX2hhc2gYCSABKAkSGgoScHJpdmFjeV9wb2xpY3lfcmVmGAogASgJEikKIXRocmVhZF9yZXNvdXJjZV9hdXRob3JpemF0aW9uX3JlZhgLIAEoCRIaChJhdXRob3JpdHlfcmV2aXNpb24YDCABKAQSEgoKcnVuX3N0YXR1cxgNIAEoCSKTAwoJUnVuRGV0YWlsEg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSFQoNcGFyZW50X3J1bl9pZBgDIAEoCRIQCghhZ2VudF9pZBgEIAEoCRIOCgZzdGF0dXMYBSABKAkSDAoEbW9kZRgGIAEoCRIMCgRnb2FsGAcgASgJEhQKDGZpbmFsX291dHB1dBgIIAEoCRINCgVlcnJvchgJIAEoCRIYChBjaGVja3BvaW50X2luZGV4GAogASgNEhcKD3N0ZXBzX2NvbXBsZXRlZBgLIAEoDRIUCgxpbnB1dF90b2tlbnMYDCABKA0SFQoNb3V0cHV0X3Rva2VucxgNIAEoDRIuCgpjcmVhdGVkX2F0GA4gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIuCgp1cGRhdGVkX2F0GA8gASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIpCghtZXRhZGF0YRgQIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3QypAUKClJ1blNlcnZpY2USQgoGR2V0UnVuEh0ubW9kZWxfcGxhbmUudjEuR2V0UnVuUmVxdWVzdBoZLm1vZGVsX3BsYW5lLnYxLlJ1bkRldGFpbBJvChdHZXRTY2hlZHVsZWRTdGVwQ29udGV4dBIuLm1vZGVsX3BsYW5lLnYxLkdldFNjaGVkdWxlZFN0ZXBDb250ZXh0UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLlNjaGVkdWxlZFN0ZXBDb250ZXh0Ek0KCExpc3RSdW5zEh8ubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuTGlzdFJ1bnNSZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USWQoOTGlzdFN5c3RlbVJ1bnMSJS5tb2RlbF9wbGFuZS52MS5MaXN0U3lzdGVtUnVuc1JlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5MaXN0UnVuc1Jlc3BvbnNlEmIKD1Jlc29sdmVSdW5Pd25lchImLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5Pd25lclJlcXVlc3QaJy5tb2RlbF9wbGFuZS52MS5SZXNvbHZlUnVuT3duZXJSZXNwb25zZRKAAQoZUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eRIwLm1vZGVsX3BsYW5lLnYxLlJlc29sdmVSdW5BY3Rpb25BdXRob3JpdHlSZXF1ZXN0GjEubW9kZWxfcGxhbmUudjEuUmVzb2x2ZVJ1bkFjdGlvbkF1dGhvcml0eVJlc3BvbnNlQrEBChJjb20ubW9kZWxfcGxhbmUudjFCCVJ1bnNQcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_google_protobuf_timestamp, file_google_protobuf_struct]);
 
 /**
  * @generated from message model_plane.v1.GetRunRequest
@@ -32,6 +32,70 @@ export type GetRunRequest = Message<"model_plane.v1.GetRunRequest"> & {
  */
 export const GetRunRequestSchema: GenMessage<GetRunRequest> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_runs, 0);
+
+/**
+ * @generated from message model_plane.v1.GetScheduledStepContextRequest
+ */
+export type GetScheduledStepContextRequest = Message<"model_plane.v1.GetScheduledStepContextRequest"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string thread_id = 2;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.GetScheduledStepContextRequest.
+ * Use `create(GetScheduledStepContextRequestSchema)` to create a new message.
+ */
+export const GetScheduledStepContextRequestSchema: GenMessage<GetScheduledStepContextRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 1);
+
+/**
+ * @generated from message model_plane.v1.ScheduledStepContext
+ */
+export type ScheduledStepContext = Message<"model_plane.v1.ScheduledStepContext"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string thread_id = 2;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string goal = 4;
+   */
+  goal: string;
+
+  /**
+   * @generated from field: string status = 5;
+   */
+  status: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ScheduledStepContext.
+ * Use `create(ScheduledStepContextSchema)` to create a new message.
+ */
+export const ScheduledStepContextSchema: GenMessage<ScheduledStepContext> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 2);
 
 /**
  * @generated from message model_plane.v1.ListRunsRequest
@@ -71,7 +135,7 @@ export type ListRunsRequest = Message<"model_plane.v1.ListRunsRequest"> & {
  * Use `create(ListRunsRequestSchema)` to create a new message.
  */
 export const ListRunsRequestSchema: GenMessage<ListRunsRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 1);
+  messageDesc(file_model_plane_v1_runs, 3);
 
 /**
  * @generated from message model_plane.v1.ListRunsResponse
@@ -97,7 +161,7 @@ export type ListRunsResponse = Message<"model_plane.v1.ListRunsResponse"> & {
  * Use `create(ListRunsResponseSchema)` to create a new message.
  */
 export const ListRunsResponseSchema: GenMessage<ListRunsResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 2);
+  messageDesc(file_model_plane_v1_runs, 4);
 
 /**
  * @generated from message model_plane.v1.ListSystemRunsRequest
@@ -138,7 +202,7 @@ export type ListSystemRunsRequest = Message<"model_plane.v1.ListSystemRunsReques
  * Use `create(ListSystemRunsRequestSchema)` to create a new message.
  */
 export const ListSystemRunsRequestSchema: GenMessage<ListSystemRunsRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 3);
+  messageDesc(file_model_plane_v1_runs, 5);
 
 /**
  * @generated from message model_plane.v1.CancelRunRequest
@@ -164,7 +228,7 @@ export type CancelRunRequest = Message<"model_plane.v1.CancelRunRequest"> & {
  * Use `create(CancelRunRequestSchema)` to create a new message.
  */
 export const CancelRunRequestSchema: GenMessage<CancelRunRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 4);
+  messageDesc(file_model_plane_v1_runs, 6);
 
 /**
  * @generated from message model_plane.v1.CancelRunResponse
@@ -183,7 +247,7 @@ export type CancelRunResponse = Message<"model_plane.v1.CancelRunResponse"> & {
  * Use `create(CancelRunResponseSchema)` to create a new message.
  */
 export const CancelRunResponseSchema: GenMessage<CancelRunResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 5);
+  messageDesc(file_model_plane_v1_runs, 7);
 
 /**
  * @generated from message model_plane.v1.ResolveRunOwnerRequest
@@ -210,7 +274,7 @@ export type ResolveRunOwnerRequest = Message<"model_plane.v1.ResolveRunOwnerRequ
  * Use `create(ResolveRunOwnerRequestSchema)` to create a new message.
  */
 export const ResolveRunOwnerRequestSchema: GenMessage<ResolveRunOwnerRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 6);
+  messageDesc(file_model_plane_v1_runs, 8);
 
 /**
  * @generated from message model_plane.v1.ResolveRunOwnerResponse
@@ -227,7 +291,120 @@ export type ResolveRunOwnerResponse = Message<"model_plane.v1.ResolveRunOwnerRes
  * Use `create(ResolveRunOwnerResponseSchema)` to create a new message.
  */
 export const ResolveRunOwnerResponseSchema: GenMessage<ResolveRunOwnerResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 7);
+  messageDesc(file_model_plane_v1_runs, 9);
+
+/**
+ * ResolveRunActionAuthorityRequest is intentionally limited to the run and
+ * tenant. Subject, Space, audience, resource, and privacy values are derived
+ * only from the durable run/thread rows; callers cannot restate them.
+ *
+ * @generated from message model_plane.v1.ResolveRunActionAuthorityRequest
+ */
+export type ResolveRunActionAuthorityRequest = Message<"model_plane.v1.ResolveRunActionAuthorityRequest"> & {
+  /**
+   * @generated from field: string run_id = 1;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string org_id = 2;
+   */
+  orgId: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveRunActionAuthorityRequest.
+ * Use `create(ResolveRunActionAuthorityRequestSchema)` to create a new message.
+ */
+export const ResolveRunActionAuthorityRequestSchema: GenMessage<ResolveRunActionAuthorityRequest> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 10);
+
+/**
+ * ResolveRunActionAuthorityResponse carries no transcript, goal, model output,
+ * tool input, or decision bearer. Control must re-resolve current membership,
+ * entitlement, privacy, recipient audience, and owner-resource authorization
+ * before it issues an effect decision. `resolved=false` has no authority and
+ * all other fields are empty/default.
+ *
+ * @generated from message model_plane.v1.ResolveRunActionAuthorityResponse
+ */
+export type ResolveRunActionAuthorityResponse = Message<"model_plane.v1.ResolveRunActionAuthorityResponse"> & {
+  /**
+   * @generated from field: bool resolved = 1;
+   */
+  resolved: boolean;
+
+  /**
+   * @generated from field: string run_id = 2;
+   */
+  runId: string;
+
+  /**
+   * @generated from field: string org_id = 3;
+   */
+  orgId: string;
+
+  /**
+   * @generated from field: string subject_id = 4;
+   */
+  subjectId: string;
+
+  /**
+   * @generated from field: string thread_id = 5;
+   */
+  threadId: string;
+
+  /**
+   * @generated from field: string space_id = 6;
+   */
+  spaceId: string;
+
+  /**
+   * @generated from field: string recipient_audience_ref = 7;
+   */
+  recipientAudienceRef: string;
+
+  /**
+   * @generated from field: uint64 recipient_audience_revision = 8;
+   */
+  recipientAudienceRevision: bigint;
+
+  /**
+   * @generated from field: string recipient_audience_hash = 9;
+   */
+  recipientAudienceHash: string;
+
+  /**
+   * @generated from field: string privacy_policy_ref = 10;
+   */
+  privacyPolicyRef: string;
+
+  /**
+   * This is the thread's original resource binding, not authority for a
+   * Conversation Core ticket/case resource. The target owner still checks its
+   * own current resource ACL immediately before the effect.
+   *
+   * @generated from field: string thread_resource_authorization_ref = 11;
+   */
+  threadResourceAuthorizationRef: string;
+
+  /**
+   * @generated from field: uint64 authority_revision = 12;
+   */
+  authorityRevision: bigint;
+
+  /**
+   * @generated from field: string run_status = 13;
+   */
+  runStatus: string;
+};
+
+/**
+ * Describes the message model_plane.v1.ResolveRunActionAuthorityResponse.
+ * Use `create(ResolveRunActionAuthorityResponseSchema)` to create a new message.
+ */
+export const ResolveRunActionAuthorityResponseSchema: GenMessage<ResolveRunActionAuthorityResponse> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_runs, 11);
 
 /**
  * RunDetail — full run metadata.
@@ -349,7 +526,7 @@ export type RunDetail = Message<"model_plane.v1.RunDetail"> & {
  * Use `create(RunDetailSchema)` to create a new message.
  */
 export const RunDetailSchema: GenMessage<RunDetail> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_runs, 8);
+  messageDesc(file_model_plane_v1_runs, 12);
 
 /**
  * RunService — query and manage run lifecycle.
@@ -367,6 +544,19 @@ export const RunService: GenService<{
     methodKind: "unary";
     input: typeof GetRunRequestSchema;
     output: typeof RunDetailSchema;
+  },
+  /**
+   * Get the minimal goal/status context for one service-owned scheduled step.
+   * This is deliberately narrower than GetRun: Execution Core uses its
+   * dedicated session:scheduled-step credential and cannot read arbitrary run
+   * transcripts or human-owned run metadata.
+   *
+   * @generated from rpc model_plane.v1.RunService.GetScheduledStepContext
+   */
+  getScheduledStepContext: {
+    methodKind: "unary";
+    input: typeof GetScheduledStepContextRequestSchema;
+    output: typeof ScheduledStepContextSchema;
   },
   /**
    * List runs for a thread.
@@ -416,6 +606,19 @@ export const RunService: GenService<{
     methodKind: "unary";
     input: typeof ResolveRunOwnerRequestSchema;
     output: typeof ResolveRunOwnerResponseSchema;
+  },
+  /**
+   * ResolveRunActionAuthority returns the non-secret, immutable run/thread
+   * bindings Control needs before issuing one target-owner action decision.
+   * It is restricted to Control's exact action-authorizer service identity;
+   * it is not a general run-inspection or user-impersonation API.
+   *
+   * @generated from rpc model_plane.v1.RunService.ResolveRunActionAuthority
+   */
+  resolveRunActionAuthority: {
+    methodKind: "unary";
+    input: typeof ResolveRunActionAuthorityRequestSchema;
+    output: typeof ResolveRunActionAuthorityResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_model_plane_v1_runs, 0);

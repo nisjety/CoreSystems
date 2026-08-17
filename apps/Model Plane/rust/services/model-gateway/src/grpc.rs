@@ -2747,6 +2747,7 @@ mod tests {
         ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, ManagedRunSource,
         ModelInfo, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse,
         ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse,
+        ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse,
         ResolveRunOwnerRequest, ResolveRunOwnerResponse, RunDetail, SaveCheckpointRequest,
         SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse,
         SpeechVoiceInfo, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest,
@@ -3370,6 +3371,15 @@ mod tests {
             }))
         }
 
+        async fn start_scheduled_run(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::StartScheduledRunRequest>,
+        ) -> Result<Response<StartRunResponse>, Status> {
+            Err(Status::unimplemented(
+                "start_scheduled_run not needed in test",
+            ))
+        }
+
         async fn complete_step(
             &self,
             _: Request<CompleteStepRequest>,
@@ -3535,6 +3545,28 @@ mod tests {
         > {
             Err(Status::unimplemented(
                 "prepare_scheduled_run_thread not needed in test",
+            ))
+        }
+
+        async fn claim_scheduled_step(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ClaimScheduledStepRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ClaimScheduledStepResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "claim_scheduled_step not needed in test",
+            ))
+        }
+
+        async fn record_scheduled_step_receipt(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RecordScheduledStepReceiptRequest>,
+        ) -> Result<
+            Response<mp_contracts::model_plane::v1::RecordScheduledStepReceiptResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented(
+                "record_scheduled_step_receipt not needed in test",
             ))
         }
 
@@ -3716,6 +3748,15 @@ mod tests {
                     && request.org_id == "org_test"
                     && request.user_id == "user_test",
             }))
+        }
+
+        async fn resolve_run_action_authority(
+            &self,
+            _: Request<ResolveRunActionAuthorityRequest>,
+        ) -> Result<Response<ResolveRunActionAuthorityResponse>, Status> {
+            Err(Status::unimplemented(
+                "run action authority not needed in gateway test",
+            ))
         }
     }
 

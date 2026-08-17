@@ -128,8 +128,174 @@ export async function getSpaceRoster(spaceRef: string): Promise<readonly SpaceRo
   return response.members
 }
 
+/** A channel a bound agent's work can reach, beyond the room itself. */
+export type SpaceAgentDeliveryTarget = {
+  channel: 'teams' | 'messenger' | 'embed'
+  /** Operator-facing destination label. Never a token or credential. */
+  label: string
+  status: 'active' | 'pending' | 'failed'
+}
+
+/**
+ * One agent participating in a Space.
+ *
+ * Two planes fill this in, and the split is load-bearing
+ * (`docs/SPACE_AGENT_SCOPE_PLAN_2026-08-14.md` §3.2): `role` and `revision` come
+ * from Control, which decides who may act in the room, while the identity
+ * fields come from an Application binding. `identity_published` is false when
+ * Control authorizes an agent that Application has not described yet — a real
+ * state that must render as a gap in presentation, never as an absent agent
+ * and never under an invented name.
+ */
+export type SpaceAgent = {
+  subject_id: string
+  role: 'viewer' | 'editor' | 'manager' | 'owner'
+  revision: number
+  identity_published: boolean
+  binding_ref?: string
+  agent_ref?: string
+  name?: string
+  title?: string
+  description?: string
+  /** Binding lifecycle. Absent when no identity is published. */
+  status?: 'pending' | 'active' | 'paused' | 'revoked' | 'failed'
+  /** The definition's own lifecycle, which can differ from the binding's. */
+  definition_status?: 'active' | 'inactive' | 'draft'
+  /**
+   * Binding policy, enforced by the gateway at invocation. Absent on bindings
+   * created before policy fields existed — absence means the legacy behavior,
+   * so the UI must not render a policy it cannot prove.
+   */
+  trigger_modes?: readonly ('mention' | 'group')[]
+  allowed_tools?: readonly string[]
+  approval_mode?: 'auto' | 'require_confirmation' | 'blocked'
+  delivery_targets: readonly SpaceAgentDeliveryTarget[]
+  updated_at?: number
+}
+
+/**
+ * The agents bound to this Space. Control gates it on your own membership, so a
+ * failure here means "your view could not be resolved" — never "this room has
+ * no agents", and the panel keeps those two apart.
+ */
+export async function getSpaceAgents(spaceRef: string): Promise<readonly SpaceAgent[]> {
+  const response = await requestJson<{ agents: readonly SpaceAgent[] }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents`,
+  )
+  return response.agents
+}
+
 export function getSpaceActions(spaceRef: string): Promise<SpaceActions> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/actions`)
+}
+
+export type CreateSpaceAgentInput = {
+  name: string
+  instructions?: string
+  avatarColor?: string
+}
+
+export type CreatedSpaceAgent = {
+  agent_ref: string
+  subject_id: string
+  status: string
+}
+
+/**
+ * Create a simple agent from inside the room (scope plan §UI-3b). The gateway
+ * runs the governed two-step flow — Application definition + pending binding,
+ * then Control roster confirmation — under the caller's verified session and
+ * room role; nothing here carries identity or authority. A rejection with
+ * `agent_membership_unconfirmed` means the agent exists but stays `pending`
+ * in the Agent tab until Control accepts the roster.
+ */
+export function createSpaceAgent(spaceRef: string, input: CreateSpaceAgentInput): Promise<CreatedSpaceAgent> {
+  return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: input.name.trim(),
+      ...(input.instructions?.trim() ? { instructions: input.instructions.trim() } : {}),
+      ...(input.avatarColor?.trim() ? { avatar_color: input.avatarColor.trim() } : {}),
+    }),
+  })
+}
+
+/**
+ * An org agent definition the caller could add to this Space (scope plan
+ * §UI-3). `already_bound` is reported, never used to filter — Control's
+ * membership state, not this list, is the source of truth for who can
+ * currently act in the room.
+ */
+export type InstallableSpaceAgent = {
+  agent_ref: string
+  name?: string
+  description?: string
+  definition_status?: 'active' | 'inactive' | 'draft'
+  already_bound: boolean
+}
+
+/**
+ * The org's agent definitions, for an owner/manager browsing what to add to
+ * this room (scope plan §UI-3). Gated the same way as creation: only a room
+ * owner/manager may call this.
+ */
+export async function getInstallableSpaceAgents(spaceRef: string): Promise<readonly InstallableSpaceAgent[]> {
+  const response = await requestJson<{ agents: readonly InstallableSpaceAgent[] }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents/available`,
+  )
+  return response.agents
+}
+
+/**
+ * Bind an EXISTING agent definition to this Space (scope plan §UI-3) — the
+ * same governed two-step and room-role gate as `createSpaceAgent`, except
+ * step 1 reuses a definition the caller picked from
+ * `getInstallableSpaceAgents` instead of authoring a new one. The bound
+ * agent's own (possibly broader) Agent Studio configuration is never
+ * inherited; the binding is born with the same narrow policy as a
+ * freshly-created room agent.
+ */
+export function bindSpaceAgent(spaceRef: string, agentRef: string): Promise<CreatedSpaceAgent> {
+  return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents/bind`, {
+    method: 'POST',
+    body: JSON.stringify({ agent_ref: agentRef }),
+  })
+}
+
+/**
+ * One agent definition and every Space (the caller can see) it is installed
+ * in — scope plan §UI-4, narrow slice. Each installation's `status` is the
+ * SAME live Control-joined status the Space's own Agent tab shows, not a
+ * separate cross-Space cache, so this page and a room's Agent tab can never
+ * silently disagree about whether a binding is active.
+ */
+export type AgentInstallation = {
+  space_ref: string
+  space_name: string
+  space_kind: 'personal' | 'room' | 'project' | 'case'
+  status?: 'pending' | 'active' | 'paused' | 'revoked' | 'failed'
+}
+
+export type AgentDefinitionInstallations = {
+  agent_ref: string
+  name?: string
+  description?: string
+  definition_status?: 'active' | 'inactive' | 'draft'
+  installations: readonly AgentInstallation[]
+}
+
+/**
+ * Every agent definition with a published identity in at least one Space the
+ * caller belongs to, grouped with its per-Space installations (scope plan
+ * §UI-4). This is "your view of your definitions," not an org-wide admin
+ * roster: it can only see Spaces Control already lists the caller as a
+ * member of, the same boundary the Agent tab itself has.
+ */
+export async function getAgentInstallations(): Promise<readonly AgentDefinitionInstallations[]> {
+  const response = await requestJson<{ definitions: readonly AgentDefinitionInstallations[] }>(
+    '/api/v1/agents/installations',
+  )
+  return response.definitions
 }
 
 /**

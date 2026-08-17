@@ -28,7 +28,9 @@ use std::time::Instant;
 use tonic::{Request, Response, Status};
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
+    authorize_operation, authorize_owner_row, authorize_run_action_authority_service,
+    authorize_scheduled_step_authority_service, authorize_scheduled_step_service, identity,
+    OwnerIntent, VerifiedIdentity,
 };
 use crate::orchestration_grpc::json_to_struct;
 
@@ -104,6 +106,169 @@ struct RunRow {
     updated_at: i64,
     steps_completed: i64,
     checkpoint_index: i64,
+}
+
+/// The deliberately content-free run/thread projection used only by Control's
+/// exact action-authorizer before it issues an owner-targeted effect decision.
+/// A query must satisfy both immutable run context and the currently stored
+/// thread context; a legacy, terminal, service-owned, or partially scoped row
+/// simply does not become an authority source.
+#[derive(sqlx::FromRow)]
+struct RunActionAuthorityRow {
+    run_id: String,
+    org_id: String,
+    subject_id: String,
+    thread_id: String,
+    run_status: String,
+    space_id: Option<String>,
+    recipient_audience_ref: Option<String>,
+    recipient_audience_revision: Option<i64>,
+    recipient_audience_hash: Option<String>,
+    privacy_policy_ref: Option<String>,
+    thread_resource_authorization_ref: Option<String>,
+    authority_revision: Option<i64>,
+}
+
+/// Durable scheduled-run bindings projected for Control's per-step authority
+/// refresh. The metadata is intentionally the only source for schedule/fire
+/// identity: callers cannot turn a valid prepared thread into a different
+/// workload by restating those values.
+#[derive(sqlx::FromRow)]
+struct ScheduledStepAuthorityRow {
+    run_id: String,
+    thread_id: String,
+    org_id: String,
+    space_id: String,
+    run_status: String,
+    metadata: serde_json::Value,
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    let value = value.trim();
+    value.len() == "sha256:".len() + 64
+        && value.starts_with("sha256:")
+        && value["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn scheduled_metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn project_scheduled_step_authority(
+    row: ScheduledStepAuthorityRow,
+    req: &pb::ResolveScheduledStepAuthorityRequest,
+) -> Option<pb::ResolveScheduledStepAuthorityResponse> {
+    if is_terminal(&row.run_status)
+        || row.space_id.trim().is_empty()
+        || row.run_id != req.run_id
+        || row.thread_id != req.thread_id
+        || row.org_id != req.org_id
+        || req.step_id != format!("{}:step:{}", req.run_id, req.step_index)
+        || req.idempotency_key.trim().is_empty()
+        || !valid_sha256_digest(&req.template_digest)
+        || !valid_sha256_digest(&req.policy_digest)
+    {
+        return None;
+    }
+
+    let source = scheduled_metadata_string(&row.metadata, "source")?;
+    let schedule_id = scheduled_metadata_string(&row.metadata, "schedule_id")?;
+    let fire_key = scheduled_metadata_string(&row.metadata, "fire_key")?;
+    let space_id = scheduled_metadata_string(&row.metadata, "space_id")?;
+    let subject_id = scheduled_metadata_string(&row.metadata, "subject_id")?;
+    let template_digest = scheduled_metadata_string(&row.metadata, "template_digest")?;
+    let policy_digest = scheduled_metadata_string(&row.metadata, "policy_digest")?;
+    let idempotency_key = scheduled_metadata_string(&row.metadata, "idempotency_key")?;
+    if source != "scheduled_run"
+        || space_id != row.space_id.trim()
+        || schedule_id != req.schedule_id.trim()
+        || fire_key != req.fire_key.trim()
+        || template_digest != req.template_digest.trim()
+        || policy_digest != req.policy_digest.trim()
+        || idempotency_key != req.idempotency_key.trim()
+    {
+        return None;
+    }
+
+    Some(pb::ResolveScheduledStepAuthorityResponse {
+        resolved: true,
+        run_id: row.run_id,
+        thread_id: row.thread_id,
+        org_id: row.org_id,
+        subject_id,
+        space_id,
+        schedule_id,
+        fire_key,
+        template_digest,
+        policy_digest,
+        step_id: req.step_id.clone(),
+        step_index: req.step_index,
+        idempotency_key,
+        run_status: row.run_status,
+    })
+}
+
+/// Project a query row only when it is safe for Control to use as the durable
+/// context source for a future action decision. This function intentionally
+/// returns `None` rather than a partial projection: the caller must fail
+/// closed and re-resolve current Control facts, not infer missing authority.
+fn project_run_action_authority(
+    row: RunActionAuthorityRow,
+) -> Option<pb::ResolveRunActionAuthorityResponse> {
+    if matches!(
+        row.run_status.as_str(),
+        "completed" | "failed" | "cancelled"
+    ) || row.subject_id.starts_with("service:")
+    {
+        return None;
+    }
+    let space_id = row.space_id?.trim().to_owned();
+    let recipient_audience_ref = row.recipient_audience_ref?.trim().to_owned();
+    let recipient_audience_hash = row.recipient_audience_hash?.trim().to_owned();
+    let privacy_policy_ref = row.privacy_policy_ref?.trim().to_owned();
+    let thread_resource_authorization_ref =
+        row.thread_resource_authorization_ref?.trim().to_owned();
+    let recipient_audience_revision = u64::try_from(row.recipient_audience_revision?).ok()?;
+    let authority_revision = u64::try_from(row.authority_revision?).ok()?;
+    if space_id.is_empty()
+        || recipient_audience_ref.is_empty()
+        || recipient_audience_hash.is_empty()
+        || privacy_policy_ref.is_empty()
+        || thread_resource_authorization_ref.is_empty()
+        || recipient_audience_revision == 0
+        || authority_revision == 0
+    {
+        return None;
+    }
+    Some(pb::ResolveRunActionAuthorityResponse {
+        resolved: true,
+        run_id: row.run_id,
+        org_id: row.org_id,
+        subject_id: row.subject_id,
+        thread_id: row.thread_id,
+        space_id,
+        recipient_audience_ref,
+        recipient_audience_revision,
+        recipient_audience_hash,
+        privacy_policy_ref,
+        thread_resource_authorization_ref,
+        authority_revision,
+        run_status: row.run_status,
+    })
+}
+
+fn unresolved_run_action_authority() -> pb::ResolveRunActionAuthorityResponse {
+    pb::ResolveRunActionAuthorityResponse {
+        resolved: false,
+        ..Default::default()
+    }
 }
 
 /// Column projection shared by `GetRun` and `ListRuns`. `steps_completed` is the
@@ -222,6 +387,115 @@ impl RunService for RunServiceImpl {
         }
         .await;
         record_metrics("get_run", started, result.is_ok());
+        result
+    }
+
+    async fn get_scheduled_step_context(
+        &self,
+        request: Request<pb::GetScheduledStepContextRequest>,
+    ) -> Result<Response<pb::ScheduledStepContext>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, crate::auth::SCHEDULED_STEP_SCOPE)?;
+        authorize_scheduled_step_service(&caller)?;
+        let req = request.into_inner();
+        if req.run_id.trim().is_empty()
+            || req.thread_id.trim().is_empty()
+            || req.org_id.trim().is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "scheduled-step context bindings are required",
+            ));
+        }
+        caller.authorize_org(&req.org_id)?;
+        let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+            "SELECT r.id, r.thread_id, r.org_id, r.goal, r.status
+             FROM runs r
+             JOIN threads t ON t.id = r.thread_id
+             WHERE r.id = $1 AND r.thread_id = $2 AND r.org_id = $3
+               AND r.user_id = $4 AND COALESCE(t.space_id, '') <> ''
+               AND COALESCE(r.metadata->>'source', '') = 'scheduled_run'",
+        )
+        .bind(&req.run_id)
+        .bind(&req.thread_id)
+        .bind(&req.org_id)
+        .bind(crate::auth::system_run_owners()[0])
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+        let Some((run_id, thread_id, org_id, goal, status)) = row else {
+            return Err(Status::not_found("scheduled run context not found"));
+        };
+        Ok(Response::new(pb::ScheduledStepContext {
+            run_id,
+            thread_id,
+            org_id,
+            goal,
+            status,
+        }))
+    }
+
+    async fn resolve_scheduled_step_authority(
+        &self,
+        request: Request<pb::ResolveScheduledStepAuthorityRequest>,
+    ) -> Result<Response<pb::ResolveScheduledStepAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveScheduledStepAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_scheduled_step_authority_service(&caller)?;
+            let req = request.into_inner();
+            if req.run_id.trim().is_empty()
+                || req.thread_id.trim().is_empty()
+                || req.org_id.trim().is_empty()
+                || req.schedule_id.trim().is_empty()
+                || req.fire_key.trim().is_empty()
+                || req.step_id.trim().is_empty()
+                || req.idempotency_key.trim().is_empty()
+                || !valid_sha256_digest(&req.template_digest)
+                || !valid_sha256_digest(&req.policy_digest)
+            {
+                return Err(Status::invalid_argument(
+                    "scheduled-step authority bindings are required",
+                ));
+            }
+            if req.step_id != format!("{}:step:{}", req.run_id, req.step_index) {
+                return Err(Status::invalid_argument("scheduled step_id is invalid"));
+            }
+            caller.authorize_org(&req.org_id)?;
+
+            // Only a prepared, service-owned scheduled run can answer this
+            // query. The exact metadata comparison below prevents a caller
+            // from reusing a valid thread for another schedule or template.
+            let row: Option<ScheduledStepAuthorityRow> = sqlx::query_as(
+                "SELECT r.id AS run_id, r.thread_id, r.org_id,
+                        COALESCE(t.space_id, '') AS space_id,
+                        r.status AS run_status, r.metadata
+                 FROM runs r
+                 JOIN threads t ON t.id = r.thread_id AND t.org_id = r.org_id
+                 WHERE r.id = $1 AND r.thread_id = $2 AND r.org_id = $3
+                   AND r.user_id = $4
+                   AND COALESCE(r.metadata->>'source', '') = 'scheduled_run'",
+            )
+            .bind(req.run_id.trim())
+            .bind(req.thread_id.trim())
+            .bind(req.org_id.trim())
+            .bind(crate::auth::system_run_owners()[0])
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "scheduled-step authority lookup failed");
+                Status::unavailable("scheduled-step authority unavailable")
+            })?;
+
+            let response = row
+                .and_then(|row| project_scheduled_step_authority(row, &req))
+                .unwrap_or_else(|| pb::ResolveScheduledStepAuthorityResponse {
+                    resolved: false,
+                    ..Default::default()
+                });
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("resolve_scheduled_step_authority", started, result.is_ok());
         result
     }
 
@@ -423,6 +697,62 @@ impl RunService for RunServiceImpl {
         record_metrics("resolve_run_owner", started, result.is_ok());
         result
     }
+
+    async fn resolve_run_action_authority(
+        &self,
+        request: Request<pb::ResolveRunActionAuthorityRequest>,
+    ) -> Result<Response<pb::ResolveRunActionAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveRunActionAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_run_action_authority_service(&caller)?;
+            let req = request.into_inner();
+            if req.run_id.trim().is_empty() || req.org_id.trim().is_empty() {
+                return Err(Status::invalid_argument("run_id and org_id are required"));
+            }
+            caller.authorize_org(&req.org_id)?;
+
+            // `runs` inherits its Space bindings from the owner-bound thread in
+            // its creation transaction. Requiring the two complete projections
+            // to remain equal makes a stale or partial legacy row unavailable
+            // instead of letting a caller choose which context to trust.
+            let row: Option<RunActionAuthorityRow> = sqlx::query_as(
+                "SELECT r.id AS run_id, r.org_id, r.user_id AS subject_id,
+                        r.thread_id, r.status AS run_status,
+                        r.space_id, r.recipient_audience_ref, r.recipient_audience_revision,
+                        r.recipient_audience_hash, r.privacy_policy_ref,
+                        r.resource_authorization_ref AS thread_resource_authorization_ref,
+                        r.authority_revision
+                 FROM runs r
+                 JOIN threads t
+                   ON t.id = r.thread_id AND t.org_id = r.org_id AND t.user_id = r.user_id
+                 WHERE r.id = $1 AND r.org_id = $2
+                   AND r.space_id IS NOT DISTINCT FROM t.space_id
+                   AND r.recipient_audience_ref IS NOT DISTINCT FROM t.recipient_audience_ref
+                   AND r.recipient_audience_revision IS NOT DISTINCT FROM t.recipient_audience_revision
+                   AND r.recipient_audience_hash IS NOT DISTINCT FROM t.recipient_audience_hash
+                   AND r.privacy_policy_ref IS NOT DISTINCT FROM t.privacy_policy_ref
+                   AND r.resource_authorization_ref IS NOT DISTINCT FROM t.resource_authorization_ref
+                   AND r.authority_revision IS NOT DISTINCT FROM t.authority_revision",
+            )
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "run action authority lookup failed");
+                Status::unavailable("run action authority unavailable")
+            })?;
+
+            let response = row
+                .and_then(project_run_action_authority)
+                .unwrap_or_else(unresolved_run_action_authority);
+            Ok(Response::new(response))
+        }
+        .await;
+        record_metrics("resolve_run_action_authority", started, result.is_ok());
+        result
+    }
 }
 
 /// Clamp a wire `limit` (0 = caller left it unset) into `[1, MAX_LIST_LIMIT]`.
@@ -463,6 +793,111 @@ mod tests {
         assert!(!is_terminal("running"));
         assert!(!is_terminal("queued"));
         assert!(!is_terminal("awaiting_approval"));
+    }
+
+    fn scheduled_step_request() -> pb::ResolveScheduledStepAuthorityRequest {
+        pb::ResolveScheduledStepAuthorityRequest {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            schedule_id: "schedule-1".to_owned(),
+            fire_key: "fire-1".to_owned(),
+            template_digest: format!("sha256:{}", "a".repeat(64)),
+            policy_digest: format!("sha256:{}", "b".repeat(64)),
+            step_id: "run-1:step:0".to_owned(),
+            step_index: 0,
+            idempotency_key: "fire-1:step:0".to_owned(),
+        }
+    }
+
+    fn scheduled_step_row() -> ScheduledStepAuthorityRow {
+        ScheduledStepAuthorityRow {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            space_id: "space-1".to_owned(),
+            run_status: "running".to_owned(),
+            metadata: serde_json::json!({
+                "source": "scheduled_run",
+                "schedule_id": "schedule-1",
+                "fire_key": "fire-1",
+                "space_id": "space-1",
+                "subject_id": "user-1",
+                "template_digest": format!("sha256:{}", "a".repeat(64)),
+                "policy_digest": format!("sha256:{}", "b".repeat(64)),
+                "idempotency_key": "fire-1:step:0",
+            }),
+        }
+    }
+
+    #[test]
+    fn scheduled_step_authority_requires_exact_prepared_metadata() {
+        let request = scheduled_step_request();
+        let response = project_scheduled_step_authority(scheduled_step_row(), &request)
+            .expect("exact prepared metadata must resolve");
+        assert!(response.resolved);
+        assert_eq!(response.subject_id, "user-1");
+        assert_eq!(response.space_id, "space-1");
+    }
+
+    #[test]
+    fn scheduled_step_authority_rejects_retargeted_fire_or_idempotency() {
+        let mut request = scheduled_step_request();
+        request.fire_key = "other-fire".to_owned();
+        assert!(project_scheduled_step_authority(scheduled_step_row(), &request).is_none());
+
+        let mut request = scheduled_step_request();
+        request.idempotency_key = "other-idempotency".to_owned();
+        assert!(project_scheduled_step_authority(scheduled_step_row(), &request).is_none());
+    }
+
+    fn valid_run_action_authority_row() -> RunActionAuthorityRow {
+        RunActionAuthorityRow {
+            run_id: "run_1".to_owned(),
+            org_id: "org_1".to_owned(),
+            subject_id: "user_1".to_owned(),
+            thread_id: "thread_1".to_owned(),
+            run_status: "running".to_owned(),
+            space_id: Some("space_1".to_owned()),
+            recipient_audience_ref: Some("audience_1".to_owned()),
+            recipient_audience_revision: Some(3),
+            recipient_audience_hash: Some("sha256:audience".to_owned()),
+            privacy_policy_ref: Some("privacy_1".to_owned()),
+            thread_resource_authorization_ref: Some("thread-resource_1".to_owned()),
+            authority_revision: Some(7),
+        }
+    }
+
+    #[test]
+    fn run_action_authority_projection_is_content_free_and_complete() {
+        let response = project_run_action_authority(valid_run_action_authority_row())
+            .expect("complete active human run is resolvable");
+        assert!(response.resolved);
+        assert_eq!(response.run_id, "run_1");
+        assert_eq!(response.subject_id, "user_1");
+        assert_eq!(
+            response.thread_resource_authorization_ref,
+            "thread-resource_1"
+        );
+        assert_eq!(response.authority_revision, 7);
+        // The response contract intentionally has no goal, transcript, tool
+        // input, output, approval, or bearer field to accidentally retain.
+        assert_eq!(response.run_status, "running");
+    }
+
+    #[test]
+    fn run_action_authority_projection_fails_closed_for_terminal_system_or_partial_rows() {
+        let mut terminal = valid_run_action_authority_row();
+        terminal.run_status = "completed".to_owned();
+        assert!(project_run_action_authority(terminal).is_none());
+
+        let mut system = valid_run_action_authority_row();
+        system.subject_id = "service:orchestrator-core".to_owned();
+        assert!(project_run_action_authority(system).is_none());
+
+        let mut partial = valid_run_action_authority_row();
+        partial.recipient_audience_revision = Some(0);
+        assert!(project_run_action_authority(partial).is_none());
     }
 
     #[test]

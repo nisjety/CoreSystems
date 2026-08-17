@@ -21,7 +21,8 @@ describe('action registry', () => {
     })
 
     expect(pack.currentView).toBe('knowledge')
-    expect(pack.availableActions).toContain('knowledge.recrawl_source')
+    expect(pack.availableActions).not.toContain('knowledge.recrawl_source')
+    expect(pack.availableActions).not.toContain('social.publish_post')
     expect(pack.redactionPolicy).toBe('ids-and-summaries-only')
   })
 

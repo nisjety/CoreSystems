@@ -492,6 +492,12 @@ services:
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       SESSION_CORE_AUTH_AUDIENCE: ${SESSION_CORE_AUTH_AUDIENCE:-session-core}
+      # Scheduled runs accept only Control-signed, short-lived preparation and
+      # execution decisions. These are public verification material, never a
+      # Control signing key. Leaving either value empty keeps the RPCs
+      # fail-closed, which is the intended unprovisioned-development state.
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
       # Dedicated short-lived service-principal credentials for the optional
       # session-core -> letta-bridge path. When LETTA_MEMORY_ADDR is non-empty,
       # session-core fails startup closed unless all three are configured.
@@ -750,6 +756,22 @@ services:
       # make both sides mandatory so an allow cannot cross the dispatch gate
       # without an Ed25519 proof.
       EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY: ${EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY:-}
+      # The scheduled-step lane independently verifies the short-lived Control
+      # decision at the Execution Core effect boundary. Reuse the deployment's
+      # Control public key set; an absent key keeps the lane disabled.
+      EXECUTION_CORE_SCHEDULED_STEP_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      EXECUTION_CORE_SCHEDULED_STEP_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
+      # Governed tickets.create adapter. All bindings are intentionally empty
+      # by default: the adapter stays disabled until Control, Conversation
+      # Core, and Execution Core have distinct, least-privilege credentials.
+      # Never place the values in this Compose file; provision them through the
+      # deployment's private environment/secret store.
+      CONTROL_PLANE_USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-}
+      EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN: ${EXECUTION_CORE_CONTROL_RUN_ACTION_TOKEN:-}
+      CONVERSATION_CORE_AGENT_ACTION_URL: ${CONVERSATION_CORE_AGENT_ACTION_URL:-}
+      CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN: ${CONVERSATION_EXECUTION_CORE_SERVICE_TOKEN:-}
+      EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN: ${EXECUTION_CORE_CONTROL_MODEL_ACTION_VIEW_TOKEN:-}
+      EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK: ${EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK:-false}
       # Feature-gates QuarryAgentClient::from_env() (browser_agent loop) — the
       # env var this block's QUARRY_EDGE_URL comment already promises but that
       # was never actually wired here (Phase 2, found live: run_browser_agent_loop
@@ -906,11 +928,20 @@ services:
       # is `persistent`: session-core refuses any ZDR credential for a
       # non-`:read` scope, and StartRun is a write.
       #
-      # execution-core is deliberately NOT in that audience list — its
-      # ExecuteStep requires the caller's identity to equal the request's user,
-      # which no service token can satisfy. See internal/servicecred.
+      # execution-core is minted only for the dedicated scheduled-step RPC;
+      # the gRPC client filters that bearer by method. ExecuteStep and RunAgent
+      # remain user-bound and never receive this service credential. See
+      # internal/servicecred.
       ORCHESTRATOR_CORE_SERVICE_ID: ${ORCHESTRATOR_CORE_SERVICE_ID:-orchestrator-core}
       ORCHESTRATOR_CORE_SERVICE_API_KEY: ${ORCHESTRATOR_CORE_SERVICE_API_KEY:-}
+      # Fresh Control authority for the StartScheduledRun activity. The
+      # dedicated credential is intentionally optional in dev: without every
+      # value the activity fails closed instead of using a standing grant.
+      CONTROL_USER_CORE_URL: ${CONTROL_USER_CORE_URL:-}
+      ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN:-}
+      ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN: ${ORCHESTRATOR_CORE_CONTROL_SCHEDULE_STEP_SERVICE_TOKEN:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
     depends_on:
       temporal:
         condition: service_healthy
@@ -955,6 +986,15 @@ services:
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       CAPABILITY_CORE_SERVICE_ID: ${CAPABILITY_CORE_SERVICE_ID:-capability-core}
       CAPABILITY_CORE_SERVICE_API_KEY: ${CAPABILITY_CORE_SERVICE_API_KEY:-}
+      # Capability Core reauthorizes every due scheduled fire directly with
+      # Control before it can prepare a service-owned Session Core thread.
+      # The credential must be registered only as capability-core with
+      # spaces:schedule:reauthorize; it is intentionally distinct from the
+      # Orchestrator effect-time credential below. Empty values fail closed.
+      CONTROL_USER_CORE_URL: ${CONTROL_USER_CORE_URL:-}
+      CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN: ${CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN:-}
+      CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:-}
+      CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64: ${CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64:-}
       APIS_GURU_OPENAPI_DIRECTORY_PATH: ${APIS_GURU_OPENAPI_DIRECTORY_PATH:-/var/lib/capability-core/openapi-directory}
       # Optional Letta tool-definition ranking. This is not memory/passages
       # search and never expands the durable tenant-scoped capability catalog.

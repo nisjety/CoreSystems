@@ -18,6 +18,27 @@ const SESSION_VALIDATION_TTL_DEFAULT_SECS: u64 = 10;
 const SESSION_VALIDATION_TTL_MIN_SECS: u64 = 5;
 const SESSION_VALIDATION_TTL_MAX_SECS: u64 = 15;
 
+/// The outcome of checking a browser session cookie against auth-core.
+///
+/// The split between `Rejected` and `Unavailable` is the entire point of this
+/// type. Only auth-core *answering* "there is no session behind this cookie" may
+/// end the browser's session. Failing to reach auth-core at all — a timeout, a
+/// connection reset, a 429, a 5xx — says nothing whatsoever about the user, and
+/// treating it as a rejection signs out people whose sessions are perfectly
+/// valid. That conflation is exactly what made a healthy 7-day session drop a
+/// user back to the login screen every few minutes: every authenticated request
+/// re-validates live, so a single unlucky round trip anywhere in the app was
+/// enough to clear the session.
+pub(crate) enum SessionValidation {
+    /// auth-core resolved the cookie to a live session.
+    Valid(AuthenticatedUser),
+    /// auth-core answered, and the answer was "no session". Authoritative.
+    Rejected,
+    /// auth-core could not be consulted, so the session's real state is unknown.
+    /// Callers must preserve whatever the client already has.
+    Unavailable,
+}
+
 /// Resolve the configured session-validation cache TTL, clamped to the safe band.
 fn session_validation_ttl_secs() -> u64 {
     std::env::var("GATEWAY_SESSION_CACHE_TTL_SECS")
@@ -166,8 +187,10 @@ pub(crate) async fn require_session(
         .to_owned();
 
     let allow_cached_session = allows_cached_session_validation(request.uri().path());
-    if let Some(user) = validate_session_cookie(&state, &cookie_header, allow_cached_session).await
-    {
+    let validation = validate_session_cookie(&state, &cookie_header, allow_cached_session).await;
+    // Read this before the `Valid` arm moves the user out of `validation`.
+    let verification_unavailable = matches!(validation, SessionValidation::Unavailable);
+    if let SessionValidation::Valid(user) = validation {
         return authorize_request(state, request, next, user).await;
     }
 
@@ -176,6 +199,23 @@ pub(crate) async fn require_session(
     // can never downgrade or impersonate an authenticated user.
     if let Some(user) = dev_bypass_user(&state, request.headers()) {
         return authorize_request(state, request, next, user).await;
+    }
+
+    // We could not consult auth-core, so we do not know whether this session is
+    // still good. Answering 401 here would be a lie the browser acts on: the SPA
+    // treats a 401 `unauthorized` as proof of expiry and clears the session, so a
+    // momentary auth-core blip would sign out a user whose session is untouched
+    // and valid for days. 503 says "ask again", which is the truth, and leaves
+    // the client's session alone.
+    if verification_unavailable {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "session_verification_unavailable",
+                "Session verification is temporarily unavailable. Your session is unchanged — retry shortly.",
+            )),
+        )
+            .into_response();
     }
 
     (
@@ -394,9 +434,10 @@ pub(crate) async fn validate_session_cookie(
     state: &AppState,
     cookie_header: &str,
     allow_cached: bool,
-) -> Option<AuthenticatedUser> {
+) -> SessionValidation {
     if cookie_header.is_empty() {
-        return None;
+        // No cookie at all is a definitive answer about the caller, not an outage.
+        return SessionValidation::Rejected;
     }
 
     // B1: collapse the per-request auth-core `/get-session` fan-out. Every
@@ -421,31 +462,70 @@ pub(crate) async fn validate_session_cookie(
     if allow_cached {
         if let Some(cached) = state.cache.lookup_within(&cache_key, ttl).await {
             if let Ok(user) = serde_json::from_value::<AuthenticatedUser>(cached) {
-                return Some(user);
+                return SessionValidation::Valid(user);
             }
             // A malformed/legacy cache entry: fall through to a live validation.
         }
     }
 
-    let resp = state
+    let resp = match state
         .client
         .get(format!("{}/api/auth/get-session", state.auth_core_url))
         .header("cookie", cookie_header)
         .send()
         .await
-        .ok()?;
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "session validation could not reach auth-core; preserving the caller's session"
+            );
+            return SessionValidation::Unavailable;
+        }
+    };
 
-    if !resp.status().is_success() {
-        return None;
+    let status = resp.status();
+    if !status.is_success() {
+        // Only an explicit auth rejection is authoritative. A 429 (rate limit),
+        // a 5xx, or a misrouted 404 all mean we failed to *ask* — not that the
+        // caller is signed out — so they must never clear a session.
+        if matches!(status.as_u16(), 401 | 403) {
+            return SessionValidation::Rejected;
+        }
+        tracing::warn!(
+            status = status.as_u16(),
+            "auth-core could not answer session validation; preserving the caller's session"
+        );
+        return SessionValidation::Unavailable;
     }
 
-    let data = resp.json::<SessionValidationResponse>().await.ok()?;
+    // Deserialize through `Option`: Better Auth answers a cookie with no live
+    // session as a bare `null` body, which serde cannot fold into the struct.
+    // Reading it as `Option` keeps that answer a *rejection* — decoding it as a
+    // struct fails, and calling that failure an outage would leave a genuinely
+    // signed-out browser unable to ever be signed out.
+    let data = match resp.json::<Option<SessionValidationResponse>>().await {
+        Ok(Some(data)) => data,
+        Ok(None) => return SessionValidation::Rejected,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "auth-core session response was unreadable; preserving the caller's session"
+            );
+            return SessionValidation::Unavailable;
+        }
+    };
     let active_org_id = data
         .session
         .and_then(|s| s.active_organization_id)
         .map(|id| id.trim().to_owned())
         .filter(|id| !id.is_empty());
-    let user = data.user?;
+    // Better Auth answers a cookie with no live session as 200 + a null user.
+    // That is a real answer, so it is a rejection rather than an outage.
+    let Some(user) = data.user else {
+        return SessionValidation::Rejected;
+    };
 
     let authenticated = AuthenticatedUser {
         user_id: user.id,
@@ -466,7 +546,7 @@ pub(crate) async fn validate_session_cookie(
         }
     }
 
-    Some(authenticated)
+    SessionValidation::Valid(authenticated)
 }
 
 /// Remove the short-lived positive session validation after a successful
@@ -486,6 +566,132 @@ pub(crate) async fn invalidate_session_validation_cache(state: &AppState, cookie
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use serde_json::json;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Drive one authenticated request through the real router against an
+    /// auth-core that answers `get-session` with `template`, and report the
+    /// status plus the machine-readable error code the browser would see.
+    async fn session_probe(template: ResponseTemplate) -> (u16, String) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(template)
+            .mount(&auth)
+            .await;
+        probe_against_auth_core(auth.uri()).await
+    }
+
+    async fn probe_against_auth_core(auth_core_url: String) -> (u16, String) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth_core_url;
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/navbar")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+        let code = parsed["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        (status, code)
+    }
+
+    /// The logout regression: auth-core being briefly unable to answer must not
+    /// be reported to the browser as "you are signed out". The SPA clears its
+    /// session on a 401 `unauthorized`, so returning that here would sign out a
+    /// user whose session is untouched and valid for days.
+    #[tokio::test]
+    async fn auth_core_outage_does_not_sign_the_user_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, code) = session_probe(ResponseTemplate::new(503)).await;
+        assert_eq!(status, 503, "an auth-core outage must not answer 401");
+        assert_eq!(code, "session_verification_unavailable");
+    }
+
+    /// A rate-limited validation is the documented 429→401 cascade. It says
+    /// nothing about the session and must never end it.
+    #[tokio::test]
+    async fn rate_limited_session_validation_does_not_sign_the_user_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, code) = session_probe(ResponseTemplate::new(429)).await;
+        assert_eq!(status, 503, "a 429 from auth-core must not answer 401");
+        assert_eq!(code, "session_verification_unavailable");
+    }
+
+    /// An unreadable body means we never learned the answer, so it is an outage
+    /// rather than a rejection.
+    #[tokio::test]
+    async fn unreadable_auth_core_response_does_not_sign_the_user_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, code) =
+            session_probe(ResponseTemplate::new(200).set_body_string("not json")).await;
+        assert_eq!(status, 503);
+        assert_eq!(code, "session_verification_unavailable");
+    }
+
+    /// An unreachable auth-core is a transport failure, not a verdict.
+    #[tokio::test]
+    async fn unreachable_auth_core_does_not_sign_the_user_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        // Port 1 refuses immediately, so this exercises the `send()` error arm.
+        let (status, code) = probe_against_auth_core("http://127.0.0.1:1".to_owned()).await;
+        assert_eq!(status, 503);
+        assert_eq!(code, "session_verification_unavailable");
+    }
+
+    /// The other half of the contract: a real sign-out must still sign the user
+    /// out. Better Auth answers a dead cookie with 200 + a null user, and that
+    /// IS an answer, so it must still produce the 401 the SPA acts on.
+    #[tokio::test]
+    async fn auth_core_reporting_no_session_still_signs_the_user_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, code) =
+            session_probe(ResponseTemplate::new(200).set_body_json(json!({"user": null}))).await;
+        assert_eq!(
+            status, 401,
+            "a genuine 'no session' answer must still end the session"
+        );
+        assert_eq!(code, "unauthorized");
+    }
+
+    /// Better Auth's real "no session" answer is a bare `null` body, not
+    /// `{"user": null}` — verified live against auth-core. A struct-shaped mock
+    /// misses it, and reading that body as a struct fails to decode, so treating
+    /// a decode failure as an outage would make a signed-out browser
+    /// un-sign-out-able: every request would answer 503 forever.
+    #[tokio::test]
+    async fn a_bare_null_body_is_a_rejection_not_an_outage() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, code) =
+            session_probe(ResponseTemplate::new(200).set_body_json(json!(null))).await;
+        assert_eq!(status, 401, "a bare null body means 'no session'");
+        assert_eq!(code, "unauthorized");
+    }
+
+    /// auth-core explicitly rejecting the cookie is equally authoritative.
+    #[tokio::test]
+    async fn auth_core_rejecting_the_cookie_still_signs_the_user_out() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, code) = session_probe(ResponseTemplate::new(401)).await;
+        assert_eq!(status, 401);
+        assert_eq!(code, "unauthorized");
+    }
 
     /// Tier-1: the ingress strip set must drop a client-forged tenant-scoping
     /// header (`x-verevon-org-id`) — the root of the cross-tenant IDOR — along

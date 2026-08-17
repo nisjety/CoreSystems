@@ -201,6 +201,131 @@ func TestRequireSpaceScheduledRunExecutorRequiresExactPrincipalAndScope(t *testi
 	}
 }
 
+func TestRequireSpaceScheduledStepExecutorRequiresExactPrincipalAndScope(t *testing.T) {
+	s := &Server{}
+	for _, candidate := range []struct {
+		serviceID string
+		scopes    []string
+		allowed   bool
+	}{
+		{serviceID: capabilityCorePrincipal, scopes: []string{"spaces:schedule:step"}},
+		{serviceID: orchestratorCorePrincipal, scopes: []string{"spaces:schedule:execute"}},
+		{serviceID: orchestratorCorePrincipal, scopes: []string{"spaces:schedule:step"}, allowed: true},
+	} {
+		c, w := newGinCtx("/api/v1/internal/spaces/scheduled-step-decision")
+		c.Set("auth_method", "service_principal")
+		c.Set("service_id", candidate.serviceID)
+		c.Set("service_scopes", candidate.scopes)
+		s.requireSpaceScheduledStepExecutor(c)
+		if candidate.allowed && w.Code != http.StatusOK {
+			t.Fatalf("eligible scheduled-step executor denied: %d", w.Code)
+		}
+		if !candidate.allowed && w.Code != http.StatusForbidden {
+			t.Fatalf("ineligible scheduled-step executor accepted: %d", w.Code)
+		}
+	}
+}
+
+func TestRequireSpaceAgentActionAuthorizerRequiresExactPrincipalAndScope(t *testing.T) {
+	s := &Server{}
+	for _, candidate := range []struct {
+		serviceID string
+		scopes    []string
+		allowed   bool
+	}{
+		{serviceID: capabilityCorePrincipal, scopes: []string{"spaces:agent-action:reauthorize"}},
+		{serviceID: executionCorePrincipal, scopes: []string{"spaces:schedule:reauthorize"}},
+		{serviceID: executionCorePrincipal, scopes: []string{"spaces:agent-action:reauthorize"}, allowed: true},
+	} {
+		c, w := newGinCtx("/api/v1/internal/spaces/run-action-decision")
+		c.Set("auth_method", "service_principal")
+		c.Set("service_id", candidate.serviceID)
+		c.Set("service_scopes", candidate.scopes)
+		s.requireSpaceAgentActionAuthorizer(c)
+		if candidate.allowed && w.Code != http.StatusOK {
+			t.Fatalf("eligible agent action authorizer denied: %d", w.Code)
+		}
+		if !candidate.allowed && w.Code != http.StatusForbidden {
+			t.Fatalf("ineligible agent action authorizer accepted: service=%q scopes=%v", candidate.serviceID, candidate.scopes)
+		}
+	}
+}
+
+func TestRequireSpaceAgentActionViewerRequiresExactPrincipalAndScope(t *testing.T) {
+	s := &Server{}
+	for _, candidate := range []struct {
+		serviceID string
+		scopes    []string
+		allowed   bool
+	}{
+		{serviceID: capabilityCorePrincipal, scopes: []string{"spaces:agent-action:view"}},
+		{serviceID: executionCorePrincipal, scopes: []string{"spaces:agent-action:reauthorize"}},
+		{serviceID: executionCorePrincipal, scopes: []string{"spaces:agent-action:view"}, allowed: true},
+	} {
+		c, w := newGinCtx("/api/v1/internal/spaces/model-action-view")
+		c.Set("auth_method", "service_principal")
+		c.Set("service_id", candidate.serviceID)
+		c.Set("service_scopes", candidate.scopes)
+		s.requireSpaceAgentActionViewer(c)
+		if candidate.allowed && w.Code != http.StatusOK {
+			t.Fatalf("eligible model action viewer denied: %d", w.Code)
+		}
+		if !candidate.allowed && w.Code != http.StatusForbidden {
+			t.Fatalf("ineligible model action viewer accepted: service=%q scopes=%v", candidate.serviceID, candidate.scopes)
+		}
+	}
+}
+
+func TestRequireCurrentRunActionAuthorityCheckerRequiresExactPrincipalAndScope(t *testing.T) {
+	s := &Server{}
+	for _, candidate := range []struct {
+		serviceID string
+		scopes    []string
+		allowed   bool
+	}{
+		{serviceID: executionCorePrincipal, scopes: []string{"spaces:agent-action:current-authority"}},
+		{serviceID: conversationCorePrincipal, scopes: []string{"spaces:agent-action:reauthorize"}},
+		{serviceID: conversationCorePrincipal, scopes: []string{"spaces:agent-action:current-authority"}, allowed: true},
+	} {
+		c, w := newGinCtx("/api/v1/internal/spaces/run-action-authority-check")
+		c.Set("auth_method", "service_principal")
+		c.Set("service_id", candidate.serviceID)
+		c.Set("service_scopes", candidate.scopes)
+		s.requireCurrentRunActionAuthorityChecker(c)
+		if candidate.allowed && w.Code != http.StatusOK {
+			t.Fatalf("eligible current authority checker denied: %d", w.Code)
+		}
+		if !candidate.allowed && w.Code != http.StatusForbidden {
+			t.Fatalf("ineligible current authority checker accepted: service=%q scopes=%v", candidate.serviceID, candidate.scopes)
+		}
+	}
+}
+
+func TestRequireOwnerEffectReservationCoordinatorRequiresExactPrincipalAndScope(t *testing.T) {
+	s := &Server{}
+	for _, candidate := range []struct {
+		serviceID string
+		scopes    []string
+		allowed   bool
+	}{
+		{serviceID: executionCorePrincipal, scopes: []string{"spaces:agent-action:reservation"}},
+		{serviceID: conversationCorePrincipal, scopes: []string{"spaces:agent-action:current-authority"}},
+		{serviceID: conversationCorePrincipal, scopes: []string{"spaces:agent-action:reservation"}, allowed: true},
+	} {
+		c, w := newGinCtx("/api/v1/internal/spaces/owner-effect-reservations/reserve")
+		c.Set("auth_method", "service_principal")
+		c.Set("service_id", candidate.serviceID)
+		c.Set("service_scopes", candidate.scopes)
+		s.requireOwnerEffectReservationCoordinator(c)
+		if candidate.allowed && w.Code != http.StatusOK {
+			t.Fatalf("eligible reservation coordinator denied: %d", w.Code)
+		}
+		if !candidate.allowed && w.Code != http.StatusForbidden {
+			t.Fatalf("ineligible reservation coordinator accepted: service=%q scopes=%v", candidate.serviceID, candidate.scopes)
+		}
+	}
+}
+
 func TestRequireSpaceDeletionAuthorizerRequiresDedicatedScope(t *testing.T) {
 	s := &Server{}
 	for _, candidate := range []struct {

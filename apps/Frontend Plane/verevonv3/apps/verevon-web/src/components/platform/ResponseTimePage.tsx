@@ -1,6 +1,11 @@
+"use client";
+
 import Image from "next/image";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
 import { Footer } from "@/components/core/footer/Footer";
 import { ArrowButton } from "@/components/ui/ArrowButton";
+import { waitingProblemShots } from "@/components/home/sections/problemVideoSequences";
 import { ResponseTimeHeader } from "./ResponseTimeHeader";
 
 const delaySteps = [
@@ -29,57 +34,86 @@ const delaySteps = [
  * ("kildespor") because the word "kilde" appears in card 01's body copy —
  * wrong move, that's card 02's argument. This version stays on card 01's
  * actual thesis (the four steps cost time, not the answer itself) and on
- * how an agent compresses them. The hero reuses the exact same file as
- * ProblemSection's hover-preview loop — what you preview on the card is
- * what you get here.
+ * how an agent compresses them. The hero reuses the same five-shot sequence
+ * as ProblemSection, with the same deliberate per-shot hold times.
  */
 export function ResponseTimePage() {
+	const heroVideoRef = useRef<HTMLVideoElement>(null);
+	const advancedHeroShot = useRef<number | null>(null);
+	const [heroShotIndex, setHeroShotIndex] = useState(0);
+	const heroShot = waitingProblemShots[heroShotIndex];
+
+	function advanceHeroShot() {
+		if (advancedHeroShot.current === heroShotIndex) {
+			return;
+		}
+
+		advancedHeroShot.current = heroShotIndex;
+		setHeroShotIndex((current) => (current + 1) % waitingProblemShots.length);
+	}
+
+	useEffect(() => {
+		const video = heroVideoRef.current;
+
+		if (!video) {
+			return;
+		}
+
+		video.load();
+		video.play().catch(() => {
+			// The poster and hero copy remain available if autoplay is blocked.
+		});
+	}, [heroShotIndex]);
+
 	return (
 		<div className="min-h-screen bg-background text-verevon-text [--verevon-edge:clamp(32px,5.55vw,208px)] [--verevon-page-pad:clamp(20px,4vw,56px)] [--verevon-section-vpad:clamp(80px,11vw,160px)]">
 			<ResponseTimeHeader />
 
 			<main>
 				<section
-					className="border-b border-verevon-j-text/8 px-[var(--verevon-edge)] pb-[clamp(72px,9vw,144px)] pt-[clamp(74px,10vw,148px)] max-[760px]:px-[var(--verevon-page-pad)]"
+					className="relative isolate min-h-[calc(100svh-72px)] overflow-hidden border-b border-black/12 bg-[#34322f] text-white"
 					id="top"
 				>
-					<div className="mx-auto grid max-w-[1680px] items-center gap-x-[clamp(44px,7.2vw,138px)] gap-y-12 xl:grid-cols-[minmax(0,0.9fr)_minmax(520px,1.1fr)]">
+					<video
+						aria-label="Sekvens av venting, tid og forsinkelse"
+						autoPlay
+						className="absolute inset-0 size-full object-cover"
+						muted
+						onEnded={advanceHeroShot}
+						onTimeUpdate={(event) => {
+							if (event.currentTarget.currentTime >= heroShot.duration) {
+								advanceHeroShot();
+							}
+						}}
+						playsInline
+						poster="/verevon-vibe/problem-waiting/waiting-room-ai-poster.jpg"
+						preload="metadata"
+						ref={heroVideoRef}
+						src={heroShot.src}
+					/>
+					<div
+						aria-hidden="true"
+						className="absolute inset-0 bg-[linear-gradient(90deg,rgba(20,20,18,0.78)_0%,rgba(20,20,18,0.46)_42%,rgba(20,20,18,0.14)_100%),linear-gradient(0deg,rgba(20,20,18,0.58)_0%,transparent_52%)]"
+					/>
+					<div className="relative z-10 mx-auto flex min-h-[calc(100svh-72px)] max-w-[1680px] items-end px-[var(--verevon-edge)] pb-[clamp(56px,8vw,128px)] pt-20 max-[760px]:px-[var(--verevon-page-pad)]">
 						<div className="max-w-[700px]">
-							<p className="verevon-eyebrow !text-[#686867]">Problemet / Tid</p>
-							<h1 className="verevon-display mt-7 max-w-[16ch] text-balance">
+							<p className="verevon-eyebrow text-white/70">Problemet / Tid</p>
+							<h1 className="verevon-display mt-7 max-w-[12ch] text-balance text-white">
 								Svaret er raskt. Prosessen rundt det er ikke.
 							</h1>
-							<p className="verevon-body-lg mt-8 max-w-[48ch] text-pretty">
+							<p className="verevon-body-lg mt-8 max-w-[48ch] text-white/82 text-pretty">
 								Hvert steg er enkelt alene — finne kilden, sjekke reglene, formulere svaret, gjøre neste steg riktig. Sammen er de det som faktisk tar tid.
 							</p>
-							<p className="mt-5 max-w-[54ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
-								Verevon lar en agent gjøre alle fire samtidig og legge fram et ferdig utkast — i stedet for fire separate manuelle runder.
-							</p>
-
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
-								<ArrowButton href="#losning">Se hvordan</ArrowButton>
-								<a
-									className="font-protokoll text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline focus-visible:text-verevon-j-text focus-visible:outline-none"
+								<ArrowButton href="#losning" variant="light">Se hvordan</ArrowButton>
+								<Link
+									className="font-protokoll text-[0.92rem] font-light text-white/72 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:text-white focus-visible:outline-none"
 									href="/"
 								>
 									Tilbake til forsiden
-								</a>
+								</Link>
 							</div>
 						</div>
-
-						<figure className="relative isolate min-h-[420px] overflow-hidden rounded-[30px] border border-verevon-j-text/8 bg-verevon-surface-soft shadow-[0_32px_100px_rgba(23,23,23,0.10)] sm:min-h-[520px]">
-							<video
-								autoPlay
-								className="size-full object-cover"
-								loop
-								muted
-								playsInline
-								poster="/verevon-vibe/problem-delay-loop-poster.jpg"
-								preload="metadata"
-							>
-								<source src="/verevon-vibe/problem-delay-loop.mp4" type="video/mp4" />
-							</video>
-						</figure>
 					</div>
 				</section>
 
@@ -140,12 +174,15 @@ export function ResponseTimePage() {
 						</div>
 
 						<figure className="relative min-h-[480px] overflow-hidden rounded-[30px] border border-verevon-j-text/8 bg-verevon-surface-soft shadow-[0_24px_80px_rgba(23,23,23,0.08)]">
-							<Image
-								alt="En lang, symmetrisk korridor der flere personer venter hver for seg langs samme vegg — samme prosess, samme kø."
-								className="object-cover object-center"
-								fill
-								sizes="(max-width: 1280px) calc(100vw - 40px), 50vw"
-								src="/verevon-mood/svartid-corridor.jpg"
+							<video
+								autoPlay
+								className="absolute inset-0 size-full object-cover object-center"
+								loop
+								muted
+								playsInline
+								poster="/verevon-vibe/problem-waiting/corridor-poster.jpg"
+								preload="metadata"
+								src="/verevon-vibe/problem-waiting/corridor.mp4"
 							/>
 							<div className="absolute bottom-5 left-5 right-5 rounded-[20px] border border-white/82 bg-white/94 p-5 shadow-[0_18px_50px_rgba(23,23,23,0.16)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
 								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">

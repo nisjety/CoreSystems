@@ -44,11 +44,15 @@ type Options struct {
 //     promotion gate reads, PromoteSkill writes.
 //   - letta-bridge `memory:read` + `memory:write` — memory consolidation reads
 //     entries and writes the consolidated summaries back.
+//   - execution-core `model:schedule:step` — only the dedicated scheduled-step
+//     RPC uses this audience; the gRPC dialer filters the bearer by method and
+//     leaves user-bound ExecuteStep/RunAgent uncredentialed.
 var DefaultScopes = map[string][]string{
 	AudienceSessionCore:    {"session:write", "session:runs:system-owner"},
 	AudienceInferenceCore:  {"inference:invoke"},
 	AudienceCapabilityCore: {"capability:read", "capability:write"},
 	AudienceLettaBridge:    {"memory:read", "memory:write"},
+	AudienceExecutionCore:  {"model:schedule:step"},
 }
 
 // mintReason is audited by Auth Core. It names the concrete caller so an
@@ -96,6 +100,7 @@ func NewMinters(opts Options, logger *slog.Logger) (Minters, error) {
 		AudienceInferenceCore,
 		AudienceCapabilityCore,
 		AudienceLettaBridge,
+		AudienceExecutionCore,
 	} {
 		scopes := DefaultScopes[audience]
 		if override, ok := opts.ScopesByAudience[audience]; ok {

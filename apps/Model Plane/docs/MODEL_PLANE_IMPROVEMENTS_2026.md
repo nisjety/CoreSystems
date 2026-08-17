@@ -1,5 +1,36 @@
 # Model Plane Improvements 2026
 
+## Current R-2 release addendum (2026-08-17)
+
+The runtime-health attestation boundary is now source- and
+disposable-Postgres-proven; it is no longer accurate to describe the
+heartbeat authorization as an unqualified `HealthWriteScope` path.
+
+- A tenant `HealthWriteScope` is restricted to its verified organization and
+  cannot select or update a `global` capability row.
+- The generic global-health route requires the exact signed
+  `service:execution-core` principal, the reserved `global` organization, and
+  `GlobalHealthWriteScope`; a scope alone is not sufficient.
+- Generic global health is an explicit allowlist containing only the execution
+  runtime capabilities it measures (`cap.command.sandbox` and
+  `cap.command.shell`). `cap.tool.ticket.create` is denied on this route.
+- `tickets.create` uses a separate Conversation Core owner-action health lane
+  with its own principal, scope, Control verifier, and capability-specific
+  contract. It cannot become runnable through generic health.
+- The end-to-end negative proof seeds a global capability in disposable
+  Postgres, sends forged tenant/global and generic-health requests, and asserts
+  the global capability row and global attestation audit remain unchanged.
+
+Evidence: `scripts/tests/capability-health-proof.sh` and the Capability Core
+full Go suite pass. This closes the R-2 source/integration authorization gap,
+but it does **not** promote a capability: the live health reporter, signed
+candidate, rollback artifact, provider/ZDR evidence, and operator promotion
+review remain open. The Model allowlist must stay empty until those gates pass.
+
+This R-2 health contract is distinct from §8.3's still-greenfield proposal for
+per-call signed execution attestations bound to actor, run, payload digest,
+resource, approval, and idempotency key.
+
 **Status:** Architecture and implementation proposal  
 **Scope:** `apps/Model Plane` and its contracts with Control, Application, Data, and Ingestion planes  
 **Research date:** 2026-08-03  
@@ -533,9 +564,14 @@ interface CapabilityDefinition {
 **Verified 2026-08-03 — GREENFIELD.** No per-call attestation exists.
 `capability-core/internal/models/availability.go` implements only a runtime
 **health heartbeat** (`AvailabilityAttestationTTL = 5*time.Minute`), gated by
-a coarse scope check (`HealthWriteScope`/`GlobalHealthWriteScope`,
-`internal/authz/authz.go:22-27`) — not a short-lived signed token bound to
+a current, route-specific authorization boundary (`HealthWriteScope` for the
+verified tenant lane; exact `service:execution-core` plus
+`GlobalHealthWriteScope` and an explicit capability allowlist for the global
+lane) — not a short-lived signed token bound to
 tenant/actor/run/node/capability-version/payload-digest/idempotency-key.
+The R-2 boundary and its disposable-Postgres no-write negative proof are
+recorded in the current addendum above; the greenfield claim here applies only
+to the per-call signed execution token proposed below.
 `IdempotencyKey` in the capability catalog (`registry/models.go:89`) is a
 **static, per-capability fingerprint set at registration time**, not a
 runtime, per-invocation signed grant. This section's proposal is the
@@ -3531,7 +3567,8 @@ Add or complete:
   exists, see above);
 - ~~capability semantic index~~ / ~~contextual ranking~~ — **partially
   done**, extend `scoring.go`, don't replace;
-- capability attestation (confirmed greenfield, §8);
+- capability attestation: R-2 runtime-health authorization is complete;
+  per-call signed execution attestations remain greenfield (§8);
 - provider readiness;
 - skill lifecycle;
 - ~~tool outcome history~~ — **done**, see above;
@@ -3668,8 +3705,10 @@ down-the-stack security audit (§20).
    DSAR/erasure-relevant gap, not hypothetical.
 5. Add the anti-replay nonce to `session-core`'s HMAC delegation (§20) —
    every sibling Go service already has this.
-6. Complete tenant delegation and capability attestation (§8 — confirmed
-   greenfield, the real remaining lift in this phase).
+6. Complete tenant delegation and the remaining capability-attestation work
+   (§8): R-2 runtime-health authorization is source/integration complete per
+   the current addendum above, while per-call signed execution attestations
+   remain greenfield and require their own contract and proof.
 7. Remove in-memory authority for critical production state (mostly
    verified already resolved — `cost-core` and the approval path are both
    durable now; re-audit `sandbox-manager`/`browser-broker` lease state

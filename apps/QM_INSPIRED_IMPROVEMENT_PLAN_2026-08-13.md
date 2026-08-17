@@ -599,6 +599,348 @@ no longer exist.
 | **INJ-1/2/4** | Provenance and fail-closed screening on the tool-result path, built against S2.7's vocabulary. |
 | *(bonus)* | Verb/Object/Outcome activity grammar and the six-tab Space cockpit shell, from the UI research document. |
 
+## 2026-08-15 source progress: scoped scheduled-run authority
+
+QM's useful scheduling lesson is not its job runner; it is the durable,
+scope-bound handoff between a planned background task and the effect it causes.
+CoreSystem now has that source-level lane without importing QM's runtime:
+
+- Control's one-fire `model.schedule.run` decision is consumed by Capability
+  Core only to prepare the exact Session Core thread. A second,
+  independently scoped `model.schedule.execute` decision is minted only when
+  Orchestrator reaches the Session Core start effect. The two bearers have
+  distinct audiences, actions, schemas, permissions, and service principals.
+  Neither is persisted in task events or Temporal input/history.
+- Capability Core routes a prepared fire to a dedicated
+  `ScheduledRunSupervision` workflow, carrying only deterministic non-secret
+  facts: task/run ID, thread ID, Space/subject, schedule/fire identity,
+  template digest, idempotency key, and the canonical non-secret task-template
+  JSON—never independent `goal` or `policy`. Capability Core reconstructs that
+  template from persisted task configuration (excluding only the fire intent),
+  recomputes its SHA-256 digest, and refuses a mismatch before a fresh Control
+  call. Orchestrator recomputes the same digest and derives the workload from
+  the template; strict decoding rejects standalone execution fields. Focused
+  regressions cover detached-template rejection before Control reauthorization
+  plus forged digest/goal/policy workflow inputs. The template body remains
+  non-bearer data, while Control and Session bind their decisions to its digest.
+  Generic interactive workflows cannot acquire a prepared thread by adding
+  input fields.
+- Orchestrator accepts this workflow only from the authenticated
+  `capability-core` service and calls a separate `StartScheduledRunActivity`.
+  The shared internal secret is intentionally insufficient.
+- Session Core has a dedicated owner-only `StartScheduledRun` RPC. It requires
+  `service:orchestrator-core`, verifies the fresh execution decision against
+  the stored prepared-thread Space/audience/privacy/resource/revision bindings,
+  then creates/reuses a duplicate run only when thread, organization, and owner
+  match. A fresh Control decision nonce no longer breaks a retry because
+  preparation compares stable authority bindings instead.
+
+Focused Control, Capability Core, Orchestrator, and Session Core source checks
+pass, including a signed-execution-bearer regression that rejects a changed
+prepared thread.
+
+## 2026-08-16 source progress: owner continuation and scheduled-step safety
+
+The next proof slice is also source-complete only and remains fail-closed:
+
+- Capability Core's generic health reporter can no longer attest the reserved
+  ticket capability or write a global row through a tenant-health credential;
+  the signed middleware regression proves the attempted write is not persisted.
+  A disposable-Postgres integration case now exercises the reserved
+  `cap.tool.ticket.create` row itself: both tenant `HealthWriteScope` and the
+  exact generic `service:execution-core` global-health identity receive 403,
+  with no state/timestamp or global-attestation audit row change.
+- The approval-delivery worker now has a dedicated `tickets.create` adapter.
+  It freezes the schema, canonical payload digest, derived idempotency key, and
+  owner subject, obtains a fresh Control decision, and calls the private
+  Conversation Core route. On an ambiguous response it reconciles the durable
+  owner receipt before retrying; if the lookup cannot settle, the worker records
+  `unknown_outcome` instead of guessing.
+- Scheduled work now has a bounded service-owned `ExecuteScheduledStep` runtime
+  in source: Control/Orchestrator decisions are independently verified at the
+  effect boundary, Session Core claims the exact run/step, Execution Core
+  mints only a tenant-scoped `inference:invoke` token, reads the exact goal
+  through Session Core's dedicated scheduled-context RPC, runs one tool-free
+  turn, and records `completed`, `failed`, or honest
+  `unknown_outcome` receipts. The lane never widens user-bound `ExecuteStep`
+  and remains disabled when its verifier, service scopes, provider, or Session
+  credential are absent. Disposable Postgres crash/receipt proof, explicit
+  Auth Core scope registration, provider/ZDR attestation, and live candidate
+  evidence remain missing.
+
+These changes improve QM's lease/idempotency and scope-bound handoff patterns
+without copying QM's single-tenant trust assumptions or enabling a Model action
+before owner-plane and release evidence gates pass.
+This is deliberately **not** a claim of shipped AUTO-2/notification behavior
+or of full S4.1 completion: the Control service-principal registry and the
+Orchestrator execution credential are intentionally not populated or rotated
+by this source change, so the new path remains fail-closed in the current dev
+stack. Live Control/Postgres/Temporal validation, delivery/approval references,
+revocation/deletion races, and the Verevon disable/repair UI are still open.
+There is a second source-level gate behind that configuration: after Session
+Core creates the service-owned run, new `ScheduledRunSupervision` histories now
+route through the replay-versioned dedicated scheduled-step activity rather
+than the ordinary user-bound `ExecuteStep` activity. The new service bearer
+proves only the Execution Core ingress identity; Session claim/receipt and the
+bounded runtime adapter remain intentionally absent. Adding dev credentials
+alone would only advance the failure to that boundary. The canonical-template
+integrity gate is now implemented in source, but it does not substitute for the
+effect-time authority contract or live proof.
+
+The contract is now explicitly scoped in the V3 comparison plan as
+`model.schedule.step` v1: only Orchestrator may obtain a short-lived execution
+decision for one deterministic `{run, thread, schedule, fire, template, step}`
+tuple; Session Core supplies a content-free current-run/step receipt; and the
+new Execution Core RPC is service-only rather than relaxing user-delegated
+`ExecuteStep`. It preserves the owner-plane authority check for each tool and
+requires `unknown_outcome` reconciliation rather than retrying an ambiguous
+external effect. This is source/test evidence, not deployed release proof.
+The plan continues to reject QM's
+in-memory web-run registry and “exactly once” delivery language; the target is
+durable at-least-once work plus owner idempotency and honest reconciliation.
+
+The release gate now has a separate read-only cross-plane preflight at
+`scripts/coresystem-cross-plane-preflight.sh`. Its contract test proves that a
+healthy local topology is not mistaken for readiness: Control, Application,
+Data, Ingestion, Frontend, Temporal, and NATS containers are observed; named
+authority/owner-effect inputs are checked for presence only; and provider/ZDR,
+approval-continuation, and candidate evidence remain explicit blockers. The
+root `scripts/coresystem-conformance.sh` composes this result with the Model
+preflight and remains blocked until live effect probes, signed candidate/
+rollback artifacts, and deployment evidence exist.
+
+The preflight now also reports the five Execution Core `tickets.create` adapter
+bindings next to Conversation Core's owner-decision and reservation inputs.
+This makes the QM-style centrally wrapped owner path observable as a complete
+configuration surface while keeping the Model action disabled when any hop is
+missing.
+
+The same conformance path now validates
+`apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv` against every seeded
+capability migration ID. All rows are currently `source_only`, including
+`cap.tool.ticket.create`; no UI flag, health attestation, or source test can
+advance a row without candidate/live/rollback evidence and an operator review.
+
+R-2 now has one reproducible health proof harness,
+`apps/Model Plane/scripts/tests/capability-health-proof.sh`, combining the
+generic reporter allowlist, tenant-to-global no-write, stale/unhealthy policy,
+and signed disposable-Postgres checks. It deliberately leaves promotion at
+`source_only`; candidate-bound stale/outage observation is still required.
+
+The scheduled-step evidence is also reproducible through
+`apps/Model Plane/scripts/tests/scheduled-step-proof.sh`: it runs the prepared
+thread/Temporal retry and `unknown_outcome` workflow tests, exact Orchestrator
+activity handoff tests, Execution Core contract tests, and the real-migration
+Session/Postgres receipt proof. It does not claim live provider, Auth Core,
+ZDR, candidate, or rollback readiness.
+
+Runtime recheck, 2026-08-15: the running Capability Core container has no
+`CONTROL_USER_CORE_URL`, `CAPABILITY_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN`,
+`CONTROL_SPACE_DECISION_KEY_ID`, or `CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64`;
+the Orchestrator equivalents and its Control URL/key are present only as empty
+values; Session Core has no Control decision verifier. Its logs therefore say
+that cron sweeping and execution reauthorization are not started. The health
+endpoints remain healthy, but this is deliberately not a successful scheduled
+run. No value was inspected, generated, injected, or rotated.
+
+The same existing-config audit prevents the owner-grant browser journey: the
+running Control User Core has neither its decision key ID nor private signing
+key, and Conversation Core has neither matching verifier value. The V3 gateway
+does have its actual `USER_CORE_URL` and `CONVERSATION_CORE_URL`, but its
+protected owner-grant route returns `401` without an authenticated browser
+session; `/api/auth/get-session` is not a gateway route (`404`). The missing
+signer/verifier already makes a Control decision impossible, so these are
+independent prerequisites for the Control → V3 gateway → Conversation Core
+durable-receipt proof. No identity, key, URL, or credential was created, read,
+injected, or rotated.
+
+## 2026-08-15 source update: one owner-governed Model action remains gated
+
+QM's centrally wrapped tool surface is a useful pattern, but CoreSystem must
+not turn a Model service credential or a source-thread reference into authority
+over an Application resource. The first `tickets.create` slice now makes that
+distinction executable in source:
+
+- Session Core exposes a content-free, Control-authenticated run projection;
+  Control uses it to re-resolve the subject, Space, current entitlement,
+  audience, and privacy policy before issuing a two-minute, target-bound
+  `run-action-v1` decision. The decision binds one schema hash, payload digest,
+  idempotency key, run, and thread. It is provenance for the source context,
+  not a Conversation Core ACL.
+- Execution Core has one fixed adapter rather than a generic cross-plane tool
+  caller. It derives its retry key, rejects actor/organization/assignment
+  fields from model input, asks Control for the decision immediately before the
+  effect, and gives Conversation Core only the signed decision plus the narrow
+  ticket payload. The tool receives only a minimal operation receipt.
+- Conversation Core derives the human actor and organization only from the
+  Control signature and uses its existing owner operation ledger, outbox, and
+  receipt. A recognized workload still cannot use the public human endpoint.
+  Its private owner transaction locks and checks an exact active conversation
+  grant against the signed Space, subject, recipient-audience reference, and
+  privacy-policy reference before it can write the ticket.
+
+This is deliberately not a claim that the Model can create tickets. The
+capability seed remains unavailable, the Model catalog/allowlist remains
+empty, and no new credential value was created or read. The owner-grant
+lifecycle and its source proofs are recorded below; the independently
+authorized owner-action health contract and server-resolved Model view now
+exist only as fail-closed source paths. Remaining gates are an authenticated
+dev journey, a real owner readiness reporter after the ticket-specific
+continuation proof, and remediation of the sealed review's Control-revocation
+fence and live authenticated-transport proof. Conversation Core now requires
+HTTPS for the credentialed current-Control read, with only an explicit
+IP-loopback development opt-in; Control-to-Session gRPC now defaults to TLS
+with an equivalent loopback-only development exception. This keeps the stronger CoreSystem
+owner-plane wall while adopting QM's useful single, centrally governed tool
+path.
+
+The remaining Control-revocation/owner-commit race is not a cache invalidation
+bug. The V3 plan now specifies the required `owner-effect-reservation-v1`
+protocol: Conversation Core first records a content-free pending operation;
+Control alone reserves and commits the exact digest under its revocation locks;
+only then may Conversation Core make its local effect visible. A post-commit
+crash is `unknown_outcome` and reconciles from durable Control/owner receipts,
+not a blind retry. This preserves the domain-owner transaction while giving
+Control a real authorization linearization point.
+
+**2026-08-16 source progress (not a closure claim):** Control now has the
+content-free reservation ledger, an authority-revision cancellation trigger,
+exact commitment validation, and private Conversation-Core-only
+reserve/commit/reconciliation route plumbing. Conversation Core now resolves
+the exact opaque owner-grant ID, reserves and commits the signed operation at
+Control, then rechecks that same grant under its ticket transaction lock before
+writing the ticket/audit/outbox receipt. The new reservation credential is
+distinct from the current-authority credential; neither it nor the signed
+decision persists. Handler regressions prove commit precedes owner write and a
+denial writes nothing; Control and Conversation Core Go suites pass. Pending
+intent and unknown-state migration support exists, but crash reconciliation,
+real cross-database interleavings, and deliberately provisioned dev proof are
+still open. No Model ticket capability has been enabled.
+
+The repeatable `apps/Model Plane/scripts/tests/tickets-create-proof.sh` now
+adds source and disposable-Postgres evidence for this slice: Execution Core
+ticket-contract tests, Control reservation cancellation/commit preservation,
+Conversation owner-grant revoke/effect races, and durable unknown/receipt
+replay all pass against the real migrations. This narrows the remaining work
+to deployed signer/verifier configuration, authenticated cross-plane transport,
+provider receipt/reconciliation, crash-after-submit observation, and immutable
+candidate/rollback evidence; it does not enable the Model action.
+
+The remaining source-level wiring omission is now closed without changing the
+runtime posture: Model Plane Compose and `.env.example` declare the exact five
+Execution Core `tickets.create` adapter bindings with empty defaults, and
+`scripts/tests/tickets-create-config-contract-test.sh` rejects missing names or
+literal values. This is a configuration contract, not credential provisioning;
+the adapter stays disabled until the existing Control/Conversation references
+are supplied and the authenticated dev journey is observed.
+
+The scheduled lane has the same explicit source contract: a dedicated
+`scheduled-step-config-contract-test.sh` checks the empty-default Control
+bindings and the Auth Core scopes required for preparation, service-owned run
+creation, Session claim/receipt, and the dedicated Execution ingress. The live
+stack still lacks those runtime registrations, so this is wiring evidence only
+and scheduled effects remain disabled.
+
+## 2026-08-15 source update: personal owner grant lifecycle
+
+The prerequisite grant lifecycle is now source-complete for one **personal
+Space** ticket action without widening it into a Model capability:
+
+- Control issues a distinct two-minute `owner-grant-v1` decision only for a
+  current personal-Space `owner`/`manager` with the current durable-agent-action
+  entitlement and non-ZDR policy. It binds exact org, subject, conversation,
+  Space, recipient-audience reference/hash/revision, privacy policy, authority
+  revision, action, idempotency key, and either `create` or the exact `revoke`
+  grant ID. Shared Spaces are denied rather than inferred.
+- V3's authenticated BFF is the short-lived bearer conduit. It checks the
+  returned Control binding, keeps the token out of browser responses, and
+  immediately forwards it over its existing signed user delegation to
+  Conversation Core. The browser supplies only bounded IDs and an idempotency
+  key. Owner/admin role checks are repeated at Conversation Core.
+- Conversation Core verifies the separate envelope, exact path/principal/org
+  binding, and operation before it writes. It persists content-free grant and
+  revoke receipts/audit/outbox rows; every active effect check now intersects
+  *hash and revisions* as well as Space, subject, audience ref, and privacy
+  ref in the same transaction as the ticket effect. Revoke deliberately still
+  works after audience/privacy revision changes, but only for the same personal
+  Space/subject and exact grant path.
+
+Focused Control, Conversation Core (full `go test ./...`), and V3 gateway
+compile/role-denial checks pass. A disposable-Postgres proof now covers
+grant → effect → revoke, concurrent revoke/effect fencing, exact replay,
+forged/expired/wrong-target denials, and revision-change denial. This remains
+source/test evidence: no configured dev key pair or authenticated running-stack
+journey has been claimed. The Model remains unavailable until those runtime
+gates, an independently authorized owner-action health contract, and a
+server-resolved Model view succeed.
+
+## 2026-08-15 source update: Model availability cannot be fabricated
+
+The owner-action boundary is now protected at all three relevant Model layers:
+
+- Execution Core does not accept caller-provided or MCP-discovered
+  `tickets.create` definitions. Its fixed tool list excludes the name, and the
+  reserved-name guard trims whitespace before it builds the model-facing
+  purpose lock. The sandbox probe can attest only its shell/interpreter
+  capabilities, never the Control → Conversation Core adapter.
+- Capability Core rejects `cap.tool.ticket.create` on every generic health
+  lane, including a signed `execution-core` global-health workload and a tenant
+  health credential trying to claim the `global` organization. The global
+  health identity is limited to the two execution-core capabilities it actually
+  probes (`cap.command.sandbox`, `cap.command.shell`), so that bearer cannot
+  become a universal availability authority.
+- Middleware/handler tests prove neither generic route reaches the durable
+  ticket health write. Full Capability Core Go tests and the 402-test
+  Execution Core library suite pass.
+
+The next source slice now makes that future boundary concrete without enabling
+it. Control issues a separate two-minute `model-action-view-v1` envelope for a
+server-fixed `tickets.create` schema and run; it carries current Space,
+audience, privacy, retention, and authority facts but only the
+`model-action:view` permission—not a target-owner effect permission. Execution
+Core must use a separately scoped Control service token to obtain the view, and
+Capability Core verifies the Control signature, run, tenant, expiry, exact
+schema hash, and current availability before returning the one fixed tool
+definition. Missing configuration, a bad signature, a stale view, or a
+non-runnable health record produces an empty Model action set.
+
+The resolved definition is not an approval bypass: Execution Core forces this
+reserved owner action to pause even when a caller selected `auto` or supplied a
+malformed mode, persists the stricter `ask` posture in its descriptor, and
+rejects it outright from the public `ExecuteStep` RPC. A future continuation
+worker must carry a durable approval that binds the run, step, schema and
+payload before it may call the adapter; today that worker does not exist, so a
+granted approval cannot be mistaken for execution authority.
+
+A bounded follow-up source review found no alternate path: whitespace aliases,
+caller-supplied tool definitions, MCP discovery, auto/empty/malformed
+permission modes, and the current generic approval-resume worker all remain
+unable to execute `tickets.create`. The full Execution Core library suite
+passes 402 tests. This is source/test evidence only, not a readiness claim.
+
+Capability Core now also has a separate owner-action health receiver. It
+accepts only `conversation-core` with the exact global
+`capability:owner-action:health:write` scope, only for
+`cap.tool.ticket.create`, and only once its own Control public-key verifier is
+configured. The generic execution health authority remains unable to write
+that row. The remaining release gate is deliberately operational: Conversation
+Core needs a real readiness reporter using that scope **only after** the
+durable approval-continuation worker exists and has passed its run/step/schema/
+payload-binding proof. The shared dev stack then needs the existing
+deployment-owned keys/service principals plus the proven authenticated journey.
+No key was generated, injected, or rotated here.
+
+That continuation is intentionally a new ticket-specific contract, not an
+extra case in the existing provider/shipment dispatcher. At delivery time it
+must consume Session Core's active leased approval receipt and frozen
+descriptor, obtain fresh Control target-action authorization and Capability
+Core policy for the exact run/step/schema/payload/idempotency tuple, then let
+Conversation Core repeat its current owner-grant transaction before the
+effect. An ambiguous owner response must reconcile by idempotency receipt and
+remain `unknown` when it cannot; it must never be blindly retried. Until that
+contract and its tests exist, no readiness reporter may attest this capability
+as available.
+
 ## The INJ finding that was worse than this plan said
 
 Section 2 said `scan_injection` had one call site and the rest of the

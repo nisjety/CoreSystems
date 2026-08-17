@@ -2,19 +2,50 @@
 
 ## Implementation plan
 
-**Date:** 2026-08-14  
+**Date:** 2026-08-14 · **Revised:** 2026-08-16
 **Owner:** Verevon Frontend Plane, with Application, Control, Model, Data, and
 agent-surface owners  
-**Status:** Proposed product and contract plan  
+**Status:** Product and contract plan. Phase UI-1 is built (see §7).
 **Related research:**
 `/Volumes/Lagring/Triodelab/CoreSystem/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md`  
 **Related frontend docs:**
+`docs/space-defenition.md` (product model — read first),
 `docs/SPACE_COCKPIT_WIRING_2026-08-13.md`,
 `docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md`
 
 > This document defines the boundary between agents that collaborate inside a
 > Space and agents that are installed on pages or system surfaces. It is a
 > planning document, not proof that the proposed backend contracts exist.
+
+## 0. What changed on 2026-08-16
+
+The product intent sharpened, and Phase UI-1 shipped. Both change what this plan
+should say.
+
+**The room is a room.** A Space is a place where people talk to each other and to
+the agents added to it — the buzz shape — with a Grok-Bot-quality teammate inside
+it. We are not competing on chat with Slack or Teams and must not build toward
+feature parity with them; we are competing on the agent, because Copilot is a
+side-panel assistant and Slackbot is an automation, and neither is a *member* of
+the channel. `space-defenition.md` carries the full framing.
+
+**Agents can be created in the room.** The original plan implied creation belongs
+to Agent Studio. It does not, exclusively. The room may create a *simple* agent
+in one action, because the need arises in the room and the threshold is the
+product. This does not relax §6: creation in a room is still two server-confirmed
+steps (definition, then binding) behind one user action, and the registry remains
+the owner. What the room must never do is show configuration.
+
+**The surfaces divide by scope, not by verb.** Earlier drafts split them as
+"configure vs. use", which broke as soon as rooms could create. The rule is now:
+*if the question involves more than one room, it belongs on the Agent page.*
+
+**Agent-to-agent collaboration is in scope**, with three constraints that were
+implicit and are now explicit — delegation stays inside the room's roster, the
+chain carries the initiating human, and fan-out is bounded. See §8.4 and §11.
+
+**Binding-state vocabulary is resolved** against `space-defenition.md`; `muted`
+folds into `paused`, and `inactive` is not a state (see §10.3).
 
 ## 1. Executive decision
 
@@ -32,6 +63,12 @@ Verevon has two different agent products:
 
 The two products may share an underlying agent definition, but they must not
 share an implicit audience, conversation, authority grant, or runtime state.
+
+Both may be **created** from either surface — a room can produce a simple Space
+agent in one action — but the registry owns every definition, and a binding is
+the only thing that puts an agent anywhere. The surfaces divide by scope, not by
+verb: *if the question involves more than one room, it belongs on the Agent
+page.*
 
 The canonical model is:
 
@@ -281,18 +318,50 @@ The current frontend has the following relevant contracts:
 - The current global Agent Studio link is an exploration/configuration shortcut,
   not a Space-scoped creation or binding flow.
 
+### Built since this plan was written (2026-08-15/16)
+
+Phase UI-1 is no longer proposed — it is live. Recorded here so the plan stops
+describing a state that has passed.
+
+- **Application:** `spaceAgentBindings` table and `convex/spaceAgents.ts`
+  (`spaceAgentBindingsForGateway` query, `upsertSpaceAgentBinding` internal
+  mutation). The write is deliberately internal: binding is a governed decision,
+  so the browser cannot reach it.
+- **Control:** already modelled agents correctly — `space_memberships` with
+  `subject_type='service'`. No new Control contract was needed for the read path.
+  `MembershipReplacement.ManagedSubjectTypes` was added so an org-roster sync,
+  which knows only people, cannot revoke a room's agents as a side effect.
+- **Gateway:** `GET /api/v1/spaces/:space_ref/agents`, joining Control's
+  authoritative roster with the Application binding projection. The join is
+  asymmetric on purpose: an agent Control authorizes but Application has not
+  named still appears, flagged `identity_published: false`; a binding without a
+  Control membership is dropped entirely.
+- **Frontend:** `getSpaceAgents()` and the Agent tab as room participants, with
+  lifecycle status (text plus shape, never colour alone) and delivery-target
+  channels for Teams / Messenger / embed.
+
 ### Required backend gaps
 
-Before the Space Agent tab can show active collaborators, the owner planes
-must publish:
+Still missing before the room behaves as `space-defenition.md` describes:
 
-1. actor-filtered agent binding projections;
-2. server-authorized create/update/revoke intents;
-3. a binding-to-runtime resolution path;
-4. agent-visible roster identity and status;
-5. Space-scoped thread/run/activity correlation;
-6. connector, skill, knowledge, and workspace scope references;
-7. revocation and deletion receipts appropriate to each owner plane.
+1. **The invocation model** — `@` mention parsing, `trigger_modes` enforcement,
+   and routing a mention to a run scoped to that Space and thread. Nothing
+   currently invokes an agent from a room, so the Agent tab is a roster and not
+   yet a teammate. This is the single largest gap.
+2. **The policy half of the binding** — `trigger_modes`, `allowed_tools`,
+   `approval_mode`, `knowledge_scope`, `default_thread_policy`,
+   `audit_visibility`. Today's binding carries identity and delivery targets
+   only, which makes it a label rather than a boundary.
+3. Server-authorized create/update/revoke intents, including the two-step
+   room-creation flow.
+4. A binding-to-runtime resolution path.
+5. Space-scoped thread/run/activity correlation.
+6. Connector, skill, knowledge, and workspace scope references.
+7. Revocation and deletion receipts appropriate to each owner plane.
+8. **Agent-to-agent delegation** with roster containment, human-carrying chains,
+   and a fan-out budget.
+9. A **Chief/Core agent** projection on the Agent page — cross-Space visibility
+   without cross-Space authority.
 
 ## 8. Target architecture
 
@@ -456,7 +525,170 @@ Add only after the read projection is stable:
 Do not implement a second chat composer inside Space. Use the existing Chat
 surface and pass the exact encoded `space_ref` and `thread_id`.
 
+### Phase UI-2b: invocation — the mention model
+
+**Goal:** make a bound agent addressable. Until this exists, an agent card is a
+name and nothing else.
+
+This is now the highest-value phase, ahead of any creation UI: a room with agents
+you cannot talk to does not deliver the product at all.
+
+- `@` in the room composer offers **people and agents from the same roster** —
+  one autocomplete, one mental model, distinguished by subject type.
+- Mentioning a bound agent invokes it. The invocation carries `space_ref` and
+  `thread_id` and nothing else the browser authored; Control re-resolves
+  membership, binding, recipient audience and tool grants at execution time.
+- Mentioning an agent that is **not** bound offers to add it — a governed action
+  gated on the caller's Space role. It never grants by mention.
+- `trigger_modes` is enforced server-side. `mention_only` is the default and the
+  only mode the first release needs.
+- An invoked agent's reply lands in the same thread. Nothing routes elsewhere.
+- The composer shows plainly when an agent will be invoked, before sending.
+
+**Exit criteria:** a person can address an agent in a room and get a reply in the
+same thread, with the run visible in Activity and any gated action surfacing an
+approval to the initiating human.
+
+### Phase UI-2c: agent-to-agent delegation
+
+**Status 2026-08-17: architecture mapped, NOT started — no safe partial
+slice exists.** Scoped to "same-room, one hop, human present, from an
+`approval_mode: auto` binding" (the user's explicit narrow choice). Full
+investigation:
+
+- The codebase's existing `subagent.*` mechanism (`execution-core/src/subagent/mod.rs`)
+  is the WRONG shape: it re-enters the same driver with a fresh history under
+  the SAME identity/authority (no re-resolution), capped at depth 1. UI-2c's
+  actual requirement — "the delegate re-resolves its own authority; it never
+  inherits the delegator's" — needs a genuinely different primitive.
+- Model Plane's own CLAUDE.md is explicit and non-negotiable here: `dispatch_tool`
+  (model-gateway's plain-chat loop) "refuses anything side-effecting" — see the
+  2026-08-14 HARN-1/2 withdrawal (`git show ac2be529`) for why this boundary is
+  not casually crossable. Delegation is unambiguously a side effect, so it can
+  only live inside execution-core's governed loop (`execute_step_inner`).
+- Execution-core's governed loop is reachable ONLY via the `agentic`/`plan_mode`
+  feature, which is real and live (`sse.rs`'s "chat-parity Phase 3 — agentic
+  run", used today by `/chat`'s plan-mode toggle) but is **never requested by
+  the room composer** — `approval_mode: auto` is currently 100% inert.
+- **The trap**: naively flipping the gateway's `apply_mention_binding_policy` to
+  request the `agentic` feature whenever `approval_mode: auto` would NOT
+  narrowly grant "may delegate" — it would silently hand that room agent
+  execution-core's ENTIRE capability surface (browser automation, sandboxed
+  code execution, whatever the org has registered in capability-core), since
+  no delegation-specific capability exists yet to scope it down to. That is
+  exactly the silent authority-expansion the QM/buzz-derived security model
+  this doc already commits to (see "Security model" below) forbids. There is
+  no safe partial slice — only the full build or nothing.
+- Confirmed via grep: execution-core has **zero** existing network path to
+  `verevon-gateway-rs` (Frontend Plane), and the gateway has no non-streaming
+  internal invoke endpoint. Execution-core DOES already hold a precedent for
+  calling Control directly (`user_core_client.rs`, gRPC, service-credential
+  auth) but has and should have no Convex-calling precedent (Convex is
+  Application Plane's own store — cross-plane DB access is against this
+  repo's architecture rules).
+- **Recommended design for the eventual build** (reuse-heavy, not a rewrite):
+  register a narrowly-scoped `delegate_to_agent` capability inside
+  execution-core's loop, gated on (a) an active Space context, (b) same-Space
+  Control membership check for the target (new minimal HTTP client, mirroring
+  `user_core_client.rs`'s pattern but hitting Control's existing
+  `/api/v1/internal/spaces/:space_ref/roster` HTTP endpoint rather than adding
+  a new one), (c) depth=1 enforced for free by NOT granting the delegate's own
+  turn the `agentic` feature (so it physically cannot delegate again — no
+  counter needed). The actual re-invocation should NOT duplicate Control+Convex
+  persona resolution in Rust; it should call back into the SAME, already-live,
+  already-tested `inject_mentioned_space_agent_persona` pipeline via a new
+  internal (non-streaming) endpoint on `verevon-gateway-rs`, using the
+  ORIGINAL human's own session bearer — which trivially satisfies "every hop
+  records the initiating human" (it IS the same authenticated human) and
+  reuses today's per-turn attribution (task #11) for the room's "one collapsed
+  unit" rendering, needing only a small grouping affordance in
+  `SpaceRoomTimeline.tsx`, not a new component.
+- Needs, in order: (1) an inter-plane network path from execution-core to
+  `verevon-gateway-rs`; (2) the new internal invoke endpoint; (3) the Control
+  membership-check client; (4) the capability registration (execution-core +
+  likely capability-core); (5) the room's collapsed-unit affordance. This is a
+  multi-service, multi-session effort at this project's established quality
+  bar (tested + live-verified at every layer) — not a same-day addition.
+
+**Goal:** let a chief-plus-specialists arrangement work without laundering
+authority or flooding the room.
+
+Add only after UI-2b is stable.
+
+- An agent may delegate only to agents **bound to the same Space**. The delegate
+  re-resolves its own authority; it never inherits the delegator's.
+- Every hop records the **initiating human**. Approvals belong to that person.
+- Delegation carries a depth limit, a per-invocation `capability_budget`, and
+  loop detection. Exceeding any of them fails visibly rather than silently.
+- The room renders a delegated chain as **one collapsed unit of work**, expandable
+  to the hops. Never as N messages.
+- Activity records who asked whom, for what, and on whose authority.
+
+**Exit criteria:** a supervisor can read one row in Activity, expand it, and see
+the whole chain with attribution intact — and a delegation to an unbound agent is
+refused with an honest reason.
+
 ### Phase UI-3: Space binding flow
+
+**Status 2026-08-17: BUILT and live-verified.** Authority decision from the
+UI-2c/UI-3 planning round: **owner/manager only, the same room-role gate as
+UI-3b's create flow** — reused directly rather than re-derived, via a new
+shared `require_space_agent_grant_role` helper both `create_space_agent` and
+the two new handlers now call.
+
+- Convex: `listInstallableSpaceAgentsForGateway` (query, org's `agents` by
+  `by_org` index, `alreadyBound` computed against this space's
+  non-revoked bindings) and `bindExistingSpaceAgentForGateway` (mutation,
+  creates a `pending` binding for an EXISTING `agentId` via the same
+  `upsertSpaceAgentBinding` internal mutation UI-3b uses — same born-with
+  policy: `["mention"]` / `[]` / `require_confirmation`. A bound
+  definition's own, possibly broader, Agent Studio configuration is never
+  inherited).
+- Gateway: `GET /spaces/:space_ref/agents/available` and
+  `POST /spaces/:space_ref/agents/bind` (body: `{agent_ref}` only — no actor
+  or authority field is client-authored, matching the flow's step 4). Both
+  routes run the same role-gate as creation, then the same
+  confirm-with-Control step (`confirmSpaceAgentMembershipForGateway`) UI-3b
+  already built, so an unconfirmed roster leaves the binding truthfully
+  `pending`, exactly like a fresh creation. 8 new Rust tests (owner binds,
+  editor is rejected for both list and bind, missing `agent_ref` is
+  rejected, unconfirmed roster stays pending, browse reports
+  `already_bound` truthfully instead of hiding it).
+- Frontend: `SpaceBindAgentDialog` (list of the org's definitions, disabled
+  "Allerede lagt til" state for ones already bound here, "Legg til" for the
+  rest) alongside the existing `SpaceCreateAgentDialog`; a second
+  "Legg til eksisterende agent" button next to "Opprett en agent" in the
+  Agent tab header, same `canCreateAgent` role gate.
+- **Live-verified end-to-end in the real org**: created "UI3
+  Testbindingsagent" from the Personal room (Control declined that room's
+  confirmation — a pre-existing gap, not a UI-3 defect, see the
+  environment note below), then opened AQUATIQ AS's "Legg til eksisterende
+  agent" list, saw it offered as unbound while Driftsassistent/Statusagent
+  correctly showed "Allerede lagt til", bound it, watched Control confirm,
+  and saw it render as a full active participant with the correct
+  born-with policy chips ("Kun @-nevning", "Krever bekreftelse", "Uten
+  verktøy") — proving the policy comes from the room binding, never from
+  wherever the definition happened to be authored.
+
+⚠⚠ **Environment landmine hit during this verification**: recreating the
+`verevon-gateway-rs` container via `docker compose up -d --no-deps gateway`
+reset `APPLICATION_CONVEX_SERVICE_KEY` to empty — `docker-compose.yml` maps
+it from a host env var (`CONVEX_INTERNAL_SERVICE_KEY`) that is not in any
+`.env` file, only ever exported ad hoc in a prior session's shell. Every
+`convex_gateway_call` degrades or fails differently depending on the
+caller: `space_agent_bindings` (identity lookup) swallows the error and
+still returns 200 (Control-only view, names missing), while
+`space_lifecycle_by_ref` (used by `/context` and `/threads`) correctly
+fails closed with 503 `space_lifecycle_unavailable` — which is why the room
+looked entirely broken ("Rom utilgjengelig") even though roster/agents
+endpoints still worked. Recovered the live value with
+`npx convex env get CONVEX_INTERNAL_SERVICE_KEY` against the self-hosted
+deployment (do **not** trust the stale value sitting in
+`.env.pre-per-service-bak`) and exported it before recreating the
+container. **Pattern to remember: any gateway container recreate must carry
+forward every host-env-sourced secret the compose file maps with a
+`:-` empty default — a missing one degrades silently rather than refusing
+to start.**
 
 **Goal:** allow an authorized user to bind an existing agent definition to a
 Space.
@@ -488,6 +720,41 @@ The form must never say “created” until the server confirms the definition a
 binding lifecycle. If creation of a new definition is introduced later, it is
 a separate Agent Studio flow followed by an explicit Space binding step.
 
+### Phase UI-3b: create an agent from the room
+
+**Status 2026-08-16: BUILT and live-verified.** `SpaceCreateAgentDialog`
+(Grok-style: color, name, template suggestions) → gateway
+`POST /spaces/:space_ref/agents` (room role owner/manager gate, resolved from
+Control under the caller's delegation) → Convex
+`createSpaceAgentForGateway` (definition + `pending` binding in one
+transaction) → Convex action `confirmSpaceAgentMembershipForGateway`
+declares the room's full service roster to Control with
+`managed_subject_types: ["service"]` (the counterpart of the human sync's
+`["user"]`) → Control acceptance flips the binding `active`. Verified
+end-to-end in the AQUATIQ AS room: created "Statusagent" from the dialog,
+Control roster row appeared, the agent joined the mention list and answered
+in its template persona. Deferred from the born-with list below: the
+`mention_only`/`approval_mode` policy fields still do not exist on the
+binding (tracked as the policy-fields task) — invocation is gated by binding
+status + Control membership only, exactly as UI-2b left it.
+
+**Goal:** let a non-technical person get a working teammate without opening a
+studio. This is the threshold-lowering the product depends on.
+
+- One action in the room: describe what you need in a line.
+- Behind it, two server-confirmed steps — create the definition in the registry,
+  then create the binding to this room. The UI does not say "created" until both
+  confirm, and says which step failed when one does.
+- Born with: this room only, `mention_only`, no tools,
+  `approval_mode: require_confirmation`.
+- No model picker, tool list, connector setup or policy form appears in the room.
+  Everything beyond the default is a trip to the Agent page.
+- The result appears in the roster as a member, immediately addressable.
+
+**Exit criteria:** someone who has never opened Agent Studio can create an agent
+and get useful work from it without leaving the room — and an admin can see, from
+the Agent page, exactly what was created and with what defaults.
+
 ### Phase UI-4: Agent page installation management
 
 **Goal:** make `/agents` the control center for reusable definitions and their
@@ -508,10 +775,18 @@ Agent Studio
   Overview / blueprints
   Definition editor
   Skills and connectors
+  Policy (trigger modes, approval mode, allowed tools, audit visibility)
   Space installations
   Page/system installations
   Runs and receipts
+  Chief/Core agent — cross-Space routing and discovery
 ```
+
+The **Chief/Core agent** belongs here because this is the only surface with a
+cross-Space view. It sees the registry and which agents are bound where, and it
+routes and assigns. It does **not** act in a room it is not bound to: broad
+visibility is not broad authority. Its own runtime actions require an ordinary
+per-Space binding like any other agent.
 
 Each installation row should show scope kind, scope name, status, revision,
 and allowed capabilities. It should link to the scoped surface without
@@ -581,9 +856,76 @@ Runtime:  unresolved → provisioning → ready → working
 The UI must not map `pending` to `active`, `authorized` to `deleted`, or
 `working` to `completed`. Unknown and partial states are first-class.
 
+**Vocabulary resolved (2026-08-16).** An earlier draft of `space-defenition.md`
+used `inactive | active | muted | revoked`, which conflated two different
+questions. The binding states above are canonical:
+
+- `muted` was the same idea as `paused` — visible, not invokable. Use `paused`.
+- `inactive` is **not** a binding state. An agent in the catalog with no binding
+  in this room has no record here; that is an absence, not a state. Rendering it
+  as a state is how a global blueprint starts looking like a room participant.
+- `failed` has no equivalent in the older list and must survive: a binding that
+  failed to provision is a real condition users need to see.
+
+This is the set implemented in `convex/schema.ts` (`spaceAgentBindings.status`).
+
 ## 11. Permissions and privacy model
 
-### Space agents
+### 11.0 Principles borrowed from the reference projects
+
+Buzz and QM have both published their security thinking. These are the parts
+that transfer, with the Verevon consequence stated.
+
+**Decisions that authorize *future* agent behavior must come from outside the
+agent.** QM excludes three actions from its agent self-API — admin grant
+changes, impersonation, and command-approval decisions — and notes that these
+"look like capability-parity gaps in an audit; they are walls, not gaps."
+
+*Verevon consequence:* an agent may never create or modify a Space binding,
+change a role or grant, approve a gated action, or act as another principal.
+`upsertSpaceAgentBinding` is an `internalMutation` for exactly this reason.
+Parity work routes around these, not through them.
+
+**Enforcement lives at the identity seam.** Buzz places moderation enforcement
+where identity is established rather than scattering it as filters, "which is why
+it can't be sidestepped."
+
+*Verevon consequence:* binding and membership are checked in the gateway's
+session/authority path and re-resolved by the owning plane at execution — not as
+per-handler conditionals that a new endpoint can forget.
+
+**The decision is recorded separately from its enforcement,** so the trail never
+claims something happened that did not.
+
+*Verevon consequence:* this is the postcondition/verified-outcome work already in
+Model Plane. A binding revocation record and the fencing of queued work are two
+facts, and the receipt must not assert the second from the first.
+
+**Reports are signals, never triggers** — human judgment is the gate.
+
+*Verevon consequence:* a mention invokes but never grants; adding an agent is a
+human decision with a role check.
+
+**The agent is not trusted to make authorization decisions,** and surface or
+connector input is untrusted data even when authenticated — "authentication
+proves the source; it does not make the content safe."
+
+*Verevon consequence:* prompt injection arrives inside legitimate messages from
+legitimate members. Tool grants and approval gates are the control, not content
+inspection.
+
+**Audit supports investigation; it does not prevent an action.** An approval
+means a human accepted the displayed action on the information available at the
+time, not that the behavior is safe.
+
+**Compute is rented by attention.** Buzz's remote agents bound their own lifetime
+and exit after silence.
+
+*Verevon consequence:* an idle Space agent should release its
+`workspace_lease_ref`. Cost control and honesty control at once — an agent that
+is not working should not look ready.
+
+### 11.1 Space agents
 
 - A person must be a current Space member to see Space agent bindings unless a
   separately authorized operator projection says otherwise.
@@ -788,16 +1130,28 @@ These decisions must be resolved before P4:
 
 ## 16. Recommended next action
 
-1. Add this plan to the research-doc index and review it with Application,
-   Control, Model, and Agent Studio owners.
-2. Approve the scope matrix and the “definition versus binding” terminology.
-3. Implement P2's read-only `SpaceAgentProjection` contract before adding any
-   Space agent creation UI.
-4. Land the frontend Agent tab with an honest unavailable state and fixture
-   tests.
-5. Only after P4 is accepted, expose “Add agent to Space.”
+Revised 2026-08-16. Steps 3 and 4 of the original list are done; the ordering
+below reflects what actually unblocks the product.
 
-The product can look and feel like Grok Bot and Buzz while remaining truthful:
-Grok/Buzz are inspirations for the Space coworker experience; they are not a
-reason to bypass Verevon's Space membership, recipient-audience, owner-plane,
-or approval boundaries.
+1. **Build the invocation model (UI-2b).** `@` mention, `trigger_modes`
+   enforcement, mention-to-run routing scoped to Space and thread. Everything
+   else is decoration until a person can talk to an agent in a room. This is the
+   single highest-value piece of work outstanding.
+2. **Add the policy half of the binding** — `trigger_modes`, `allowed_tools`,
+   `approval_mode`, `knowledge_scope`, `default_thread_policy`,
+   `audit_visibility`. Without it the binding is a label, not a boundary, and
+   UI-2b has nothing to enforce.
+3. **Settle the open decisions in §15 that block writes** — specifically which
+   Space roles may add, pause or revoke an agent (§15.3). UI-3 and UI-3b are
+   blocked on Control defining that capability.
+4. **Then room creation (UI-3b)**, which is the threshold-lowering the product
+   depends on, followed by delegation (UI-2c).
+5. **Then Agent-page installation management (UI-4)** and the Chief/Core agent's
+   cross-Space view.
+
+The product can look and feel like Grok Bot and Buzz while remaining truthful.
+Buzz is the reference for the room and for identity-scoped agents; Grok Bot is
+the reference for the teammate ergonomics. Neither is a reason to bypass
+Verevon's Space membership, recipient-audience, owner-plane or approval
+boundaries — and the difference is not friction, it is the only reason we can
+answer who asked whom to do what, on whose authority.

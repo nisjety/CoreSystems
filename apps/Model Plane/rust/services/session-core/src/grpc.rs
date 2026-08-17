@@ -32,9 +32,10 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, authorize_space_deletion_service,
-    authorize_system_run_owner, identity, is_system_run_owner, DelegatedDataPlaneBearer,
-    JwtVerifier, OwnerIntent, VerifiedIdentity, DATA_PLANE_AUTH_METADATA_KEY,
+    authorize_operation, authorize_owner_row, authorize_scheduled_step_service,
+    authorize_space_deletion_service, authorize_system_run_owner, identity, is_system_run_owner,
+    DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
+    DATA_PLANE_AUTH_METADATA_KEY,
 };
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
 use crate::terminalization;
@@ -81,6 +82,9 @@ const CONTROL_THREAD_APPEND_SCHEMA: &str = "sha256:thread-append-v1";
 const CONTROL_SCHEDULED_RUN_AUDIENCE: &str = "model-plane-capability-core";
 const CONTROL_SCHEDULED_RUN_ACTION: &str = "model.schedule.run";
 const CONTROL_SCHEDULED_RUN_SCHEMA: &str = "sha256:space-scheduled-run-v1";
+const CONTROL_SCHEDULED_RUN_EXECUTION_AUDIENCE: &str = "model-plane-session-core";
+const CONTROL_SCHEDULED_RUN_EXECUTION_ACTION: &str = "model.schedule.execute";
+const CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA: &str = "sha256:space-scheduled-run-execute-v1";
 const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
 
 #[allow(clippy::result_large_err)]
@@ -668,7 +672,9 @@ fn scheduled_run_payload_digest(
     format!("sha256:{:x}", digest.finalize())
 }
 
-fn verify_scheduled_run_decision(req: &pb::PrepareScheduledRunThreadRequest) -> Result<(), Status> {
+fn validate_scheduled_run_preparation_bindings(
+    req: &pb::PrepareScheduledRunThreadRequest,
+) -> Result<(), Status> {
     if req.control_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
         return Err(Status::invalid_argument(
             "Control scheduled-run decision is too large",
@@ -689,6 +695,23 @@ fn verify_scheduled_run_decision(req: &pb::PrepareScheduledRunThreadRequest) -> 
             "scheduled-run preparation bindings are invalid",
         ));
     }
+    Ok(())
+}
+
+fn verify_scheduled_run_decision(req: &pb::PrepareScheduledRunThreadRequest) -> Result<(), Status> {
+    // Preserve boundary-validation precedence: malformed requests should not
+    // depend on Control verifier configuration before being rejected.
+    validate_scheduled_run_preparation_bindings(req)?;
+    let keys = configured_control_space_decision_keys()?;
+    verify_scheduled_run_decision_with_keys(req, &keys, Utc::now())
+}
+
+fn verify_scheduled_run_decision_with_keys(
+    req: &pb::PrepareScheduledRunThreadRequest,
+    keys: &BTreeMap<String, VerifyingKey>,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    validate_scheduled_run_preparation_bindings(req)?;
     let parts: Vec<&str> = req.control_decision_token.split('.').collect();
     if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
         return Err(Status::permission_denied(
@@ -701,7 +724,6 @@ fn verify_scheduled_run_decision(req: &pb::PrepareScheduledRunThreadRequest) -> 
         .and_then(|raw| String::from_utf8(raw).ok())
         .filter(|id| !id.trim().is_empty())
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
-    let keys = configured_control_space_decision_keys()?;
     let key = keys
         .get(&key_id)
         .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
@@ -744,13 +766,533 @@ fn verify_scheduled_run_decision(req: &pb::PrepareScheduledRunThreadRequest) -> 
         && !claims.zero_data_retention;
     if !matches
         || claims.nonce.trim().is_empty()
-        || claims.expires_at <= Utc::now()
-        || claims.issued_at > Utc::now() + chrono::Duration::minutes(1)
+        || claims.expires_at <= now
+        || claims.issued_at > now + chrono::Duration::minutes(1)
     {
         return Err(Status::permission_denied(
             "Control decision does not authorize this scheduled run",
         ));
     }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ScheduledRunThreadContext {
+    space_id: String,
+    recipient_audience_ref: String,
+    recipient_audience_revision: u64,
+    recipient_audience_hash: String,
+    privacy_policy_ref: String,
+    resource_authorization_ref: String,
+    authority_revision: u64,
+}
+
+fn scheduled_run_execution_payload_digest(
+    req: &pb::StartScheduledRunRequest,
+    claims: &ControlSpaceDecisionClaims,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"model.schedule.execute\0v1\0");
+    let system_thread_key = format!("schedule/{}/{}", req.schedule_id, req.fire_key);
+    for (name, value) in [
+        ("org_id", req.org_id.as_str()),
+        ("user_id", req.human_subject_id.as_str()),
+        ("space_id", claims.space_ref.as_str()),
+        ("schedule_id", req.schedule_id.as_str()),
+        ("fire_key", req.fire_key.as_str()),
+        ("run_id", req.run_id.as_str()),
+        ("system_thread_key", system_thread_key.as_str()),
+        ("template_digest", req.template_digest.as_str()),
+        (
+            "recipient_audience_ref",
+            claims.recipient_audience_ref.as_str(),
+        ),
+        (
+            "recipient_audience_hash",
+            claims.recipient_audience_hash.as_str(),
+        ),
+        ("privacy_policy_ref", claims.privacy_policy_ref.as_str()),
+        (
+            "resource_authorization_ref",
+            claims.resource_authorization_ref.as_str(),
+        ),
+        ("action_schema_hash", CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA),
+        ("thread_id", req.thread_id.as_str()),
+        ("idempotency_key", req.idempotency_key.as_str()),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    for (name, value) in [
+        ("authority_revision", claims.authority_revision),
+        ("membership_revision", claims.membership_revision),
+        ("privacy_revision", claims.privacy_revision),
+        (
+            "recipient_audience_revision",
+            claims.recipient_audience_revision,
+        ),
+        ("entitlement_revision", claims.entitlement_revision),
+    ] {
+        digest.update(name.as_bytes());
+        digest.update([0]);
+        digest.update(value.to_be_bytes());
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+fn verify_scheduled_run_execution_decision(
+    req: &pb::StartScheduledRunRequest,
+    thread: &ScheduledRunThreadContext,
+) -> Result<(), Status> {
+    let keys = configured_control_space_decision_keys()?;
+    verify_scheduled_run_execution_decision_with_keys(req, thread, &keys, Utc::now())
+}
+
+fn verify_scheduled_run_execution_decision_with_keys(
+    req: &pb::StartScheduledRunRequest,
+    thread: &ScheduledRunThreadContext,
+    keys: &BTreeMap<String, VerifyingKey>,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    if req.control_execution_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control scheduled-run execution decision is too large",
+        ));
+    }
+    if !valid_scheduled_run_identifier(&req.run_id)
+        || !valid_scheduled_run_identifier(&req.schedule_id)
+        || !valid_scheduled_run_identifier(&req.fire_key)
+        || req.thread_id.trim().is_empty()
+        || req.human_subject_id.trim().is_empty()
+        || req.idempotency_key.trim().is_empty()
+        || !req.template_digest.starts_with("sha256:")
+        || req.template_digest.len() != "sha256:".len() + 64
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-run execution bindings are invalid",
+        ));
+    }
+    let parts: Vec<&str> = req.control_execution_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != CONTROL_SPACE_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control scheduled-run execution decision envelope",
+        ));
+    }
+    let key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run execution decision payload")
+    })?;
+    let signature = URL_SAFE_NO_PAD.decode(parts[3]).map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run execution decision signature")
+    })?;
+    let signature = Signature::from_slice(&signature).map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run execution decision signature")
+    })?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run execution decision signature")
+    })?;
+    let claims: ControlSpaceDecisionClaims = serde_json::from_slice(&payload).map_err(|_| {
+        Status::permission_denied("invalid Control scheduled-run execution decision claims")
+    })?;
+    let matches = claims.org_id == req.org_id
+        && claims.space_ref == thread.space_id
+        && claims.subject_id == req.human_subject_id
+        && claims.service_audience == CONTROL_SCHEDULED_RUN_EXECUTION_AUDIENCE
+        && claims.action_id == CONTROL_SCHEDULED_RUN_EXECUTION_ACTION
+        && claims.action_schema_hash == CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA
+        && claims.idempotency_key == req.idempotency_key
+        && claims.recipient_audience_ref == thread.recipient_audience_ref
+        && claims.recipient_audience_revision == thread.recipient_audience_revision
+        && claims.recipient_audience_hash == thread.recipient_audience_hash
+        && claims.privacy_policy_ref == thread.privacy_policy_ref
+        && claims.resource_authorization_ref == thread.resource_authorization_ref
+        && claims.authority_revision == thread.authority_revision
+        && claims.payload_digest == scheduled_run_execution_payload_digest(req, &claims)
+        && claims
+            .permissions
+            .iter()
+            .any(|permission| permission == "schedule:execute")
+        && !claims.zero_data_retention;
+    if !matches
+        || claims.decision_ref.trim().is_empty()
+        || claims.nonce.trim().is_empty()
+        || claims.expires_at <= now
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+    {
+        return Err(Status::permission_denied(
+            "Control decision does not authorize this scheduled-run execution",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_scheduled_run_identifier(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value == value.trim()
+        && value.len() <= 256
+        && !value.contains(['/', '.', '*', '>', ' ', '\t', '\r', '\n'])
+}
+
+fn valid_scheduled_step_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_scheduled_step_request(req: &pb::ClaimScheduledStepRequest) -> Result<(), Status> {
+    if !valid_scheduled_run_identifier(&req.run_id)
+        || !valid_scheduled_run_identifier(&req.thread_id)
+        || !valid_scheduled_run_identifier(&req.org_id)
+        || !valid_scheduled_run_identifier(&req.space_id)
+        || !valid_scheduled_run_identifier(&req.schedule_id)
+        || !valid_scheduled_run_identifier(&req.fire_key)
+        || !valid_scheduled_run_identifier(&req.step_id)
+        || !valid_scheduled_run_identifier(&req.idempotency_key)
+        || !valid_scheduled_step_digest(&req.template_digest)
+        || !valid_scheduled_step_digest(&req.policy_digest)
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-step bindings are invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn scheduled_step_metadata_matches(
+    metadata: &serde_json::Value,
+    req: &pb::ClaimScheduledStepRequest,
+) -> bool {
+    [
+        ("schedule_id", req.schedule_id.as_str()),
+        ("fire_key", req.fire_key.as_str()),
+        ("template_digest", req.template_digest.as_str()),
+        ("space_id", req.space_id.as_str()),
+    ]
+    .into_iter()
+    .all(|(name, expected)| {
+        metadata.get(name).and_then(serde_json::Value::as_str) == Some(expected)
+    })
+}
+
+#[allow(clippy::result_large_err)]
+async fn claim_scheduled_step_inner(
+    pool: &PgPool,
+    req: pb::ClaimScheduledStepRequest,
+) -> Result<Response<pb::ClaimScheduledStepResponse>, Status> {
+    validate_scheduled_step_request(&req)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    let run: Option<(String, String, String, String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT r.org_id, r.thread_id, r.user_id, r.status, COALESCE(t.space_id, ''), r.metadata
+         FROM runs r JOIN threads t ON t.id = r.thread_id
+         WHERE r.id = $1 AND r.org_id = $2
+         FOR UPDATE OF r, t",
+    )
+    .bind(&req.run_id)
+    .bind(&req.org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let Some((org_id, thread_id, owner, status, stored_space_id, metadata)) = run else {
+        return Err(Status::not_found("scheduled run not found"));
+    };
+    if thread_id != req.thread_id
+        || owner != crate::auth::system_run_owners()[0]
+        || stored_space_id != req.space_id
+        || !scheduled_step_metadata_matches(&metadata, &req)
+    {
+        return Err(Status::permission_denied(
+            "scheduled step does not match the prepared run",
+        ));
+    }
+    if is_terminal_run_status(&status) {
+        return Err(Status::failed_precondition(
+            "scheduled run is already terminal",
+        ));
+    }
+
+    let inserted: Option<(String, String)> = sqlx::query_as(
+        "INSERT INTO scheduled_step_receipts
+             (run_id, step_id, org_id, thread_id, space_id, schedule_id, fire_key,
+              template_digest, step_index, policy_digest, idempotency_key, receipt_id, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'claimed')
+         ON CONFLICT (run_id, step_id) DO NOTHING
+         RETURNING receipt_id, status",
+    )
+    .bind(&req.run_id)
+    .bind(&req.step_id)
+    .bind(&org_id)
+    .bind(&req.thread_id)
+    .bind(&req.space_id)
+    .bind(&req.schedule_id)
+    .bind(&req.fire_key)
+    .bind(&req.template_digest)
+    .bind(i64::from(req.step_index))
+    .bind(&req.policy_digest)
+    .bind(&req.idempotency_key)
+    .bind(format!("scheduled_step_{}", new_ulid()))
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| {
+        if error
+            .to_string()
+            .contains("scheduled_step_receipts_org_id_idempotency_key_key")
+        {
+            Status::already_exists("scheduled-step idempotency key is bound to another step")
+        } else {
+            Status::internal(error.to_string())
+        }
+    })?;
+
+    let (receipt_id, status, claimed) = match inserted {
+        Some((receipt_id, status)) => (receipt_id, status, true),
+        None => {
+            let existing: Option<(
+                String,
+                String,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                String,
+                String,
+            )> = sqlx::query_as(
+                "SELECT receipt_id, status, thread_id, space_id, schedule_id, fire_key,
+                        step_index, template_digest, policy_digest
+                 FROM scheduled_step_receipts
+                 WHERE run_id = $1 AND step_id = $2
+                 FOR UPDATE",
+            )
+            .bind(&req.run_id)
+            .bind(&req.step_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            let Some((
+                receipt_id,
+                status,
+                thread_id,
+                space_id,
+                schedule_id,
+                fire_key,
+                step_index,
+                template_digest,
+                policy_digest,
+            )) = existing
+            else {
+                return Err(Status::already_exists(
+                    "scheduled-step identity is already in use",
+                ));
+            };
+            if thread_id != req.thread_id
+                || space_id != req.space_id
+                || schedule_id != req.schedule_id
+                || fire_key != req.fire_key
+                || step_index != i64::from(req.step_index)
+                || template_digest != req.template_digest
+                || policy_digest != req.policy_digest
+            {
+                return Err(Status::already_exists(
+                    "scheduled-step identity is bound to different immutable input",
+                ));
+            }
+            (receipt_id, status, false)
+        }
+    };
+    tx.commit()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    Ok(Response::new(pb::ClaimScheduledStepResponse {
+        claimed,
+        receipt_id,
+        status,
+    }))
+}
+
+#[allow(clippy::result_large_err)]
+async fn record_scheduled_step_receipt_inner(
+    pool: &PgPool,
+    req: pb::RecordScheduledStepReceiptRequest,
+) -> Result<Response<pb::RecordScheduledStepReceiptResponse>, Status> {
+    if !valid_scheduled_run_identifier(&req.run_id)
+        || !valid_scheduled_run_identifier(&req.step_id)
+        || !valid_scheduled_run_identifier(&req.org_id)
+        || !valid_scheduled_run_identifier(&req.idempotency_key)
+        || !valid_scheduled_run_identifier(&req.receipt_id)
+    {
+        return Err(Status::invalid_argument(
+            "scheduled-step receipt bindings are invalid",
+        ));
+    }
+    let allowed = matches!(
+        req.status.as_str(),
+        "completed" | "failed" | "unknown_outcome"
+    );
+    if !allowed || (req.unknown_outcome != (req.status == "unknown_outcome")) {
+        return Err(Status::invalid_argument(
+            "invalid scheduled-step receipt status",
+        ));
+    }
+    if !req.output_digest.is_empty() && !valid_scheduled_step_digest(&req.output_digest) {
+        return Err(Status::invalid_argument(
+            "invalid scheduled-step output digest",
+        ));
+    }
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    let existing: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT receipt_id, status, idempotency_key
+         FROM scheduled_step_receipts
+         WHERE run_id = $1 AND step_id = $2 AND org_id = $3
+         FOR UPDATE",
+    )
+    .bind(&req.run_id)
+    .bind(&req.step_id)
+    .bind(&req.org_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let Some((receipt_id, current_status, idempotency_key)) = existing else {
+        return Err(Status::not_found("scheduled-step receipt not found"));
+    };
+    if receipt_id != req.receipt_id || idempotency_key != req.idempotency_key {
+        return Err(Status::permission_denied(
+            "scheduled-step receipt binding mismatch",
+        ));
+    }
+    if current_status != "claimed" {
+        if current_status == req.status {
+            tx.commit()
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            return Ok(Response::new(pb::RecordScheduledStepReceiptResponse {
+                receipt_id,
+                status: current_status,
+                recorded: false,
+            }));
+        }
+        return Err(Status::already_exists(
+            "scheduled-step receipt already has a different terminal outcome",
+        ));
+    }
+    sqlx::query(
+        "UPDATE scheduled_step_receipts
+         SET status = $4, output_digest = $5, error_code = $6,
+             unknown_outcome = $7, updated_at = now()
+         WHERE run_id = $1 AND step_id = $2 AND org_id = $3",
+    )
+    .bind(&req.run_id)
+    .bind(&req.step_id)
+    .bind(&req.org_id)
+    .bind(&req.status)
+    .bind(&req.output_digest)
+    .bind(&req.error_code)
+    .bind(req.unknown_outcome)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    tx.commit()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    Ok(Response::new(pb::RecordScheduledStepReceiptResponse {
+        receipt_id,
+        status: req.status,
+        recorded: true,
+    }))
+}
+
+/// Bind the non-secret schedule identity to the deterministic run row. This
+/// is separate from `StartRunRequest` so generic user runs cannot populate the
+/// schedule namespace. A retry may observe the exact same binding, but a
+/// different schedule/fire/template/policy can never retarget the run id.
+#[allow(clippy::result_large_err)]
+async fn persist_scheduled_run_bindings(
+    pool: &PgPool,
+    req: &pb::StartScheduledRunRequest,
+) -> Result<(), Status> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    let existing: Option<(String, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT r.org_id, COALESCE(t.space_id, ''), r.metadata
+         FROM runs r JOIN threads t ON t.id = r.thread_id
+         WHERE r.id = $1 AND r.thread_id = $2
+           AND r.org_id = $3 AND r.user_id = $4
+         FOR UPDATE OF r, t",
+    )
+    .bind(&req.run_id)
+    .bind(&req.thread_id)
+    .bind(&req.org_id)
+    .bind(crate::auth::system_run_owners()[0])
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let Some((org_id, space_id, metadata)) = existing else {
+        return Err(Status::permission_denied(
+            "scheduled run owner binding is unavailable",
+        ));
+    };
+    let expected = serde_json::json!({
+        "source": "scheduled_run",
+        "schedule_id": req.schedule_id,
+        "fire_key": req.fire_key,
+        "space_id": space_id,
+        "subject_id": req.human_subject_id,
+        "template_digest": req.template_digest,
+        "policy_digest": req.policy_digest,
+        "idempotency_key": req.idempotency_key,
+    });
+    let exact = [
+        "schedule_id",
+        "fire_key",
+        "space_id",
+        "subject_id",
+        "template_digest",
+        "policy_digest",
+        "idempotency_key",
+    ]
+    .into_iter()
+    .all(|key| metadata.get(key) == expected.get(key));
+    if !metadata.is_object() || metadata.as_object().is_none() || metadata == serde_json::json!({})
+    {
+        sqlx::query(
+            "UPDATE runs SET metadata = $2, updated_at = now() WHERE id = $1 AND org_id = $3",
+        )
+        .bind(&req.run_id)
+        .bind(&expected)
+        .bind(&org_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
+    } else if !exact {
+        return Err(Status::permission_denied(
+            "scheduled run id is bound to different immutable schedule metadata",
+        ));
+    }
+    tx.commit()
+        .await
+        .map_err(|error| Status::internal(error.to_string()))?;
     Ok(())
 }
 
@@ -1211,6 +1753,16 @@ fn verify_append_space_decision(
     verify_append_space_decision_with_key(req, org_id, user_id, &key_id, key, Utc::now())
 }
 
+/// Whether a decision-less assistant append may land in a Space thread. The
+/// reply slot is open only directly after a user message: that user turn was
+/// itself admitted by a verified create or append decision, and the assistant
+/// reply is the second half of that same authorized exchange. An empty thread
+/// has no verified turn to answer, and an assistant/system tail means the
+/// exchange is already complete — both stay denied.
+fn assistant_reply_slot_is_open(last_role: Option<&str>) -> bool {
+    last_role.is_some_and(|role| role.trim() == "user")
+}
+
 /// Core of `SessionCore::create_thread`, factored out to keep the trait method
 /// small. Inserts the thread row and its `THREAD_CREATED` event in one tx.
 async fn create_thread_inner(
@@ -1390,6 +1942,26 @@ async fn append_message_inner(
                         "a fresh Control Space append decision is required",
                     ));
                 }
+            } else if !has_append_context && req.role.trim() == "assistant" {
+                // An assistant reply carries no independent authority: it is
+                // the second half of an exchange whose human turn was already
+                // verified (the thread create or a fresh append decision).
+                // Allow it only in that reply slot — directly after a user
+                // message — where it inherits the thread's stored,
+                // Control-verified authority refs. Every other unscoped
+                // append into a Space thread stays denied.
+                let last_role: Option<(String,)> = sqlx::query_as(
+                    "SELECT role FROM messages WHERE thread_id = $1 ORDER BY sequence DESC LIMIT 1",
+                )
+                .bind(&req.thread_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                if !assistant_reply_slot_is_open(last_role.as_ref().map(|(role,)| role.as_str())) {
+                    return Err(Status::permission_denied(
+                        "a Space assistant reply must directly follow a verified user turn",
+                    ));
+                }
             } else {
                 if req.space_id != stored_space_id {
                     return Err(Status::permission_denied(
@@ -1425,9 +1997,9 @@ async fn append_message_inner(
 
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
         "INSERT INTO messages
-         (id, thread_id, role, content, created_at, space_id, recipient_audience_ref,
+         (id, thread_id, role, content, created_at, agent_name, space_id, recipient_audience_ref,
           recipient_audience_revision, recipient_audience_hash, authority_revision, resource_authorization_ref)
-         SELECT $1, t.id, $3, $4, $5, t.space_id, t.recipient_audience_ref,
+         SELECT $1, t.id, $3, $4, $5, NULLIF($6, ''), t.space_id, t.recipient_audience_ref,
                 t.recipient_audience_revision, t.recipient_audience_hash, t.authority_revision, t.resource_authorization_ref
          FROM threads t WHERE t.id=$2
          RETURNING sequence, space_id, recipient_audience_ref, recipient_audience_revision,
@@ -1438,6 +2010,7 @@ async fn append_message_inner(
     .bind(&req.role)
     .bind(&req.content)
     .bind(now)
+    .bind(req.agent_name.trim())
     .fetch_one(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -1545,8 +2118,10 @@ async fn append_message_inner(
 async fn start_run_inner(
     pool: &PgPool,
     req: pb::StartRunRequest,
+    requested_run_id: Option<String>,
 ) -> Result<Response<pb::StartRunResponse>, Status> {
-    let run_id = new_ulid();
+    let requested_run_id = requested_run_id.filter(|value| !value.trim().is_empty());
+    let run_id = requested_run_id.clone().unwrap_or_else(new_ulid);
     let now = Utc::now();
 
     let mut tx = pool
@@ -1557,13 +2132,14 @@ async fn start_run_inner(
     // P0.4 residency: stamp the configured Model-Plane region (EU default,
     // Sweden Central) onto the run so its processing region is auditable.
     let residency = configured_residency();
-    let inherited_space_context: (Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<i64>) = sqlx::query_as(
+    let inherited_space_context: Option<(Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
                           space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
                 t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision
          FROM threads t
          WHERE t.id = $2 AND t.org_id = $7
+         ON CONFLICT (id) DO NOTHING
          RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
     )
     .bind(&run_id)
@@ -1578,8 +2154,46 @@ async fn start_run_inner(
     .bind(now)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| Status::internal(e.to_string()))?
-    .ok_or_else(|| Status::not_found("thread not found for run creation"))?;
+    .map_err(|e| Status::internal(e.to_string()))?;
+
+    let inherited_space_context = match inherited_space_context {
+        Some(context) => context,
+        None if requested_run_id.is_some() => {
+            let existing: Option<(String, String, String, DateTime<Utc>)> = sqlx::query_as(
+                "SELECT thread_id, org_id, user_id, created_at FROM runs WHERE id = $1",
+            )
+            .bind(&run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            match existing {
+                Some((thread_id, org_id, user_id, created_at))
+                    if thread_id == req.thread_id
+                        && org_id == req.org_id
+                        && user_id == req.user_id =>
+                {
+                    tx.commit()
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                    return Ok(Response::new(pb::StartRunResponse {
+                        run_id,
+                        created_at: Some(prost_types::Timestamp {
+                            seconds: created_at.timestamp(),
+                            nanos: nanos_to_i32(created_at.timestamp_subsec_nanos()),
+                        }),
+                        owner_id: req.user_id,
+                    }));
+                }
+                Some(_) => {
+                    return Err(Status::permission_denied(
+                        "scheduled run id is already bound to another owner",
+                    ));
+                }
+                None => return Err(Status::not_found("thread not found for run creation")),
+            }
+        }
+        None => return Err(Status::not_found("thread not found for run creation")),
+    };
 
     let run_started_resource = format!("run:{}", &run_id);
     let run_started_idem = derive_idempotency_hash(
@@ -2874,10 +3488,95 @@ impl SessionCore for SessionService {
                 }
             };
             req.user_id = owner;
-            start_run_inner(&self.pool, req).await
+            start_run_inner(&self.pool, req, None).await
         }
         .await;
         record_metrics("start_run", started, result.is_ok());
+        result
+    }
+
+    async fn start_scheduled_run(
+        &self,
+        request: Request<pb::StartScheduledRunRequest>,
+    ) -> Result<Response<pb::StartRunResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            if !caller.is_service() || caller.principal_id() != "service:orchestrator-core" {
+                return Err(Status::permission_denied(
+                    "only Orchestrator Core may start prepared scheduled runs",
+                ));
+            }
+            let req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            if !valid_scheduled_run_identifier(&req.run_id)
+                || !valid_scheduled_run_identifier(&req.schedule_id)
+                || !valid_scheduled_run_identifier(&req.fire_key)
+                || req.thread_id.trim().is_empty()
+                || req.goal.trim().is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "prepared scheduled-run bindings are invalid",
+                ));
+            }
+            let owner = "service:orchestrator-core";
+            let expected_thread_key = format!("schedule/{}/{}", req.schedule_id, req.fire_key);
+            let exact: Option<(String, String, i64, String, String, String, i64)> = sqlx::query_as(
+                "SELECT COALESCE(space_id, ''), COALESCE(recipient_audience_ref, ''),
+                        COALESCE(recipient_audience_revision, 0), COALESCE(recipient_audience_hash, ''),
+                        COALESCE(privacy_policy_ref, ''), COALESCE(resource_authorization_ref, ''),
+                        COALESCE(authority_revision, 0)
+                 FROM threads
+                 WHERE id=$1 AND org_id=$2 AND user_id=$3 AND session_key=$4
+                   AND COALESCE(space_id, '') <> ''",
+            )
+            .bind(&req.thread_id)
+            .bind(&req.org_id)
+            .bind(owner)
+            .bind(expected_thread_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
+            if exact.is_none() {
+                return Err(Status::permission_denied(
+                    "scheduled run thread is not the exact prepared service thread",
+                ));
+            }
+            let exact = exact.expect("checked above");
+            let thread = ScheduledRunThreadContext {
+                space_id: exact.0,
+                recipient_audience_ref: exact.1,
+                recipient_audience_revision: u64::try_from(exact.2).map_err(|_| {
+                    Status::permission_denied("scheduled run thread has invalid audience revision")
+                })?,
+                recipient_audience_hash: exact.3,
+                privacy_policy_ref: exact.4,
+                resource_authorization_ref: exact.5,
+                authority_revision: u64::try_from(exact.6).map_err(|_| {
+                    Status::permission_denied("scheduled run thread has invalid authority revision")
+                })?,
+            };
+            verify_scheduled_run_execution_decision(&req, &thread)?;
+            let response = start_run_inner(
+                &self.pool,
+                pb::StartRunRequest {
+                    thread_id: req.thread_id.clone(),
+                    parent_run_id: String::new(),
+                    agent_id: req.agent_id.clone(),
+                    goal: req.goal.clone(),
+                    mode: req.mode.clone(),
+                    org_id: req.org_id.clone(),
+                    user_id: owner.to_owned(),
+                },
+                Some(req.run_id.clone()),
+            )
+            .await?;
+            persist_scheduled_run_bindings(&self.pool, &req).await?;
+            Ok(response)
+        }
+        .await;
+        record_metrics("start_scheduled_run", started, result.is_ok());
         result
     }
 
@@ -2920,27 +3619,40 @@ impl SessionCore for SessionService {
         .await?
         .into_inner();
 
-        let exact: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM threads WHERE id=$1 AND org_id=$2 AND user_id=$3 AND session_key=$4
-             AND space_id=$5 AND space_decision_ref=$6 AND recipient_audience_ref=$7
-             AND recipient_audience_revision=$8 AND recipient_audience_hash=$9
-             AND privacy_policy_ref=$10 AND resource_authorization_ref=$11 AND authority_revision=$12",
-        )
-        .bind(&created.thread_id)
-        .bind(&req.org_id)
-        .bind(owner)
-        .bind(&req.system_thread_key)
-        .bind(&req.space_id)
-        .bind(&req.space_decision_ref)
-        .bind(&req.recipient_audience_ref)
-        .bind(i64::try_from(req.recipient_audience_revision).map_err(|_| Status::invalid_argument("recipient audience revision is too large"))?)
-        .bind(&req.recipient_audience_hash)
-        .bind(&req.privacy_policy_ref)
-        .bind(&req.resource_authorization_ref)
-        .bind(i64::try_from(req.authority_revision).map_err(|_| Status::invalid_argument("authority revision is too large"))?)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| Status::internal(error.to_string()))?;
+        // Control mints a fresh decision_ref/nonce for every reauthorization of
+        // the same fire. Those values prove the preparation call, not durable
+        // thread identity, so retries compare every stable authority binding
+        // below while deliberately not requiring the previous decision_ref.
+        let exact: Option<(String,)> =
+            sqlx::query_as(
+                "SELECT id FROM threads WHERE id=$1 AND org_id=$2 AND user_id=$3 AND session_key=$4
+             AND space_id=$5 AND recipient_audience_ref=$6
+             AND recipient_audience_revision=$7 AND recipient_audience_hash=$8
+             AND privacy_policy_ref=$9 AND resource_authorization_ref=$10 AND authority_revision=$11
+             AND action_schema_hash=$12 AND payload_digest=$13 AND idempotency_key=$14",
+            )
+            .bind(&created.thread_id)
+            .bind(&req.org_id)
+            .bind(owner)
+            .bind(&req.system_thread_key)
+            .bind(&req.space_id)
+            .bind(&req.recipient_audience_ref)
+            .bind(i64::try_from(req.recipient_audience_revision).map_err(|_| {
+                Status::invalid_argument("recipient audience revision is too large")
+            })?)
+            .bind(&req.recipient_audience_hash)
+            .bind(&req.privacy_policy_ref)
+            .bind(&req.resource_authorization_ref)
+            .bind(
+                i64::try_from(req.authority_revision)
+                    .map_err(|_| Status::invalid_argument("authority revision is too large"))?,
+            )
+            .bind(&req.action_schema_hash)
+            .bind(&req.payload_digest)
+            .bind(&req.idempotency_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
         if exact.is_none() {
             return Err(Status::permission_denied(
                 "existing scheduled-run thread has different authority bindings",
@@ -3335,6 +4047,38 @@ impl SessionCore for SessionService {
         result
     }
 
+    async fn claim_scheduled_step(
+        &self,
+        request: Request<pb::ClaimScheduledStepRequest>,
+    ) -> Result<Response<pb::ClaimScheduledStepResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, crate::auth::SCHEDULED_STEP_SCOPE)?;
+            authorize_scheduled_step_service(&caller)?;
+            claim_scheduled_step_inner(&self.pool, request.into_inner()).await
+        }
+        .await;
+        record_metrics("claim_scheduled_step", started, result.is_ok());
+        result
+    }
+
+    async fn record_scheduled_step_receipt(
+        &self,
+        request: Request<pb::RecordScheduledStepReceiptRequest>,
+    ) -> Result<Response<pb::RecordScheduledStepReceiptResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, crate::auth::SCHEDULED_STEP_SCOPE)?;
+            authorize_scheduled_step_service(&caller)?;
+            record_scheduled_step_receipt_inner(&self.pool, request.into_inner()).await
+        }
+        .await;
+        record_metrics("record_scheduled_step_receipt", started, result.is_ok());
+        result
+    }
+
     // G7 read path (the loop's "last mile"): list an org's agent skills so the
     // gateway's MatchSkills cache can surface LEARNED skills, not just disk
     // ones. Org-scoped — only this org's rows. The jsonb array columns are
@@ -3423,8 +4167,8 @@ impl SessionCore for SessionService {
             }
             caller.authorize_org(&req.org_id)?;
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read).await?;
-            let rows: Vec<(String, String)> = sqlx::query_as(
-                "SELECT m.role, m.content
+            let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT m.role, m.content, m.agent_name
                  FROM messages m
                  JOIN threads t ON t.id = m.thread_id
                  WHERE m.thread_id = $1 AND t.org_id = $2
@@ -3440,7 +4184,11 @@ impl SessionCore for SessionService {
             })?;
             let messages = rows
                 .into_iter()
-                .map(|(role, content)| pb::SessionMessage { role, content })
+                .map(|(role, content, agent_name)| pb::SessionMessage {
+                    role,
+                    content,
+                    agent_name: agent_name.unwrap_or_default(),
+                })
                 .collect();
             Ok(Response::new(pb::ListConversationResponse { messages }))
         }
@@ -5061,15 +5809,19 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_letta_memory_rows, assemble_segments, authorize_dataplane, complete_step_inner,
+        append_letta_memory_rows, assemble_segments, assistant_reply_slot_is_open,
+        authorize_dataplane, claim_scheduled_step_inner, complete_step_inner,
         derive_idempotency_hash, finalize_tool_action_inner, normalize_thread_presentation_text,
-        pb, reserve_tool_action_inner, resolve_dataplane_addr, resolve_residency,
-        semantic_context_search_status, support_thread_id, thread_append_payload_digest,
-        thread_create_payload_digest, validate_append_space_context_shape,
-        validate_thread_space_context_shape, validate_user_checkpoint,
-        verify_append_space_decision_with_key, verify_thread_space_decision_with_key,
-        verify_thread_space_decision_with_keys, AssemblyInputs, DelegatedDataPlaneBearer,
-        LettaMemoryAdapter, MemoryRetention, SemanticContextSearchStatus, VerifiedIdentity,
+        pb, record_scheduled_step_receipt_inner, reserve_tool_action_inner, resolve_dataplane_addr,
+        resolve_residency, scheduled_run_execution_payload_digest, semantic_context_search_status,
+        support_thread_id, thread_append_payload_digest, thread_create_payload_digest,
+        valid_scheduled_run_identifier, validate_append_space_context_shape,
+        validate_scheduled_step_request, validate_thread_space_context_shape,
+        validate_user_checkpoint, verify_append_space_decision_with_key,
+        verify_scheduled_run_decision_with_keys, verify_scheduled_run_execution_decision_with_keys,
+        verify_thread_space_decision_with_key, verify_thread_space_decision_with_keys,
+        AssemblyInputs, DelegatedDataPlaneBearer, LettaMemoryAdapter, MemoryRetention,
+        ScheduledRunThreadContext, SemanticContextSearchStatus, VerifiedIdentity,
         CONTROL_SPACE_DECISION_AUDIENCE, CONTROL_SPACE_DECISION_VERSION,
         CONTROL_THREAD_APPEND_ACTION, CONTROL_THREAD_CREATE_ACTION, DEFAULT_RESIDENCY,
         HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES, MAX_USER_CHECKPOINT_STATE_BYTES,
@@ -5087,6 +5839,227 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
+    fn assistant_reply_slot_opens_only_directly_after_a_user_turn() {
+        // The decision-covered user turn opens exactly one reply slot.
+        assert!(assistant_reply_slot_is_open(Some("user")));
+        assert!(assistant_reply_slot_is_open(Some(" user ")));
+        // No verified turn to answer: an empty Space thread stays closed.
+        assert!(!assistant_reply_slot_is_open(None));
+        // The exchange is already complete or was never user-authorized.
+        assert!(!assistant_reply_slot_is_open(Some("assistant")));
+        assert!(!assistant_reply_slot_is_open(Some("system")));
+        assert!(!assistant_reply_slot_is_open(Some("tool")));
+    }
+
+    #[test]
+    fn scheduled_step_claim_shape_is_strict_and_digest_bound() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let request = pb::ClaimScheduledStepRequest {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            space_id: "space-1".to_owned(),
+            schedule_id: "schedule-1".to_owned(),
+            fire_key: "fire-1".to_owned(),
+            template_digest: digest.clone(),
+            step_id: "step-1".to_owned(),
+            step_index: 0,
+            policy_digest: digest,
+            idempotency_key: "run-1:step-1".to_owned(),
+        };
+        validate_scheduled_step_request(&request).expect("valid claim");
+        let mut wildcard = request.clone();
+        wildcard.org_id = "*".to_owned();
+        assert!(validate_scheduled_step_request(&wildcard).is_err());
+        let mut missing_policy = request;
+        missing_policy.policy_digest.clear();
+        assert!(validate_scheduled_step_request(&missing_policy).is_err());
+    }
+
+    /// Real-Postgres proof for the scheduled-step receipt contract. This keeps
+    /// the workflow's retry boundary honest: a duplicate claim returns the
+    /// original receipt, an ambiguous provider result is terminalized as
+    /// `unknown_outcome`, and a second terminal outcome cannot overwrite it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn scheduled_step_claim_and_unknown_receipt_are_idempotent_against_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let run_id = format!("scheduled-run-{suffix}");
+        let thread_id = format!("scheduled-thread-{suffix}");
+        let org_id = format!("scheduled-org-{suffix}");
+        let space_id = format!("scheduled-space-{suffix}");
+        let schedule_id = format!("schedule-{suffix}");
+        let fire_key = format!("fire-{suffix}");
+        let step_id = format!("{run_id}:step:0");
+        let idempotency_key = format!("{fire_key}:step:0");
+        let template_digest = format!("sha256:{}", "a".repeat(64));
+        let policy_digest = format!("sha256:{}", "b".repeat(64));
+        let audience_hash = format!("sha256:{}", "c".repeat(64));
+        let metadata = serde_json::json!({
+            "source": "scheduled_run",
+            "schedule_id": schedule_id,
+            "fire_key": fire_key,
+            "template_digest": template_digest,
+            "space_id": space_id,
+        });
+
+        sqlx::query(
+            "INSERT INTO threads
+             (id, session_key, org_id, user_id, space_id, space_decision_ref,
+              recipient_audience_ref, recipient_audience_revision,
+              recipient_audience_hash, privacy_policy_ref,
+              resource_authorization_ref, authority_revision)
+             VALUES ($1,$2,$3,'service:orchestrator-core',$4,$5,$6,1,$7,$8,$9,1)",
+        )
+        .bind(&thread_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&space_id)
+        .bind(format!("decision-{suffix}"))
+        .bind(format!("audience-{suffix}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{suffix}"))
+        .bind(format!("resource-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("seed scheduled thread");
+        sqlx::query(
+            "INSERT INTO runs
+             (id, thread_id, goal, org_id, user_id, status, metadata,
+              space_id, space_decision_ref, recipient_audience_ref,
+              recipient_audience_revision, recipient_audience_hash,
+              privacy_policy_ref, resource_authorization_ref, authority_revision)
+             VALUES ($1,$2,'scheduled proof goal',$3,'service:orchestrator-core',
+                     'queued',$4,$5,$6,$7,1,$8,$9,$10,1)",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(metadata)
+        .bind(&space_id)
+        .bind(format!("decision-{suffix}"))
+        .bind(format!("audience-{suffix}"))
+        .bind(&audience_hash)
+        .bind(format!("privacy-{suffix}"))
+        .bind(format!("resource-{suffix}"))
+        .execute(&pool)
+        .await
+        .expect("seed scheduled run");
+
+        let request = pb::ClaimScheduledStepRequest {
+            run_id: run_id.clone(),
+            thread_id: thread_id.clone(),
+            org_id: org_id.clone(),
+            space_id: space_id.clone(),
+            schedule_id: schedule_id.clone(),
+            fire_key: fire_key.clone(),
+            template_digest: template_digest.clone(),
+            step_id: step_id.clone(),
+            step_index: 0,
+            policy_digest: policy_digest.clone(),
+            idempotency_key: idempotency_key.clone(),
+        };
+        let first = claim_scheduled_step_inner(&pool, request.clone())
+            .await
+            .expect("first claim")
+            .into_inner();
+        assert!(first.claimed);
+        assert_eq!(first.status, "claimed");
+        assert!(!first.receipt_id.is_empty());
+
+        let duplicate = claim_scheduled_step_inner(&pool, request)
+            .await
+            .expect("duplicate claim")
+            .into_inner();
+        assert!(!duplicate.claimed);
+        assert_eq!(duplicate.receipt_id, first.receipt_id);
+        assert_eq!(duplicate.status, "claimed");
+
+        let unknown = record_scheduled_step_receipt_inner(
+            &pool,
+            pb::RecordScheduledStepReceiptRequest {
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
+                org_id: org_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+                receipt_id: first.receipt_id.clone(),
+                status: "unknown_outcome".to_owned(),
+                output_digest: String::new(),
+                error_code: "transport_ambiguous".to_owned(),
+                unknown_outcome: true,
+            },
+        )
+        .await
+        .expect("record unknown outcome")
+        .into_inner();
+        assert!(unknown.recorded);
+        assert_eq!(unknown.status, "unknown_outcome");
+
+        let duplicate_unknown = record_scheduled_step_receipt_inner(
+            &pool,
+            pb::RecordScheduledStepReceiptRequest {
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
+                org_id: org_id.clone(),
+                idempotency_key: idempotency_key.clone(),
+                receipt_id: first.receipt_id.clone(),
+                status: "unknown_outcome".to_owned(),
+                output_digest: String::new(),
+                error_code: "transport_ambiguous".to_owned(),
+                unknown_outcome: true,
+            },
+        )
+        .await
+        .expect("duplicate unknown outcome")
+        .into_inner();
+        assert!(!duplicate_unknown.recorded);
+
+        let overwrite = record_scheduled_step_receipt_inner(
+            &pool,
+            pb::RecordScheduledStepReceiptRequest {
+                run_id: run_id.clone(),
+                step_id: step_id.clone(),
+                org_id: org_id.clone(),
+                idempotency_key,
+                receipt_id: first.receipt_id,
+                status: "completed".to_owned(),
+                output_digest: format!("sha256:{}", "d".repeat(64)),
+                error_code: String::new(),
+                unknown_outcome: false,
+            },
+        )
+        .await
+        .expect_err("terminal receipt must not be overwritten");
+        assert_eq!(overwrite.code(), tonic::Code::AlreadyExists);
+
+        sqlx::query("DELETE FROM scheduled_step_receipts WHERE run_id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("clean receipts");
+        sqlx::query("DELETE FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("clean run");
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .execute(&pool)
+            .await
+            .expect("clean thread");
+    }
+
+    #[test]
     fn thread_presentation_text_preserves_explicit_clear_and_rejects_oversize_values() {
         assert_eq!(
             normalize_thread_presentation_text("  An   explicit title  ", "title", 96)
@@ -5101,6 +6074,298 @@ mod tests {
         let error = normalize_thread_presentation_text(&oversized, "title", THREAD_TITLE_MAX_CHARS)
             .expect_err("oversize title must not be silently truncated");
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn scheduled_run_identifiers_are_nats_safe_and_never_path_like() {
+        assert!(valid_scheduled_run_identifier("task_scheduled_1"));
+        assert!(valid_scheduled_run_identifier("schedule_1"));
+        for invalid in [
+            "", " task", "task ", "task.id", "task/id", "task>1", "task\n1",
+        ] {
+            assert!(
+                !valid_scheduled_run_identifier(invalid),
+                "scheduled-run identifier {invalid:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_run_preparation_accepts_a_fresh_retry_decision_only_for_the_same_fire() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-15T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[28_u8; 32]);
+        let key_id = "control-scheduled-run-preparation".to_owned();
+        let mut request = pb::PrepareScheduledRunThreadRequest {
+            org_id: "org-1".to_owned(),
+            human_subject_id: "user-1".to_owned(),
+            space_id: "space-1".to_owned(),
+            schedule_id: "schedule-1".to_owned(),
+            fire_key: "fire_20260815t120000z".to_owned(),
+            run_id: "task_scheduled_1".to_owned(),
+            system_thread_key: "schedule/schedule-1/fire_20260815t120000z".to_owned(),
+            template_digest: format!("sha256:{}", "a".repeat(64)),
+            idempotency_key: "schedule-1:fire_20260815t120000z".to_owned(),
+            space_decision_ref: "decision-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_revision: 2,
+            recipient_audience_hash: "sha256:audience".to_owned(),
+            privacy_policy_ref: "privacy-1".to_owned(),
+            resource_authorization_ref: "resource-1".to_owned(),
+            authority_revision: 7,
+            action_schema_hash: "sha256:space-scheduled-run-v1".to_owned(),
+            ..Default::default()
+        };
+        let sign = |request: &mut pb::PrepareScheduledRunThreadRequest,
+                    decision_ref: &str,
+                    nonce: &str| {
+            request.space_decision_ref = decision_ref.to_owned();
+            let mut claims = serde_json::json!({
+                "decision_ref": decision_ref,
+                "org_id": "org-1",
+                "space_ref": "space-1",
+                "subject_id": "user-1",
+                "service_audience": "model-plane-capability-core",
+                "action_id": "model.schedule.run",
+                "action_schema_hash": "sha256:space-scheduled-run-v1",
+                "payload_digest": "",
+                "idempotency_key": request.idempotency_key.as_str(),
+                "recipient_audience_ref": "audience-1",
+                "recipient_audience_revision": 2,
+                "recipient_audience_hash": "sha256:audience",
+                "privacy_policy_ref": "privacy-1",
+                "resource_authorization_ref": "resource-1",
+                "purpose": "agent_work",
+                "lawful_basis": "contract",
+                "privacy_class": "internal",
+                "third_party_processing_allowed": false,
+                "retention_class": "standard",
+                "residency": "swedencentral",
+                "deletion_scope": "space",
+                "zero_data_retention": false,
+                "nonce": nonce,
+                "authority_revision": 7,
+                "membership_revision": 4,
+                "privacy_revision": 5,
+                "entitlement_revision": 3,
+                "permissions": ["schedule:run"],
+                "issued_at": (now - chrono::Duration::seconds(1)).to_rfc3339(),
+                "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+            });
+            let decoded: super::ControlSpaceDecisionClaims =
+                serde_json::from_value(claims.clone()).expect("test claims");
+            request.payload_digest = super::scheduled_run_payload_digest(request, &decoded);
+            claims["payload_digest"] = serde_json::json!(request.payload_digest.as_str());
+            let payload =
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
+            let encoded_key = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+            let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{encoded_key}.{payload}");
+            request.control_decision_token = format!(
+                "{signing_input}.{}",
+                URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+            );
+        };
+        let keys = BTreeMap::from([(key_id.clone(), signing_key.verifying_key())]);
+
+        sign(&mut request, "decision-1", "nonce-1");
+        verify_scheduled_run_decision_with_keys(&request, &keys, now)
+            .expect("original decision must authorize the prepared fire");
+
+        sign(&mut request, "decision-2", "nonce-2");
+        verify_scheduled_run_decision_with_keys(&request, &keys, now)
+            .expect("fresh retry decision must authorize the same prepared fire");
+
+        request.fire_key = "different_fire".to_owned();
+        assert_eq!(
+            verify_scheduled_run_decision_with_keys(&request, &keys, now)
+                .expect_err("a decision may not move to a different fire")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    /// A preparation activity can succeed in Session Core and then lose its
+    /// response before Capability Core records the handoff. A retry receives a
+    /// fresh Control decision (and therefore a new decision_ref/nonce), but it
+    /// must converge on the same durable service-owned thread for the stable
+    /// (org, owner, system_thread_key) fire identity. This exercises the real
+    /// Postgres idempotency fence rather than only the signed-envelope helper.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn scheduled_run_prepare_retry_with_fresh_decision_reuses_thread_against_real_pg() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let suffix = mp_ids::new_ulid();
+        let org_id = format!("org-scheduled-retry-{suffix}");
+        let owner = "service:orchestrator-core".to_owned();
+        let system_thread_key = format!("schedule/retry-{suffix}/fire-{suffix}");
+        let first = pb::CreateThreadRequest {
+            session_key: system_thread_key.clone(),
+            org_id: org_id.clone(),
+            user_id: owner.clone(),
+            space_id: "space-retry".to_owned(),
+            space_decision_ref: "decision-first".to_owned(),
+            recipient_audience_ref: "audience-retry".to_owned(),
+            recipient_audience_revision: 4,
+            recipient_audience_hash: "sha256:audience-retry".to_owned(),
+            privacy_policy_ref: "privacy-retry".to_owned(),
+            resource_authorization_ref: "resource-retry".to_owned(),
+            authority_revision: 9,
+            action_schema_hash: super::CONTROL_SCHEDULED_RUN_SCHEMA.to_owned(),
+            payload_digest: "sha256:payload-retry".to_owned(),
+            idempotency_key: "schedule-retry-fire".to_owned(),
+            ..Default::default()
+        };
+        let first_id = super::create_thread_inner_preverified(&pool, first)
+            .await
+            .expect("first preparation")
+            .into_inner()
+            .thread_id;
+
+        // The stable fire bindings are unchanged; only the fresh Control
+        // decision reference and nonce would differ at the RPC boundary.
+        let retry = pb::CreateThreadRequest {
+            session_key: system_thread_key.clone(),
+            org_id: org_id.clone(),
+            user_id: owner.clone(),
+            space_id: "space-retry".to_owned(),
+            space_decision_ref: "decision-fresh-retry".to_owned(),
+            recipient_audience_ref: "audience-retry".to_owned(),
+            recipient_audience_revision: 4,
+            recipient_audience_hash: "sha256:audience-retry".to_owned(),
+            privacy_policy_ref: "privacy-retry".to_owned(),
+            resource_authorization_ref: "resource-retry".to_owned(),
+            authority_revision: 9,
+            action_schema_hash: super::CONTROL_SCHEDULED_RUN_SCHEMA.to_owned(),
+            payload_digest: "sha256:payload-retry".to_owned(),
+            idempotency_key: "schedule-retry-fire".to_owned(),
+            ..Default::default()
+        };
+        let retry_id = super::create_thread_inner_preverified(&pool, retry)
+            .await
+            .expect("fresh-decision retry")
+            .into_inner()
+            .thread_id;
+        assert_eq!(
+            retry_id, first_id,
+            "same scheduled fire must reuse its thread"
+        );
+
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3",
+        )
+        .bind(&org_id)
+        .bind(&owner)
+        .bind(&system_thread_key)
+        .fetch_one(&pool)
+        .await
+        .expect("count prepared threads");
+        assert_eq!(count, 1, "retry must not create a second service thread");
+
+        sqlx::query("DELETE FROM events WHERE run_id = $1")
+            .bind(&first_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&first_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[test]
+    fn scheduled_run_execution_decision_is_bound_to_the_exact_prepared_thread() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-15T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let signing_key = SigningKey::from_bytes(&[29_u8; 32]);
+        let key_id = "control-scheduled-run-execution".to_owned();
+        let mut request = pb::StartScheduledRunRequest {
+            thread_id: "thread-scheduled-1".to_owned(),
+            run_id: "task_scheduled_1".to_owned(),
+            org_id: "org-1".to_owned(),
+            schedule_id: "schedule-1".to_owned(),
+            fire_key: "2026-08-15T12:00:00Z".to_owned(),
+            goal: "summarise the queue".to_owned(),
+            human_subject_id: "user-1".to_owned(),
+            template_digest: format!("sha256:{}", "a".repeat(64)),
+            idempotency_key: "schedule-1:2026-08-15T12:00:00Z".to_owned(),
+            ..Default::default()
+        };
+        let thread = ScheduledRunThreadContext {
+            space_id: "space-1".to_owned(),
+            recipient_audience_ref: "audience-1".to_owned(),
+            recipient_audience_revision: 2,
+            recipient_audience_hash: "sha256:audience".to_owned(),
+            privacy_policy_ref: "privacy-1".to_owned(),
+            resource_authorization_ref: "resource-1".to_owned(),
+            authority_revision: 7,
+        };
+        let mut claims = serde_json::json!({
+            "decision_ref": "decision-1",
+            "org_id": "org-1",
+            "space_ref": "space-1",
+            "subject_id": "user-1",
+            "service_audience": "model-plane-session-core",
+            "action_id": "model.schedule.execute",
+            "action_schema_hash": "sha256:space-scheduled-run-execute-v1",
+            "payload_digest": "",
+            "idempotency_key": request.idempotency_key.as_str(),
+            "recipient_audience_ref": "audience-1",
+            "recipient_audience_revision": 2,
+            "recipient_audience_hash": "sha256:audience",
+            "privacy_policy_ref": "privacy-1",
+            "resource_authorization_ref": "resource-1",
+            "purpose": "agent_work",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": 7,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "entitlement_revision": 3,
+            "permissions": ["schedule:execute"],
+            "issued_at": (now - chrono::Duration::seconds(1)).to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        let decoded: super::ControlSpaceDecisionClaims =
+            serde_json::from_value(claims.clone()).expect("test claims");
+        claims["payload_digest"] =
+            serde_json::json!(scheduled_run_execution_payload_digest(&request, &decoded));
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
+        let encoded_key = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let signing_input = format!("{CONTROL_SPACE_DECISION_VERSION}.{encoded_key}.{payload}");
+        request.control_execution_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        );
+        let keys = BTreeMap::from([(key_id, signing_key.verifying_key())]);
+        verify_scheduled_run_execution_decision_with_keys(&request, &thread, &keys, now)
+            .expect("exact current execution decision must verify");
+
+        let mut another_thread = request;
+        another_thread.thread_id = "thread-scheduled-2".to_owned();
+        assert_eq!(
+            verify_scheduled_run_execution_decision_with_keys(&another_thread, &thread, &keys, now)
+                .expect_err("execution bearer may not move to another prepared thread")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
     }
 
     #[test]

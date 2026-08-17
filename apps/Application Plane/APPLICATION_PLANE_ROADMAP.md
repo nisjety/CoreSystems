@@ -43,7 +43,13 @@ As of 2026-07-13, the plane is not MVP-ready. This roadmap starts from the evide
 ## Gate 5 — Notification and support automation
 
 1. Keep support-worker disabled until every workflow supplies an authoritative Control organization/user mapping. The source accepts only typed tenant-scoped users and ZDR; numeric Zammad owners, literal `broadcast`, and raw email-as-subscriber are rejected as identities.
-2. Add a transactional notification/feed outbox and attempt state machine with backoff, bounded retries, dead-letter visibility, provider callbacks/reconciliation, and safe finalization. Replace the process-local nonce cache with a bounded HA replay store before scaling replicas.
+2. Wire the source-complete notification/feed outbox and attempt state machine
+   (`notification_delivery_attempts`) behind an explicit rollout flag. It has
+   lease-fenced claims, `sent_unconfirmed`/`unknown` states, and a callback
+   verifier contract; finish provider-specific callbacks/reconciliation,
+   bounded retry/dead-letter policy, feed projection, and the Postgres-backed
+   expiry/replay worker before enabling replicas. Never persist ZDR payloads in
+   asynchronous attempts.
 3. Make readiness depend on required database/cache/bus/provider state. Add channel-specific preference/consent semantics, recipient/schema limits, tenant rate limits, templates, audit, and opt-out tests.
 4. Deploy in disabled mode first; verify no 2xx delivery claim. Enable Novu only with an authorized test subscriber and verify valid, duplicate, retry, suppression, failure, and recovery flows.
 

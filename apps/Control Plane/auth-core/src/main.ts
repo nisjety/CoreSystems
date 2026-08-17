@@ -18,6 +18,12 @@ import type { Server } from '@grpc/grpc-js';
 import type { PackageDefinition } from '@grpc/proto-loader';
 import type { Express, Request, Response } from 'express';
 
+/** Positive-integer env parse; falls back on absent, malformed, or <= 0 values. */
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 // Load environment variables
 dotenv.config();
 
@@ -197,6 +203,33 @@ async function bootstrap() {
   );
 
   await app.listen(process.env.PORT ?? 3011);
+
+  // Node closes an idle keep-alive socket after 5s by default. The gateway
+  // pools its connections to auth-core for 20s
+  // (`apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs`), so anything
+  // arriving 5-20s after the previous request reuses a socket this process has
+  // already closed, and the write fails as "error sending request".
+  //
+  // That was not a rare race: the SPA polls on 15s and 30s timers, landing
+  // squarely inside the window, and it produced 18 failed session validations
+  // in 45 minutes of ordinary use. Until the gateway learned to treat an
+  // unreachable auth-core as "unknown" rather than "signed out", every one of
+  // those logged the user out.
+  //
+  // The rule for Node behind any pooling proxy is keepAliveTimeout > the
+  // proxy's idle timeout, and headersTimeout > keepAliveTimeout so a slow
+  // request header cannot be cut off by the keep-alive clock.
+  const keepAliveTimeoutMs = parsePositiveInt(
+    process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS,
+    65_000,
+  );
+  const httpServer = app.getHttpServer();
+  httpServer.keepAliveTimeout = keepAliveTimeoutMs;
+  httpServer.headersTimeout = keepAliveTimeoutMs + 5_000;
+  console.log(
+    `⏱️  HTTP keep-alive: ${keepAliveTimeoutMs}ms (headers ${keepAliveTimeoutMs + 5_000}ms)`,
+  );
+
   console.log(`🚀 Auth service is running on: ${await app.getUrl()}`);
   console.log(
     `📚 Better Auth endpoints available at: ${await app.getUrl()}/api/auth/*`,

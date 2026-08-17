@@ -31,6 +31,8 @@ type Server struct {
 	removeMembershipProjection func(context.Context, string, string) error
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
+	runActionAuthority         RunActionAuthorityResolver
+	scheduledStepAuthority     ScheduledStepAuthorityResolver
 	port                       string
 	httpClient                 *http.Client
 	orgService                 string
@@ -55,6 +57,31 @@ func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClient
 // authority must not be represented as an owner-resource ACL.
 func (s *Server) SetSpaceRepository(repository *spaces.Repository) {
 	s.spaceRepo = repository
+}
+
+// RunActionAuthorityResolver fetches the content-free run binding from Session
+// Core using Control's own service credential. It intentionally exposes no
+// transcript, tool input, output, or target owner resource.
+type RunActionAuthorityResolver interface {
+	ResolveRunActionAuthority(context.Context, string, string) (spaces.RunActionAuthority, error)
+}
+
+// ScheduledStepAuthorityResolver proves the prepared scheduled run before
+// Control refreshes Space policy and signs an effect-time step decision.
+type ScheduledStepAuthorityResolver interface {
+	ResolveScheduledStepAuthority(context.Context, spaces.ScheduledStepIntent) (spaces.ScheduledStepAuthority, error)
+}
+
+// SetRunActionAuthorityResolver wires the only source Control accepts for a
+// Model-originated owner action. A nil resolver leaves the route fail-closed.
+func (s *Server) SetRunActionAuthorityResolver(resolver RunActionAuthorityResolver) {
+	s.runActionAuthority = resolver
+}
+
+// SetScheduledStepAuthorityResolver wires the narrow Session Core authority
+// read. A nil resolver leaves scheduled-step issuance fail-closed.
+func (s *Server) SetScheduledStepAuthorityResolver(resolver ScheduledStepAuthorityResolver) {
+	s.scheduledStepAuthority = resolver
 }
 
 // NewServer creates a new HTTP server. aclRepo backs the per-user authz facade
@@ -305,6 +332,14 @@ func (s *Server) setupRoutes() {
 				spaces.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
 				spaces.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
 				spaces.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
+				spaces.POST("/scheduled-step-decision", s.requireSpaceScheduledStepExecutor, s.issueScheduledStepDecision)
+				spaces.POST("/owner-grant-decision", s.requireVerifiedSpaceResolver, s.issueOwnerGrantDecision)
+				spaces.POST("/model-action-view", s.requireSpaceAgentActionViewer, s.issueModelActionView)
+				spaces.POST("/run-action-decision", s.requireSpaceAgentActionAuthorizer, s.issueRunActionDecision)
+				spaces.POST("/run-action-authority-check", s.requireCurrentRunActionAuthorityChecker, s.checkCurrentRunActionAuthority)
+				spaces.POST("/owner-effect-reservations/reserve", s.requireOwnerEffectReservationCoordinator, s.reserveOwnerEffect)
+				spaces.POST("/owner-effect-reservations/:reservation_id/commit", s.requireOwnerEffectReservationCoordinator, s.commitOwnerEffectReservation)
+				spaces.GET("/owner-effect-reservations/:reservation_id", s.requireOwnerEffectReservationCoordinator, s.getOwnerEffectReservation)
 			}
 
 			// Per-user authz facade — the single internal surface Data Plane

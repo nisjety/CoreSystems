@@ -156,6 +156,10 @@ type EffectPolicy struct {
 	ThreadCreateEntitled        bool   `json:"thread_create_entitled"`
 	RetrievalReadEntitled       bool   `json:"retrieval_read_entitled"`
 	ImportWriteEntitled         bool   `json:"import_write_entitled"`
+	// AgentActionEntitled is a separate, deny-by-default floor for a Model run
+	// to request a target-specific owner action. It does not authorize an
+	// owner-plane resource; that owner rechecks its resource at effect time.
+	AgentActionEntitled bool `json:"agent_action_entitled"`
 	// ScheduleFireEntitled is deliberately separate from thread creation. A
 	// recurring effect must be explicitly allowed at *each* fire; a schedule
 	// cannot inherit an old chat/creation entitlement.
@@ -229,6 +233,32 @@ type MemberGrant struct {
 type MembershipReplacement struct {
 	SpaceRef string        `json:"space_ref"`
 	Members  []MemberGrant `json:"members"`
+	// Which subject kinds this replacement speaks for. Convergence deactivates
+	// undeclared members ONLY within these kinds.
+	//
+	// Absent means "this is the entire roster", which is what a caller that owns
+	// every subject kind wants. But the organization-roster sync is not such a
+	// caller: org-core knows people and nothing else, so an unscoped replacement
+	// from it revokes every agent bound to the room as a side effect of a human
+	// roster converging. That is the same shape as the owner-demotion bug fixed
+	// above — a declarative sync from a source that only knows part of the
+	// truth, applied as if it knew all of it.
+	//
+	// Callers that manage one kind must say so: `["user"]`.
+	ManagedSubjectTypes []string `json:"managed_subject_types,omitempty"`
+}
+
+// managedSubjectTypeSet resolves the kinds this replacement may deactivate.
+// Nil means every kind.
+func (m MembershipReplacement) managedSubjectTypeSet() map[string]struct{} {
+	if len(m.ManagedSubjectTypes) == 0 {
+		return nil
+	}
+	managed := make(map[string]struct{}, len(m.ManagedSubjectTypes))
+	for _, subjectType := range m.ManagedSubjectTypes {
+		managed[strings.TrimSpace(subjectType)] = struct{}{}
+	}
+	return managed
 }
 
 const maxSpaceMembers = 5000
@@ -263,6 +293,26 @@ func (m MembershipReplacement) Validate() error {
 			return fmt.Errorf("duplicate Space member %s:%s", subjectType, subjectID)
 		}
 		seen[key] = struct{}{}
+	}
+	managed := m.managedSubjectTypeSet()
+	for _, subjectType := range m.ManagedSubjectTypes {
+		if trimmed := strings.TrimSpace(subjectType); trimmed != "user" && trimmed != "service" {
+			return fmt.Errorf("unknown managed subject type %q", subjectType)
+		}
+	}
+	if managed != nil {
+		// Declaring a member of a kind you do not manage would insert a row that
+		// the very same call refuses to converge, so the roster would drift by
+		// design. Rejecting it keeps the scope honest.
+		for _, member := range m.Members {
+			subjectType := strings.TrimSpace(member.SubjectType)
+			if _, ok := managed[subjectType]; !ok {
+				return fmt.Errorf(
+					"member subject type %q is outside the declared managed scope",
+					subjectType,
+				)
+			}
+		}
 	}
 	return nil
 }

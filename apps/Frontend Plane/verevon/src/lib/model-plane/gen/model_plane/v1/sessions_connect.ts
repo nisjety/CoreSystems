@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CompactNowRequest, CompactNowResponse, CompleteStepRequest, CompleteStepResponse, CreateThreadRequest, CreateThreadResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListThreadsRequest, ListThreadsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, SaveCheckpointRequest, SaveCheckpointResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -47,6 +47,19 @@ export const SessionCore = {
     startRun: {
       name: "StartRun",
       I: StartRunRequest,
+      O: StartRunResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Start one prepared, deterministic service-owned scheduled run. This is
+     * intentionally distinct from StartRun: only orchestrator-core may use a
+     * thread that Capability Core prepared for a freshly authorized cron fire.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.StartScheduledRun
+     */
+    startScheduledRun: {
+      name: "StartScheduledRun",
+      I: StartScheduledRunRequest,
       O: StartRunResponse,
       kind: MethodKind.Unary,
     },
@@ -306,6 +319,33 @@ export const SessionCore = {
       name: "SetRunMode",
       I: SetRunModeRequest,
       O: SetRunModeResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Claim one service-owned scheduled step before Execution Core dispatches
+     * it. The request is content-free and must match the deterministic run
+     * bindings persisted by StartScheduledRun. A duplicate claim returns the
+     * original receipt and never opens a second effect attempt.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.ClaimScheduledStep
+     */
+    claimScheduledStep: {
+      name: "ClaimScheduledStep",
+      I: ClaimScheduledStepRequest,
+      O: ClaimScheduledStepResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Record the metadata-only outcome for a previously claimed scheduled step.
+     * `unknown_outcome` is explicit: a lost transport response is not converted
+     * into success or an immediate blind retry.
+     *
+     * @generated from rpc model_plane.v1.SessionCore.RecordScheduledStepReceipt
+     */
+    recordScheduledStepReceipt: {
+      name: "RecordScheduledStepReceipt",
+      I: RecordScheduledStepReceiptRequest,
+      O: RecordScheduledStepReceiptResponse,
       kind: MethodKind.Unary,
     },
   }

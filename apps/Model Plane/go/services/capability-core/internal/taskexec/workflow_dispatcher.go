@@ -2,6 +2,7 @@ package taskexec
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,11 @@ var WorkflowStartScopes = []string{
 // exists — calls CompleteRunActivity, the only production emitter of
 // RUN_COMPLETED.
 const DefaultWorkflowType = "InteractiveRunSupervision"
+
+// ScheduledRunWorkflowType is the only Temporal workflow allowed to receive a
+// prepared service-owned Space thread. Generic workflows stay unable to attach
+// one by adding fields to their input.
+const ScheduledRunWorkflowType = "ScheduledRunSupervision"
 
 // dispatchActor identifies this component in task_events.actor.
 const dispatchActor = "capability-core/task-executor"
@@ -184,6 +190,17 @@ type taskTemplate struct {
 	Policy        string          `json:"policy"`
 }
 
+type preparedScheduledRun struct {
+	threadID       string
+	spaceRef       string
+	subjectID      string
+	scheduleID     string
+	fireKey        string
+	templateDigest string
+	templateJSON   string
+	idempotencyKey string
+}
+
 // Dispatch starts the durable run for one claimed task.
 //
 // A returned error is the Executor's signal to move the task to `failed` with a
@@ -195,7 +212,7 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 	if err != nil {
 		return err
 	}
-	preparedThread, err := d.reauthorizeScheduleFire(ctx, task, detail)
+	preparedRun, err := d.reauthorizeScheduleFire(ctx, task, detail)
 	if err != nil {
 		return err
 	}
@@ -208,12 +225,14 @@ func (d *WorkflowDispatcher) Dispatch(ctx context.Context, task TaskRef) error {
 		// fail — another actor owns its state now.
 		return nil
 	}
-	if preparedThread != "" {
-		fields := req.GetInput().GetFields()
-		fields["thread_id"] = structpb.NewStringValue(preparedThread)
-		fields["schedule_fire_intent"] = structpb.NewStructValue(mustStruct(map[string]any{
-			"schedule_id": detail.scheduleID, "task_id": task.ID,
-		}))
+	if preparedRun != nil {
+		if req.GetWorkflowType() != DefaultWorkflowType {
+			return fmt.Errorf("taskexec: scoped scheduled run %s requires %s, got %s", task.ID, DefaultWorkflowType, req.GetWorkflowType())
+		}
+		req.WorkflowType = ScheduledRunWorkflowType
+		if err := attachScheduledRunInput(req, *preparedRun, task.ID); err != nil {
+			return err
+		}
 	}
 	workflowType := req.GetWorkflowType()
 
@@ -305,35 +324,47 @@ func (d *WorkflowDispatcher) loadTask(ctx context.Context, taskID string) (taskD
 	return detail, nil
 }
 
-func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task TaskRef, detail taskDetail) (string, error) {
+func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task TaskRef, detail taskDetail) (*preparedScheduledRun, error) {
 	var envelope struct {
 		ScheduleFireIntent *cron.FireIntent `json:"schedule_fire_intent"`
 	}
 	if len(detail.config) > 0 {
 		if err := json.Unmarshal(detail.config, &envelope); err != nil {
-			return "", fmt.Errorf("taskexec: task %s config_json is not a valid template: %w", task.ID, err)
+			return nil, fmt.Errorf("taskexec: task %s config_json is not a valid template: %w", task.ID, err)
 		}
 	}
 	if envelope.ScheduleFireIntent == nil {
-		return "", nil
+		return nil, nil
 	}
 	if d.fireAuthorizer == nil {
-		return "", fmt.Errorf("taskexec: cron task %s cannot start without fresh Control fire authorization", task.ID)
+		return nil, fmt.Errorf("taskexec: cron task %s cannot start without fresh Control fire authorization", task.ID)
 	}
 	intent := *envelope.ScheduleFireIntent
 	if intent.OrgID != task.OrgID || intent.ScheduleID != detail.scheduleID {
-		return "", fmt.Errorf("taskexec: cron task %s fire intent does not match durable task/schedule ownership", task.ID)
+		return nil, fmt.Errorf("taskexec: cron task %s fire intent does not match durable task/schedule ownership", task.ID)
+	}
+	// The fire decision commits to the exact canonical template that created
+	// this task. Reconstruct it from the durable task record (dropping only the
+	// scheduler-injected, non-secret fire intent) before we call Control again.
+	// Without this check, a mutated config could retain an old approved digest
+	// while dispatchPlan derives a different goal or policy for Temporal.
+	canonicalTemplate, actualTemplateDigest, err := canonicalScheduledTemplate(detail.config)
+	if err != nil {
+		return nil, fmt.Errorf("taskexec: cron task %s has no canonical scheduled template: %w", task.ID, err)
+	}
+	if actualTemplateDigest != intent.TemplateDigest {
+		return nil, fmt.Errorf("taskexec: cron task %s template digest does not match its fire intent", task.ID)
 	}
 	if err := d.fireAuthorizer.AuthorizeFire(ctx, intent); err != nil {
-		return "", fmt.Errorf("taskexec: cron task %s fresh Control fire authorization failed: %w", task.ID, err)
+		return nil, fmt.Errorf("taskexec: cron task %s fresh Control fire authorization failed: %w", task.ID, err)
 	}
 	runAuthorizer, ok := d.fireAuthorizer.(scheduledRunAuthorizer)
 	if !ok || d.scheduledRunSession == nil {
-		return "", fmt.Errorf("taskexec: cron task %s cannot prepare a scoped scheduled run", task.ID)
+		return nil, fmt.Errorf("taskexec: cron task %s cannot prepare a scoped scheduled run", task.ID)
 	}
 	prep, err := runAuthorizer.AuthorizeScheduledRun(ctx, intent, task.ID)
 	if err != nil {
-		return "", fmt.Errorf("taskexec: cron task %s scheduled-run authorization failed: %w", task.ID, err)
+		return nil, fmt.Errorf("taskexec: cron task %s scheduled-run authorization failed: %w", task.ID, err)
 	}
 	decision := prep.Decision
 	response, err := d.scheduledRunSession.PrepareScheduledRunThread(ctx, &mpv1.PrepareScheduledRunThreadRequest{
@@ -347,17 +378,91 @@ func (d *WorkflowDispatcher) reauthorizeScheduleFire(ctx context.Context, task T
 		PayloadDigest: decision.PayloadDigest, ControlDecisionToken: prep.Token,
 	})
 	if err != nil {
-		return "", fmt.Errorf("taskexec: prepare scheduled run thread: %w", err)
+		return nil, fmt.Errorf("taskexec: prepare scheduled run thread: %w", err)
 	}
 	if response.GetRunId() != task.ID || response.GetOwnerId() != "service:orchestrator-core" || response.GetThreadId() == "" {
-		return "", fmt.Errorf("taskexec: Session Core returned a mismatched scheduled-run preparation")
+		return nil, fmt.Errorf("taskexec: Session Core returned a mismatched scheduled-run preparation")
 	}
-	return response.GetThreadId(), nil
+	return &preparedScheduledRun{
+		threadID:       response.GetThreadId(),
+		spaceRef:       intent.SpaceRef,
+		subjectID:      intent.SubjectID,
+		scheduleID:     intent.ScheduleID,
+		fireKey:        intent.FireKey,
+		templateDigest: intent.TemplateDigest,
+		templateJSON:   string(canonicalTemplate),
+		idempotencyKey: intent.IdempotencyKey,
+	}, nil
 }
 
-func mustStruct(value map[string]any) *structpb.Struct {
-	result, _ := structpb.NewStruct(value)
-	return result
+// canonicalScheduledTemplate returns the immutable template and commitment
+// Capability Core verified when it accepted the original schedule.
+// taskConfigJSON adds the fire intent after persisting that template; that
+// record is authority context, not executable work, and must be excluded
+// before hashing or forwarding it to the scheduled-only workflow.
+func canonicalScheduledTemplate(config json.RawMessage) ([]byte, string, error) {
+	var fields map[string]json.RawMessage
+	if len(config) == 0 || json.Unmarshal(config, &fields) != nil || fields == nil {
+		return nil, "", errors.New("task config is not a template object")
+	}
+	delete(fields, "schedule_fire_intent")
+	canonical, err := json.Marshal(fields)
+	if err != nil {
+		return nil, "", fmt.Errorf("canonicalize task template: %w", err)
+	}
+	return canonical, fmt.Sprintf("sha256:%x", sha256.Sum256(canonical)), nil
+}
+
+// attachScheduledRunInput forwards only the non-secret result of a successful
+// scheduled-run preparation into Temporal. The signed Control decision is
+// deliberately absent from both arguments and output: Capability Core consumes
+// it on the direct Session Core RPC, so it cannot reach workflow input/history,
+// task events, or a downstream provider through this helper.
+func attachScheduledRunInput(req *mpv1.StartWorkflowRequest, prepared preparedScheduledRun, taskID string) error {
+	if req == nil || req.Input == nil {
+		return errors.New("taskexec: scheduled workflow request input is required")
+	}
+	threadID := strings.TrimSpace(prepared.threadID)
+	spaceRef := strings.TrimSpace(prepared.spaceRef)
+	subjectID := strings.TrimSpace(prepared.subjectID)
+	scheduleID := strings.TrimSpace(prepared.scheduleID)
+	fireKey := strings.TrimSpace(prepared.fireKey)
+	templateDigest := strings.TrimSpace(prepared.templateDigest)
+	templateJSON := strings.TrimSpace(prepared.templateJSON)
+	idempotencyKey := strings.TrimSpace(prepared.idempotencyKey)
+	taskID = strings.TrimSpace(taskID)
+	if threadID == "" || spaceRef == "" || subjectID == "" || scheduleID == "" || fireKey == "" ||
+		templateDigest == "" || templateJSON == "" || idempotencyKey == "" || taskID == "" {
+		return errors.New("taskexec: scheduled workflow preparation bindings are required")
+	}
+	if req.GetRunId() != taskID {
+		return fmt.Errorf("taskexec: scheduled workflow task %s does not match run %s", taskID, req.GetRunId())
+	}
+	if req.Input.Fields == nil {
+		req.Input.Fields = make(map[string]*structpb.Value)
+	}
+	// A task template is data, not an authority envelope. Drop every
+	// Control-derived field that could otherwise survive the conversion into
+	// Temporal history. The dedicated workflow registry also rejects unknown
+	// fields, making the non-secret facts below the complete scheduled-run
+	// binding. Orchestrator uses them only to request a fresh direct-hop
+	// execution decision immediately before Session Core starts the run.
+	for _, field := range []string{
+		"schedule_fire_intent", "control_decision_token", "decision", "token",
+		"payload_digest", "authority_revision", "recipient_audience_hash",
+		"resource_authorization_ref", "goal", "policy",
+	} {
+		delete(req.Input.Fields, field)
+	}
+	req.Input.Fields["thread_id"] = structpb.NewStringValue(threadID)
+	req.Input.Fields["space_ref"] = structpb.NewStringValue(spaceRef)
+	req.Input.Fields["subject_id"] = structpb.NewStringValue(subjectID)
+	req.Input.Fields["schedule_id"] = structpb.NewStringValue(scheduleID)
+	req.Input.Fields["fire_key"] = structpb.NewStringValue(fireKey)
+	req.Input.Fields["template_digest"] = structpb.NewStringValue(templateDigest)
+	req.Input.Fields["task_template_json"] = structpb.NewStringValue(templateJSON)
+	req.Input.Fields["idempotency_key"] = structpb.NewStringValue(idempotencyKey)
+	return nil
 }
 
 // dispatchPlan turns a claimed row into the StartWorkflow request to send, or

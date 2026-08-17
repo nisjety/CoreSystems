@@ -23,6 +23,7 @@ type CapabilitiesHandler struct {
 	store             *registry.CapabilitiesStore
 	availabilityStore availabilityStoreBackend
 	scopes            *registry.ScopeStore // optional: enables scope grant/revoke/resolve
+	modelActionViews  *ControlModelActionViewVerifier
 }
 
 // NewCapabilitiesHandler constructs the handler.
@@ -38,10 +39,20 @@ func (h *CapabilitiesHandler) WithScopeStore(s *registry.ScopeStore) *Capabiliti
 	return h
 }
 
+// WithModelActionViewVerifier enables the narrow run-bound model-action view.
+// An absent verifier deliberately leaves the endpoint unavailable instead of
+// accepting an unsigned Control assertion in development.
+func (h *CapabilitiesHandler) WithModelActionViewVerifier(verifier *ControlModelActionViewVerifier) *CapabilitiesHandler {
+	h.modelActionViews = verifier
+	return h
+}
+
 // Register mounts routes on the provided mux under /api/v1/capabilities.
 func (h *CapabilitiesHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities", h.list)
 	mux.HandleFunc("/api/v1/capabilities/availability", h.attestAvailability)
+	mux.HandleFunc("/api/v1/capabilities/owner-actions/health", h.attestOwnerActionHealth)
+	mux.HandleFunc(modelActionViewPath, h.resolveModelActionView)
 	mux.HandleFunc("/api/v1/capabilities/ranked", h.ranked)
 	mux.HandleFunc("/api/v1/capabilities/scopes", h.listScopes)
 	mux.HandleFunc("/api/v1/capabilities/scopes/grant", h.grantScope)

@@ -69,29 +69,31 @@ type fakeRepository struct {
 	emailDeliveryFailureErr        error
 	supportRecurrenceCorpus        []SupportRecurrenceCorpusEntry
 	ticketOperations               map[string]*TicketOperationReceipt
+	agentTicketActionGrants        map[string]*AgentTicketActionGrant
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
-		details:             make(map[string]*ConversationDetail),
-		stored:              make(map[string]*StoredEventResult),
-		threadRefs:          make(map[string]*ChannelThreadRef),
-		tickets:             make(map[string]*Ticket),
-		teams:               make(map[string]*TicketTeam),
-		macros:              make(map[string]*TicketMacro),
-		checklists:          make(map[string]*TicketChecklist),
-		incidents:           make(map[string]*Incident),
-		problems:            make(map[string]*Problem),
-		incidentTicketLinks: make(map[string][]IncidentTicketLink),
-		outboundIntents:     make(map[string]*OutboundIntent),
-		outboundMessages:    make(map[string]*Message),
-		draftLeases:         make(map[string]*DraftLease),
-		drafts:              make(map[string]*ConversationDraft),
-		follows:             make(map[string]*ConversationFollow),
-		csatPreferences:     make(map[string]*CSATPreference),
-		csatOutcomes:        make(map[string]*TicketCSATOutcome),
-		sideConversations:   make(map[string]*TicketSideConversation),
-		ticketOperations:    make(map[string]*TicketOperationReceipt),
+		details:                 make(map[string]*ConversationDetail),
+		stored:                  make(map[string]*StoredEventResult),
+		threadRefs:              make(map[string]*ChannelThreadRef),
+		tickets:                 make(map[string]*Ticket),
+		teams:                   make(map[string]*TicketTeam),
+		macros:                  make(map[string]*TicketMacro),
+		checklists:              make(map[string]*TicketChecklist),
+		incidents:               make(map[string]*Incident),
+		problems:                make(map[string]*Problem),
+		incidentTicketLinks:     make(map[string][]IncidentTicketLink),
+		outboundIntents:         make(map[string]*OutboundIntent),
+		outboundMessages:        make(map[string]*Message),
+		draftLeases:             make(map[string]*DraftLease),
+		drafts:                  make(map[string]*ConversationDraft),
+		follows:                 make(map[string]*ConversationFollow),
+		csatPreferences:         make(map[string]*CSATPreference),
+		csatOutcomes:            make(map[string]*TicketCSATOutcome),
+		sideConversations:       make(map[string]*TicketSideConversation),
+		ticketOperations:        make(map[string]*TicketOperationReceipt),
+		agentTicketActionGrants: make(map[string]*AgentTicketActionGrant),
 	}
 }
 
@@ -858,6 +860,26 @@ func (f *fakeRepository) CreateTicketOperation(ctx context.Context, input Create
 	return receipt, nil
 }
 
+func (f *fakeRepository) ResolveAgentTicketActionGrant(_ context.Context, input CreateTicketInput) (string, error) {
+	if input.AgentActionAuthorization == nil {
+		return "", ErrForbidden
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, grant := range f.agentTicketActionGrants {
+		if grant.OrgID == input.OrgID && grant.ConversationID == input.ConversationID && grant.ActionID == "tickets.create" &&
+			grant.SpaceRef == input.AgentActionAuthorization.SpaceRef && grant.SubjectID == input.AgentActionAuthorization.SubjectID &&
+			grant.RecipientAudienceRef == input.AgentActionAuthorization.RecipientAudienceRef &&
+			grant.RecipientAudienceHash == input.AgentActionAuthorization.RecipientAudienceHash &&
+			grant.RecipientAudienceRevision == input.AgentActionAuthorization.RecipientAudienceRevision &&
+			grant.PrivacyPolicyRef == input.AgentActionAuthorization.PrivacyPolicyRef && grant.AuthorityRevision == input.AgentActionAuthorization.AuthorityRevision &&
+			grant.RevokedAt == nil {
+			return grant.ID, nil
+		}
+	}
+	return "", ErrForbidden
+}
+
 func (f *fakeRepository) GetTicketOperation(_ context.Context, orgID, _ string, idempotencyKey string) (*TicketOperationReceipt, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -868,6 +890,45 @@ func (f *fakeRepository) GetTicketOperation(_ context.Context, orgID, _ string, 
 	copy := *receipt
 	copy.Replayed = true
 	return &copy, nil
+}
+
+func (f *fakeRepository) CreateAgentTicketActionGrant(_ context.Context, input CreateAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := input.OrgID + ":create:" + input.CreatedByUserID + ":" + input.IdempotencyKey
+	if existing := f.agentTicketActionGrants[key]; existing != nil {
+		copy := *existing
+		return &AgentTicketActionGrantReceipt{Grant: &copy, AuditEventID: "audit_agent_grant_1", Status: "created", Replayed: true}, nil
+	}
+	grant := &AgentTicketActionGrant{
+		ID: "agent_grant_" + input.IdempotencyKey, OrgID: input.OrgID, ConversationID: input.ConversationID,
+		ActionID: input.ActionID, SpaceRef: input.SpaceRef, SubjectID: input.SubjectID,
+		RecipientAudienceRef: input.RecipientAudienceRef, RecipientAudienceHash: input.RecipientAudienceHash,
+		RecipientAudienceRevision: input.RecipientAudienceRevision, PrivacyPolicyRef: input.PrivacyPolicyRef,
+		AuthorityRevision: input.AuthorityRevision, CreatedByUserID: input.CreatedByUserID, CreatedAt: time.Now().UTC(),
+	}
+	f.agentTicketActionGrants[key] = grant
+	copy := *grant
+	return &AgentTicketActionGrantReceipt{Grant: &copy, AuditEventID: "audit_agent_grant_1", Status: "created"}, nil
+}
+
+func (f *fakeRepository) RevokeAgentTicketActionGrant(_ context.Context, input RevokeAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, grant := range f.agentTicketActionGrants {
+		if grant.ID != input.GrantID || grant.OrgID != input.OrgID || grant.ConversationID != input.ConversationID {
+			continue
+		}
+		if grant.SpaceRef != input.SpaceRef || grant.SubjectID != input.SubjectID {
+			return nil, ErrForbidden
+		}
+		now := time.Now().UTC()
+		grant.RevokedAt = &now
+		grant.RevokedByUserID = input.RevokedByUserID
+		copy := *grant
+		return &AgentTicketActionGrantReceipt{Grant: &copy, AuditEventID: "audit_agent_grant_revoke_1", Status: "revoked"}, nil
+	}
+	return nil, ErrNotFound
 }
 
 func (f *fakeRepository) UpdateTicket(_ context.Context, input UpdateTicketInput) (*Ticket, error) {

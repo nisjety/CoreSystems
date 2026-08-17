@@ -1804,6 +1804,243 @@ INSERT INTO conversation_tickets (
 	return r.GetTicket(ctx, input.OrgID, ticketID)
 }
 
+// BeginAgentTicketOperationIntent creates the owner-side content-free intent
+// before a Control reservation is attempted. The advisory lock makes retries
+// for one tenant/idempotency tuple serialize, while the immutable commitment
+// columns prevent a caller from rebinding a pending effect to a different
+// actor, payload, grant, or Control decision.
+func (r *PGRepository) BeginAgentTicketOperationIntent(ctx context.Context, input TicketOperationIntentInput) (*TicketOperationReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	if err := validateTicketOperationIntentInput(input); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+	var existing struct {
+		OperationID, ActionID, ActorUserID, ConversationID, RequestSHA256, Status    string
+		ActionSchemaHash, PayloadDigest, DecisionRef, GrantRef, ControlReservationID string
+	}
+	err = tx.QueryRow(ctx, `
+SELECT operation_id, action_id, actor_user_id, conversation_id, request_sha256, status,
+       action_schema_hash, payload_digest, decision_ref, grant_ref,
+       COALESCE(control_reservation_id, '')
+FROM conversation_ticket_operations
+WHERE org_id = $1 AND idempotency_key = $2
+FOR UPDATE`, input.OrgID, input.IdempotencyKey).Scan(
+		&existing.OperationID, &existing.ActionID, &existing.ActorUserID, &existing.ConversationID,
+		&existing.RequestSHA256, &existing.Status, &existing.ActionSchemaHash, &existing.PayloadDigest,
+		&existing.DecisionRef, &existing.GrantRef, &existing.ControlReservationID,
+	)
+	if err == nil {
+		if existing.OperationID != input.OperationID || existing.ActionID != input.ActionID ||
+			existing.ActorUserID != input.ActorUserID || existing.ConversationID != input.ConversationID ||
+			existing.RequestSHA256 != input.RequestSHA256 || existing.ActionSchemaHash != input.ActionSchemaHash ||
+			existing.PayloadDigest != input.PayloadDigest || existing.DecisionRef != input.DecisionRef ||
+			existing.GrantRef != input.GrantRef {
+			return nil, ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		if existing.Status == "completed" {
+			return r.GetTicketOperation(ctx, input.OrgID, input.ActorUserID, input.IdempotencyKey)
+		}
+		return &TicketOperationReceipt{
+			OperationID:          existing.OperationID,
+			Status:               existing.Status,
+			ControlReservationID: existing.ControlReservationID,
+			Replayed:             true,
+		}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+	_, err = tx.Exec(ctx, `
+INSERT INTO conversation_ticket_operations (
+ operation_id, org_id, idempotency_key, action_id, actor_user_id, conversation_id,
+ request_sha256, ticket_id, audit_event_id, status, action_schema_hash, payload_digest,
+ decision_ref, grant_ref, control_reservation_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL, 'pending_control_commit', $8, $9, $10, $11, '')`,
+		input.OperationID, input.OrgID, input.IdempotencyKey, input.ActionID, input.ActorUserID,
+		input.ConversationID, input.RequestSHA256, input.ActionSchemaHash, input.PayloadDigest,
+		input.DecisionRef, input.GrantRef)
+	if err != nil {
+		return nil, normalizeOperationalPGError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &TicketOperationReceipt{OperationID: input.OperationID, Status: "pending_control_commit"}, nil
+}
+
+// BindAgentTicketOperationReservation records the committed Control receipt
+// before any ticket content is written. It is safe to replay after a worker
+// crash and rejects a reservation that does not match the original intent.
+func (r *PGRepository) BindAgentTicketOperationReservation(ctx context.Context, input TicketOperationReservationInput) (*TicketOperationReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	if err := validateTicketOperationReservationInput(input); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+	var status, reservationID string
+	err = tx.QueryRow(ctx, `
+UPDATE conversation_ticket_operations
+SET status = 'reserved', control_reservation_id = $1, updated_at = NOW()
+WHERE operation_id = $2 AND org_id = $3 AND idempotency_key = $4
+  AND action_id = $5 AND actor_user_id = $6 AND conversation_id = $7
+  AND request_sha256 = $8 AND action_schema_hash = $9 AND payload_digest = $10
+  AND decision_ref = $11 AND grant_ref = $12
+  AND status = 'pending_control_commit' AND COALESCE(control_reservation_id, '') = ''
+RETURNING status, control_reservation_id`, input.ControlReservationID, input.OperationID, input.OrgID,
+		input.IdempotencyKey, input.ActionID, input.ActorUserID, input.ConversationID, input.RequestSHA256,
+		input.ActionSchemaHash, input.PayloadDigest, input.DecisionRef, input.GrantRef).Scan(&status, &reservationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `
+SELECT status, COALESCE(control_reservation_id, '')
+FROM conversation_ticket_operations
+WHERE operation_id = $1 AND org_id = $2 AND idempotency_key = $3
+FOR UPDATE`, input.OperationID, input.OrgID, input.IdempotencyKey).Scan(&status, &reservationID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrNotFound
+			}
+			return nil, err
+		}
+		if status != "reserved" || reservationID != input.ControlReservationID {
+			if status == "completed" {
+				if err := tx.Commit(ctx); err != nil {
+					return nil, err
+				}
+				return r.GetTicketOperation(ctx, input.OrgID, input.ActorUserID, input.IdempotencyKey)
+			}
+			return nil, ErrConflict
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &TicketOperationReceipt{OperationID: input.OperationID, Status: status, ControlReservationID: reservationID}, nil
+}
+
+func (r *PGRepository) MarkAgentTicketOperationUnknown(ctx context.Context, input TicketOperationOutcomeInput) error {
+	return r.markAgentTicketOperationOutcome(ctx, input, "unknown")
+}
+
+func (r *PGRepository) MarkAgentTicketOperationCancelled(ctx context.Context, input TicketOperationOutcomeInput) error {
+	return r.markAgentTicketOperationOutcome(ctx, input, "cancelled")
+}
+
+func (r *PGRepository) markAgentTicketOperationOutcome(ctx context.Context, input TicketOperationOutcomeInput, status string) error {
+	if err := r.ensureConfigured(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.OrgID) == "" || strings.TrimSpace(input.OperationID) == "" ||
+		strings.TrimSpace(input.IdempotencyKey) == "" || strings.TrimSpace(input.ControlReservationID) == "" ||
+		(status != "unknown" && status != "cancelled") {
+		return fmt.Errorf("%w: invalid ticket operation outcome", ErrInvalidInput)
+	}
+	if len(strings.TrimSpace(input.TerminalReason)) > 200 {
+		return fmt.Errorf("%w: ticket operation terminal reason is too long", ErrInvalidInput)
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
+		return err
+	}
+	allowedStatuses := "'reserved', 'unknown'"
+	if status == "cancelled" {
+		// An already-unknown outcome is terminally reconciliation-required;
+		// deterministic cancellation must never overwrite it.
+		allowedStatuses = "'reserved'"
+	}
+	var currentStatus, reservationID string
+	err = tx.QueryRow(ctx, `
+UPDATE conversation_ticket_operations
+SET status = $1, terminal_reason = $2, updated_at = NOW()
+WHERE operation_id = $3 AND org_id = $4 AND idempotency_key = $5
+	  AND control_reservation_id = $6 AND status IN (`+allowedStatuses+`)
+RETURNING status`, status, strings.TrimSpace(input.TerminalReason), input.OperationID, input.OrgID,
+		input.IdempotencyKey, input.ControlReservationID).Scan(&currentStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `
+SELECT status, COALESCE(control_reservation_id, '')
+FROM conversation_ticket_operations
+WHERE operation_id = $1 AND org_id = $2 AND idempotency_key = $3
+FOR UPDATE`, input.OperationID, input.OrgID, input.IdempotencyKey).Scan(&currentStatus, &reservationID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if currentStatus == status && reservationID == input.ControlReservationID {
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
+			return nil
+		}
+		if currentStatus == "completed" {
+			return ErrConflict
+		}
+		return ErrConflict
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func validateTicketOperationIntentInput(input TicketOperationIntentInput) error {
+	for name, value := range map[string]string{
+		"operation_id": input.OperationID, "org_id": input.OrgID, "idempotency_key": input.IdempotencyKey,
+		"action_id": input.ActionID, "actor_user_id": input.ActorUserID, "conversation_id": input.ConversationID,
+		"request_sha256": input.RequestSHA256, "action_schema_hash": input.ActionSchemaHash,
+		"payload_digest": input.PayloadDigest, "decision_ref": input.DecisionRef, "grant_ref": input.GrantRef,
+	} {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 512 {
+			return fmt.Errorf("%w: ticket operation intent %s is invalid", ErrInvalidInput, name)
+		}
+	}
+	if input.ActionID != "tickets.create" {
+		return fmt.Errorf("%w: unsupported ticket operation action", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validateTicketOperationReservationInput(input TicketOperationReservationInput) error {
+	if err := validateTicketOperationIntentInput(input.TicketOperationIntentInput); err != nil {
+		return err
+	}
+	if strings.TrimSpace(input.ControlReservationID) == "" || len(strings.TrimSpace(input.ControlReservationID)) > 512 {
+		return fmt.Errorf("%w: control reservation id is invalid", ErrInvalidInput)
+	}
+	return nil
+}
+
 // CreateTicketOperation performs the ticket, immutable receipt, audit record,
 // and outbox write in one owner-plane transaction. A replay may return only
 // the exact same actor/action/conversation/request digest; reusing a key for a
@@ -1823,38 +2060,78 @@ func (r *PGRepository) CreateTicketOperation(ctx context.Context, input CreateTi
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
 		return nil, err
 	}
+	ownerGrantID, err := r.authorizeAgentTicketOperation(ctx, tx, input)
+	if err != nil {
+		return nil, err
+	}
 
 	var existing struct {
 		OperationID, ActionID, ActorUserID, ConversationID, RequestSHA256, TicketID, AuditEventID, Status string
+		ActionSchemaHash, PayloadDigest, DecisionRef, GrantRef, ControlReservationID                      string
 	}
+	hasReservedIntent := false
 	err = tx.QueryRow(ctx, `
-SELECT operation_id, action_id, actor_user_id, conversation_id, request_sha256, ticket_id, audit_event_id, status
+SELECT operation_id, action_id, actor_user_id, conversation_id, request_sha256,
+       COALESCE(ticket_id, ''), COALESCE(audit_event_id, ''), status,
+       action_schema_hash, payload_digest, decision_ref, grant_ref,
+       COALESCE(control_reservation_id, '')
 FROM conversation_ticket_operations
 WHERE org_id = $1 AND idempotency_key = $2
 FOR UPDATE`, input.OrgID, input.IdempotencyKey).Scan(
 		&existing.OperationID, &existing.ActionID, &existing.ActorUserID, &existing.ConversationID,
 		&existing.RequestSHA256, &existing.TicketID, &existing.AuditEventID, &existing.Status,
+		&existing.ActionSchemaHash, &existing.PayloadDigest, &existing.DecisionRef, &existing.GrantRef,
+		&existing.ControlReservationID,
 	)
 	if err == nil {
 		if existing.OperationID != input.OperationID || existing.ActionID != input.ActionID ||
 			existing.ActorUserID != input.ActorUserID || existing.ConversationID != input.ConversationID ||
-			existing.RequestSHA256 != input.RequestSHA256 || existing.Status != "completed" {
-			return nil, ErrConflict
+			existing.RequestSHA256 != input.RequestSHA256 {
+			return nil, fmt.Errorf("%w: existing ticket operation identity mismatch", ErrConflict)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, err
+		if input.AgentActionAuthorization != nil {
+			actionSchemaHash, payloadDigest, decisionRef, grantRef, reservationID := agentTicketOperationEvidence(input)
+			if existing.ActionSchemaHash != actionSchemaHash || existing.PayloadDigest != payloadDigest ||
+				existing.DecisionRef != decisionRef || existing.GrantRef != grantRef ||
+				existing.ControlReservationID != reservationID {
+				return nil, fmt.Errorf("%w: existing ticket operation commitment mismatch", ErrConflict)
+			}
 		}
-		ticket, err := r.GetTicket(ctx, input.OrgID, existing.TicketID)
-		if err != nil {
-			return nil, err
+		if input.AgentActionAuthorization != nil {
+			switch existing.Status {
+			case "reserved":
+				hasReservedIntent = true
+			case "completed":
+				// Replayed agent effects return the original receipt without
+				// creating a second ticket.
+			default:
+				return nil, fmt.Errorf("%w: ticket operation status %s cannot be finalized", ErrConflict, existing.Status)
+			}
+		} else if existing.Status != "completed" {
+			return nil, fmt.Errorf("%w: existing ticket operation status %s is not completed", ErrConflict, existing.Status)
 		}
-		return &TicketOperationReceipt{
-			OperationID: existing.OperationID, AuditEventID: existing.AuditEventID,
-			Status: existing.Status, Ticket: ticket, Replayed: true,
-		}, nil
+		if existing.Status == "completed" {
+			if err := tx.Commit(ctx); err != nil {
+				return nil, err
+			}
+			ticket, err := r.GetTicket(ctx, input.OrgID, existing.TicketID)
+			if err != nil {
+				return nil, err
+			}
+			return &TicketOperationReceipt{
+				OperationID: existing.OperationID, AuditEventID: existing.AuditEventID,
+				Status: existing.Status, Ticket: ticket, Replayed: true,
+			}, nil
+		}
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
+	}
+	if errors.Is(err, pgx.ErrNoRows) && input.AgentActionAuthorization != nil {
+		// The private route must have created the owner intent before Control
+		// reservation. Never fall back to an insert-only effect if that row is
+		// missing.
+		return nil, fmt.Errorf("%w: agent ticket operation intent row is missing", ErrConflict)
 	}
 
 	ticketID := newID("ticket")
@@ -1879,14 +2156,20 @@ INSERT INTO conversation_tickets (
 		return nil, normalizeOperationalPGError(err)
 	}
 	auditEventID := newID("audit")
+	auditPayload := map[string]any{
+		"ticket_id": ticketID, "ticket_key": ticketKey, "status": input.Status,
+		"work_type": input.WorkType, "operation_id": input.OperationID,
+		"request_sha256": input.RequestSHA256,
+	}
+	if input.AgentActionAuthorization != nil {
+		auditPayload["control_decision_ref"] = input.AgentActionAuthorization.DecisionRef
+		auditPayload["owner_resource_grant_id"] = ownerGrantID
+		auditPayload["control_owner_effect_reservation_id"] = input.AgentActionAuthorization.ControlReservationID
+	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO conversation_audit_events (id, org_id, conversation_id, actor_user_id, action, payload)
 VALUES ($1, $2, $3, $4, 'ticket.created', $5::jsonb)`, auditEventID, input.OrgID,
-		input.ConversationID, input.ActorUserID, mustJSON(map[string]any{
-			"ticket_id": ticketID, "ticket_key": ticketKey, "status": input.Status,
-			"work_type": input.WorkType, "operation_id": input.OperationID,
-			"request_sha256": input.RequestSHA256,
-		})); err != nil {
+		input.ConversationID, input.ActorUserID, mustJSON(auditPayload)); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -1898,13 +2181,30 @@ VALUES ($1, $2, $3, 'ticket.created', $4::jsonb)`, newID("evt"), input.OrgID, in
 		})); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `
+	actionSchemaHash, payloadDigest, decisionRef, grantRef, controlReservationID := agentTicketOperationEvidence(input)
+	if hasReservedIntent {
+		var updated int64
+		if err := tx.QueryRow(ctx, `
+UPDATE conversation_ticket_operations
+SET ticket_id = $1, audit_event_id = $2, status = 'completed', terminal_reason = '', updated_at = NOW()
+WHERE operation_id = $3 AND org_id = $4 AND idempotency_key = $5
+  AND status = 'reserved' AND control_reservation_id = $6
+RETURNING 1`, ticketID, auditEventID, input.OperationID, input.OrgID, input.IdempotencyKey,
+			controlReservationID).Scan(&updated); err != nil || updated != 1 {
+			if err == nil {
+				err = ErrConflict
+			}
+			return nil, err
+		}
+	} else if _, err := tx.Exec(ctx, `
 INSERT INTO conversation_ticket_operations (
  operation_id, org_id, idempotency_key, action_id, actor_user_id, conversation_id,
- request_sha256, ticket_id, audit_event_id, status
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'completed')`,
+ request_sha256, ticket_id, audit_event_id, status,
+ action_schema_hash, payload_digest, decision_ref, grant_ref, control_reservation_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'completed', $10, $11, $12, $13, $14)`,
 		input.OperationID, input.OrgID, input.IdempotencyKey, input.ActionID, input.ActorUserID,
-		input.ConversationID, input.RequestSHA256, ticketID, auditEventID); err != nil {
+		input.ConversationID, input.RequestSHA256, ticketID, auditEventID,
+		actionSchemaHash, payloadDigest, decisionRef, grantRef, controlReservationID); err != nil {
 		return nil, normalizeOperationalPGError(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1919,6 +2219,316 @@ INSERT INTO conversation_ticket_operations (
 	}, nil
 }
 
+// authorizeAgentTicketOperation performs the owner-resource check inside the
+// same transaction as the ticket and receipt write. A non-nil authorization
+// can come only from the private, signature-verified ingress. The query locks
+// both the conversation and matching grant at FOR SHARE strength, so a grant
+// revoke/change cannot commit between the check and the durable effect.
+func (r *PGRepository) authorizeAgentTicketOperation(ctx context.Context, tx pgx.Tx, input CreateTicketInput) (string, error) {
+	if input.AgentActionAuthorization == nil {
+		return "", nil
+	}
+	if err := input.AgentActionAuthorization.Validate(); err != nil {
+		return "", err
+	}
+	authorization := input.AgentActionAuthorization
+	var grantID string
+	err := tx.QueryRow(ctx, `
+SELECT ag.id
+FROM conversation_agent_action_grants AS ag
+JOIN conversations AS conversation
+  ON conversation.id = ag.conversation_id
+ AND conversation.org_id = ag.org_id
+WHERE ag.org_id = $1
+  AND ag.conversation_id = $2
+  AND ag.action_id = 'tickets.create'
+  AND ag.space_ref = $3
+  AND ag.subject_id = $4
+  AND ag.recipient_audience_ref = $5
+  AND ag.recipient_audience_hash = $6
+  AND ag.recipient_audience_revision = $7
+  AND ag.privacy_policy_ref = $8
+  AND ag.authority_revision = $9
+  AND ag.revoked_at IS NULL
+FOR SHARE OF ag, conversation`, input.OrgID, input.ConversationID, authorization.SpaceRef,
+		authorization.SubjectID, authorization.RecipientAudienceRef, authorization.RecipientAudienceHash,
+		authorization.RecipientAudienceRevision, authorization.PrivacyPolicyRef, authorization.AuthorityRevision).Scan(&grantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrForbidden
+	}
+	if err != nil {
+		return "", err
+	}
+	if authorization.ControlReservationID != "" || authorization.GrantRef != "" || authorization.ActionSchemaHash != "" || authorization.PayloadDigest != "" {
+		if strings.TrimSpace(authorization.ControlReservationID) == "" || strings.TrimSpace(authorization.GrantRef) == "" ||
+			strings.TrimSpace(authorization.ActionSchemaHash) == "" || strings.TrimSpace(authorization.PayloadDigest) == "" ||
+			authorization.GrantRef != grantID {
+			return "", ErrForbidden
+		}
+	}
+	return grantID, nil
+}
+
+func agentTicketOperationEvidence(input CreateTicketInput) (string, string, string, string, string) {
+	if input.AgentActionAuthorization == nil {
+		return "", "", "", "", ""
+	}
+	authorization := input.AgentActionAuthorization
+	return authorization.ActionSchemaHash, authorization.PayloadDigest, authorization.DecisionRef,
+		authorization.GrantRef, authorization.ControlReservationID
+}
+
+// ResolveAgentTicketActionGrant returns the opaque current grant ID for the
+// exact signed Control authorization tuple. It is a reservation binding read,
+// not a durable effect: authorizeAgentTicketOperation repeats this query with
+// FOR SHARE in the ticket transaction immediately before writes.
+func (r *PGRepository) ResolveAgentTicketActionGrant(ctx context.Context, input CreateTicketInput) (string, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return "", err
+	}
+	if input.AgentActionAuthorization == nil {
+		return "", ErrForbidden
+	}
+	if err := input.AgentActionAuthorization.Validate(); err != nil {
+		return "", err
+	}
+	authorization := input.AgentActionAuthorization
+	var grantID string
+	err := r.pool.QueryRow(ctx, `
+SELECT ag.id
+FROM conversation_agent_action_grants AS ag
+JOIN conversations AS conversation
+  ON conversation.id = ag.conversation_id
+ AND conversation.org_id = ag.org_id
+WHERE ag.org_id = $1
+  AND ag.conversation_id = $2
+  AND ag.action_id = 'tickets.create'
+  AND ag.space_ref = $3
+  AND ag.subject_id = $4
+  AND ag.recipient_audience_ref = $5
+  AND ag.recipient_audience_hash = $6
+  AND ag.recipient_audience_revision = $7
+  AND ag.privacy_policy_ref = $8
+  AND ag.authority_revision = $9
+  AND ag.revoked_at IS NULL`, input.OrgID, input.ConversationID, authorization.SpaceRef,
+		authorization.SubjectID, authorization.RecipientAudienceRef, authorization.RecipientAudienceHash,
+		authorization.RecipientAudienceRevision, authorization.PrivacyPolicyRef, authorization.AuthorityRevision).Scan(&grantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrForbidden
+	}
+	if err != nil {
+		return "", err
+	}
+	return grantID, nil
+}
+
+// CreateAgentTicketActionGrant persists Application's resource-side approval
+// for an otherwise unavailable Model ticket action. A Control decision has
+// already been verified at the HTTP boundary, but only this transaction can
+// authorize the named conversation and write the durable owner receipt.
+func (r *PGRepository) CreateAgentTicketActionGrant(ctx context.Context, input CreateAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':agent-ticket-grant:create:' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+
+	existing, existingAuditID, existingRequestSHA, err := r.agentTicketActionGrantByCreateIdempotency(ctx, tx, input.OrgID, input.CreatedByUserID, input.IdempotencyKey)
+	if err == nil {
+		if existingRequestSHA != input.RequestSHA256 || existing.ConversationID != input.ConversationID || existing.ActionID != input.ActionID ||
+			existing.SpaceRef != input.SpaceRef || existing.SubjectID != input.SubjectID ||
+			existing.RecipientAudienceRef != input.RecipientAudienceRef || existing.RecipientAudienceHash != input.RecipientAudienceHash ||
+			existing.RecipientAudienceRevision != input.RecipientAudienceRevision || existing.PrivacyPolicyRef != input.PrivacyPolicyRef ||
+			existing.AuthorityRevision != input.AuthorityRevision {
+			return nil, ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &AgentTicketActionGrantReceipt{Grant: existing, AuditEventID: existingAuditID, Status: "created", Replayed: true}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, err
+	}
+
+	var conversationID string
+	err = tx.QueryRow(ctx, `SELECT id FROM conversations WHERE id = $1 AND org_id = $2 FOR SHARE`, input.ConversationID, input.OrgID).Scan(&conversationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	grantID := newID("agent_ticket_grant")
+	auditEventID := newID("audit")
+	grant := &AgentTicketActionGrant{
+		ID: grantID, OrgID: input.OrgID, ConversationID: conversationID, ActionID: input.ActionID,
+		SpaceRef: input.SpaceRef, SubjectID: input.SubjectID,
+		RecipientAudienceRef: input.RecipientAudienceRef, RecipientAudienceHash: input.RecipientAudienceHash,
+		RecipientAudienceRevision: input.RecipientAudienceRevision, PrivacyPolicyRef: input.PrivacyPolicyRef,
+		AuthorityRevision: input.AuthorityRevision, CreatedByUserID: input.CreatedByUserID,
+	}
+	err = tx.QueryRow(ctx, `
+INSERT INTO conversation_agent_action_grants (
+ id, org_id, conversation_id, action_id, space_ref, subject_id,
+ recipient_audience_ref, recipient_audience_hash, recipient_audience_revision, privacy_policy_ref, authority_revision,
+ created_by_user_id, created_idempotency_key, create_request_sha256, created_audit_event_id
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+RETURNING created_at`, grant.ID, grant.OrgID, grant.ConversationID, grant.ActionID, grant.SpaceRef, grant.SubjectID,
+		grant.RecipientAudienceRef, grant.RecipientAudienceHash, grant.RecipientAudienceRevision, grant.PrivacyPolicyRef,
+		grant.AuthorityRevision, grant.CreatedByUserID, input.IdempotencyKey, input.RequestSHA256, auditEventID).Scan(&grant.CreatedAt)
+	if err != nil {
+		return nil, normalizeOperationalPGError(err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_audit_events (id, org_id, conversation_id, actor_user_id, action, payload)
+VALUES ($1, $2, $3, $4, 'agent_ticket_grant.created', $5::jsonb)`, auditEventID, input.OrgID, input.ConversationID, input.CreatedByUserID,
+		mustJSON(map[string]any{
+			"grant_id": grant.ID, "action_id": grant.ActionID, "space_ref": grant.SpaceRef,
+			"subject_id": grant.SubjectID, "control_decision_ref": input.ControlDecisionRef,
+			"request_sha256": input.RequestSHA256,
+		})); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_events (id, org_id, conversation_id, type, payload)
+VALUES ($1, $2, $3, 'agent_ticket_grant.created', $4::jsonb)`, newID("evt"), input.OrgID, input.ConversationID,
+		mustJSON(map[string]any{"grant_id": grant.ID, "action_id": grant.ActionID, "audit_event_id": auditEventID, "actor_user_id": input.CreatedByUserID})); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &AgentTicketActionGrantReceipt{Grant: grant, AuditEventID: auditEventID, Status: "created"}, nil
+}
+
+// RevokeAgentTicketActionGrant is intentionally narrower than create. A
+// current personal-space owner can only revoke a grant for that same personal
+// subject and Space. Audience/privacy revisions are not required to match: a
+// changed policy must never leave an older grant impossible to revoke.
+func (r *PGRepository) RevokeAgentTicketActionGrant(ctx context.Context, input RevokeAgentTicketActionGrantInput) (*AgentTicketActionGrantReceipt, error) {
+	if err := r.ensureConfigured(); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || ':agent-ticket-grant:revoke:' || $2))`, input.OrgID, input.IdempotencyKey); err != nil {
+		return nil, err
+	}
+	grant, createdAuditID, createRequestSHA, revokedAuditID, revokedRequestSHA, revokedBy, revokedIdempotency, err := r.agentTicketActionGrantByID(ctx, tx, input.OrgID, input.ConversationID, input.GrantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if grant.SpaceRef != input.SpaceRef || grant.SubjectID != input.SubjectID {
+		return nil, ErrForbidden
+	}
+	if grant.RevokedAt != nil {
+		if revokedBy != input.RevokedByUserID || revokedIdempotency != input.IdempotencyKey || revokedRequestSHA != input.RequestSHA256 {
+			return nil, ErrConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+		return &AgentTicketActionGrantReceipt{Grant: grant, AuditEventID: revokedAuditID, Status: "revoked", Replayed: true}, nil
+	}
+	if createdAuditID == "" || createRequestSHA == "" {
+		return nil, fmt.Errorf("agent ticket grant durable receipt is corrupt")
+	}
+	auditEventID := newID("audit")
+	var revokedAt time.Time
+	err = tx.QueryRow(ctx, `
+UPDATE conversation_agent_action_grants
+SET revoked_at = NOW(), revoked_by_user_id = $1, revoked_idempotency_key = $2,
+    revocation_request_sha256 = $3, revoked_audit_event_id = $4
+WHERE id = $5 AND org_id = $6 AND conversation_id = $7 AND revoked_at IS NULL
+RETURNING revoked_at`, input.RevokedByUserID, input.IdempotencyKey, input.RequestSHA256, auditEventID,
+		input.GrantID, input.OrgID, input.ConversationID).Scan(&revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	grant.RevokedAt = &revokedAt
+	grant.RevokedByUserID = input.RevokedByUserID
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_audit_events (id, org_id, conversation_id, actor_user_id, action, payload)
+VALUES ($1, $2, $3, $4, 'agent_ticket_grant.revoked', $5::jsonb)`, auditEventID, input.OrgID, input.ConversationID, input.RevokedByUserID,
+		mustJSON(map[string]any{
+			"grant_id": grant.ID, "action_id": grant.ActionID, "space_ref": grant.SpaceRef,
+			"subject_id": grant.SubjectID, "control_decision_ref": input.ControlDecisionRef,
+			"request_sha256": input.RequestSHA256,
+		})); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO conversation_events (id, org_id, conversation_id, type, payload)
+VALUES ($1, $2, $3, 'agent_ticket_grant.revoked', $4::jsonb)`, newID("evt"), input.OrgID, input.ConversationID,
+		mustJSON(map[string]any{"grant_id": grant.ID, "action_id": grant.ActionID, "audit_event_id": auditEventID, "actor_user_id": input.RevokedByUserID})); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return &AgentTicketActionGrantReceipt{Grant: grant, AuditEventID: auditEventID, Status: "revoked"}, nil
+}
+
+func (r *PGRepository) agentTicketActionGrantByCreateIdempotency(ctx context.Context, tx pgx.Tx, orgID, createdByUserID, idempotencyKey string) (*AgentTicketActionGrant, string, string, error) {
+	var grant AgentTicketActionGrant
+	var createdAuditID, requestSHA string
+	err := tx.QueryRow(ctx, `
+SELECT id, org_id, conversation_id, action_id, space_ref, subject_id,
+       recipient_audience_ref, recipient_audience_hash, recipient_audience_revision, privacy_policy_ref, authority_revision,
+       created_by_user_id, created_at, revoked_at, revoked_by_user_id, created_audit_event_id, create_request_sha256
+FROM conversation_agent_action_grants
+WHERE org_id = $1 AND created_by_user_id = $2 AND created_idempotency_key = $3
+FOR UPDATE`, orgID, createdByUserID, idempotencyKey).Scan(
+		&grant.ID, &grant.OrgID, &grant.ConversationID, &grant.ActionID, &grant.SpaceRef, &grant.SubjectID,
+		&grant.RecipientAudienceRef, &grant.RecipientAudienceHash, &grant.RecipientAudienceRevision, &grant.PrivacyPolicyRef, &grant.AuthorityRevision,
+		&grant.CreatedByUserID, &grant.CreatedAt, &grant.RevokedAt, &grant.RevokedByUserID, &createdAuditID, &requestSHA,
+	)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return &grant, createdAuditID, requestSHA, nil
+}
+
+func (r *PGRepository) agentTicketActionGrantByID(ctx context.Context, tx pgx.Tx, orgID, conversationID, grantID string) (*AgentTicketActionGrant, string, string, string, string, string, string, error) {
+	var grant AgentTicketActionGrant
+	var createdAuditID, createRequestSHA, revokedAuditID, revokedRequestSHA, revokedBy, revokedIdempotency string
+	err := tx.QueryRow(ctx, `
+SELECT ag.id, ag.org_id, ag.conversation_id, ag.action_id, ag.space_ref, ag.subject_id,
+       ag.recipient_audience_ref, ag.recipient_audience_hash, ag.recipient_audience_revision,
+       ag.privacy_policy_ref, ag.authority_revision, ag.created_by_user_id, ag.created_at,
+       ag.revoked_at, ag.revoked_by_user_id, ag.created_audit_event_id, ag.create_request_sha256,
+       ag.revoked_audit_event_id, ag.revocation_request_sha256, ag.revoked_by_user_id, ag.revoked_idempotency_key
+FROM conversation_agent_action_grants AS ag
+JOIN conversations AS conversation ON conversation.id = ag.conversation_id AND conversation.org_id = ag.org_id
+WHERE ag.id = $1 AND ag.org_id = $2 AND ag.conversation_id = $3
+FOR UPDATE OF ag, conversation`, grantID, orgID, conversationID).Scan(
+		&grant.ID, &grant.OrgID, &grant.ConversationID, &grant.ActionID, &grant.SpaceRef, &grant.SubjectID,
+		&grant.RecipientAudienceRef, &grant.RecipientAudienceHash, &grant.RecipientAudienceRevision, &grant.PrivacyPolicyRef,
+		&grant.AuthorityRevision, &grant.CreatedByUserID, &grant.CreatedAt, &grant.RevokedAt, &grant.RevokedByUserID,
+		&createdAuditID, &createRequestSHA, &revokedAuditID, &revokedRequestSHA, &revokedBy, &revokedIdempotency,
+	)
+	if err != nil {
+		return nil, "", "", "", "", "", "", err
+	}
+	return &grant, createdAuditID, createRequestSHA, revokedAuditID, revokedRequestSHA, revokedBy, revokedIdempotency, nil
+}
+
 // GetTicketOperation is the owner-side reconciliation lookup for a request
 // whose HTTP response may have been lost. Matching the exact actor prevents an
 // org peer from using a guessed idempotency key as a receipt-discovery oracle.
@@ -1929,10 +2539,12 @@ func (r *PGRepository) GetTicketOperation(ctx context.Context, orgID, actorUserI
 	var receipt TicketOperationReceipt
 	var ticketID string
 	err := r.pool.QueryRow(ctx, `
-SELECT operation_id, audit_event_id, status, ticket_id
+SELECT operation_id, COALESCE(audit_event_id, ''), status, COALESCE(ticket_id, ''),
+       COALESCE(control_reservation_id, ''), COALESCE(terminal_reason, '')
 FROM conversation_ticket_operations
-WHERE org_id = $1 AND actor_user_id = $2 AND idempotency_key = $3`, orgID, actorUserID, idempotencyKey).Scan(
+	WHERE org_id = $1 AND actor_user_id = $2 AND idempotency_key = $3`, orgID, actorUserID, idempotencyKey).Scan(
 		&receipt.OperationID, &receipt.AuditEventID, &receipt.Status, &ticketID,
+		&receipt.ControlReservationID, &receipt.TerminalReason,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1940,11 +2552,16 @@ WHERE org_id = $1 AND actor_user_id = $2 AND idempotency_key = $3`, orgID, actor
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := r.GetTicket(ctx, orgID, ticketID)
-	if err != nil {
-		return nil, err
+	if receipt.Status == "completed" {
+		if ticketID == "" || receipt.AuditEventID == "" {
+			return nil, fmt.Errorf("completed ticket operation is missing its owner receipt")
+		}
+		ticket, err := r.GetTicket(ctx, orgID, ticketID)
+		if err != nil {
+			return nil, err
+		}
+		receipt.Ticket = ticket
 	}
-	receipt.Ticket = ticket
 	receipt.Replayed = true
 	return &receipt, nil
 }

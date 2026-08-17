@@ -168,6 +168,69 @@ func newLegacyTestService(repository Repository, runtime RuntimeClient, publishe
 	)
 }
 
+type fakeDeliveryQueue struct {
+	attempts []DeliveryAttemptParams
+}
+
+func (f *fakeDeliveryQueue) EnqueueDeliveryAttempt(_ context.Context, params DeliveryAttemptParams) (*DeliveryAttempt, error) {
+	f.attempts = append(f.attempts, params)
+	return &DeliveryAttempt{ID: params.ID, NotificationID: params.NotificationID, AttemptNumber: params.AttemptNumber, Status: DeliveryAttemptPending}, nil
+}
+
+func (*fakeDeliveryQueue) ClaimDeliveryAttempt(context.Context, string, time.Time, time.Duration) (*DeliveryAttempt, error) {
+	return nil, ErrNotFound
+}
+
+func (*fakeDeliveryQueue) MarkDeliverySubmitted(context.Context, string, string, string, time.Time) (*DeliveryAttempt, error) {
+	return nil, ErrNotFound
+}
+
+func (*fakeDeliveryQueue) MarkDeliveryUnknown(context.Context, string, string, string, time.Time) (*DeliveryAttempt, error) {
+	return nil, ErrNotFound
+}
+
+func (*fakeDeliveryQueue) MarkDeliveryAcknowledged(context.Context, string, string, string, time.Time) (*DeliveryAttempt, error) {
+	return nil, ErrNotFound
+}
+
+func (*fakeDeliveryQueue) MarkDeliveryFailed(context.Context, string, string, string, time.Time) (*DeliveryAttempt, error) {
+	return nil, ErrNotFound
+}
+
+func TestAcceptEnqueuesDurableAttemptWhenQueueIsConfigured(t *testing.T) {
+	repository := newFakeRepository()
+	queue := &fakeDeliveryQueue{}
+	runtimeClient := &fakeRuntimeClient{result: &DispatchResult{ProviderRequestID: "must-not-dispatch"}}
+	service := NewService(
+		repository,
+		runtimeClient,
+		&fakePublisher{},
+		WithIDGenerator(func() string { return "req_outbox" }),
+		WithNow(func() time.Time { return time.Date(2026, time.August, 16, 21, 0, 0, 0, time.UTC) }),
+		WithRecipientResolver(fakeRecipientResolver{}),
+		WithDeliveryQueue(queue),
+	)
+
+	accepted, err := service.Accept(context.Background(), Request{
+		OrganizationID: "org_123",
+		Recipient:      Recipient{Kind: RecipientKindUser, ID: "user_123"},
+		Type:           "notification.created",
+		Payload:        map[string]any{"title": "queued"},
+	})
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if accepted == nil || accepted.Status != StatusAccepted {
+		t.Fatalf("accepted = %#v, want accepted status", accepted)
+	}
+	if runtimeClient.callCount != 0 {
+		t.Fatalf("runtime dispatch calls = %d, want 0", runtimeClient.callCount)
+	}
+	if len(queue.attempts) != 1 || queue.attempts[0].NotificationID != "req_outbox" || queue.attempts[0].AttemptNumber != 1 {
+		t.Fatalf("queued attempts = %#v, want one attempt for req_outbox", queue.attempts)
+	}
+}
+
 func scopedRequest(userID string) Request {
 	return Request{
 		OrganizationID: "org_123",

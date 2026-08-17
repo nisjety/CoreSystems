@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Gauge,
   Play,
+  Puzzle,
   Rocket,
   Sparkles,
 } from 'lucide-solid'
@@ -114,6 +115,7 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
 
       <section aria-labelledby="agent-role-heading" class="agents-overview-section">
         <TaskConsoleEntry />
+        <InstallationsEntry />
         <div class="agents-role-grid">
           <For each={agentBlueprints}>
             {(role) => (
@@ -148,6 +150,30 @@ function TaskConsoleEntry() {
       </span>
       <span class="agents-task-console-entry__cta">
         {i18n.tr('Åpne konsoll', 'Open console')}
+        <ChevronRight class="size-4" strokeWidth={2.2} />
+      </span>
+    </A>
+  )
+}
+
+function InstallationsEntry() {
+  const i18n = useI18n()
+  return (
+    <A href="/agents/installations" class={cn('agents-task-console-entry', controlFocusClass)} aria-label={i18n.tr('Åpne installasjoner for å se agentene dine og hvilke rom de er i', 'Open installations to see your agents and which rooms they are in')}>
+      <span class="agents-task-console-entry__icon">
+        <Puzzle class="size-5" strokeWidth={2.1} />
+      </span>
+      <span class="agents-task-console-entry__copy">
+        <span class="agents-task-console-entry__title">{i18n.tr('Installasjoner — agenter og hvilke rom de er i', 'Installations — your agents and which rooms they\'re in')}</span>
+        <span class="agents-task-console-entry__desc">
+          {i18n.tr(
+            'Agentene du har opprettet eller lagt til, samlet på tvers av rommene dine — med samme status som hvert roms Agent-fane viser.',
+            'The agents you\'ve created or added, gathered across your rooms — with the same status each room\'s Agent tab shows.',
+          )}
+        </span>
+      </span>
+      <span class="agents-task-console-entry__cta">
+        {i18n.tr('Åpne installasjoner', 'Open installations')}
         <ChevronRight class="size-4" strokeWidth={2.2} />
       </span>
     </A>

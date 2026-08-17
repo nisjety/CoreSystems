@@ -10,6 +10,7 @@ import {
 } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
+import { spaceDisplayName } from '@/features/spaces/lib/space-name'
 import { SidebarPanelTitle, SidebarSearchField } from './CoreSidebarPrimitives'
 
 /**
@@ -48,8 +49,8 @@ export function SpacesExpandedSidebarPanel(props: { onCollapse: () => void }) {
   const normalizedQuery = createMemo(() => query().trim().toLocaleLowerCase())
   const personalSpaces = createMemo(() => (spaces() ?? []).filter((space) => space.kind === 'personal'))
   const otherSpaces = createMemo(() => (spaces() ?? []).filter((space) => space.kind !== 'personal'))
-  const visiblePersonalSpaces = createMemo(() => personalSpaces().filter((space) => matchesSpace(space, normalizedQuery())))
-  const visibleOtherSpaces = createMemo(() => otherSpaces().filter((space) => matchesSpace(space, normalizedQuery())))
+  const visiblePersonalSpaces = createMemo(() => personalSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
+  const visibleOtherSpaces = createMemo(() => otherSpaces().filter((space) => matchesSpace(space, normalizedQuery(), i18n.tr)))
   const visibleThreads = createMemo(() => (threads()?.threads ?? []).filter((thread) => matchesThread(thread, normalizedQuery())))
   const selectedSpace = createMemo(() => threads()?.space ?? (selectedSpaceRef()
     ? (spaces() ?? []).find((space) => space.space_ref === selectedSpaceRef())
@@ -139,6 +140,7 @@ function SidebarGroup(props: { title: string; children: JSX.Element }) {
 }
 
 function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
+  const i18n = useI18n()
   return (
     <A
       href={spaceHref(props.space.space_ref)}
@@ -146,7 +148,9 @@ function SpaceLink(props: { space: SpaceSummary; active: boolean }) {
       class={cn('core-sidebar-panel-link', props.active && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')}
     >
       <Users class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
-      <span class="core-sidebar-panel-link__label verevon-sidebar-row-strong">{props.space.name}</span>
+      <span class="core-sidebar-panel-link__label verevon-sidebar-row-strong">
+        {spaceDisplayName(props.space, i18n.tr)}
+      </span>
     </A>
   )
 }
@@ -155,7 +159,7 @@ function SpaceThreadLink(props: { thread: SpaceThread }) {
   const i18n = useI18n()
   const title = () => threadTitle(props.thread, i18n)
   return (
-    <A href={threadHref(props.thread.thread_id)} class="core-sidebar-panel-link core-sidebar-space-thread" aria-label={threadLinkLabel(props.thread, i18n)}>
+    <A href={spaceHref(props.thread.space_id)} class="core-sidebar-panel-link core-sidebar-space-thread" aria-label={threadLinkLabel(props.thread, i18n)}>
       <MessageCircle class="core-sidebar-panel-link__icon" strokeWidth={1.7} />
       <span class="core-sidebar-panel-link__label verevon-sidebar-row-normal">{title()}</span>
     </A>
@@ -181,20 +185,27 @@ function defaultSpace(spaces: readonly SpaceSummary[] | undefined): SpaceSummary
     ?? spaces[0]
 }
 
-function matchesSpace(space: SpaceSummary, query: string): boolean {
-  return !query || `${space.name} ${space.kind} ${space.lifecycle}`.toLocaleLowerCase().includes(query)
+function matchesSpace(
+  space: SpaceSummary,
+  query: string,
+  tr: (no: string, en: string) => string,
+): boolean {
+  // Search the name on screen as well as the stored one: a personal Space reads
+  // as "Personlig rom" but is stored as "Personal Space", so matching only the
+  // stored value would hide the room from someone typing what they can see.
+  const haystack = `${space.name} ${spaceDisplayName(space, tr)} ${space.kind} ${space.lifecycle}`
+  return !query || haystack.toLocaleLowerCase().includes(query)
 }
 
 function matchesThread(thread: SpaceThread, query: string): boolean {
   return !query || `${threadTitle(thread)} ${thread.preview ?? ''}`.toLocaleLowerCase().includes(query)
 }
 
+// A Space conversation opens in its room — the shared record lives there, and
+// routing it to /chat was the exact separation-of-concerns leak the product
+// model forbids (Chat is Verevon's own surface, not the room's reader).
 function spaceHref(spaceRef: string): string {
   return `/spaces/${encodeURIComponent(spaceRef)}`
-}
-
-function threadHref(threadId: string): string {
-  return `/chat?thread_id=${encodeURIComponent(threadId)}`
 }
 
 function threadTitle(thread: SpaceThread, i18n?: ReturnType<typeof useI18n>): string {

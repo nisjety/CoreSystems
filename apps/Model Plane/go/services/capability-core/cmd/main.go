@@ -224,6 +224,11 @@ func main() {
 		if scopeStore != nil {
 			ch = ch.WithScopeStore(scopeStore)
 		}
+		if modelActionViewVerifier, viewVerifierErr := modelActionViewVerifierFromEnv(os.Getenv); viewVerifierErr != nil {
+			slog.Warn("run-bound Model owner-action view unavailable; Control public key is required", "error", viewVerifierErr)
+		} else {
+			ch = ch.WithModelActionViewVerifier(modelActionViewVerifier)
+		}
 		ch.Register(protectedMux)
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
@@ -393,6 +398,19 @@ func cronDecisionVerifierFromEnv(getenv func(string) string) (*cron.ControlDecis
 	)
 }
 
+// modelActionViewVerifierFromEnv pins the same deployment-distributed Control
+// public key used by other Space decision recipients. It has no fallback: an
+// unsigned view could make an owner-plane effect look model-eligible.
+func modelActionViewVerifierFromEnv(getenv func(string) string) (*api.ControlModelActionViewVerifier, error) {
+	if getenv == nil {
+		return nil, fmt.Errorf("model action view environment reader is required")
+	}
+	return api.NewControlModelActionViewVerifier(
+		getenv("CONTROL_SPACE_DECISION_KEY_ID"),
+		getenv("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64"),
+	)
+}
+
 // startTaskCompletionConsumer closes a task when the run it started finishes.
 //
 // It is the other half of the executor's safety story: buildTaskDispatcher makes
@@ -465,7 +483,6 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 		slog.Error("dial orchestrator-core workflow service failed", "addr", addr, "error", err)
 		return fallback, false
 	}
-	dispatcher.SetScheduledRunSession(sessionClient)
 	dispatcher, err := taskexec.NewWorkflowDispatcher(
 		pool,
 		mpv1.NewOrchestratorWorkflowServiceClient(conn),
@@ -480,6 +497,11 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 		_ = conn.Close()
 		return fallback, false
 	}
+	// Scoped cron fires prepare their deterministic service-owned Session Core
+	// thread before Temporal starts. This is deliberately configured only after
+	// the dispatcher exists; an absent Session Core client leaves those fires
+	// fail-closed in the dispatcher instead of falling back to a generic run.
+	dispatcher.SetScheduledRunSession(sessionClient)
 	slog.Info("task workflow dispatch enabled",
 		"orchestrator_workflow_addr", addr,
 		"credential", map[bool]string{true: "minted service JWT (signed retention posture)",
