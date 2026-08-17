@@ -10,13 +10,13 @@
 //! An attestation instead names the exact artifacts a reviewer can check:
 //! which cloud resource the claim covers, which retention-exception approval
 //! backs it, when it took effect, and who signed off. The digest is what makes
-//! it non-forgeable-by-accident: it is recomputed here from the other four
+//! it non-forgeable-by-accident: it is recomputed here from the other five
 //! fields, so a placeholder (`CHANGEME`, an empty string, a digest copied from
 //! a different resource) fails validation instead of silently granting ZDR.
 //!
 //! # What the digest does not prove
 //!
-//! The digest binds the four fields *to each other*, not to the endpoint traffic
+//! The digest binds the five fields *to each other*, not to the endpoint traffic
 //! is actually sent to. Move the whole five-variable block to an environment whose
 //! `AZURE_*_ENDPOINT` points at a resource with no retention exception and it
 //! still validates — the fields remain mutually consistent, they just describe
@@ -25,20 +25,21 @@
 //! and logging when they disagree, but that is a heuristic on an opaque
 //! operator-authored string, not a proof.
 //!
-//! There is also no upper bound: an attestation whose approval has since lapsed
-//! keeps validating, because nothing here knows the approval's term. A `review_by`
-//! field would close it and is a deliberate follow-up rather than an oversight —
-//! adding it changes the canonical form, so it is cheapest to do while no
-//! attestation is deployed yet.
+//! It does bound validity at both ends. `_ZDR_EFFECTIVE_DATE` is the lower bound
+//! and `_ZDR_REVIEW_BY` the upper one, so a lapsed retention approval stops
+//! granting ZDR instead of coasting on the fact that nobody remembered it. That is
+//! the whole point of putting the posture in config rather than in someone's head:
+//! a mechanism that never expires is still a mechanism that depends on memory.
 //!
 //! # Generating the digest
 //!
-//! The canonical form is the four fields in declaration order, each followed by
+//! The canonical form is the five fields in declaration order, each followed by
 //! a newline. An operator reproduces it with:
 //!
 //! ```sh
-//! printf '%s\n%s\n%s\n%s\n' \
-//!   "$RESOURCE_ID" "$APPROVAL_REF" "$EFFECTIVE_DATE" "$REVIEWER" | sha256sum
+//! printf '%s\n%s\n%s\n%s\n%s\n' \
+//!   "$RESOURCE_ID" "$APPROVAL_REF" "$EFFECTIVE_DATE" "$REVIEW_BY" "$REVIEWER" \
+//!   | sha256sum
 //! ```
 //!
 //! [`ZdrAttestation::validate`] is pure and holds that contract; `from_env` is a
@@ -57,10 +58,11 @@ use chrono::NaiveDate;
 use sha2::{Digest as _, Sha256};
 
 /// Environment-variable suffixes read for every attestation, in canonical order.
-const FIELD_SUFFIXES: [&str; 4] = [
+const FIELD_SUFFIXES: [&str; 5] = [
     "_ZDR_RESOURCE_ID",
     "_ZDR_APPROVAL_REF",
     "_ZDR_EFFECTIVE_DATE",
+    "_ZDR_REVIEW_BY",
     "_ZDR_REVIEWER",
 ];
 
@@ -79,7 +81,8 @@ pub enum ZdrAttestationError {
     /// Some but not all attestation fields were supplied.
     #[error(
         "ZDR attestation for {prefix} is incomplete: missing {missing:?}. Supply every \
-         {prefix}_ZDR_* field (RESOURCE_ID, APPROVAL_REF, EFFECTIVE_DATE, REVIEWER, DIGEST), \
+         {prefix}_ZDR_* field (RESOURCE_ID, APPROVAL_REF, EFFECTIVE_DATE, REVIEW_BY, REVIEWER, \
+         DIGEST), \
          or unset them all to run without ZDR."
     )]
     Incomplete {
@@ -102,13 +105,43 @@ pub enum ZdrAttestationError {
     #[error(
         "ZDR attestation for {prefix}: {prefix}_ZDR_DIGEST ({supplied:?}) does not match the \
          digest of the supplied fields ({expected:?}). Recompute with: printf \
-         '%s\\n%s\\n%s\\n%s\\n' \"$RESOURCE_ID\" \"$APPROVAL_REF\" \"$EFFECTIVE_DATE\" \
-         \"$REVIEWER\" | sha256sum"
+         '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$RESOURCE_ID\" \"$APPROVAL_REF\" \
+         \"$EFFECTIVE_DATE\" \"$REVIEW_BY\" \"$REVIEWER\" | sha256sum"
     )]
     DigestMismatch {
         prefix: String,
         supplied: String,
         expected: String,
+    },
+
+    /// `_ZDR_REVIEW_BY` was not an ISO-8601 calendar date.
+    #[error(
+        "ZDR attestation for {prefix}: {prefix}_ZDR_REVIEW_BY ({value:?}) is not a YYYY-MM-DD date"
+    )]
+    InvalidReviewBy { prefix: String, value: String },
+
+    /// `_ZDR_REVIEW_BY` is not after `_ZDR_EFFECTIVE_DATE`.
+    #[error(
+        "ZDR attestation for {prefix}: review-by {review_by} is not after the effective date \
+         {effective}. An approval cannot lapse before it starts."
+    )]
+    ReviewBeforeEffective {
+        prefix: String,
+        effective: NaiveDate,
+        review_by: NaiveDate,
+    },
+
+    /// The retention approval has passed its review-by date.
+    #[error(
+        "ZDR attestation for {prefix} lapsed on {review_by} (today {today}). Re-verify the \
+         retention approval and update {prefix}_ZDR_REVIEW_BY with a recomputed \
+         {prefix}_ZDR_DIGEST, or unset the attestation to run without ZDR. Refusing to keep \
+         advertising ZDR on an unreviewed approval."
+    )]
+    Expired {
+        prefix: String,
+        review_by: NaiveDate,
+        today: NaiveDate,
     },
 
     /// The attestation is well-formed but its effective date is in the future.
@@ -162,6 +195,9 @@ pub struct RawAttestation {
     /// Kept as the operator's raw string: the digest is defined over exactly the
     /// bytes they hashed, not over a reformatted date.
     pub effective_date: String,
+    /// The date the retention approval must be re-verified by. Past this, the
+    /// attestation stops granting ZDR — see the module docs on bounding validity.
+    pub review_by: String,
     pub reviewer: String,
     pub digest: String,
 }
@@ -176,6 +212,7 @@ pub struct ZdrAttestation {
     resource_id: String,
     approval_ref: String,
     effective_date: NaiveDate,
+    review_by: NaiveDate,
     reviewer: String,
     digest: String,
 }
@@ -201,6 +238,7 @@ impl ZdrAttestation {
             &raw.resource_id,
             &raw.approval_ref,
             &raw.effective_date,
+            &raw.review_by,
             &raw.reviewer,
         ];
         let mut missing: Vec<String> = FIELD_SUFFIXES
@@ -240,6 +278,21 @@ impl ZdrAttestation {
                 value: raw.effective_date.clone(),
             })?;
 
+        let review_by =
+            NaiveDate::parse_from_str(raw.review_by.trim(), "%Y-%m-%d").map_err(|_| {
+                ZdrAttestationError::InvalidReviewBy {
+                    prefix: prefix.to_owned(),
+                    value: raw.review_by.clone(),
+                }
+            })?;
+        if review_by <= effective_date {
+            return Err(ZdrAttestationError::ReviewBeforeEffective {
+                prefix: prefix.to_owned(),
+                effective: effective_date,
+                review_by,
+            });
+        }
+
         let expected = canonical_digest(raw);
         if !raw.digest.trim().eq_ignore_ascii_case(&expected) {
             return Err(ZdrAttestationError::DigestMismatch {
@@ -257,10 +310,22 @@ impl ZdrAttestation {
             });
         }
 
+        // Upper bound. An approval that lapsed months ago is not evidence of
+        // anything, and the operator who set it is not going to be reminded by
+        // anything else.
+        if review_by < today {
+            return Err(ZdrAttestationError::Expired {
+                prefix: prefix.to_owned(),
+                review_by,
+                today,
+            });
+        }
+
         Ok(Self {
             resource_id: raw.resource_id.trim().to_owned(),
             approval_ref: raw.approval_ref.trim().to_owned(),
             effective_date,
+            review_by,
             reviewer: raw.reviewer.trim().to_owned(),
             digest: expected,
         })
@@ -287,13 +352,15 @@ impl ZdrAttestation {
             resource_id: read(FIELD_SUFFIXES[0]),
             approval_ref: read(FIELD_SUFFIXES[1]),
             effective_date: read(FIELD_SUFFIXES[2]),
-            reviewer: read(FIELD_SUFFIXES[3]),
+            review_by: read(FIELD_SUFFIXES[3]),
+            reviewer: read(FIELD_SUFFIXES[4]),
             digest: read(DIGEST_SUFFIX),
         };
 
         if raw.resource_id.is_empty()
             && raw.approval_ref.is_empty()
             && raw.effective_date.is_empty()
+            && raw.review_by.is_empty()
             && raw.reviewer.is_empty()
             && raw.digest.is_empty()
         {
@@ -413,6 +480,14 @@ impl ZdrAttestation {
         self.effective_date
     }
 
+    /// The date the retention approval must be re-verified by. Past this the
+    /// attestation stops validating.
+    #[allow(dead_code)] // surfaced by the provenance receipt (strategy doc Phase 4)
+    #[must_use]
+    pub const fn review_by(&self) -> NaiveDate {
+        self.review_by
+    }
+
     /// Who signed off on the claim.
     #[allow(dead_code)] // surfaced by the provenance receipt (strategy doc Phase 4)
     #[must_use]
@@ -432,12 +507,13 @@ impl ZdrAttestation {
 ///
 /// Trimmed field values joined by newlines with a trailing newline — the exact
 /// bytes the documented `printf ... | sha256sum` pipeline produces.
-fn canonical_digest(raw: &RawAttestation) -> String {
+pub(crate) fn canonical_digest(raw: &RawAttestation) -> String {
     let canonical = format!(
-        "{}\n{}\n{}\n{}\n",
+        "{}\n{}\n{}\n{}\n{}\n",
         raw.resource_id.trim(),
         raw.approval_ref.trim(),
         raw.effective_date.trim(),
+        raw.review_by.trim(),
         raw.reviewer.trim()
     );
     to_lower_hex(&Sha256::digest(canonical.as_bytes()))
@@ -472,6 +548,7 @@ mod tests {
             resource_id: "/subscriptions/abc/rg/eu/openai-swedencentral".to_owned(),
             approval_ref: "MAM-2026-0042".to_owned(),
             effective_date: "2026-06-01".to_owned(),
+            review_by: "2027-06-01".to_owned(),
             reviewer: "ima@aquatiq.com".to_owned(),
             digest: String::new(),
         };
@@ -501,6 +578,7 @@ mod tests {
                 "AZURE_OPENAI_ZDR_RESOURCE_ID".to_owned(),
                 "AZURE_OPENAI_ZDR_APPROVAL_REF".to_owned(),
                 "AZURE_OPENAI_ZDR_EFFECTIVE_DATE".to_owned(),
+                "AZURE_OPENAI_ZDR_REVIEW_BY".to_owned(),
                 "AZURE_OPENAI_ZDR_REVIEWER".to_owned(),
                 "AZURE_OPENAI_ZDR_DIGEST".to_owned(),
             ],
@@ -570,6 +648,10 @@ mod tests {
                 ..base.clone()
             },
             RawAttestation {
+                review_by: "2028-06-01".to_owned(),
+                ..base.clone()
+            },
+            RawAttestation {
                 reviewer: "someone.else@example.com".to_owned(),
                 ..base.clone()
             },
@@ -590,6 +672,7 @@ mod tests {
             effective_date: "01/06/2026".to_owned(),
             ..valid()
         };
+        // review_by stays valid so the failure is unambiguously the effective date.
         raw.digest = canonical_digest(&raw);
         let error = ZdrAttestation::validate(PREFIX, &raw, today()).expect_err("bad date fails");
         assert!(matches!(
@@ -602,6 +685,7 @@ mod tests {
     fn future_effective_date_does_not_grant_zdr_yet() {
         let mut raw = RawAttestation {
             effective_date: "2027-01-01".to_owned(),
+            review_by: "2028-01-01".to_owned(),
             ..valid()
         };
         raw.digest = canonical_digest(&raw);
@@ -614,6 +698,7 @@ mod tests {
     fn effective_today_is_in_force() {
         let mut raw = RawAttestation {
             effective_date: "2026-08-17".to_owned(),
+            review_by: "2027-08-17".to_owned(),
             ..valid()
         };
         raw.digest = canonical_digest(&raw);
@@ -669,6 +754,7 @@ mod tests {
     #[test]
     fn newline_in_a_field_is_rejected_because_it_would_collide() {
         let split_in_resource = RawAttestation {
+            review_by: "2027-06-01".to_owned(),
             resource_id: "a\nb".to_owned(),
             approval_ref: "c".to_owned(),
             effective_date: "2026-01-01".to_owned(),
@@ -676,6 +762,7 @@ mod tests {
             digest: String::new(),
         };
         let split_in_approval = RawAttestation {
+            review_by: "2027-06-01".to_owned(),
             resource_id: "a".to_owned(),
             approval_ref: "b\nc".to_owned(),
             effective_date: "2026-01-01".to_owned(),
@@ -763,6 +850,62 @@ mod tests {
         }
     }
 
+    /// The gap this field closes: an approval whose term has run out must stop
+    /// granting ZDR rather than coasting on nobody remembering it.
+    #[test]
+    fn a_lapsed_approval_stops_granting_zdr() {
+        let mut raw = RawAttestation {
+            effective_date: "2025-06-01".to_owned(),
+            review_by: "2026-06-01".to_owned(),
+            ..valid()
+        };
+        raw.digest = canonical_digest(&raw);
+        // today() is 2026-08-17, two months past review-by.
+        let error = ZdrAttestation::validate(PREFIX, &raw, today()).expect_err("lapsed must fail");
+        assert!(matches!(error, ZdrAttestationError::Expired { .. }));
+    }
+
+    /// The boundary: still in force on the review-by date itself.
+    #[test]
+    fn review_by_today_is_still_in_force() {
+        let mut raw = RawAttestation {
+            effective_date: "2026-01-01".to_owned(),
+            review_by: "2026-08-17".to_owned(),
+            ..valid()
+        };
+        raw.digest = canonical_digest(&raw);
+        ZdrAttestation::validate(PREFIX, &raw, today())
+            .expect("an approval reviewed today is still in force");
+    }
+
+    #[test]
+    fn review_by_must_be_after_the_effective_date() {
+        let mut raw = RawAttestation {
+            effective_date: "2026-06-01".to_owned(),
+            review_by: "2026-06-01".to_owned(),
+            ..valid()
+        };
+        raw.digest = canonical_digest(&raw);
+        let error = ZdrAttestation::validate(PREFIX, &raw, today())
+            .expect_err("an approval cannot lapse before it starts");
+        assert!(matches!(
+            error,
+            ZdrAttestationError::ReviewBeforeEffective { .. }
+        ));
+    }
+
+    #[test]
+    fn unparseable_review_by_is_rejected() {
+        let mut raw = RawAttestation {
+            review_by: "next year".to_owned(),
+            ..valid()
+        };
+        raw.digest = canonical_digest(&raw);
+        let error =
+            ZdrAttestation::validate(PREFIX, &raw, today()).expect_err("bad review-by fails");
+        assert!(matches!(error, ZdrAttestationError::InvalidReviewBy { .. }));
+    }
+
     /// Digest stability: the canonical form is a documented operator contract
     /// (`printf '%s\n%s\n%s\n%s\n' ... | sha256sum`). Changing it silently
     /// invalidates every deployed attestation, so pin a known-good vector
@@ -773,14 +916,16 @@ mod tests {
             resource_id: "res".to_owned(),
             approval_ref: "appr".to_owned(),
             effective_date: "2026-01-01".to_owned(),
+            review_by: "2027-01-01".to_owned(),
             reviewer: "rev".to_owned(),
             digest: String::new(),
         };
         // Computed outside this code with the documented operator pipeline:
-        //   $ printf '%s\n%s\n%s\n%s\n' res appr 2026-01-01 rev | shasum -a 256
+        //   $ printf '%s\n%s\n%s\n%s\n%s\n' res appr 2026-01-01 2027-01-01 rev \
+        //       | shasum -a 256
         assert_eq!(
             canonical_digest(&raw),
-            "8ea99979f1131e2e5d51fc19a2959fb95e41577b5f2fc0b723dafdf9f52cc60a",
+            "46acd4025f8909cfb4eb98b81027c932cd117b005acf54403a863124721b7aa5",
             "canonical digest changed — every deployed AZURE_*_ZDR_DIGEST is now invalid"
         );
     }

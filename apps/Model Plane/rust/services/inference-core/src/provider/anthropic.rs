@@ -1261,26 +1261,13 @@ mod zdr_capability_tests {
             resource_id: "/subscriptions/abc/rg/eu/foundry-claude".to_owned(),
             approval_ref: "MAM-2026-0043".to_owned(),
             effective_date: "2026-06-01".to_owned(),
+            review_by: "2027-06-01".to_owned(),
             reviewer: "ima@aquatiq.com".to_owned(),
             digest: String::new(),
         };
-        // Recompute rather than hardcode so the fixture cannot drift from the
-        // canonical form.
-        raw.digest = {
-            use std::fmt::Write as _;
-
-            use sha2::{Digest as _, Sha256};
-            let canonical = format!(
-                "{}\n{}\n{}\n{}\n",
-                raw.resource_id, raw.approval_ref, raw.effective_date, raw.reviewer
-            );
-            Sha256::digest(canonical.as_bytes())
-                .iter()
-                .fold(String::new(), |mut out, byte| {
-                    let _ = write!(out, "{byte:02x}");
-                    out
-                })
-        };
+        // Use the shared canonical digest rather than recomputing it here: a second
+        // implementation of the canonical form is a second thing that can drift.
+        raw.digest = crate::provider::zdr::canonical_digest(&raw);
         Arc::new(
             ZdrAttestation::validate(
                 "AZURE_ANTHROPIC",
