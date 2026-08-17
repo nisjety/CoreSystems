@@ -1567,16 +1567,30 @@ impl ModelGateway for GatewayService {
         &self,
         request: Request<ListSkillsRequest>,
     ) -> Result<Response<ListSkillsResponse>, Status> {
-        authorize_rpc(&request, RpcAccess::Read)?;
-        skills::handle_list_skills(&self.state.skills, request.into_inner()).map(Response::new)
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
+        let caller_user_id = identity.user_id().unwrap_or_default().to_owned();
+        skills::handle_list_skills(
+            &self.state.skills,
+            request.into_inner(),
+            &self.state.ownership,
+            &caller_user_id,
+        )
+        .map(Response::new)
     }
 
     async fn get_skill(
         &self,
         request: Request<GetSkillRequest>,
     ) -> Result<Response<GetSkillResponse>, Status> {
-        authorize_rpc(&request, RpcAccess::Read)?;
-        skills::handle_get_skill(&self.state.skills, request.into_inner()).map(Response::new)
+        let identity = authorize_rpc(&request, RpcAccess::Read)?;
+        let caller_user_id = identity.user_id().unwrap_or_default().to_owned();
+        skills::handle_get_skill(
+            &self.state.skills,
+            request.into_inner(),
+            &self.state.ownership,
+            &caller_user_id,
+        )
+        .map(Response::new)
     }
 
     async fn match_skills(
@@ -1584,6 +1598,7 @@ impl ModelGateway for GatewayService {
         request: Request<MatchSkillsRequest>,
     ) -> Result<Response<MatchSkillsResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Read)?;
+        let caller_user_id = identity.user_id().unwrap_or_default().to_owned();
         let req = request.into_inner();
         // §G7 read path (last mile): lazily pull this org's LEARNED skills from
         // session-core into the match cache — once per org — so learned skills
@@ -1602,13 +1617,20 @@ impl ModelGateway for GatewayService {
                 .await
             {
                 Ok(resp) => {
+                    let pulled = resp.into_inner().skills;
+                    // Ownership (SKILL-1) rides alongside the match cache: computed
+                    // from the same pull, before `pulled` is consumed below.
+                    self.state.ownership.replace_org_kind(
+                        &req.org_id,
+                        crate::ownership::KIND_SKILL,
+                        skills::skill_ownership_entries(&pulled),
+                    );
                     // Reconcile, don't merely append: a disabled/deleted
                     // learned skill must stop steering MatchSkills results on
                     // the gRPC path just as it does on the SSE path.
                     self.state.skills.replace_learned(
                         &req.org_id,
-                        resp.into_inner()
-                            .skills
+                        pulled
                             .into_iter()
                             .map(skills::agent_skill_to_skill)
                             .collect(),
@@ -1619,7 +1641,13 @@ impl ModelGateway for GatewayService {
                 }
             }
         }
-        skills::handle_match_skills(&self.state.skills, req).map(Response::new)
+        skills::handle_match_skills(
+            &self.state.skills,
+            req,
+            &self.state.ownership,
+            &caller_user_id,
+        )
+        .map(Response::new)
     }
 
     // ------------------------------------------------------------------

@@ -707,6 +707,12 @@ message AgentSkill {
   bool enabled = 8;
   // Provenance: "user" or "background_review".
   string origin = 9;
+  // Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
+  // explicit-share shape. "org" (default) or "user"; owner_user_id and
+  // shared_with are meaningful only when scope == "user".
+  string scope = 10;
+  string owner_user_id = 11;
+  repeated string shared_with = 12;
 }
 
 message ListAgentSkillsResponse {

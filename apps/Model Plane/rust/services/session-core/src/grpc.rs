@@ -4097,6 +4097,9 @@ impl SessionCore for SessionService {
             sqlx::types::Json<Vec<String>>,
             bool,
             String,
+            String,
+            String,
+            sqlx::types::Json<Vec<String>>,
         );
 
         let started = Instant::now();
@@ -4110,7 +4113,8 @@ impl SessionCore for SessionService {
             caller.authorize_org(&req.org_id)?;
             let rows: Vec<Row> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
-                        trigger_file_patterns, tool_restrictions, enabled, origin
+                        trigger_file_patterns, tool_restrictions, enabled, origin,
+                        scope, owner_user_id, shared_with
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
                  ORDER BY name",
@@ -4126,7 +4130,20 @@ impl SessionCore for SessionService {
             let skills = rows
                 .into_iter()
                 .map(
-                    |(id, name, description, content, kw, fp, tr, enabled, origin)| {
+                    |(
+                        id,
+                        name,
+                        description,
+                        content,
+                        kw,
+                        fp,
+                        tr,
+                        enabled,
+                        origin,
+                        scope,
+                        owner_user_id,
+                        shared_with,
+                    )| {
                         pb::AgentSkill {
                             id,
                             name,
@@ -4137,6 +4154,9 @@ impl SessionCore for SessionService {
                             tool_restrictions: tr.0,
                             enabled,
                             origin,
+                            scope,
+                            owner_user_id,
+                            shared_with: shared_with.0,
                         }
                     },
                 )

@@ -921,7 +921,8 @@ pub async fn invoke_stream_sse(
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
     // behaviour that was previously absent (MatchSkills had no internal caller).
-    let skill_context = fetch_skill_context(&state, &model_bearer, &org_id, &req.content).await;
+    let skill_context =
+        fetch_skill_context(&state, &model_bearer, &org_id, &user_id, &req.content).await;
     // Remember which skills this turn injected, keyed by the request_id the SPA
     // already has. A thumbs-up has to credit the skills that actually shaped the
     // answer, and the client must not be trusted to name them — so the mapping
@@ -2437,6 +2438,7 @@ async fn fetch_skill_context(
     state: &AppState,
     bearer: &VerifiedModelBearer,
     org_id: &str,
+    user_id: &str,
     query: &str,
 ) -> Vec<String> {
     use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest};
@@ -2462,13 +2464,20 @@ async fn fetch_skill_context(
                 .await
             {
                 Ok(resp) => {
+                    let pulled = resp.into_inner().skills;
+                    // Ownership (SKILL-1) rides alongside the match cache: computed
+                    // from the same pull, before `pulled` is consumed below.
+                    state.ownership.replace_org_kind(
+                        org_id,
+                        crate::ownership::KIND_SKILL,
+                        crate::skills::skill_ownership_entries(&pulled),
+                    );
                     // replace_learned, not a bare upsert loop: on a re-pull the
                     // cache must also FORGET skills the operator deleted, or a
                     // removed skill keeps steering answers indefinitely.
                     state.skills.replace_learned(
                         org_id,
-                        resp.into_inner()
-                            .skills
+                        pulled
                             .into_iter()
                             .map(crate::skills::agent_skill_to_skill)
                             .collect(),
@@ -2489,6 +2498,8 @@ async fn fetch_skill_context(
             limit: MAX_INJECTED_SKILLS,
             min_score: 0.0,
         },
+        &state.ownership,
+        user_id,
     ) else {
         return Vec::new();
     };

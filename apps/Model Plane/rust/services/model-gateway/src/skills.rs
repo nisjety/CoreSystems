@@ -139,7 +139,10 @@ impl SkillStore {
     }
 }
 
-/// Lists all skills registered for `req.org_id`.
+/// Lists all skills registered for `req.org_id` that `caller_user_id` may see
+/// (SKILL-1): org-scoped and disk/operator-pushed skills (untracked in
+/// `ownership`) are visible to everyone; a learned, user-scoped skill is
+/// visible only to its owner or an explicit grantee.
 ///
 /// # Errors
 ///
@@ -147,28 +150,58 @@ impl SkillStore {
 pub fn handle_list_skills(
     store: &SkillStore,
     req: ListSkillsRequest,
+    ownership: &crate::ownership::OwnershipStore,
+    caller_user_id: &str,
 ) -> Result<ListSkillsResponse, Status> {
     if req.org_id.is_empty() {
         return Err(Status::invalid_argument("org_id is required"));
     }
+    let skills = store
+        .list(&req.org_id)
+        .into_iter()
+        .filter(|s| {
+            ownership.usable_or_untracked(
+                &req.org_id,
+                crate::ownership::KIND_SKILL,
+                &s.id,
+                caller_user_id,
+            )
+        })
+        .collect();
     Ok(ListSkillsResponse {
         request_id: req.request_id,
-        skills: store.list(&req.org_id),
+        skills,
     })
 }
 
-/// Fetches a single skill by id.
+/// Fetches a single skill by id, same visibility rule as
+/// [`handle_list_skills`]. Returns `not_found` rather than a permission error
+/// when the caller may not see the skill, so existence isn't leaked.
 ///
 /// # Errors
 ///
-/// Returns `Status::not_found` if no skill matches `(org_id, skill_id)`.
+/// Returns `Status::not_found` if no skill matches `(org_id, skill_id)` or the
+/// caller may not see it.
 pub fn handle_get_skill(
     store: &SkillStore,
     req: GetSkillRequest,
+    ownership: &crate::ownership::OwnershipStore,
+    caller_user_id: &str,
 ) -> Result<GetSkillResponse, Status> {
     let s = store
         .get(&req.org_id, &req.skill_id)
         .ok_or_else(|| Status::not_found(format!("skill not found: {}", req.skill_id)))?;
+    if !ownership.usable_or_untracked(
+        &req.org_id,
+        crate::ownership::KIND_SKILL,
+        &s.id,
+        caller_user_id,
+    ) {
+        return Err(Status::not_found(format!(
+            "skill not found: {}",
+            req.skill_id
+        )));
+    }
     Ok(GetSkillResponse {
         request_id: req.request_id,
         skill: Some(s),
@@ -191,6 +224,31 @@ pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
         source_path: format!("{LEARNED_SOURCE_PREFIX}{}", a.origin),
         min_score: 0.0,
     }
+}
+
+/// Derive an [`Ownership`](crate::ownership::Ownership) record from a
+/// session-core [`AgentSkill`]'s `scope`/`owner_user_id`/`shared_with`
+/// fields (SKILL-1), keyed by skill id — the shape
+/// [`OwnershipStore::replace_org_kind`](crate::ownership::OwnershipStore::replace_org_kind)
+/// expects on every G7 refresh.
+#[must_use]
+pub fn skill_ownership_entries(
+    skills: &[AgentSkill],
+) -> Vec<(String, crate::ownership::Ownership)> {
+    skills
+        .iter()
+        .map(|a| {
+            let ownership = match crate::ownership::Scope::from_wire(&a.scope) {
+                crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
+                crate::ownership::Scope::User => crate::ownership::Ownership {
+                    scope: crate::ownership::Scope::User,
+                    owner_user_id: a.owner_user_id.clone(),
+                    shared_with: a.shared_with.clone(),
+                },
+            };
+            (a.id.clone(), ownership)
+        })
+        .collect()
 }
 
 /// Format a matched skill as a system-context block for live prompt injection.
@@ -220,7 +278,11 @@ fn score(query_terms: &[String], s: &Skill) -> f32 {
     ratio
 }
 
-/// Ranks an org's skills by keyword overlap with the query.
+/// Ranks an org's skills by keyword overlap with the query, restricted to
+/// skills `caller_user_id` may see (SKILL-1, same rule as
+/// [`handle_list_skills`]) — filtered before scoring/truncation so a
+/// caller's `limit` matches are chosen from skills they're actually allowed
+/// to see, not backfilled short by ones filtered out afterward.
 ///
 /// # Errors
 ///
@@ -228,6 +290,8 @@ fn score(query_terms: &[String], s: &Skill) -> f32 {
 pub fn handle_match_skills(
     store: &SkillStore,
     req: MatchSkillsRequest,
+    ownership: &crate::ownership::OwnershipStore,
+    caller_user_id: &str,
 ) -> Result<MatchSkillsResponse, Status> {
     if req.org_id.is_empty() {
         return Err(Status::invalid_argument("org_id is required"));
@@ -250,6 +314,14 @@ pub fn handle_match_skills(
     let mut scored: Vec<SkillMatch> = store
         .list(&req.org_id)
         .into_iter()
+        .filter(|s| {
+            ownership.usable_or_untracked(
+                &req.org_id,
+                crate::ownership::KIND_SKILL,
+                &s.id,
+                caller_user_id,
+            )
+        })
         .map(|s| {
             let match_score = score(&query_terms, &s);
             SkillMatch {
@@ -413,6 +485,9 @@ mod tests {
             tool_restrictions: vec![],
             enabled: true,
             origin: "background_review".into(),
+            scope: "org".into(),
+            owner_user_id: String::new(),
+            shared_with: vec![],
         };
         let sk = agent_skill_to_skill(a);
         assert_eq!(sk.id, "sk-1");
@@ -423,6 +498,7 @@ mod tests {
                                                                       // A learned skill, once mapped, is matchable by its keywords.
         let store = SkillStore::new();
         store.upsert("o", sk);
+        let ownership = crate::ownership::OwnershipStore::new();
         let resp = handle_match_skills(
             &store,
             MatchSkillsRequest {
@@ -432,6 +508,8 @@ mod tests {
                 limit: 0,
                 min_score: 0.0,
             },
+            &ownership,
+            "caller",
         )
         .unwrap();
         assert!(
@@ -462,6 +540,7 @@ mod tests {
         let store = SkillStore::new();
         store.upsert("o", s("python testing", &["pytest"], "Run pytest"));
         store.upsert("o", s("rust formatting", &["rustfmt"], "Run cargo fmt"));
+        let ownership = crate::ownership::OwnershipStore::new();
         let resp = handle_match_skills(
             &store,
             MatchSkillsRequest {
@@ -471,6 +550,8 @@ mod tests {
                 limit: 0,
                 min_score: 0.0,
             },
+            &ownership,
+            "caller",
         )
         .unwrap();
         assert!(!resp.matches.is_empty());
@@ -480,5 +561,74 @@ mod tests {
             .unwrap()
             .name
             .contains("python"));
+    }
+
+    #[test]
+    fn match_hides_a_private_learned_skill_from_a_non_owner_non_grantee() {
+        let store = SkillStore::new();
+        let private = store.upsert("o", s("alice's runbook", &["private"], "secret steps"));
+        let ownership = crate::ownership::OwnershipStore::new();
+        ownership.set(
+            "o",
+            crate::ownership::KIND_SKILL,
+            &private.id,
+            crate::ownership::Ownership::user("alice"),
+        );
+
+        let req = MatchSkillsRequest {
+            request_id: "t".into(),
+            org_id: "o".into(),
+            query: "private".into(),
+            limit: 0,
+            min_score: 0.0,
+        };
+
+        let owner_resp = handle_match_skills(&store, req.clone(), &ownership, "alice").unwrap();
+        assert!(
+            !owner_resp.matches.is_empty(),
+            "owner must see their own skill"
+        );
+
+        let stranger_resp = handle_match_skills(&store, req, &ownership, "bob").unwrap();
+        assert!(
+            stranger_resp.matches.is_empty(),
+            "a non-owner, non-grantee must not see a private learned skill"
+        );
+    }
+
+    #[test]
+    fn list_and_get_are_visible_to_untracked_and_owner_but_not_a_stranger() {
+        let store = SkillStore::new();
+        store.upsert("o", s("disk skill", &[], "always visible"));
+        let private = store.upsert("o", s("private skill", &[], "owner only"));
+        let ownership = crate::ownership::OwnershipStore::new();
+        ownership.set(
+            "o",
+            crate::ownership::KIND_SKILL,
+            &private.id,
+            crate::ownership::Ownership::user("alice"),
+        );
+
+        let list_req = ListSkillsRequest {
+            request_id: "t".into(),
+            org_id: "o".into(),
+        };
+        let listed_for_owner =
+            handle_list_skills(&store, list_req.clone(), &ownership, "alice").unwrap();
+        assert_eq!(listed_for_owner.skills.len(), 2, "owner sees both");
+        let listed_for_stranger = handle_list_skills(&store, list_req, &ownership, "bob").unwrap();
+        assert_eq!(
+            listed_for_stranger.skills.len(),
+            1,
+            "stranger sees only the untracked disk skill"
+        );
+
+        let get_req = GetSkillRequest {
+            request_id: "t".into(),
+            org_id: "o".into(),
+            skill_id: private.id.clone(),
+        };
+        assert!(handle_get_skill(&store, get_req.clone(), &ownership, "alice").is_ok());
+        assert!(handle_get_skill(&store, get_req, &ownership, "bob").is_err());
     }
 }
