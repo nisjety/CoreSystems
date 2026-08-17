@@ -757,6 +757,56 @@ the Agent page, exactly what was created and with what defaults.
 
 ### Phase UI-4: Agent page installation management
 
+**Status 2026-08-17: NARROW SLICE built and live-verified; the rest
+deliberately deferred.** User decision when this phase was scoped: the real
+`/agents` page turned out to be a pure role-blueprint showcase (Service/
+Sales/Ecommerce/Chatbot/Workflow) with every activation control disabled and
+its own code comment marking real per-org config "deferred to Phase 5" — it
+had no connection at all to the actual `agents`/`spaceAgentBindings` system
+UI-2b/UI-3/UI-3b built. The full vision below (Blueprints/Definitions/Space
+installations/Page installations/Runs/Chief-Core, one restructured Agent
+Studio) also needs a new cross-Space registry read — the same class of gap
+that blocked UI-2c. Given a full restructure risked leaving a working
+surface half-broken for multi-session-scope backend work, the chosen slice
+was: **a real, honest "Definitions + Space installations" view, reusing
+existing per-Space reads instead of a new backend contract.**
+
+- New gateway `GET /api/v1/agents/installations`: composes
+  `control_space_index` (which Spaces the caller belongs to — the same
+  Control read `GET /api/v1/spaces` already uses) with `compose_space_agents`
+  (the SAME live Control-joined per-Space read the room Agent tab uses),
+  fetched concurrently via `join_all`, then grouped by `agent_ref` into one
+  row per definition with one installation entry per Space. No new Convex
+  index or query — deliberately, since a fresh cross-Space aggregate read
+  is exactly the undecided contract the rest of this phase is blocked on.
+  One real consequence of reusing `compose_space_agents`: a binding Control
+  never confirmed (no service-subject roster row) has no installation row
+  here, same as it has none in that Space's own Agent tab — verified live
+  (a room's `pending`-with-no-Control-membership Space never gains a
+  visible row).
+  2 new Rust tests (an agent installed in two rooms groups into one
+  definition with two installation rows carrying each room's own status;
+  a Control-authorized-but-unpublished subject correctly contributes no
+  installation row).
+- New `AgentInstallationsPage.tsx` at `/agents/installations`, linked from a
+  new entry card on `/agents` (next to the existing Task Console card) —
+  the existing blueprint showcase page is otherwise untouched. New
+  `getAgentInstallations()` client. 3 new Solid tests (groups across rooms
+  with per-room status, honest empty state, distinct load-failure state).
+- **Live-verified in the real org**: opened `/agents` → "Installasjoner" →
+  saw all three real agent definitions (Driftsassistent, Statusagent, UI3
+  Testbindingsagent), each showing "Lagt til i 1 rom" / AQUATIQ AS / Aktiv;
+  clicking the room name navigated to that Space. The Personal-room
+  `pending` binding for UI3 Testbindingsagent (Control never confirmed it,
+  see the UI-3 section above) correctly does not appear anywhere on this
+  page — consistent with that room's own Agent tab, not a bug.
+- **Explicitly NOT built, left for a dedicated session**: the blueprint
+  showcase restructure, Page/system installations (no storage contract
+  exists for these at all), Runs-and-receipts as part of this IA (Task
+  Console already covers a version of this separately), and the Chief/Core
+  agent's cross-Space routing view (needs the org-wide registry read this
+  slice deliberately avoided building).
+
 **Goal:** make `/agents` the control center for reusable definitions and their
 installations.
 
