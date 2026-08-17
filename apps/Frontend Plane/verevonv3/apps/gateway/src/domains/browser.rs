@@ -2157,7 +2157,7 @@ fn process_upstream_ws_message(
         return tungstenite_to_axum_message(message);
     };
     let Ok(mut value) = serde_json::from_str::<Value>(&text) else {
-        return Some(AxumWsMessage::Text(text.into()));
+        return Some(AxumWsMessage::Text(text.to_string().into()));
     };
     if value.get("type").and_then(Value::as_str) == Some("frame") {
         return process_upstream_frame_ws_message(value, state, session_id);
@@ -2247,23 +2247,25 @@ fn process_upstream_devtools_ws_message(
 
 fn axum_to_tungstenite_message(message: AxumWsMessage) -> Option<TungsteniteMessage> {
     match message {
-        // axum's Utf8Bytes/Bytes and tungstenite's String/Vec<u8> are distinct
-        // types on these still-unbumped-here tungstenite versions; converting
-        // across the client/upstream boundary needs an explicit copy either way.
-        AxumWsMessage::Text(value) => Some(TungsteniteMessage::Text(value.to_string())),
-        AxumWsMessage::Binary(value) => Some(TungsteniteMessage::Binary(value.to_vec())),
-        AxumWsMessage::Ping(value) => Some(TungsteniteMessage::Ping(value.to_vec())),
-        AxumWsMessage::Pong(value) => Some(TungsteniteMessage::Pong(value.to_vec())),
+        // axum's Utf8Bytes and tungstenite's Utf8Bytes are each crate's own
+        // newtype, with no cross-crate conversion between them, so text goes
+        // through String (both implement Display + From<String>). Binary,
+        // Ping, and Pong all hold the shared `bytes::Bytes` type directly and
+        // need no conversion at all.
+        AxumWsMessage::Text(value) => Some(TungsteniteMessage::Text(value.to_string().into())),
+        AxumWsMessage::Binary(value) => Some(TungsteniteMessage::Binary(value)),
+        AxumWsMessage::Ping(value) => Some(TungsteniteMessage::Ping(value)),
+        AxumWsMessage::Pong(value) => Some(TungsteniteMessage::Pong(value)),
         AxumWsMessage::Close(_) => Some(TungsteniteMessage::Close(None)),
     }
 }
 
 fn tungstenite_to_axum_message(message: TungsteniteMessage) -> Option<AxumWsMessage> {
     match message {
-        TungsteniteMessage::Text(value) => Some(AxumWsMessage::Text(value.into())),
-        TungsteniteMessage::Binary(value) => Some(AxumWsMessage::Binary(value.into())),
-        TungsteniteMessage::Ping(value) => Some(AxumWsMessage::Ping(value.into())),
-        TungsteniteMessage::Pong(value) => Some(AxumWsMessage::Pong(value.into())),
+        TungsteniteMessage::Text(value) => Some(AxumWsMessage::Text(value.to_string().into())),
+        TungsteniteMessage::Binary(value) => Some(AxumWsMessage::Binary(value)),
+        TungsteniteMessage::Ping(value) => Some(AxumWsMessage::Ping(value)),
+        TungsteniteMessage::Pong(value) => Some(AxumWsMessage::Pong(value)),
         TungsteniteMessage::Close(_) => Some(AxumWsMessage::Close(None)),
         TungsteniteMessage::Frame(_) => None,
     }
@@ -5792,7 +5794,8 @@ mod tests {
                         "screenshot_artifact_id": "art_01JZ9XM7EXAMPLESHOT00001"
                     }
                 })
-                .to_string(),
+                .to_string()
+                .into(),
             ),
             &state,
             session_id,
@@ -5866,7 +5869,8 @@ mod tests {
                     ],
                     "zdr": false
                 })
-                .to_string(),
+                .to_string()
+                .into(),
             ),
             &state,
             session_id,
@@ -5932,7 +5936,8 @@ mod tests {
                     "dataBase64": "abcdef",
                     "zdr": false
                 })
-                .to_string(),
+                .to_string()
+                .into(),
             ),
             &state,
             session_id,
@@ -5998,7 +6003,8 @@ mod tests {
                         "dataBase64": format!("payload-{sequence}"),
                         "zdr": true
                     })
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 ),
                 &state,
                 session_id,
@@ -6089,7 +6095,8 @@ mod tests {
                     "events": events,
                     "zdr": false
                 })
-                .to_string(),
+                .to_string()
+                .into(),
             ),
             &state,
             session_id,
