@@ -11,7 +11,7 @@ anyhow = "1.0"
 # STREAM.INFO-free bind, which the shared-broker ACLs are written against.
 async-nats = "0.50.0"
 async-stream = "0.3"
-axum = { version = "0.7", features = ["macros", "ws"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
