@@ -163,15 +163,83 @@ Venice's tool-calling limitation is an *implementation* consequence of provider-
 
 ---
 
+## 4.5 Shipped (branch `model-plane-harness`, 2026-08-19)
+
+Phase 0 and the inference-core half of Phase 1 are implemented and committed.
+221 tests pass; strict clippy is clean on every changed file (the one remaining
+`-D warnings` error in the crate, `cache.rs:149`, is pre-existing and untouched).
+
+| Item | State |
+|---|---|
+| ZDR evidence binding (`provider/zdr.rs`) | **Done.** `ZdrAttestation` over resource id, approval ref, effective date, review-by and reviewer, digest-bound over all five. `validate()` is pure; `from_env` is a thin reader. |
+| Claude ZDR capability | **Done.** `AnthropicProvider` takes the same attestation; `capabilities()` no longer hardcodes `false`. Azure OpenAI and Foundry Claude carry *separate* attestations. |
+| Global-deployment gate | **Done.** Explicit `Global`/`Worldwide` deployment type refuses to boot without `MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT`. Unset warns. |
+| Provider identity + routing off declarations | **Done.** `provider_serves_model` and hint matching read declared `provider_id`/`aliases`/`model_family` instead of hardcoded name literals. Per-provider catalogs replace the chain-level two-slot `DeployedModels`. |
+| Residency axis | **Declared, not enforced.** `Residency::{Global,Eu,Norway}` on `ProviderCapabilities`, classified per Azure resource, logged at boot. See the honest caveat below. |
+| Compose wiring | **Done.** 18 variables forwarded; `docker compose config` validates. |
+
+### Deviations from the plan above, and why
+
+**The residency gate warns; it does not enforce.** §5 Phase 1 called for a
+fail-loud gate. Built that way first, it was wrong: after classifying unknown as
+`Global` (which is the honest classification — "cannot prove EU" is not "EU"),
+a fail-loud gate aborts boot for every deployment without a declared region,
+i.e. the running stack. The sibling EU-embedding gate's actual precedent is to
+fire only on *provably* non-EU and tolerate unknown. Real enforcement belongs on
+the request path beside the ZDR skip, which needs a residency field on
+`InferRequest` and therefore a proto change — deferred to Phase 2, where a second
+residency tier (Bineric) will exist for it to discriminate between. **Until then
+the residency axis is disclosure, not a control, and is labelled that way in the
+code.**
+
+**capability-core's models registry was NOT made the invoke-path source of
+truth.** §5 Phase 1 proposed this. It would put a synchronous cross-service call
+on the request hot path, against the plane's own "Rust owns hot path" rule. The
+registry should stay declarative and be loaded/cached at startup instead. Flagged
+rather than silently skipped — it needs a decision before Phase 2.
+
+**Three defects were found by adversarial review after the first two commits and
+fixed in `5ac43a5b`.** Worth reading if you touch this code: Foundry Claude was
+inheriting its residency from a *different* Azure resource's region; an unset
+deployment type was promoted to `Eu` while the Phase 0 gate only warned about the
+same silence; and the gate panicked where its siblings warn. The first two were
+overclaims — the code asserted an EU boundary it had no evidence for.
+
+### Operator runbook — configuring a ZDR attestation
+
+```bash
+RESOURCE_ID='/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.CognitiveServices/accounts/<name>'
+APPROVAL_REF='MAM-2026-0042'        # Modified Abuse Monitoring approval reference
+EFFECTIVE_DATE='2026-06-01'          # when the approval took effect
+REVIEW_BY='2027-06-01'               # when it must be re-verified; past this, ZDR stops
+REVIEWER='ima@aquatiq.com'
+
+printf '%s\n%s\n%s\n%s\n%s\n' \
+  "$RESOURCE_ID" "$APPROVAL_REF" "$EFFECTIVE_DATE" "$REVIEW_BY" "$REVIEWER" | sha256sum
+```
+
+Set the five values plus the resulting digest as `AZURE_OPENAI_ZDR_*` (and
+separately as `AZURE_ANTHROPIC_ZDR_*` for the Foundry Claude resource — it is a
+different resource under a different approval and must not share one). Leave
+`AZURE_OPENAI_ZDR_CONFIRMED=false`; it is now read only to reject an assertion
+made without evidence.
+
+The digest binds the five fields to each other, **not** to the endpoint. Moving
+the block to an environment pointed at a different resource still validates —
+`warn_on_endpoint_mismatch` logs when the attested resource name does not appear
+in the configured host, but that is a heuristic on an opaque string, not a proof.
+
+---
+
 ## 5. Sequencing
 
-**Phase 0 — fix what's broken in our own claims (do first; independent of every supplier).**
+**Phase 0 — fix what's broken in our own claims. ✅ SHIPPED (items 1–3) — see §4.5.**
 1. **Give `AnthropicProvider` a ZDR builder.** Today no Claude path can serve a ZDR request (`anthropic.rs:527`). Either wire the Azure-Foundry Claude route's real posture, or make the exclusion explicit and visible instead of silent.
 2. **Upgrade `AZURE_OPENAI_ZDR_CONFIRMED` from a boolean to bound evidence** — Azure resource id + Modified Abuse Monitoring approval reference + effective date + reviewer, hashed to a non-placeholder digest; refuse to register `supports_zdr` unless it validates. Right now `config.rs:96-98` is the same self-reported-boolean antipattern the Venice audit called out, pointed at ourselves.
 3. **Fail-loud startup gate rejecting Global/Worldwide Azure deployment types**, mirroring the existing deny-by-default EU embedding gate at `config.rs:100-104`. A `Global` deployment silently voids the entire EU-boundary claim and is the most likely way we break our own promise.
 4. **Apply for Azure Modified Abuse Monitoring now** — it needs an EA/MCA plus a Microsoft account team. Get the residual-operational-retention question answered *in writing* for our specific resource; Microsoft's own support answers currently contradict each other.
 
-**Phase 1 — provider routing rewrite (the prerequisite).** Replace the hardcoded name `match`, the two-family `provider_serves_model` split, and the fixed hint alias table with a registry-driven provider identity + capability declaration. Make capability-core's `models` registry the invoke-path source of truth and add the privacy-tier column. Without this, no new supplier can be addressed distinctly.
+**Phase 1 — provider routing rewrite (the prerequisite). ✅ SHIPPED for inference-core; the capability-core half is deliberately not done — see §4.5.** Replace the hardcoded name `match`, the two-family `provider_serves_model` split, and the fixed hint alias table with a registry-driven provider identity + capability declaration. Make capability-core's `models` registry the invoke-path source of truth and add the privacy-tier column. Without this, no new supplier can be addressed distinctly.
 
 **Phase 2 — add the two decided providers.**
 - **Bineric as Tier A** — an OpenAI-compatible provider registration (zero adapter code if their wire format confirms), with a **hard model allow-list** restricted to their Norwegian/Nordic models and brokered models refused at registration, not merely unselected. Blocked on the Bineric call (§6).
