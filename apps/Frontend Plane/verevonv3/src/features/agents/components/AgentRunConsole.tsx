@@ -11,6 +11,8 @@ import {
 import { createStore } from 'solid-js/store'
 import {
   ArrowLeft,
+  Bell,
+  BellRing,
   Bot,
   Brain,
   CheckCircle2,
@@ -73,8 +75,11 @@ import {
 } from '@/shared/api/orchestration-client'
 import {
   getRun,
+  getRunWatchStatus,
   listRuns,
   listSystemRuns,
+  unwatchRun,
+  watchRun,
   type RunDetail,
 } from '@/shared/api/runs-client'
 import {
@@ -836,6 +841,7 @@ export default function AgentRunConsole() {
                   detail={view().detail}
                   live={view().live}
                   mode={mode()}
+                  runId={activeRunId()}
                   status={state.status}
                   onResume={() => {
                     const runId = activeRunId()
@@ -2130,6 +2136,9 @@ function TelemetryPanel(props: {
   detail: RunDetail | null
   live: RunUsage | null
   mode: VerevonMode
+  /** The run this panel is pinned to (live or replayed). Drives the "notify
+   * me" toggle — null hides it, since there is nothing yet to subscribe to. */
+  runId: string | null
   status: RunStatus
   onResume: () => void
 }) {
@@ -2182,6 +2191,9 @@ function TelemetryPanel(props: {
         <span class="verevon-run-telemetry__status" data-tone={normalizeStatusTone(props.status)}>
           {statusLabelFor(i18n, props.status)}
         </span>
+        <Show when={props.runId}>
+          {(runId) => <RunWatchToggle runId={runId()} />}
+        </Show>
       </div>
 
       <div class="verevon-run-telemetry__grid">
@@ -2224,6 +2236,67 @@ function TelemetryPanel(props: {
         </div>
       </Show>
     </div>
+  )
+}
+
+// ── Run watcher toggle ───────────────────────────────────────────────────────
+// "Notify me when this run finishes" (AUTO-2). A standing per-user
+// subscription, distinct from the live event stream above: this survives the
+// tab closing, and delivery happens through the org's existing notification
+// channels (see `/notifications/preferences` — no new preference surface
+// needed for this). Deliberately a single small control, not a settings page.
+
+function RunWatchToggle(props: { runId: string }) {
+  const i18n = useI18n()
+  const [status, { mutate }] = createResource(() => props.runId, (runId) => getRunWatchStatus(runId))
+  const [pending, setPending] = createSignal(false)
+
+  // Reading a Solid resource in its errored state re-throws (see `proofView`
+  // above) — check `.error` before falling back, so a failed status fetch
+  // degrades to "not watching" instead of an uncaught throw.
+  const watching = () => {
+    if (status.error != null) return false
+    return status()?.watching ?? false
+  }
+
+  const toggle = async () => {
+    if (pending()) return
+    const runId = props.runId
+    const next = !watching()
+    setPending(true)
+    // Optimistic: the control reflects the requested state immediately: a
+    // failed call below reverts it rather than leaving a false "on"/"off".
+    mutate({ watching: next })
+    try {
+      if (next) {
+        await watchRun(runId)
+      } else {
+        await unwatchRun(runId)
+      }
+    } catch {
+      mutate({ watching: !next })
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      class={cn('verevon-run-watch-toggle', controlFocusClass)}
+      classList={{ 'verevon-run-watch-toggle--active': watching() }}
+      aria-pressed={watching()}
+      disabled={pending() || status.loading}
+      onClick={() => void toggle()}
+      title={watching()
+        ? i18n.tr('Du varsles når kjøringen er ferdig — klikk for å avslutte', "You'll be notified when this run finishes — click to cancel")
+        : i18n.tr('Varsle meg når kjøringen er ferdig', 'Notify me when this run finishes')}
+    >
+      <Show when={watching()} fallback={<Bell size={13} strokeWidth={2.1} />}>
+        <BellRing size={13} strokeWidth={2.1} />
+      </Show>
+      {watching() ? i18n.tr('Varsler', 'Watching') : i18n.tr('Varsle meg', 'Notify me')}
+    </button>
   )
 }
 

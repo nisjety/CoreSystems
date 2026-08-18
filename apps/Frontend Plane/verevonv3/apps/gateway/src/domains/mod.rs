@@ -31,6 +31,7 @@ pub mod orgs;
 pub mod ownership;
 pub mod privacy;
 pub mod router_policy;
+pub mod run_watchers;
 pub mod search;
 pub mod settings;
 pub mod shares;

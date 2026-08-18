@@ -4357,6 +4357,46 @@ textarea:focus-visible {
   border-color: var(--border);
 }
 
+.verevon-run-watch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.verevon-run-watch-toggle:hover:not(:disabled) {
+  border-color: var(--verevon-accent);
+  color: var(--verevon-accent);
+}
+
+.verevon-run-watch-toggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.verevon-run-watch-toggle--active {
+  border-color: var(--verevon-accent);
+  background: color-mix(in srgb, var(--verevon-accent) 12%, transparent);
+  color: var(--verevon-accent-ink);
+}
+
+.dark .verevon-run-watch-toggle {
+  background: var(--verevon-dark-panel, #15161a);
+  border-color: var(--border);
+}
+
+.dark .verevon-run-watch-toggle--active {
+  background: color-mix(in srgb, var(--verevon-accent) 20%, transparent);
+}
+
 .verevon-run-console__eyebrow {
   display: inline-flex;
   align-items: center;

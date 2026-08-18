@@ -113,6 +113,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::ownership::router(state.clone()))
         .merge(domains::privacy::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
+        .merge(domains::run_watchers::router(state.clone()))
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
         .merge(domains::shares::router(state.clone()))

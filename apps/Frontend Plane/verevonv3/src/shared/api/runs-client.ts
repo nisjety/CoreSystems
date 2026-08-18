@@ -159,3 +159,44 @@ export async function getRun(runId: string, signal?: AbortSignal): Promise<RunDe
   )
   return payload.run ? normalizeRun(payload.run) : null
 }
+
+// ── Run watchers ("notify me when this run finishes") ───────────────────────
+// These call the gateway `/api/v1/runs/:run_id/watchers` proxy (→
+// model-gateway → capability-core), which owns the durable per-user watcher
+// record and hands off to notification-core once the run finishes. Distinct
+// from the reads above: a watcher is a standing subscription the caller
+// registers, not a read of the run's own state.
+
+export type RunWatchStatus = {
+  watching: boolean
+}
+
+function normalizeWatchStatus(payload: { watching?: unknown }): RunWatchStatus {
+  return { watching: payload.watching === true }
+}
+
+/** Register a "notify me" subscription: tell the caller when this run finishes. */
+export async function watchRun(runId: string, signal?: AbortSignal): Promise<RunWatchStatus> {
+  const payload = await requestJson<{ watching?: unknown }>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/watchers`,
+    { method: 'POST', signal },
+  )
+  return normalizeWatchStatus(payload)
+}
+
+/** Cancel a previously-registered "notify me" subscription for this run. */
+export async function unwatchRun(runId: string, signal?: AbortSignal): Promise<void> {
+  await requestJson<unknown>(`/api/v1/runs/${encodeURIComponent(runId)}/watchers`, {
+    method: 'DELETE',
+    signal,
+  })
+}
+
+/** Check whether the caller currently has a "notify me" subscription on this run. */
+export async function getRunWatchStatus(runId: string, signal?: AbortSignal): Promise<RunWatchStatus> {
+  const payload = await requestJson<{ watching?: unknown }>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/watchers`,
+    { signal },
+  )
+  return normalizeWatchStatus(payload)
+}
