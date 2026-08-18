@@ -251,6 +251,27 @@ func main() {
 	// must not sit behind the per-user JWT middleware wrapping protectedMux
 	// below, which a service-to-service caller has no bearer to satisfy.
 	mcpHandler.RegisterInternal(publicMux)
+
+	// MCP DNS revalidator: normalizeMCPRegistration's DNS-address check only
+	// ever runs once, at registration/update time — DNS answers can legitimately
+	// drift afterward even without an attacker. This periodically re-resolves
+	// every enabled MCP server's hostname and quarantines it if DNS now lands
+	// inside a forbidden range. Opt out with MCP_DNS_REVALIDATOR_ENABLED=false;
+	// override the interval with MCP_DNS_REVALIDATION_INTERVAL (Go duration,
+	// e.g. "5m").
+	if os.Getenv("MCP_DNS_REVALIDATOR_ENABLED") != "false" {
+		interval := api.DefaultMCPDNSRevalidationInterval
+		if raw := os.Getenv("MCP_DNS_REVALIDATION_INTERVAL"); raw != "" {
+			if parsed, perr := time.ParseDuration(raw); perr == nil && parsed > 0 {
+				interval = parsed
+			} else {
+				slog.Warn("invalid MCP_DNS_REVALIDATION_INTERVAL; using default",
+					"value", raw, "default", interval)
+			}
+		}
+		go api.NewMCPDNSRevalidator(pool, interval).WithPublisher(recPub).Start(ctx)
+		slog.Info("mcp dns revalidator started", "interval", interval)
+	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMemoryHandler(pool).Register(protectedMux)
