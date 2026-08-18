@@ -289,7 +289,7 @@ default, and none was added.
 
 | ID | Effort | Impact | What |
 |---|---|---|---|
-| SSRF-1 | M | High | Give integration-corev2 a general SSRF/DNS-pinning guard — zero exists today on a service CLAUDE.md explicitly names as owning this class of outbound call. |
+| SSRF-1 | M | High | **DONE 2026-08-13, closed further 2026-08-18** — see "Landed" below; the one residual gap (Microsoft OAuth client bypassing the shared guard) is fixed, plus a NAT64 well-known-prefix blind spot in the guard's own range list. |
 | SSRF-2 | M | High | **DONE 2026-08-13** — resolved as a documented contract, NOT a shared crate; see correction below. |
 | SSRF-3 | L | Medium | Evaluate a QM-style centralized decision service for polyglot reuse instead of N independent guards — real leverage for whichever Go/TS service comes next, since Quarry's Rust-native pinning doesn't port. |
 | SSRF-4 | S | Low | Audit model-gateway's outbound calls for any caller-influenced host — it has a `CONNECT_TIMEOUT` (this session) but no SSRF guard, currently acceptable only if it never dials outward on caller/model input. |

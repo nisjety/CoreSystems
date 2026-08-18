@@ -61,6 +61,7 @@ func TestGuardVetBlocksEveryReservedRange(t *testing.T) {
 		{"rfc4193 ula", "fc00::1", true},
 		{"cgnat 100.64/10", "100.64.0.1", true},
 		{"cgnat upper edge", "100.127.255.255", true},
+		{"nat64-embedded aws metadata address", "64:ff9b::a9fe:a9fe", true},
 		{"public v4 (test-net-3, not in this blocklist)", "203.0.113.10", false},
 		{"public v6", "2606:4700:4700::1111", false},
 	}

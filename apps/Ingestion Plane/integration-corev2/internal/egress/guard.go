@@ -83,6 +83,17 @@ var thisNetworkV4 = netip.MustParsePrefix("0.0.0.0/8")
 // has no dedicated predicate for either.
 var reservedV4 = netip.MustParsePrefix("240.0.0.0/4")
 
+// nat64Prefix is the RFC 6052 NAT64 well-known prefix. Addr.Unmap only
+// undoes RFC4291 IPv4-mapped addresses (::ffff:0:0/96); it does not
+// recognize this different embedding format, so a network running
+// NAT64/DNS64 can translate a connection to an address in this prefix
+// into a connection to whatever IPv4 address is embedded in its low 32
+// bits — including a blocked one (64:ff9b::a9fe:a9fe embeds
+// 169.254.169.254). Blocking the prefix outright closes that
+// translation path without decoding and re-vetting the embedded
+// address.
+var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+
 // Resolver is satisfied by *net.Resolver. Tests substitute a stub so
 // DNS-rebinding-style scenarios are deterministic and need no real network
 // or real DNS infrastructure.
@@ -276,6 +287,8 @@ func (g *Guard) vet(addr netip.Addr) string {
 		return "private (RFC1918/RFC4193)"
 	case cgnatPrefix.Contains(addr):
 		return "carrier-grade NAT (100.64.0.0/10)"
+	case nat64Prefix.Contains(addr):
+		return "NAT64 well-known prefix (64:ff9b::/96, can embed a blocked IPv4 address)"
 	default:
 		return ""
 	}
