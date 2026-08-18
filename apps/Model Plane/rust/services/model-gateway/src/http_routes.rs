@@ -324,6 +324,16 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_plugin_proxy)
                 .delete(delete_plugin_proxy),
         )
+        // Run watchers (AUTO-2): "notify me when this run finishes". Backed
+        // by capability-core's run_watch_subscriptions; org_id/user_id are
+        // never in this proxy's control, only the verified capability bearer
+        // capability-core's own principal derives them from.
+        .route(
+            "/v1/runs/:run_id/watchers",
+            get(get_run_watchers_proxy)
+                .post(create_run_watcher_proxy)
+                .delete(delete_run_watcher_proxy),
+        )
 }
 
 /// `/v1/ai/*` modality routes (chat, embeddings, images, speech, translate,
@@ -4960,6 +4970,64 @@ async fn delete_skill_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
+}
+
+/// `GET /v1/runs/:run_id/watchers` — the caller's own watch status on this
+/// run. capability-core derives org_id/user_id from the forwarded
+/// capability bearer alone; no query/body identity to inject here.
+async fn get_run_watchers_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("runs/{run_id}/watchers"),
+        "GET",
+        None,
+    )
+    .await
+}
+
+/// `POST /v1/runs/:run_id/watchers` — register "notify me" for this run.
+/// No request body: the recipient is always the calling user, never
+/// caller-supplied.
+async fn create_run_watcher_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("runs/{run_id}/watchers"),
+        "POST",
+        None,
+    )
+    .await
+}
+
+/// `DELETE /v1/runs/:run_id/watchers` — cancel the caller's own watch.
+async fn delete_run_watcher_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("runs/{run_id}/watchers"),
+        "DELETE",
+        None,
+    )
+    .await
 }
 
 async fn list_plugins_proxy(
