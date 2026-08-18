@@ -166,6 +166,7 @@ func (h *Handler) CreateNotificationRequest(c *gin.Context) {
 			return
 		}
 	case "support-worker":
+	case "capability-core":
 	default:
 		c.JSON(http.StatusForbidden, gin.H{"error": "caller is not authorized to create notifications"})
 		return
@@ -206,6 +207,10 @@ func isNotificationTypeAuthorized(serviceID, notificationType string) bool {
 			"ticket.triaged":  {},
 			"sla.warning":     {},
 			"sla.breach":      {},
+		},
+		"capability-core": {
+			"modelplane.run_completed": {},
+			"modelplane.run_failed":    {},
 		},
 	}
 	_, ok := allowed[serviceID][notificationType]

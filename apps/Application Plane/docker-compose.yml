@@ -842,6 +842,10 @@ services:
             NOTIFICATION_DELIVERY_WORKER_LEASE: ${NOTIFICATION_DELIVERY_WORKER_LEASE:-30s}
             NOTIFICATION_GATEWAY_SERVICE_TOKEN: ${NOTIFICATION_GATEWAY_SERVICE_TOKEN:?NOTIFICATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
             NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN: ${NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN:-}
+            # Optional third authorized caller: Model Plane's capability-core,
+            # for run-watch notifications (AUTO-2). Empty disables this
+            # principal entirely, matching support-worker's optional pattern.
+            NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
             # Cross-plane org-deletion subscriber: a SECOND, narrowly-scoped NATS
             # identity (notification-core-gdpr) on the shared Control-Plane broker,
             # kept distinct from NATS_URL/NATS_SHARED_URL/VEREVON_NATS_URL above,

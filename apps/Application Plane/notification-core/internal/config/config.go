@@ -70,6 +70,7 @@ func Load() (*Config, error) {
 		DelegationKeys: map[string]string{
 			"verevon-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
 			"support-worker":  strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
+			"capability-core": strings.TrimSpace(getEnv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN", "")),
 		},
 	}
 

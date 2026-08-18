@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +25,7 @@ import (
 )
 
 const testDelegationSecret = "gateway-test-secret-at-least-32-bytes"
+const testCapabilityCoreDelegationSecret = "capability-core-test-secret-at-least-32-bytes"
 
 var testNonceCounter atomic.Uint64
 
@@ -39,14 +41,40 @@ func newTestVerifier(t *testing.T) *delegation.Verifier {
 	return verifier
 }
 
+// newTestVerifierWithCapabilityCore is newTestVerifier plus the
+// "capability-core" principal, for tests exercising the Model Plane's
+// run-watch notification caller.
+func newTestVerifierWithCapabilityCore(t *testing.T) *delegation.Verifier {
+	t.Helper()
+	verifier, err := delegation.NewVerifier(delegation.Config{
+		Audience: "notification-core",
+		Keys: map[string]string{
+			"verevon-gateway": testDelegationSecret,
+			"capability-core": testCapabilityCoreDelegationSecret,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewVerifier() error = %v", err)
+	}
+	return verifier
+}
+
 func signTestRequest(t *testing.T, request *stdhttp.Request, body []byte, secret, userID, organizationID, role string) {
+	t.Helper()
+	signTestRequestAs(t, request, body, "verevon-gateway", secret, userID, organizationID, role)
+}
+
+// signTestRequestAs signs the request as an arbitrary service principal.
+// signTestRequest above is the "verevon-gateway" special case kept for the
+// many existing call sites.
+func signTestRequestAs(t *testing.T, request *stdhttp.Request, body []byte, serviceID, secret, userID, organizationID, role string) {
 	t.Helper()
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 	nonce := fmt.Sprintf("test-nonce-%016d", testNonceCounter.Add(1))
 	digestBytes := sha256.Sum256(body)
 	digest := base64.RawURLEncoding.EncodeToString(digestBytes[:])
 	canonical := delegation.Canonical(delegation.CanonicalFields{
-		ServiceID:      "verevon-gateway",
+		ServiceID:      serviceID,
 		Audience:       "notification-core",
 		Timestamp:      timestamp,
 		Nonce:          nonce,
@@ -60,7 +88,7 @@ func signTestRequest(t *testing.T, request *stdhttp.Request, body []byte, secret
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(canonical))
 
-	request.Header.Set(delegation.HeaderServiceID, "verevon-gateway")
+	request.Header.Set(delegation.HeaderServiceID, serviceID)
 	request.Header.Set(delegation.HeaderTimestamp, timestamp)
 	request.Header.Set(delegation.HeaderNonce, nonce)
 	request.Header.Set(delegation.HeaderBodySHA256, digest)
@@ -490,6 +518,101 @@ func TestServicePrincipalsHaveExplicitNotificationTypeAllowlists(t *testing.T) {
 	}
 	if isNotificationTypeAuthorized("verevon-gateway", "ticket.assigned") {
 		t.Fatal("gateway has no direct notification-dispatch workflow")
+	}
+	for _, notificationType := range []string{
+		"modelplane.run_completed",
+		"modelplane.run_failed",
+	} {
+		if !isNotificationTypeAuthorized("capability-core", notificationType) {
+			t.Fatalf("capability-core type %q rejected, want authorized", notificationType)
+		}
+	}
+	if isNotificationTypeAuthorized("capability-core", "ticket.assigned") {
+		t.Fatal("capability-core can request a support-worker notification type")
+	}
+}
+
+func TestCreateNotificationRequestAcceptsCapabilityCoreRunNotification(t *testing.T) {
+	handler := NewHandler(&config.Config{ServiceName: "notification-core"}, HandlerDeps{Notifications: newTestNotificationService(nil)})
+	server := httptest.NewServer(newRouter(handler, newTestVerifierWithCapabilityCore(t)))
+	defer server.Close()
+
+	requestBody := []byte(`{
+		"organization_id":"org_123",
+		"recipient":{"kind":"user","id":"user_456"},
+		"type":"modelplane.run_completed",
+		"payload":{"run_id":"run_789"}
+	}`)
+	request, err := stdhttp.NewRequest(stdhttp.MethodPost, server.URL+"/api/v1/notification-requests", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("NewRequest error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	// capability-core is a trusted backend correctly asserting an arbitrary
+	// org member as the recipient (it is notifying whichever user is
+	// watching the run), not forwarding one browser session's own identity
+	// the way verevon-gateway must — so x-user-id need not equal the
+	// recipient id here.
+	signTestRequestAs(t, request, requestBody, "capability-core", testCapabilityCoreDelegationSecret, "", "org_123", "")
+
+	response, err := stdhttp.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /api/v1/notification-requests error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != stdhttp.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("POST /api/v1/notification-requests status = %d, want %d, body = %s", response.StatusCode, stdhttp.StatusAccepted, body)
+	}
+
+	// notification.AcceptedRequest only echoes request_id/status (see
+	// internal/notification/service.go) — organization_id is not part of the
+	// response body. The organization match itself is already enforced
+	// earlier in CreateNotificationRequest (request.OrganizationID must equal
+	// the delegated x-org-id) before Accept is ever called, so reaching a 202
+	// here is itself proof the "org_123" in the body and header agreed.
+	var payload struct {
+		RequestID string `json:"request_id"`
+		Status    string `json:"status"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatalf("Decode response error = %v", err)
+	}
+	if payload.RequestID == "" {
+		t.Fatal("request_id = empty, want non-empty")
+	}
+	if payload.Status != notification.StatusSubmitted {
+		t.Fatalf("status = %q, want %q", payload.Status, notification.StatusSubmitted)
+	}
+}
+
+func TestCreateNotificationRequestRejectsCapabilityCoreOutsideAllowlist(t *testing.T) {
+	handler := NewHandler(&config.Config{ServiceName: "notification-core"}, HandlerDeps{Notifications: newTestNotificationService(nil)})
+	server := httptest.NewServer(newRouter(handler, newTestVerifierWithCapabilityCore(t)))
+	defer server.Close()
+
+	requestBody := []byte(`{
+		"organization_id":"org_123",
+		"recipient":{"kind":"user","id":"user_456"},
+		"type":"ticket.assigned",
+		"payload":{}
+	}`)
+	request, err := stdhttp.NewRequest(stdhttp.MethodPost, server.URL+"/api/v1/notification-requests", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("NewRequest error = %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	signTestRequestAs(t, request, requestBody, "capability-core", testCapabilityCoreDelegationSecret, "", "org_123", "")
+
+	response, err := stdhttp.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("POST /api/v1/notification-requests error = %v", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != stdhttp.StatusForbidden {
+		t.Fatalf("POST /api/v1/notification-requests status = %d, want %d", response.StatusCode, stdhttp.StatusForbidden)
 	}
 }
 
