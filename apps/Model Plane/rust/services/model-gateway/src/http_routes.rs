@@ -2716,8 +2716,7 @@ async fn mcp_oauth_start(
         ));
     }
 
-    let http = reqwest::Client::new();
-    let resource_metadata = crate::mcp_oauth::discover_protected_resource(&http, &body.url)
+    let resource_metadata = crate::mcp_oauth::discover_protected_resource(&body.url)
         .await
         .map_err(|e| {
             warn!(error = %e, "mcp oauth: protected-resource discovery failed");
@@ -2753,7 +2752,6 @@ async fn start_oauth_connection(
     scope: String,
     resource_metadata: crate::mcp_oauth::ProtectedResourceMetadata,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let http = reqwest::Client::new();
     let Some(authorization_server) = resource_metadata.authorization_servers.first() else {
         return Err((
             StatusCode::BAD_GATEWAY,
@@ -2761,7 +2759,6 @@ async fn start_oauth_connection(
         ));
     };
     let auth_server_metadata = crate::mcp_oauth::discover_authorization_server(
-        &http,
         authorization_server,
     )
     .await
@@ -2784,16 +2781,15 @@ async fn start_oauth_connection(
         "{}/api/v1/mcp/servers/oauth/callback",
         state.verevon_public_origin.trim_end_matches('/')
     );
-    let registration =
-        crate::mcp_oauth::register_client(&http, registration_endpoint, &redirect_uri)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "mcp oauth: dynamic client registration failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "error": "dynamic client registration was rejected" })),
-                )
-            })?;
+    let registration = crate::mcp_oauth::register_client(registration_endpoint, &redirect_uri)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "mcp oauth: dynamic client registration failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "dynamic client registration was rejected" })),
+            )
+        })?;
 
     let pkce = crate::mcp_oauth::generate_pkce();
     let state_value = crate::mcp_oauth::generate_state();
@@ -2878,8 +2874,7 @@ async fn mcp_connect(
         ));
     }
 
-    let http = reqwest::Client::new();
-    match crate::mcp_oauth::discover_protected_resource(&http, &url).await {
+    match crate::mcp_oauth::discover_protected_resource(&url).await {
         Ok(resource_metadata) => {
             start_oauth_connection(
                 &state,
@@ -2961,9 +2956,7 @@ async fn mcp_oauth_callback(
         return fail("organization mismatch between start and callback");
     }
 
-    let http = reqwest::Client::new();
     let tokens = match crate::mcp_oauth::exchange_code(
-        &http,
         &pending.token_endpoint,
         &pending.client_id,
         &code,

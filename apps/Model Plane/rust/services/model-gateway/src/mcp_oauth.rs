@@ -95,8 +95,14 @@ pub struct TokenResponse {
 /// MCP server URL, falling back to the bare-origin form — some servers only
 /// publish the document at the root, others (like Visma) scope it to the
 /// resource path.
+///
+/// `server_url` is user-supplied, so the dial goes through
+/// `safe_mcp_http_client`, the same DNS-resolved/IP-pinned SSRF guard the
+/// tool-call path already uses — never a bare `reqwest::Client`. The guard
+/// re-resolves DNS on every call (this one included), which matters because
+/// the candidate URLs below only ever vary by path, not host: one guarded
+/// client, pinned to `server_url`'s validated addresses, safely covers both.
 pub async fn discover_protected_resource(
-    client: &reqwest::Client,
     server_url: &str,
 ) -> Result<ProtectedResourceMetadata, McpOAuthError> {
     let parsed = reqwest::Url::parse(server_url)
@@ -106,6 +112,9 @@ pub async fn discover_protected_resource(
             "server_url must be https".to_owned(),
         ));
     }
+    let (client, _) = crate::runtime_registries::safe_mcp_http_client(server_url)
+        .await
+        .map_err(McpOAuthError::Discovery)?;
     let origin = format!(
         "{}://{}",
         parsed.scheme(),
@@ -141,8 +150,12 @@ pub async fn discover_protected_resource(
 /// Fetch `{authorization_server}/.well-known/oauth-authorization-server`,
 /// falling back to the OIDC discovery path for servers that only publish
 /// that document.
+///
+/// `authorization_server` comes from the TARGET server's own protected-
+/// resource metadata response, not from anything Verevon's own user typed —
+/// it is attacker-controlled the moment a malicious MCP server is reached.
+/// Guarded via `safe_mcp_http_client` for exactly that reason, on every call.
 pub async fn discover_authorization_server(
-    client: &reqwest::Client,
     authorization_server: &str,
 ) -> Result<AuthorizationServerMetadata, McpOAuthError> {
     if !authorization_server.starts_with("https://") {
@@ -150,6 +163,9 @@ pub async fn discover_authorization_server(
             "authorization_server must be https".to_owned(),
         ));
     }
+    let (client, _) = crate::runtime_registries::safe_mcp_http_client(authorization_server)
+        .await
+        .map_err(McpOAuthError::Discovery)?;
     let base = authorization_server.trim_end_matches('/');
     let mut last_error = String::new();
     for suffix in [
@@ -177,8 +193,12 @@ pub async fn discover_authorization_server(
 /// possibly `client_secret`) scoped to `redirect_uri`. No pre-existing app
 /// registration is required; this is what lets a server be connected with
 /// nothing but its URL.
+///
+/// `registration_endpoint` is also server-response-supplied (from the
+/// authorization server's own RFC 8414 metadata) — same attacker-controlled
+/// reasoning as `discover_authorization_server`, so it is guarded the same
+/// way rather than dialed on a bare client.
 pub async fn register_client(
-    client: &reqwest::Client,
     registration_endpoint: &str,
     redirect_uri: &str,
 ) -> Result<ClientRegistration, McpOAuthError> {
@@ -187,6 +207,9 @@ pub async fn register_client(
             "registration_endpoint must be https".to_owned(),
         ));
     }
+    let (client, _) = crate::runtime_registries::safe_mcp_http_client(registration_endpoint)
+        .await
+        .map_err(McpOAuthError::RegistrationRejected)?;
     let body = RegistrationRequest {
         client_name: "Verevon",
         redirect_uris: vec![redirect_uri],
@@ -275,8 +298,10 @@ pub fn build_authorization_url(
 }
 
 /// Exchange an authorization `code` for tokens (RFC 6749 §4.1.3 + PKCE).
+///
+/// `token_endpoint` is server-response-supplied (RFC 8414 metadata), so this
+/// dials through `safe_mcp_http_client` like every other hop in the chain.
 pub async fn exchange_code(
-    client: &reqwest::Client,
     token_endpoint: &str,
     client_id: &str,
     code: &str,
@@ -288,6 +313,9 @@ pub async fn exchange_code(
             "token_endpoint must be https".to_owned(),
         ));
     }
+    let (client, _) = crate::runtime_registries::safe_mcp_http_client(token_endpoint)
+        .await
+        .map_err(McpOAuthError::TokenExchangeRejected)?;
     let params = [
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -310,8 +338,15 @@ pub async fn exchange_code(
 }
 
 /// Refresh an access token using a stored `refresh_token` (RFC 6749 §6).
+///
+/// `token_endpoint` here is a PERSISTED value from a prior discovery, dialed
+/// again on every refresh (including from the unattended background path in
+/// `refresh_stored_oauth_token` below). It still goes through
+/// `safe_mcp_http_client` on every single call: the guard's DNS-rebinding
+/// resistance only holds if re-validated per-dial, so "this endpoint was
+/// accepted once already" is deliberately not treated as a reason to skip
+/// re-checking it now.
 pub async fn refresh_access_token(
-    client: &reqwest::Client,
     token_endpoint: &str,
     client_id: &str,
     refresh_token: &str,
@@ -321,6 +356,9 @@ pub async fn refresh_access_token(
             "token_endpoint must be https".to_owned(),
         ));
     }
+    let (client, _) = crate::runtime_registries::safe_mcp_http_client(token_endpoint)
+        .await
+        .map_err(McpOAuthError::TokenExchangeRejected)?;
     let params = [
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -541,24 +579,18 @@ async fn refresh_stored_oauth_token(
         );
         return None;
     }
-    let refreshed = match refresh_access_token(
-        client,
-        token_endpoint,
-        stored.client_id.trim(),
-        refresh_token,
-    )
-    .await
-    {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            warn!(
-                server_id,
-                error = %error,
-                "mcp oauth: refresh rejected; the server must be reconnected"
-            );
-            return None;
-        }
-    };
+    let refreshed =
+        match refresh_access_token(token_endpoint, stored.client_id.trim(), refresh_token).await {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                warn!(
+                    server_id,
+                    error = %error,
+                    "mcp oauth: refresh rejected; the server must be reconnected"
+                );
+                return None;
+            }
+        };
     let access_token = refreshed.access_token.trim().to_owned();
     if access_token.is_empty() {
         warn!(
@@ -727,6 +759,106 @@ mod tests {
             &[],
         );
         assert!(!url.contains("scope="));
+    }
+
+    // ---- SSRF: server-response-supplied hops must be re-validated, not
+    // dialed on a bare client -------------------------------------------
+    //
+    // Regression coverage for the gap the discovery/DCR/token chain used to
+    // have: `authorization_server`, `registration_endpoint`, and
+    // `token_endpoint` all originate from the TARGET server's own JSON
+    // responses, not from anything Verevon's user typed, so a malicious MCP
+    // server can name an internal/loopback/link-local host there.
+    //
+    // IMPORTANT: pointing an `https://` URL at wiremock (a plain-HTTP
+    // listener) is NOT a valid way to prove the guard ran — that setup fails
+    // at the TLS handshake regardless of whether the SSRF guard is present
+    // or absent, so `result.is_err()` alone is vacuous (it was verified, by
+    // literally reverting the guard, that four earlier versions of these
+    // tests kept passing with the fix removed). Every test below instead
+    // asserts the caller got one of `safe_mcp_http_client`'s OWN two
+    // rejection messages (both start with the literal "MCP endpoint" —
+    // see runtime_registries.rs) rather than a downstream network/TLS
+    // error. A literal loopback/link-local IP is rejected at the
+    // host-string check (`endpoint_host_is_forbidden` parses it as an
+    // `IpAddr` directly); a hostname that only resolves to a forbidden
+    // address later would instead hit the DNS-resolve check — both are the
+    // guard, so both are accepted here, and a reqwest connection/TLS
+    // error would match neither.
+    fn assert_rejected_by_ssrf_guard(result: &Result<impl std::fmt::Debug, McpOAuthError>) {
+        let message = match result {
+            Ok(value) => panic!("expected the SSRF guard to reject this call, got Ok({value:?})"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("MCP endpoint"),
+            "expected rejection by safe_mcp_http_client's own guard, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_protected_resource_rejects_a_loopback_server_url_before_any_dial() {
+        // The first hop: `server_url` is what the USER typed when connecting
+        // an MCP server, dialed before any server response is ever received.
+        // It had zero test coverage at all before this fix — the most
+        // directly reachable of the five guarded hops, since it needs no
+        // prior successful contact with anything.
+        let result = discover_protected_resource("https://127.0.0.1:1/").await;
+        assert_rejected_by_ssrf_guard(&result);
+    }
+
+    #[tokio::test]
+    async fn discover_authorization_server_rejects_a_loopback_authorization_server_before_any_dial()
+    {
+        // A raw loopback IP, not a wiremock https-on-http mismatch: this is
+        // the exact shape `ip_is_forbidden` checks, with no TLS confound.
+        let result = discover_authorization_server("https://127.0.0.1:1/").await;
+        assert_rejected_by_ssrf_guard(&result);
+    }
+
+    #[tokio::test]
+    async fn register_client_rejects_a_loopback_registration_endpoint_before_any_dial() {
+        let result = register_client(
+            "https://127.0.0.1:1/",
+            "https://verevon.example.test/callback",
+        )
+        .await;
+        assert_rejected_by_ssrf_guard(&result);
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_a_loopback_token_endpoint_before_any_dial() {
+        let result = exchange_code(
+            "https://127.0.0.1:1/",
+            "client-123",
+            "auth-code",
+            "https://verevon.example.test/callback",
+            "verifier",
+        )
+        .await;
+        assert_rejected_by_ssrf_guard(&result);
+    }
+
+    // The token-refresh path is the recurring one: it re-dials a PERSISTED
+    // token_endpoint on every ordinary chat turn via `resolve_stored_oauth_token`
+    // / `refresh_stored_oauth_token`. Proving `refresh_access_token` itself
+    // re-validates on every call is what closes that recurrence, not just the
+    // one-shot registration-time hops above.
+    #[tokio::test]
+    async fn refresh_access_token_rejects_a_loopback_token_endpoint_before_any_dial() {
+        let result =
+            refresh_access_token("https://127.0.0.1:1/", "client-123", "refresh-token").await;
+        assert_rejected_by_ssrf_guard(&result);
+    }
+
+    // A link-local address (169.254.x.x, e.g. AWS/GCP/Azure's cloud-metadata
+    // endpoint at 169.254.169.254) is a distinct forbidden range from
+    // loopback — exercise it too so the coverage is not loopback-only.
+    #[tokio::test]
+    async fn refresh_access_token_rejects_a_link_local_metadata_style_token_endpoint() {
+        let result =
+            refresh_access_token("https://169.254.169.254/latest/token", "client-123", "rt").await;
+        assert_rejected_by_ssrf_guard(&result);
     }
 
     // ---- per-org internal service token derivation -------------------------
