@@ -78,6 +78,28 @@ func consumerBindings() []consumerBinding {
 				DeliverPolicy: nats.DeliverAllPolicy,
 			},
 		},
+		{
+			// AUTO-2 ("notify me when a run finishes"): capability-core's
+			// internal/runwatch.Notifier binds this durable with manual ack (see
+			// its package doc) and calls notification-core for every user who
+			// watched a run once that run's terminal event arrives. Explicit ack
+			// (not AckNonePolicy, unlike session-core-orchestration above)
+			// because the side effect is an outbound cross-plane HTTP call that
+			// can fail transiently — a Nak'd message must be redelivered rather
+			// than silently dropped. DeliverNewPolicy: a fresh deployment does
+			// not need to replay 48h of run history to find watchers that could
+			// not have existed yet.
+			stream: "MODEL_PLANE_RUN_EVENTS",
+			config: nats.ConsumerConfig{
+				Durable:       "capability-core-run-watch-notify",
+				AckPolicy:     nats.AckExplicitPolicy,
+				AckWait:       30 * time.Second,
+				MaxDeliver:    5,
+				FilterSubject: "mp.v1.run.*.event",
+				ReplayPolicy:  nats.ReplayInstantPolicy,
+				DeliverPolicy: nats.DeliverNewPolicy,
+			},
+		},
 	}
 }
 

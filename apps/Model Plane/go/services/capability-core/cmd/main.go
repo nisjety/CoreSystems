@@ -28,9 +28,11 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
+	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
+	"github.com/triodelab/model-plane/services/capability-core/internal/runwatch"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
@@ -195,6 +197,13 @@ func main() {
 			// workflow dispatcher would strand every cron-fired task exactly the
 			// way the publish-only dispatcher did.
 			startTaskCompletionConsumer(ctx, nc, pool)
+
+			// AUTO-2 run-watch notify consumer: on a terminal run event, notify
+			// every user who registered a watch on that run (see
+			// api.RunWatchersHandler for how a watch gets registered). Needs
+			// notification-core's URL + this service's delegated service token;
+			// guarded independently of the two consumers above.
+			startRunWatchConsumer(ctx, nc, pool)
 		}
 	}
 
@@ -246,6 +255,10 @@ func main() {
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewMemoryHandler(pool).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
+	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
+	// consumer that actually fires the notification is wired below,
+	// independently, once NATS is available (see startRunWatchConsumer).
+	api.NewRunWatchersHandler(pool).Register(protectedMux)
 	cronHandler := api.NewCronHandler(pool)
 	if cronVerifier, cronVerifierErr := cronDecisionVerifierFromEnv(os.Getenv); cronVerifierErr != nil {
 		slog.Warn("Space-scoped cron creation unavailable; Control decision verifier is required", "error", cronVerifierErr)
@@ -427,6 +440,47 @@ func startTaskCompletionConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpo
 			slog.Warn("task completion consumer stopped", "error", rerr)
 		}
 	}()
+}
+
+// startRunWatchConsumer wires AUTO-2's durable JetStream consumer: on a
+// terminal run event, notify every user who registered a watch on that run
+// (api.RunWatchersHandler is where a watch gets registered).
+//
+// Needs BOTH NOTIFICATION_CORE_URL and
+// NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN — notifyclient.New reports
+// (nil, false) when either is blank, and that alone disables this consumer
+// (logged), independently of the task-completion and learning-review
+// consumers above. Also needs a JetStream context on the same connection:
+// unlike those two (plain core-NATS nc.Subscribe/QueueSubscribe), this
+// consumer binds a pre-provisioned DURABLE consumer with manual ack (see
+// runwatch's package doc for why), which requires nats-provisioner to have
+// already registered RunWatchDurable on RunEventsStream.
+func startRunWatchConsumer(ctx context.Context, nc *nats.Conn, pool *pgxpool.Pool) {
+	notifyClient, enabled := notifyclient.New(
+		os.Getenv("NOTIFICATION_CORE_URL"),
+		os.Getenv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN"),
+		nil,
+	)
+	if !enabled {
+		slog.Info("run-watch notify consumer disabled (NOTIFICATION_CORE_URL/NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN not set)")
+		return
+	}
+	notifier, err := runwatch.NewNotifier(runwatch.NewPostgresSubscriptionStore(pool), notifyClient)
+	if err != nil {
+		slog.Error("run-watch notifier unavailable", "error", err)
+		return
+	}
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("JetStream context unavailable; run-watch notify consumer disabled", "error", err)
+		return
+	}
+	go func() {
+		if rerr := notifier.Run(ctx, js); rerr != nil {
+			slog.Warn("run-watch notify consumer stopped (is it pre-provisioned on "+runwatch.RunEventsStream+"?)", "error", rerr)
+		}
+	}()
+	slog.Info("run-watch notify consumer started", "stream", runwatch.RunEventsStream, "durable", runwatch.RunWatchDurable)
 }
 
 // buildTaskDispatcher returns the task dispatcher plus whether it can actually

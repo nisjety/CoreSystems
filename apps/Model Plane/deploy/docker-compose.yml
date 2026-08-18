@@ -1091,6 +1091,22 @@ services:
       # deployment has built and deployed its own consumer of
       # mp.v1.capability.task.dispatched.
       TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH: ${TASK_EXECUTOR_ACCEPT_PUBLISH_ONLY_DISPATCH:-}
+      # --- AUTO-2: run-watch notify consumer ----------------------------------
+      # "Notify me when this run finishes" — internal/runwatch.Notifier calls
+      # notification-core's delegated POST /notification-requests (Application
+      # Plane) for every user who watched a run once its terminal event
+      # arrives. Reached over inter-plane-bus (see the networks: block below);
+      # NOTIFICATION_CORE_URL defaults to the same address the other planes
+      # already use for it (see e.g. Ingestion Plane/docker-compose.yml). Empty
+      # either var and startRunWatchConsumer simply does not start the
+      # consumer (logged) — the rest of capability-core is unaffected.
+      NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
+      # Must be registered on notification-core's side as the "capability-core"
+      # delegation principal (NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN in
+      # Application Plane/docker-compose.yml) — same shared-secret pattern as
+      # NOTIFICATION_GATEWAY_SERVICE_TOKEN/NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN
+      # there, just a third, independently-revocable caller identity.
+      NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN: ${NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN:-}
     volumes:
       - mp-capability-core-data:/var/lib/capability-core
     depends_on:
@@ -1100,6 +1116,16 @@ services:
         condition: service_healthy
       orchestrator-core:
         condition: service_started
+    networks:
+      # Model Plane's own default network, plus inter-plane-bus so the
+      # run-watch notify consumer above can reach notification-core, which is
+      # itself joined to inter-plane-bus (Application Plane/docker-compose.yml).
+      # Mirrors session-core's and model-gateway's identical two-network block
+      # elsewhere in this file — capability-core had no networks: key at all
+      # before this (implicit default-only), which is why this key is new here
+      # rather than an addition to an existing list.
+      default: {}
+      inter-plane-bus: {}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/healthz"]
       interval: 10s
