@@ -731,10 +731,28 @@ implements each — none of the three are built yet as of this entry.
        org-core mirrors that value and re-publishes `organization.plan.changed`, which
        billing-core consumes — emitting an inherited plan there could feed back and write the
        inherited tier onto the member's own *stored* plan, turning a derived grant permanent.
-     - ⚠ **Outstanding**: billing-core's `0008_billing_group` migration has **not** been applied
-       against a live database (the Docker daemon started returning 500s mid-session); it was
-       only reviewed against billing-core's conventions. It needs one real apply before deploy.
-       billing-core also was not rebuilt/redeployed for the same reason.
+     - **✅ Applied and live-verified 2026-08-19** (the earlier Docker outage is resolved).
+       `0008_billing_group` was applied by billing-core's own migration runner at startup —
+       `✓ applied migration 0008_billing_group (114ms)`, recorded in its `schema_migrations`
+       ledger — after rebuilding the image, since the runner reads `*.up.sql` from disk rather
+       than an embedded FS. Verified in this order: the full `0001`→`0008` chain applies cleanly
+       in sequence on a disposable Postgres; the `not_self` CHECK, the `ON CONFLICT (org_id)`
+       upsert, the `billing_consolidation` read filter and the partial index all behave as
+       designed; idempotent across a restart (zero re-applies, exactly one ledger row); and the
+       real corpus was untouched throughout (1 account / 26 usage events, before and after).
+       Then proven **end to end on the running system**: a real `organization.billing_group.changed`
+       event published to `controlplane-nats` as `auth-core-control` was mirrored into
+       `billing_group_memberships`, and a revocation payload (null host, `false`) removed the row.
+       Whole Control Plane fleet healthy afterwards, zero restarts, zero errors.
+       💡 The NATS ACLs needed no change — `auth-core-control` may publish `organization.>` and
+       `billing-core-control` subscribes to `organization.>`, so the new subject was already
+       covered. A first publish attempt failed `Authorization Violation` only because it
+       connected anonymously; `controlplane-nats` enforces per-user subject permissions.
+     - ⚠ **Still not deployed**: auth-core was NOT rebuilt with the new grant write path, so
+       `/api/v1/internal/org-groups/{grant,revoke}` is not live yet. It also needs
+       `ORG_GROUP_GRANT_SERVICE_TOKEN` provisioned — the controller fails closed (503) when it
+       is unset, deliberately, rather than accepting every caller. The mirror chain downstream
+       of it is proven; only the HTTP entry point is pending.
      - ⚠ Also noted, pre-existing: `retrieval-engine`'s service-principal entry has
        `allowAnyOrg: true`, which the registry loader permits only because `NODE_ENV` is
        development — it would fail a production render as written.
