@@ -103,8 +103,27 @@ pub async fn run(
         };
 
         match handle_message(&pool, &quickwit, &msg.payload).await {
-            Ok(Outcome::Purged { org_id, rows }) => {
-                info!(org_id = %org_id, rows, "quickwit-adapter purged organization admin-job data");
+            Ok(Outcome::Purged {
+                org_id,
+                rows,
+                index_pruned,
+            }) => {
+                if index_pruned {
+                    info!(
+                        org_id = %org_id,
+                        rows,
+                        index_pruned,
+                        "quickwit-adapter purged organization data and submitted an index delete task"
+                    );
+                } else {
+                    // Not info: the org's documents are still searchable.
+                    error!(
+                        org_id = %org_id,
+                        rows,
+                        "quickwit-adapter purged organization bookkeeping WITHOUT pruning the \
+                         index; the org's documents remain searchable"
+                    );
+                }
                 if let Err(e) = msg.ack().await {
                     warn!(error = %e, "ack failed after purge");
                 }
@@ -144,7 +163,15 @@ async fn connect_shared(url: &str) -> Result<async_nats::Client, async_nats::Con
 }
 
 enum Outcome {
-    Purged { org_id: String, rows: u64 },
+    Purged {
+        org_id: String,
+        rows: u64,
+        /// Carried so the completion log records whether the searchable copy was
+        /// pruned, not just how many bookkeeping rows went. Without it an
+        /// operator auditing an erasure cannot tell from logs whether the org's
+        /// documents were actually removed from the index.
+        index_pruned: bool,
+    },
     Skipped,
 }
 
@@ -162,5 +189,6 @@ async fn handle_message(
     Ok(Outcome::Purged {
         org_id: erasure.org_id,
         rows: summary.total(),
+        index_pruned: summary.index_delete_task_submitted,
     })
 }
