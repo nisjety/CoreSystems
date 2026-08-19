@@ -29,9 +29,13 @@
 >    than the "replace the visual embedder" plan below — treat Phase 3's steps as
 >    superseded by this reranker-only shape unless/until the full multivector swap is
 >    separately decided.
-> Phase 1's own gRPC caveat also re-confirmed live: `get_sources`/`get_chunks`/
-> `pack_context` in `retrieval_svc.rs` still bind `req.org_id` straight into SQL with no
-> verified-context check, and no RLS migration (`ENABLE ROW LEVEL SECURITY`) exists yet.
+> Phase 1's own gRPC caveat, as of 2026-07-10: `get_sources`/`get_chunks`/`pack_context` in
+> `retrieval_svc.rs` bind `req.org_id` straight into SQL with no verified-context check. **That
+> half is still true today.** The clause that followed it — "and no RLS migration (`ENABLE ROW
+> LEVEL SECURITY`) exists yet" — is **no longer true as of 2026-08-09**: RLS is enabled on all
+> 35 org-scoped tables and adopted by all 10 Postgres-backed services, so those three gRPC
+> methods now sit behind a database-enforced boundary even though they still read org from the
+> request body. See the Phase 1 RLS section and the current isolation table below.
 
 ## Requirements (restated)
 
@@ -53,6 +57,36 @@ ownership), Quickwit (BM25 on MinIO), Dragonfly (exact KV). Fusion = RRF + Coher
 
 ## Isolation audit — summary
 
+> **Superseded 2026-08-19.** The table below is the ORIGINAL audit, kept for provenance.
+> Every gap it lists has since been closed; read the current-state table first. Do not quote
+> the original as the system's posture — it says "no RLS" and "body-trusted org", and both are
+> now false.
+
+**Current state (2026-08-19):**
+
+| Path | org | user | account (D-A) |
+|---|---|---|---|
+| Dense / Sparse(PG+Quickwit) / Wiki-ANN / **Visual** | ✅ forced + **RLS** | ✅ fused gate | ✅ opt-in grant |
+| Graph, Wiki-kw, Contradictions, Timeline (aux HTTP) | ✅ **pinned from verified ctx** + **RLS** | ❌/n/a | ✅ opt-in grant |
+| Semantic cache (HTTP) | ✅ **pinned from verified ctx** (scope ✅) | ✅ scope_key | n/a |
+| gRPC Retrieve/Stream | ✅ **JWT org asserted** + **RLS** | ✅ + admin off | ✅ opt-in grant |
+
+**Verdict:** org isolation is now **two independent layers** — the application pins org from a
+verified `AuthContext` (GAP-1/GAP-2, pre-dating this work) *and* Postgres RLS enforces it at the
+database across **all 10** Postgres-backed DPv2 services, so a forgotten `WHERE org_id` yields
+empty results rather than a leak. The account tier exists as D-A's **opt-in per-org grant**,
+resolved live per request (never a token claim, never a stored bypass) and defaulting to denied.
+
+⚠ Two real caveats, neither closed by the above:
+- gRPC `get_sources` / `get_chunks` / `pack_context` still take a **body** org. They are by-id
+  and SQL-org-filtered and now sit behind RLS, so the exposure is bounded — but they do not use
+  the verified-context helper the other paths do.
+- org-core's GDPR erasure procs are `SECURITY DEFINER`, so RLS structurally cannot apply inside
+  them; they rely solely on their own parameterized `WHERE org_id`, with no second layer.
+
+<details>
+<summary>Original audit (pre-2026-08-09) — historical, all gaps since closed</summary>
+
 | Path | org | user | tenant |
 |---|---|---|---|
 | Dense / Sparse(PG+Quickwit) / Wiki-ANN / **Visual** | ✅ forced | ✅ fused gate | ❌ none |
@@ -60,8 +94,10 @@ ownership), Quickwit (BM25 on MinIO), Dragonfly (exact KV). Fusion = RRF + Coher
 | Semantic cache (HTTP) | ⚠️ **body-trusted org** (scope ✅) | ✅ scope_key | ❌ |
 | gRPC Retrieve/Stream | ⚠️ **no DP-side org binding** | ✅ + admin off | ❌ |
 
-**Verdict:** strong org + per-user on the main `/v1/retrieve` path; **no tenant tier,
+Original verdict: strong org + per-user on the main `/v1/retrieve` path; **no tenant tier,
 no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + gRPC).
+
+</details>
 
 ## Phases
 
