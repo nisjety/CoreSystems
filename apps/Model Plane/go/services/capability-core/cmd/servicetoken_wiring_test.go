@@ -194,8 +194,8 @@ func TestStartLearningConsumerStaysDisabledWithoutBackends(t *testing.T) {
 	t.Setenv("SESSION_CORE_ADDR", "")
 	t.Setenv("INFERENCE_CORE_ADDR", "")
 
-	session, inference := dialBackends()
-	if session != nil || inference != nil {
+	session, inference, runs := dialBackends()
+	if session != nil || inference != nil || runs != nil {
 		t.Fatal("unset backend addrs must yield no clients")
 	}
 	// nil clients → consumer disabled, no goroutine, no panic.

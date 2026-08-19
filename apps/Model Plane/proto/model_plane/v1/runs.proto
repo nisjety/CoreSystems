@@ -40,6 +40,15 @@ service RunService {
   // tenant's run metadata.
   rpc ResolveRunOwner(ResolveRunOwnerRequest) returns (ResolveRunOwnerResponse);
 
+  // ResolveThreadOwner — authoritative tenant/user ownership check for a
+  // thread, mirroring ResolveRunOwner exactly. Also used to authorize
+  // capability-core's memory scope='session' rows: session and thread are
+  // the same underlying resource in this codebase (see agent_memory's writer
+  // in dreaming.rs, which stores a thread_id under scope='thread'), so
+  // scope='session' calls this RPC with the same thread_id too. Returns only
+  // a boolean to avoid disclosing another tenant's thread metadata.
+  rpc ResolveThreadOwner(ResolveThreadOwnerRequest) returns (ResolveThreadOwnerResponse);
+
   // ResolveRunActionAuthority returns the non-secret, immutable run/thread
   // bindings Control needs before issuing one target-owner action decision.
   // It is restricted to Control's exact action-authorizer service identity;
@@ -131,6 +140,16 @@ message ResolveRunOwnerRequest {
 }
 
 message ResolveRunOwnerResponse {
+  bool authorized = 1;
+}
+
+message ResolveThreadOwnerRequest {
+  string thread_id = 1;
+  string org_id = 2;
+  string user_id = 3;
+}
+
+message ResolveThreadOwnerResponse {
   bool authorized = 1;
 }
 

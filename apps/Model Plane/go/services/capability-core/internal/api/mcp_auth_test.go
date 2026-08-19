@@ -251,7 +251,7 @@ func mcpAuthenticatedHandlerWithSigner(t *testing.T, handler http.Handler) (http
 
 func TestZDRDurableMutationsAreDeniedBeforeCapabilityCoreHandlers(t *testing.T) {
 	database := &recordingDatabase{}
-	memory := NewMemoryHandler(nil)
+	memory := NewMemoryHandler(nil, nil)
 	memory.pool = database
 	mcp := NewMCPHandler(nil)
 	mcp.pool = database

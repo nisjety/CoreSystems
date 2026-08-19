@@ -25,6 +25,7 @@ const (
 	RunService_CancelRun_FullMethodName                     = "/model_plane.v1.RunService/CancelRun"
 	RunService_ListSystemRuns_FullMethodName                = "/model_plane.v1.RunService/ListSystemRuns"
 	RunService_ResolveRunOwner_FullMethodName               = "/model_plane.v1.RunService/ResolveRunOwner"
+	RunService_ResolveThreadOwner_FullMethodName            = "/model_plane.v1.RunService/ResolveThreadOwner"
 	RunService_ResolveRunActionAuthority_FullMethodName     = "/model_plane.v1.RunService/ResolveRunActionAuthority"
 	RunService_ResolveScheduledStepAuthority_FullMethodName = "/model_plane.v1.RunService/ResolveScheduledStepAuthority"
 )
@@ -60,6 +61,14 @@ type RunServiceClient interface {
 	// execution mutations. Returns only a boolean to avoid disclosing another
 	// tenant's run metadata.
 	ResolveRunOwner(ctx context.Context, in *ResolveRunOwnerRequest, opts ...grpc.CallOption) (*ResolveRunOwnerResponse, error)
+	// ResolveThreadOwner — authoritative tenant/user ownership check for a
+	// thread, mirroring ResolveRunOwner exactly. Also used to authorize
+	// capability-core's memory scope='session' rows: session and thread are
+	// the same underlying resource in this codebase (see agent_memory's writer
+	// in dreaming.rs, which stores a thread_id under scope='thread'), so
+	// scope='session' calls this RPC with the same thread_id too. Returns only
+	// a boolean to avoid disclosing another tenant's thread metadata.
+	ResolveThreadOwner(ctx context.Context, in *ResolveThreadOwnerRequest, opts ...grpc.CallOption) (*ResolveThreadOwnerResponse, error)
 	// ResolveRunActionAuthority returns the non-secret, immutable run/thread
 	// bindings Control needs before issuing one target-owner action decision.
 	// It is restricted to Control's exact action-authorizer service identity;
@@ -142,6 +151,16 @@ func (c *runServiceClient) ResolveRunOwner(ctx context.Context, in *ResolveRunOw
 	return out, nil
 }
 
+func (c *runServiceClient) ResolveThreadOwner(ctx context.Context, in *ResolveThreadOwnerRequest, opts ...grpc.CallOption) (*ResolveThreadOwnerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveThreadOwnerResponse)
+	err := c.cc.Invoke(ctx, RunService_ResolveThreadOwner_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *runServiceClient) ResolveRunActionAuthority(ctx context.Context, in *ResolveRunActionAuthorityRequest, opts ...grpc.CallOption) (*ResolveRunActionAuthorityResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ResolveRunActionAuthorityResponse)
@@ -193,6 +212,14 @@ type RunServiceServer interface {
 	// execution mutations. Returns only a boolean to avoid disclosing another
 	// tenant's run metadata.
 	ResolveRunOwner(context.Context, *ResolveRunOwnerRequest) (*ResolveRunOwnerResponse, error)
+	// ResolveThreadOwner — authoritative tenant/user ownership check for a
+	// thread, mirroring ResolveRunOwner exactly. Also used to authorize
+	// capability-core's memory scope='session' rows: session and thread are
+	// the same underlying resource in this codebase (see agent_memory's writer
+	// in dreaming.rs, which stores a thread_id under scope='thread'), so
+	// scope='session' calls this RPC with the same thread_id too. Returns only
+	// a boolean to avoid disclosing another tenant's thread metadata.
+	ResolveThreadOwner(context.Context, *ResolveThreadOwnerRequest) (*ResolveThreadOwnerResponse, error)
 	// ResolveRunActionAuthority returns the non-secret, immutable run/thread
 	// bindings Control needs before issuing one target-owner action decision.
 	// It is restricted to Control's exact action-authorizer service identity;
@@ -232,6 +259,9 @@ func (UnimplementedRunServiceServer) ListSystemRuns(context.Context, *ListSystem
 }
 func (UnimplementedRunServiceServer) ResolveRunOwner(context.Context, *ResolveRunOwnerRequest) (*ResolveRunOwnerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveRunOwner not implemented")
+}
+func (UnimplementedRunServiceServer) ResolveThreadOwner(context.Context, *ResolveThreadOwnerRequest) (*ResolveThreadOwnerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveThreadOwner not implemented")
 }
 func (UnimplementedRunServiceServer) ResolveRunActionAuthority(context.Context, *ResolveRunActionAuthorityRequest) (*ResolveRunActionAuthorityResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveRunActionAuthority not implemented")
@@ -368,6 +398,24 @@ func _RunService_ResolveRunOwner_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RunService_ResolveThreadOwner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveThreadOwnerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunServiceServer).ResolveThreadOwner(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunService_ResolveThreadOwner_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunServiceServer).ResolveThreadOwner(ctx, req.(*ResolveThreadOwnerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _RunService_ResolveRunActionAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ResolveRunActionAuthorityRequest)
 	if err := dec(in); err != nil {
@@ -434,6 +482,10 @@ var RunService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveRunOwner",
 			Handler:    _RunService_ResolveRunOwner_Handler,
+		},
+		{
+			MethodName: "ResolveThreadOwner",
+			Handler:    _RunService_ResolveThreadOwner_Handler,
 		},
 		{
 			MethodName: "ResolveRunActionAuthority",

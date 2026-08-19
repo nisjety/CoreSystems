@@ -24,6 +24,7 @@ use mp_contracts::model_plane::v1::{
     run_service_server::{RunService, RunServiceServer},
 };
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
@@ -64,6 +65,49 @@ async fn authorize_thread_owner(
             .map_err(|error| Status::internal(error.to_string()))?;
     let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
     authorize_owner_row(caller, &org_id, &user_id, intent)
+}
+
+/// Seam for `resolve_thread_owner`'s durable lookup, mirroring `memory_grpc.rs`'s
+/// `ThreadOwnership` trait one file over. `resolve_run_owner` (the RPC this
+/// handler is modeled on) queries `self.pool` directly with no injectable seam
+/// and has zero unit-test coverage as a result; this new, security-critical
+/// authorization RPC gets the testable shape instead of perpetuating that gap.
+#[tonic::async_trait]
+trait ThreadOwnerLookup: Send + Sync {
+    async fn owner_matches(
+        &self,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Result<bool, Status>;
+}
+
+struct PgThreadOwnerLookup {
+    pool: PgPool,
+}
+
+#[tonic::async_trait]
+impl ThreadOwnerLookup for PgThreadOwnerLookup {
+    async fn owner_matches(
+        &self,
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> Result<bool, Status> {
+        let (authorized,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+        )
+        .bind(thread_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "durable thread ownership lookup failed");
+            Status::unavailable("thread ownership unavailable")
+        })?;
+        Ok(authorized)
+    }
 }
 
 /// Hard cap on `ListRuns.limit` so a hostile or buggy caller cannot ask for an
@@ -342,12 +386,27 @@ fn is_terminal(status: &str) -> bool {
 
 pub struct RunServiceImpl {
     pool: PgPool,
+    thread_owner_lookup: Arc<dyn ThreadOwnerLookup>,
 }
 
 impl RunServiceImpl {
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            thread_owner_lookup: Arc::new(PgThreadOwnerLookup { pool: pool.clone() }),
+            pool,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_with_thread_owner_lookup_for_test(
+        pool: PgPool,
+        thread_owner_lookup: Arc<dyn ThreadOwnerLookup>,
+    ) -> Self {
+        Self {
+            pool,
+            thread_owner_lookup,
+        }
     }
 
     /// Convenience for `grpc.rs` so the wiring mirrors how the other services in
@@ -698,6 +757,38 @@ impl RunService for RunServiceImpl {
         result
     }
 
+    async fn resolve_thread_owner(
+        &self,
+        request: Request<pb::ResolveThreadOwnerRequest>,
+    ) -> Result<Response<pb::ResolveThreadOwnerResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::ResolveThreadOwnerResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:read")?;
+            let req = request.into_inner();
+            if req.thread_id.trim().is_empty()
+                || req.org_id.trim().is_empty()
+                || req.user_id.trim().is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "thread_id, org_id, and user_id are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            if !caller.is_service() {
+                caller.authorize_user(&req.user_id)?;
+            }
+            let authorized = self
+                .thread_owner_lookup
+                .owner_matches(req.thread_id.trim(), req.org_id.trim(), req.user_id.trim())
+                .await?;
+            Ok(Response::new(pb::ResolveThreadOwnerResponse { authorized }))
+        }
+        .await;
+        record_metrics("resolve_thread_owner", started, result.is_ok());
+        result
+    }
+
     async fn resolve_run_action_authority(
         &self,
         request: Request<pb::ResolveRunActionAuthorityRequest>,
@@ -769,6 +860,7 @@ fn clamp_limit(raw: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn clamp_limit_defaults_when_zero() {
@@ -954,5 +1046,205 @@ mod tests {
         assert_eq!(detail.error, "");
         // Null JSONB metadata maps to no Struct rather than an empty one.
         assert!(detail.metadata.is_none());
+    }
+
+    // -- resolve_thread_owner ------------------------------------------------
+    //
+    // MEM-2: `resolve_thread_owner` is what capability-core's memory
+    // authorization write-path gate calls before persisting a run/thread/
+    // session-scoped `agent_memory` row (see `workplane_apis.go`'s
+    // `authorizeResourceOwner`). It is modeled line-for-line on
+    // `resolve_run_owner` above, which has zero test coverage in this file
+    // today -- this suite exists so the new RPC does not inherit that gap.
+
+    struct FakeThreadOwnerLookup {
+        calls: AtomicUsize,
+        result: Result<bool, ()>,
+    }
+
+    #[tonic::async_trait]
+    impl ThreadOwnerLookup for FakeThreadOwnerLookup {
+        async fn owner_matches(
+            &self,
+            _thread_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<bool, Status> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.result
+                .map_err(|()| Status::unavailable("thread ownership unavailable"))
+        }
+    }
+
+    fn thread_owner_request_for_test(
+        thread_id: &str,
+        org_id: &str,
+        user_id: &str,
+    ) -> pb::ResolveThreadOwnerRequest {
+        pb::ResolveThreadOwnerRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+        }
+    }
+
+    fn service_with_thread_owner_result(
+        result: Result<bool, ()>,
+    ) -> (RunServiceImpl, Arc<FakeThreadOwnerLookup>) {
+        // A lazily-connected pool never actually dials out: the fake lookup
+        // never touches `self.pool`, so no real database is required. Mirrors
+        // `memory_grpc.rs`'s `guarded_service` test helper.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let lookup = Arc::new(FakeThreadOwnerLookup {
+            calls: AtomicUsize::new(0),
+            result,
+        });
+        (
+            RunServiceImpl::new_with_thread_owner_lookup_for_test(pool, lookup.clone()),
+            lookup,
+        )
+    }
+
+    fn identity_request<T>(value: T, identity: VerifiedIdentity) -> Request<T> {
+        let mut request = Request::new(value);
+        request.extensions_mut().insert(identity);
+        request
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_authorized_owner_returns_true() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("authorized owner resolves")
+            .into_inner();
+        assert!(response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_non_owner_returns_false_not_error() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(false));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("non-owner still resolves, does not error")
+            .into_inner();
+        assert!(!response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_unknown_thread_fails_closed_as_false_not_not_found() {
+        // Same wire shape as "non-owner": the durable lookup collapses "row
+        // missing" and "row belongs to someone else" into the same
+        // `Ok(false)`, exercised identically here. The explicit assertion
+        // that this is `Ok` (never `Status::not_found`) is the point: the
+        // whole reason for the boolean-only contract (per `ResolveRunOwner`'s
+        // proto comment, which this RPC mirrors) is to never disclose
+        // resource existence across tenants.
+        let (service, _lookup) = service_with_thread_owner_result(Ok(false));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-missing", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .expect("unknown thread resolves to false, not an error");
+        assert!(!response.into_inner().authorized);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_cross_user_request_rejected_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-b"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_cross_org_request_rejected_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-b", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_service_caller_with_session_read_may_ask_about_any_user_in_org() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let response = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test("org-a", &["session:read"], false),
+            ))
+            .await
+            .expect("service with session:read may ask about any user in its org")
+            .into_inner();
+        assert!(response.authorized);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_service_caller_missing_scope_rejected_before_db() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-z"),
+                VerifiedIdentity::service_for_test("org-a", &["memory:read"], false),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_db_failure_fails_closed_never_authorized() {
+        let (service, lookup) = service_with_thread_owner_result(Err(()));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("thread-1", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_thread_owner_rejects_empty_fields() {
+        let (service, lookup) = service_with_thread_owner_result(Ok(true));
+        let error = service
+            .resolve_thread_owner(identity_request(
+                thread_owner_request_for_test("", "org-a", "user-a"),
+                VerifiedIdentity::user_for_test("org-a", "user-a"),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
     }
 }

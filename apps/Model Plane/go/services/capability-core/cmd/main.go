@@ -164,7 +164,7 @@ func main() {
 	// ListModels, /compact → session CompactNow) and the G7 learning consumer —
 	// one dial site, no duplication. Nil when addrs are unset → both consumers
 	// degrade gracefully.
-	sessionClient, inferenceClient := dialBackends()
+	sessionClient, inferenceClient, runClient := dialBackends()
 
 	// --- §4.3 reconcile event publisher -------------------------------------
 	// capability-core is the registry system-of-record; on a create/update it
@@ -274,7 +274,7 @@ func main() {
 	}
 	api.NewRoutingHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSafetyHandler(pool).WithPublisher(recPub).Register(protectedMux)
-	api.NewMemoryHandler(pool).Register(protectedMux)
+	api.NewMemoryHandler(pool, runClient).Register(protectedMux)
 	api.NewTasksHandler(pool).Register(protectedMux)
 	// AUTO-2: lets a user register/inspect/cancel a watch on one run. The
 	// consumer that actually fires the notification is wired below,
@@ -642,14 +642,19 @@ func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCo
 // dialBackends dials session-core + inference-core once (guarded on
 // SESSION_CORE_ADDR + INFERENCE_CORE_ADDR; lazy grpc clients shared by the
 // /commands delegation and the learning consumer — one dial site, no
-// duplication). Returns (nil, nil) when the addrs are unset or a dial fails, so
-// callers degrade gracefully.
-func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
+// duplication). Returns (nil, nil, nil) when the addrs are unset or a dial
+// fails, so callers degrade gracefully.
+//
+// The returned RunServiceClient (MEM-2) is built on the same sessConn as the
+// SessionCoreClient — RunService is served on session-core's same tonic
+// multiplexed server (see grpc.rs's single Server::builder()...add_service
+// chain), so it needs no separate dial, env var, or credential.
+func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient, mpv1.RunServiceClient) {
 	sessAddr := os.Getenv("SESSION_CORE_ADDR")
 	infAddr := os.Getenv("INFERENCE_CORE_ADDR")
 	if sessAddr == "" || infAddr == "" {
 		slog.Info("backend clients disabled (SESSION_CORE_ADDR/INFERENCE_CORE_ADDR unset)")
-		return nil, nil
+		return nil, nil, nil
 	}
 	creds := grpc.WithTransportCredentials(insecure.NewCredentials())
 
@@ -668,7 +673,7 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 		).dialOption())
 	if err != nil {
 		slog.Warn("dial session-core failed", "error", err)
-		return nil, nil
+		return nil, nil, nil
 	}
 	infConn, err := grpc.NewClient(infAddr, creds,
 		newBackendCredential(
@@ -680,9 +685,9 @@ func dialBackends() (mpv1.SessionCoreClient, mpv1.InferenceCoreClient) {
 	if err != nil {
 		slog.Warn("dial inference-core failed", "error", err)
 		_ = sessConn.Close()
-		return nil, nil
+		return nil, nil, nil
 	}
-	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn)
+	return mpv1.NewSessionCoreClient(sessConn), mpv1.NewInferenceCoreClient(infConn), mpv1.NewRunServiceClient(sessConn)
 }
 
 // Auth Core service-principal configuration for capability-core's OWN identity.
