@@ -2910,7 +2910,13 @@ type AgentSkill struct {
 	ToolRestrictions    []string               `protobuf:"bytes,7,rep,name=tool_restrictions,json=toolRestrictions,proto3" json:"tool_restrictions,omitempty"`
 	Enabled             bool                   `protobuf:"varint,8,opt,name=enabled,proto3" json:"enabled,omitempty"`
 	// Provenance: "user" or "background_review".
-	Origin        string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	Origin string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
+	// Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
+	// explicit-share shape. "org" (default) or "user"; owner_user_id and
+	// shared_with are meaningful only when scope == "user".
+	Scope         string   `protobuf:"bytes,10,opt,name=scope,proto3" json:"scope,omitempty"`
+	OwnerUserId   string   `protobuf:"bytes,11,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
+	SharedWith    []string `protobuf:"bytes,12,rep,name=shared_with,json=sharedWith,proto3" json:"shared_with,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -3006,6 +3012,27 @@ func (x *AgentSkill) GetOrigin() string {
 		return x.Origin
 	}
 	return ""
+}
+
+func (x *AgentSkill) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetOwnerUserId() string {
+	if x != nil {
+		return x.OwnerUserId
+	}
+	return ""
+}
+
+func (x *AgentSkill) GetSharedWith() []string {
+	if x != nil {
+		return x.SharedWith
+	}
+	return nil
 }
 
 type ListAgentSkillsResponse struct {
@@ -4846,7 +4873,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x11skipped_protected\x18\x03 \x01(\bR\x10skippedProtected\"R\n" +
 	"\x16ListAgentSkillsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12!\n" +
-	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\"\xaa\x02\n" +
+	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\"\x85\x03\n" +
 	"\n" +
 	"AgentSkill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -4857,7 +4884,12 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x15trigger_file_patterns\x18\x06 \x03(\tR\x13triggerFilePatterns\x12+\n" +
 	"\x11tool_restrictions\x18\a \x03(\tR\x10toolRestrictions\x12\x18\n" +
 	"\aenabled\x18\b \x01(\bR\aenabled\x12\x16\n" +
-	"\x06origin\x18\t \x01(\tR\x06origin\"M\n" +
+	"\x06origin\x18\t \x01(\tR\x06origin\x12\x14\n" +
+	"\x05scope\x18\n" +
+	" \x01(\tR\x05scope\x12\"\n" +
+	"\rowner_user_id\x18\v \x01(\tR\vownerUserId\x12\x1f\n" +
+	"\vshared_with\x18\f \x03(\tR\n" +
+	"sharedWith\"M\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
 	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\"M\n" +
 	"\x17ListConversationRequest\x12\x15\n" +
