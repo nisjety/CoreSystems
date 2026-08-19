@@ -692,11 +692,52 @@ implements each — none of the three are built yet as of this entry.
      at all for this feature, so that half of item 1 has no grounding beyond the original
      one-paragraph decision. Resolving the ownership question is what unblocks writing an
      actual migration.
-  - **Not started**: no schema, no migration, no grant-check code, for either grant. The one
-    prerequisite this sequencing decision named — org-level RLS, validated live, across both
-    planes — is done; the data-access half now has a concrete, source-verified design to
-    build against (item 4) pending the ownership call above. The billing-consolidation half
-    has no design work done beyond the original decision in item 1.
+  5. **✅ BOTH grants built 2026-08-09/10.** Ownership call resolved by the user: **auth-core**.
+     - **Data-access grant** (`87bcf544`): `org_group` + `org_group_grant` in auth-core, and a
+       new `account.data.read` action on the live decision endpoint. Named `org_group`, not
+       `account` — auth-core's schema *already* has an unrelated `account` table (Better Auth's
+       per-user OAuth rows), so "account" would have repeated the exact `microsoft_tenant_id`
+       collision this feature's naming was chosen to avoid. The plan's "admin principal" is the
+       host org's own owner/admin `member` rows; no second membership system was built.
+       Live-verified end to end against the running service: `data.read` unregressed
+       (`member`/`owner`), `account.data.read` denied `no_account_grant` with no grant, allowed
+       `account_grant` with a grant + host owner, denied `not_member` for a non-member, and the
+       org path unchanged while a grant exists. A temporary fixture was used for the positive
+       case and removed, with the prior baseline re-confirmed.
+     - **Grant write path** (`307ad524`): the schema shipped with **no CRUD at all**, so no
+       grant could be created or revoked and any consumer would have sat inert.
+       `/api/v1/internal/org-groups/{grant,revoke}` is service-authed, requires an owner/admin
+       of the **host** org, is idempotent on `(org_group_id, organization_id)`, and announces
+       the change for mirroring. A failed announce never fails a committed mutation.
+     - **Billing-consolidation = plan inheritance only** (`307ad524`), per the user's decision.
+       A member org inherits the host's *tier*; usage, invoices and the Nexi provider customer
+       stay strictly per-org, and `billing_accounts.org_id` remains the billing unit. Full
+       invoice consolidation was deliberately deferred: billing-core charges real money via
+       **Nexi in NOK**, and it would first require settling legal liability, VAT when host and
+       member differ, mid-cycle proration, and the fate of a member's open invoices.
+       billing-core mirrors the grant into its own DB (it cannot read auth-core's) via
+       `organization.billing_group.changed`; all three services share
+       `NATS_URL=nats://controlplane-nats:4222`, which is what makes the subject reachable.
+       ⚠ Worth knowing when tracing this: auth-core *declares*
+       `publishOrganizationPlanChanged` but **nothing calls it** — org-core is the real
+       publisher of `organization.plan.changed`.
+       Inheritance is resolved at READ time and never written onto the member's stored account,
+       so revocation needs no undo. Two load-bearing properties, both tested: it takes the
+       **more privileged** tier so a member is never downgraded into a tier it already pays
+       for, and an active trial is not pulled down by a lower-tier host. Every failure path
+       (missing mirror, unreadable host, absent grant) degrades to the org's own plan. The
+       check sits **last** in `CanUseFeature` so it can only widen access.
+       ⚠ **Deliberately not changed**: the plan published on `billing.account.updated`.
+       org-core mirrors that value and re-publishes `organization.plan.changed`, which
+       billing-core consumes — emitting an inherited plan there could feed back and write the
+       inherited tier onto the member's own *stored* plan, turning a derived grant permanent.
+     - ⚠ **Outstanding**: billing-core's `0008_billing_group` migration has **not** been applied
+       against a live database (the Docker daemon started returning 500s mid-session); it was
+       only reviewed against billing-core's conventions. It needs one real apply before deploy.
+       billing-core also was not rebuilt/redeployed for the same reason.
+     - ⚠ Also noted, pre-existing: `retrieval-engine`'s service-principal entry has
+       `allowAnyOrg: true`, which the registry loader permits only because `NODE_ENV` is
+       development — it would fail a production render as written.
 - **D-B (text embedder) — DECIDED: migrate to Cohere Embed v4 for dense text.** This
   resolves Phase 3 Step 4's sub-decision below in favor of the original blueprint
   requirement (line 40: "Cohere Embed v4 = dense text (multilingual chunks...)"). Driven by
