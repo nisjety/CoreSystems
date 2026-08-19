@@ -800,12 +800,29 @@ existing per-Space reads instead of a new backend contract.**
   `pending` binding for UI3 Testbindingsagent (Control never confirmed it,
   see the UI-3 section above) correctly does not appear anywhere on this
   page — consistent with that room's own Agent tab, not a bug.
-- **Explicitly NOT built, left for a dedicated session**: the blueprint
-  showcase restructure, Page/system installations (no storage contract
-  exists for these at all), Runs-and-receipts as part of this IA (Task
-  Console already covers a version of this separately), and the Chief/Core
-  agent's cross-Space routing view (needs the org-wide registry read this
-  slice deliberately avoided building).
+- **Status 2026-08-19: the org-wide registry blocker is resolved, and the
+  Chief/Core routing view is built.** ADR-0002
+  (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`) settled registry
+  ownership (Application Plane); `/api/v1/agents/installations` now reads
+  the real org-scoped Convex query
+  (`spaceAgents:agentInstallationsForOrgForGateway`) instead of this slice's
+  original per-Space `join_all` loop, with no change to its response shape
+  or its callers. On top of that same read, `ChiefCoreRoutingPage.tsx` at
+  `/agents/chief-core` (linked from a new entry card on `/agents`) re-keys
+  the registry by destination Space instead of by definition — "what
+  already exists in this room" rather than "where is this definition
+  installed" — via a pure `groupInstallationsBySpace` projection, unit- and
+  component-tested (5 new tests total). Still a human-facing discovery/
+  navigation surface only: there is no runtime "Chief" or "Core" persona,
+  and following a Space link still resolves that Space's own Control
+  roster before anything can act — unchanged, per ADR-0002's "presence, not
+  authority."
+- **Still explicitly NOT built, left for a dedicated session**: the
+  blueprint showcase restructure, Page/system installations (no storage
+  contract exists for these at all), and Runs-and-receipts as part of this
+  IA (Task Console already covers a version of this separately) — each
+  needs its own storage-contract or IA decision, not just the registry read
+  this phase was blocked on.
 
 **Goal:** make `/agents` the control center for reusable definitions and their
 installations.
