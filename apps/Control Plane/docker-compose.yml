@@ -274,6 +274,9 @@ services:
             # Dedicated read-only credential for user-core's exact Better Auth
             # membership decision. It must not be reused as a general internal key.
             USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
+            # D-A grant administration (/api/v1/internal/org-groups/*). Required:
+            # the controller fails closed rather than accepting an unauthenticated caller.
+            ORG_GROUP_GRANT_SERVICE_TOKEN: ${ORG_GROUP_GRANT_SERVICE_TOKEN:?ORG_GROUP_GRANT_SERVICE_TOKEN is required}
             # Read-only Auth-canonical membership list used only by the explicit
             # Application operator reconciliation workflow.
             APPLICATION_RECONCILER_AUTH_TOKEN: ${APPLICATION_RECONCILER_AUTH_TOKEN:?APPLICATION_RECONCILER_AUTH_TOKEN is required}
