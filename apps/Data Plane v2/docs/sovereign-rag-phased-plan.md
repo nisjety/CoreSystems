@@ -12,12 +12,14 @@
 >    (`quarry-runtime/src/page_renderer.rs`), the `image/png` serve route
 >    (`quarry-edge/src/resource_routes.rs`), and the `page_images.created` emission
 >    (`quarry-runtime/src/page_image.rs`) all exist in Ingestion Plane source today.
->    Still genuinely open, confirmed by grep: no `page_images.deleted` **producer**
->    exists in DP2's document-erasure cascade (`embedding-engine-rs/src/stream/mod.rs`'s
->    `documents.deleted` handler only purges Qdrant vectors — it does not touch the CAS
->    or emit `page_images.deleted`), so the GDPR/CAS-erasure gap called out in Phase 2
->    is real and still open. `W_VISUAL` also still defaults to `0` (shadow) in
->    `docker-compose.yml` — the arm is wired but not live in fusion.
+>    Was genuinely open at the time this note was written. **✅ Closed since**, and by a
+>    cleaner mechanism than the one this plan called for: rather than building a
+>    `page_images.deleted` **producer** and a second consumer of it, embedding-engine-rs's
+>    `document_erasure_consumer.rs` (committed, wired into `main.rs`, tested) subscribes
+>    directly to the `dataplane.documents.deleted` event that already exists and purges
+>    both the page-image Qdrant vectors and the CAS objects itself — no intermediate event,
+>    no second consumer competing for the WorkQueue stream. `W_VISUAL` now defaults to
+>    `0.05` in `docker-compose.yml` — the arm is live in fusion, not shadow.
 > 2. **Phase 3 shipped differently than planned, not "not started."** There is no
 >    ColQwen2 multivector Qdrant collection and no swap of `provider/visual.rs` /
 >    `embed/visual.rs` off Embed v4 — both still call Cohere Embed v4 for visual
@@ -51,8 +53,8 @@
 ## Current state (verified this session)
 
 Visual RAG core built + passing real `cargo test`: authz-safe semantic cache (PR-A),
-Embed v4 provider/consumer/visual-arm (PR-B/C/D), structural chunker (PR-E). Ships dark
-(`W_VISUAL=0`, no producer). Stores: Qdrant (vectors), Postgres (canonical + graph +
+Embed v4 provider/consumer/visual-arm (PR-B/C/D), structural chunker (PR-E). Now live in fusion
+(`W_VISUAL=0.05` default; see the header note above). Stores: Qdrant (vectors), Postgres (canonical + graph +
 ownership), Quickwit (BM25 on MinIO), Dragonfly (exact KV). Fusion = RRF + Cohere rerank.
 
 ## Isolation audit — summary
@@ -442,9 +444,14 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
   `dataplane-cas` bucket, and the cross-plane NATS/serve/MinIO reachability (all runtime-
   unverified per the critique). These are the live-stack finish line for PR-F.
   **(Verified 2026-07-10: the render hook, serve route, and `page_images.created` emission
-  now exist in source — `page_renderer.rs`, `resource_routes.rs`, `page_image.rs`. Still
-  open: no `page_images.deleted` producer in DP2's erasure cascade, so CAS objects are not
-  purged on document delete/DSAR. See the verified note at the top of this file.)**
+  now exist in source — `page_renderer.rs`, `resource_routes.rs`, `page_image.rs`.)**
+  **✅ CLOSED — the CAS-erasure gap, by a different route than planned.** Rather than the
+  `page_images.deleted` producer this section called for, `document_erasure_consumer.rs`
+  subscribes directly to `dataplane.documents.deleted` and purges the page-image Qdrant
+  vectors AND the CAS objects itself in one step — one erasure event, one consumer, no
+  intermediate producer/consumer pair to keep in sync. Tested (signed-envelope decode,
+  replay rejection, tenant-mismatch rejection); PR-F's remaining finish-line items above
+  are otherwise done.
 - **(b) live-stack progress (2026-06-22):** DP2 infra up; **compose fixed** — `dpv2-minio`
   joined `inter-plane-bus` + `minio-init` now creates `dataplane-cas` (verified created).
   **Cross-plane reachability PROVEN live** (the critique's #1 unverified risk): from
