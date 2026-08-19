@@ -622,10 +622,23 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
 - **Risk:** MEDIUM. **Complexity:** LOW-MEDIUM. **Depends on:** Phases 2-4.
 
 ### Phase 6 — Model Plane track *(separate plane — coordinate, don't build in DP)*
-- Local **router classifier** (replaces "Not Diamond"; sovereign <10ms) + routing policy.
+- Local **router classifier** (replaces "Not Diamond"; sovereign <10ms) — **DONE, not to-build.**
+  Already live in Model Plane: the heuristic complexity scorer and mode/budget resolution are
+  `inference-core/src/provider/intent.rs`'s `classify()`/`choose()`/`resolve()`, with the
+  weights/keyword-list/table externalized into a runtime-tunable, session-core-persisted
+  `RoutingPolicy` singleton (`inference-core/src/provider/routing_policy.rs`,
+  `RoutingPolicy::default()` byte-identical to the original compile-time constants). It is the
+  first step of every unary/streaming inference call, via `provider/fallback.rs`'s
+  `FallbackChain::infer`/`infer_stream` → `resolve_intent()`, before any provider or the cache is
+  touched. "Not Diamond" itself was never wired into this repo (2026-08-19 full-repo grep: zero
+  code references, only this doc and `sovereign-rag-blueprint-reconciliation.md` propose
+  replacing it) — this local classifier already satisfies that ask, pure CPU, no network call,
+  no model weights, no training data. Remaining, genuinely open Phase 6 scope below.
 - **Command R+** and **local Llama 3.3 (vLLM)** as **inference-core providers**.
 - Multi-turn session stays in **session-core** (no second Redis).
-- **Risk:** MEDIUM. **Depends on:** Phase 3 GPU (shares the Llama fleet).
+- **Risk:** MEDIUM. **Depends on:** Phase 3 GPU (shares the Llama fleet) — the GPU dependency is
+  for the Command R+/local-Llama provider additions above, not the router classifier, which is
+  pure CPU and already shipped.
 
 ### Phase 7 — Sovereignty/infra *(if self-host confirmed)*
 - Bare-metal EU GPU provisioning (ColQwen2 + Llama), Azure-EU pinning (Sweden/Germany)
