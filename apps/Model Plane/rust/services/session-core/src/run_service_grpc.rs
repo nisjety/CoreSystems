@@ -35,19 +35,34 @@ use crate::auth::{
 };
 use crate::orchestration_grpc::json_to_struct;
 
+/// `space_membership_revoked` is true when the row has a non-null
+/// `space_id` AND that (space_id, user_id) pair has a row in
+/// `space_membership_revocations` (migration 0032, populated by
+/// `space_membership_nats.rs`). A row with a null `space_id` never matches
+/// the revocation join, so unscoped runs/threads are unaffected.
 async fn authorize_run_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     run_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String)> =
-        sqlx::query_as("SELECT org_id, user_id FROM runs WHERE id = $1")
-            .bind(run_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("run not found"))?;
+    let owner: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT r.org_id, r.user_id, \
+         EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                WHERE rev.space_ref = r.space_id AND rev.subject_id = r.user_id) \
+         FROM runs r WHERE r.id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id, space_membership_revoked) =
+        owner.ok_or_else(|| Status::not_found("run not found"))?;
+    if space_membership_revoked {
+        return Err(Status::permission_denied(
+            "Space membership required for this run",
+        ));
+    }
     authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
@@ -57,13 +72,23 @@ async fn authorize_thread_owner(
     thread_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String)> =
-        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    let owner: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT t.org_id, t.user_id, \
+         EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                WHERE rev.space_ref = t.space_id AND rev.subject_id = t.user_id) \
+         FROM threads t WHERE t.id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id, space_membership_revoked) =
+        owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    if space_membership_revoked {
+        return Err(Status::permission_denied(
+            "Space membership required for this thread",
+        ));
+    }
     authorize_owner_row(caller, &org_id, &user_id, intent)
 }
 
@@ -94,8 +119,14 @@ impl ThreadOwnerLookup for PgThreadOwnerLookup {
         org_id: &str,
         user_id: &str,
     ) -> Result<bool, Status> {
+        // A revoked Space membership denies even a matching org+user row —
+        // see authorize_run_owner's doc comment above for why: a null
+        // space_id (unscoped thread) never matches the revocation join, so
+        // this only tightens Space-scoped threads.
         let (authorized,): (bool,) = sqlx::query_as(
-            "SELECT EXISTS(SELECT 1 FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+            "SELECT EXISTS(SELECT 1 FROM threads t WHERE t.id = $1 AND t.org_id = $2 AND t.user_id = $3 \
+             AND NOT EXISTS(SELECT 1 FROM space_membership_revocations rev \
+                             WHERE rev.space_ref = t.space_id AND rev.subject_id = t.user_id))",
         )
         .bind(thread_id)
         .bind(org_id)
@@ -1246,5 +1277,232 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
         assert_eq!(lookup.calls.load(Ordering::SeqCst), 0);
+    }
+
+    // -- Space membership revocation (real Postgres) -------------------------
+    //
+    // authorize_run_owner and PgThreadOwnerLookup::owner_matches's own SQL is
+    // the thing under test here, not a fake — every test above bypasses it
+    // via ThreadOwnerLookup's fake, and authorize_run_owner has no injectable
+    // seam at all. Migration 0032's revocation join can only be proven
+    // correct against a real database.
+    //
+    // #[ignore]d so plain `cargo test` (no DB) skips these; run with a DB:
+    //   DATABASE_URL=… cargo test --bin session-core -- --ignored space_membership_revocation
+
+    async fn migrated_test_pool() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_membership_revocation_denies_a_run_owner_who_still_matches_org_and_user() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let (run_id, thread_id, org_id, user_id, space_ref) = (
+            format!("smr-run-{sfx}"),
+            format!("smr-thread-{sfx}"),
+            format!("smr-org-{sfx}"),
+            format!("smr-user-{sfx}"),
+            format!("smr-space-{sfx}"),
+        );
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3) ON CONFLICT (id) DO NOTHING")
+            .bind(&thread_id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("seed parent thread");
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash) \
+             VALUES ($1, $2, 'g', $3, $4, $5, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&space_ref)
+        .execute(&pool)
+        .await
+        .expect("seed run");
+
+        let caller = VerifiedIdentity::user_for_test(&org_id, &user_id);
+
+        // Before any revocation: org_id+user_id match and no revocation row
+        // exists, so this must still authorize.
+        authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect("no revocation yet: run owner must be authorized");
+
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (space_ref, subject_id) DO UPDATE SET revoked_at = NOW()",
+        )
+        .bind(&space_ref)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+
+        let error = authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect_err("a revoked Space membership must deny even a matching org+user run");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        // A rejoin clears the revocation row (mirrors space_membership_nats.rs's
+        // apply_membership_change on an active=true event) — authorization
+        // must be restored, not permanently stuck denied.
+        sqlx::query(
+            "DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = $2",
+        )
+        .bind(&space_ref)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("clear revocation on rejoin");
+        authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect("a cleared revocation must restore authorization, not deny forever");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_membership_revocation_never_affects_an_unscoped_run_or_thread() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let (run_id, thread_id, org_id, user_id) = (
+            format!("smr-unscoped-run-{sfx}"),
+            format!("smr-unscoped-thread-{sfx}"),
+            format!("smr-unscoped-org-{sfx}"),
+            format!("smr-unscoped-user-{sfx}"),
+        );
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3) ON CONFLICT (id) DO NOTHING")
+            .bind(&thread_id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("seed unscoped thread");
+        sqlx::query("INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'g', $3, $4) ON CONFLICT (id) DO NOTHING")
+            .bind(&run_id)
+            .bind(&thread_id)
+            .bind(&org_id)
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .expect("seed unscoped run");
+
+        let caller = VerifiedIdentity::user_for_test(&org_id, &user_id);
+        // A revocation naming this exact user under a space_ref this run/
+        // thread never used must not leak into an unscoped (space_id IS
+        // NULL) row's authorization — NULL never equals a non-null revoked
+        // space_ref, and this row has no space_ref at all to match.
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ('some-other-space', $1, $2)",
+        )
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed unrelated revocation");
+
+        authorize_run_owner(&pool, &caller, &run_id, OwnerIntent::Read)
+            .await
+            .expect("unscoped run must be unaffected by any Space revocation");
+        authorize_thread_owner(&pool, &caller, &thread_id, OwnerIntent::Read)
+            .await
+            .expect("unscoped thread must be unaffected by any Space revocation");
+
+        let lookup = PgThreadOwnerLookup { pool: pool.clone() };
+        let authorized = lookup
+            .owner_matches(&thread_id, &org_id, &user_id)
+            .await
+            .expect("owner_matches must not error for an unscoped thread");
+        assert!(authorized, "unscoped thread ownership must still match");
+
+        let _ = sqlx::query(
+            "DELETE FROM space_membership_revocations WHERE space_ref = 'some-other-space' AND org_id = $1",
+        )
+        .bind(&org_id)
+        .execute(&pool)
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn space_membership_revocation_denies_pg_thread_owner_lookup() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = std::process::id();
+        let (thread_id, org_id, user_id, space_ref) = (
+            format!("smr-lookup-thread-{sfx}"),
+            format!("smr-lookup-org-{sfx}"),
+            format!("smr-lookup-user-{sfx}"),
+            format!("smr-lookup-space-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash) \
+             VALUES ($1, $1, $2, $3, $4, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1') \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&thread_id)
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&space_ref)
+        .execute(&pool)
+        .await
+        .expect("seed thread");
+
+        let lookup = PgThreadOwnerLookup { pool: pool.clone() };
+        assert!(
+            lookup
+                .owner_matches(&thread_id, &org_id, &user_id)
+                .await
+                .expect("no revocation yet"),
+            "org+user match with no revocation must authorize"
+        );
+
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, $3)",
+        )
+        .bind(&space_ref)
+        .bind(&org_id)
+        .bind(&user_id)
+        .execute(&pool)
+        .await
+        .expect("seed revocation");
+
+        assert!(
+            !lookup
+                .owner_matches(&thread_id, &org_id, &user_id)
+                .await
+                .expect("query must still succeed, just return false"),
+            "a revoked Space membership must deny even a matching org+user thread"
+        );
+
+        let _ = sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1")
+            .bind(&space_ref)
+            .execute(&pool)
+            .await;
     }
 }
