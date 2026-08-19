@@ -218,10 +218,13 @@ Binding fields:
   enforced**: `blocked` refuses invocation; `require_confirmation` (and
   absent) forbids autonomous runs from a mention; only `auto` leaves them on.
 - `knowledge_scope` (`space`, `thread`, `space_with_links`) — **not stored
-  yet, deliberately**: room turns currently run with knowledge grounding
-  suppressed entirely (Control has no shared-Space retrieval authority), so
-  there is nothing for this field to govern. It lands together with that
-  authority.
+  yet**: Control now has shared-Space retrieval authority (`ResolveSharedRetrievalDecisionEvidence`/
+  `IssueSharedRetrievalDecision`, the unified `POST /api/v1/internal/spaces/retrieval-decision`
+  endpoint room/project/case turns now use, gated on the org's independent
+  `retrieval_read_entitled` policy bit), so a room turn with that entitlement
+  active gets real, whole-Space grounding — no longer suppressed by kind.
+  This field's own finer distinction (thread-only vs space-with-links) is
+  still unbuilt; today retrieval is all-or-nothing at the whole-Space grain.
 - `default_thread_policy` (`none`, `latest`, `inbox`) — **not stored yet**:
   awaits the delivery-routing surface it governs.
 - `audit_visibility` (`owner`, `member`, `readonly`, `none`) — **not stored

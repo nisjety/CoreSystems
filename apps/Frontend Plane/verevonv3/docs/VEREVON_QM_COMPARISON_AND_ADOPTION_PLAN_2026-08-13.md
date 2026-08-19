@@ -2523,6 +2523,20 @@ ordered by the missing contracts that keep the projection honest:
    retrieval, authored instructions, skills, schedules, approvals, runs, and
    delivery. Its effective permission must be the intersection of Space
    authority, current recipient audience, and the linked resource's owner ACL.
+   **Status 2026-08-19: one surface closed.** Shared-Space (room/project/case)
+   retrieval decisions now exist (`ResolveSharedRetrievalDecisionEvidence`/
+   `IssueSharedRetrievalDecision`, unified `POST .../spaces/retrieval-decision`
+   dispatching on the Space's registered kind, same pattern as thread-decision),
+   gated on the org's independent `retrieval_read_entitled` policy bit; a
+   denied/not-yet-entitled retrieval degrades the turn to ungrounded chat
+   rather than failing it. Every other named surface — authored instructions,
+   skills (no `space` scope kind exists anywhere in capability-core's registry),
+   approvals (no space field on `Approval`/`CreateApprovalRequest` at all,
+   deliberately per its own Phase-6 IDOR-fix comments), runs (session-core's
+   `runs`/`threads` tables carry `space_id` but `ResolveRunOwner`/
+   `ResolveThreadOwner` ignore it), and delivery (notification-core has zero
+   Space dimension anywhere) — remains exactly as unresolved as this item
+   originally described. This is a narrow slice of item 2, not item 2 itself.
 3. **Release gates before new effectful UI.** Prove the existing source lanes
    against an immutable candidate: Auth Core/service-principal registrations,
    owner-effect reservation/receipt, approval continuation after restart,
