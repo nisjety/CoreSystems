@@ -326,6 +326,7 @@ func (s *Server) setupRoutes() {
 				spaces.POST("/thread-decision", s.requireVerifiedSpaceResolver, s.issueThreadDecision)
 				spaces.POST("/thread-append-decision", s.requireVerifiedSpaceResolver, s.issueThreadAppendDecision)
 				spaces.POST("/personal-retrieval-decision", s.requireVerifiedSpaceResolver, s.issuePersonalRetrievalDecision)
+				spaces.POST("/retrieval-decision", s.requireVerifiedSpaceResolver, s.issueRetrievalDecision)
 				spaces.POST("/personal-import-decision", s.requireVerifiedSpaceResolver, s.issuePersonalImportDecision)
 				spaces.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
 				spaces.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)

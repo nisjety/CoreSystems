@@ -1,68 +1,29 @@
 package spaces
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
 )
 
-const (
-	retrievalReadAction   = "data.retrieval.read"
-	retrievalReadAudience = "data-plane-retrieval"
-	retrievalReadSchema   = "sha256:retrieval-read-v1"
-)
-
-// PersonalRetrievalDecisionRequest has only a retry identity. Control derives
-// the actor, tenant, audience, privacy claims, and resource authorization
-// from current state; callers cannot turn an arbitrary query into authority.
-type PersonalRetrievalDecisionRequest struct {
-	DecisionRef    string
-	IdempotencyKey string
-	Nonce          string
-}
-
-func (r PersonalRetrievalDecisionRequest) Validate() error {
-	for label, value := range map[string]string{
-		"decision_ref": r.DecisionRef, "idempotency_key": r.IdempotencyKey, "nonce": r.Nonce,
-	} {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("personal retrieval decision %s is required", label)
-		}
-	}
-	return nil
-}
-
-// retrievalPayloadDigest is shared by the personal and shared retrieval
-// issuers: it only serializes resolved evidence and request fields, with no
-// personal/shared branching of its own.
-func retrievalPayloadDigest(evidence PersonalThreadDecisionEvidence, request PersonalRetrievalDecisionRequest) string {
-	value := strings.Join([]string{
-		"data.retrieval.read", "v1", evidence.Membership.OrgID, evidence.Membership.SubjectID,
-		evidence.Membership.SpaceRef, request.DecisionRef, evidence.RecipientAudienceRef,
-		evidence.Privacy.PolicyRef, evidence.ResourceAuthorizationRef, retrievalReadSchema,
-		request.IdempotencyKey,
-	}, "\x00")
-	sum := sha256.Sum256([]byte(value))
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-// IssuePersonalRetrievalDecision emits a short-lived, target-specific read
-// authority. It never reuses a thread:create decision or its resource ref.
-func IssuePersonalRetrievalDecision(
+// IssueSharedRetrievalDecision uses the same retrieval effect digest and
+// audience as personal retrieval, but only after Control has resolved a
+// current shared recipient audience and confirmed retrieval entitlement for
+// that Space's org. It deliberately accepts no caller-selected recipient
+// fields; those come from the registered audience snapshot in Repository.
+func IssueSharedRetrievalDecision(
 	evidence PersonalThreadDecisionEvidence,
 	request PersonalRetrievalDecisionRequest,
 	now time.Time,
 ) (Decision, error) {
-	if err := evidence.ValidateForRetrieval(); err != nil {
+	if err := evidence.ValidateForSharedRetrieval(); err != nil {
 		return Decision{}, err
 	}
 	if err := request.Validate(); err != nil {
 		return Decision{}, err
 	}
 	if now.IsZero() {
-		return Decision{}, fmt.Errorf("personal retrieval decision issuance time is required")
+		return Decision{}, fmt.Errorf("shared retrieval decision issuance time is required")
 	}
 	return Decision{
 		DecisionRef:               strings.TrimSpace(request.DecisionRef),

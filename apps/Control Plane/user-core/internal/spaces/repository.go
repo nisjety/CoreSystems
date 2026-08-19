@@ -904,6 +904,60 @@ func (r *Repository) ResolveSharedThreadDecisionEvidence(ctx context.Context, sp
 	return evidence, nil
 }
 
+// ResolveSharedRetrievalDecisionEvidence mirrors
+// ResolveSharedThreadDecisionEvidence's current-membership and current-
+// recipient-audience resolution, but binds the independent retrieval
+// entitlement and resource reference instead of thread-create's. This must
+// never fall back to the shared thread-create grant.
+func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("Space authority repository unavailable")
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision, r.privacy_revision,
+		       r.recipient_audience_revision, r.entitlement_revision,
+		       a.audience_ref, a.audience_hash,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.retrieval_read_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_recipient_audiences a ON a.space_ref=s.space_ref AND a.revision=r.recipient_audience_revision
+		JOIN space_recipient_audience_members am ON am.space_ref=a.space_ref AND am.revision=a.revision AND am.subject_id=m.subject_id
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		  AND s.space_kind <> 'personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+	).Scan(
+		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
+		&evidence.Membership.Kind, &evidence.Membership.Role,
+		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
+		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
+		&evidence.Membership.Revisions.Entitlement,
+		&evidence.RecipientAudienceRef, &evidence.RecipientAudienceHash,
+		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
+		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
+		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
+		&evidence.Privacy.ZeroDataRetention, &evidence.RetrievalReadEntitled,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve shared Space retrieval authority: %w", err)
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:retrieval-read:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForSharedRetrieval(); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid shared Space retrieval authority: %w", err)
+	}
+	return evidence, nil
+}
+
 // ResolvePersonalRetrievalDecisionEvidence returns the same current Control
 // authority facts as thread issuance, but binds them to the independent
 // retrieval entitlement and resource reference. This must never fall back to

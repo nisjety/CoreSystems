@@ -577,10 +577,13 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
 		return
 	}
-	// space_kind travels in the envelope, not the signed decision: the gateway
-	// needs it to know which follow-up authorities exist for this Space kind
-	// (retrieval decisions are personal-only today), while verifiers of the
-	// token itself must keep deriving kind from Control state, never a claim.
+	// space_kind travels in the envelope, not the signed decision, for any
+	// caller that wants to branch on it (e.g. UI copy); it is not needed to
+	// choose a follow-up authority anymore — retrieval-decision now resolves
+	// personal vs shared itself from Control state, the same way this
+	// handler does, so a caller never needs to know or claim the kind to get
+	// a correctly-scoped retrieval decision. Verifiers of the signed token
+	// itself must still keep deriving kind from Control state, never a claim.
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token, "space_kind": membership.Kind}})
 }
 
@@ -698,6 +701,75 @@ func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
 	}, time.Now().UTC())
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space retrieval is not authorized"})
+		return
+	}
+	token, err := spaces.SignDecision(key, decision)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+// issueRetrievalDecision chooses a Control-owned personal or shared retrieval
+// evidence resolver from the registered Space kind, the same dispatch
+// issueThreadDecision uses for thread creation. personal-retrieval-decision
+// remains for any existing caller of that narrower path; the gateway should
+// call this one instead so a Space's own kind — not a caller's own guess —
+// decides which retrieval authority gets resolved.
+func (s *Server) issueRetrievalDecision(c *gin.Context) {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return
+	}
+	var request personalRetrievalDecisionRequest
+	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+		return
+	}
+	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority unavailable"})
+		return
+	}
+	var evidence spaces.PersonalThreadDecisionEvidence
+	if membership.Kind == spaces.KindPersonal {
+		evidence, err = s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	} else {
+		evidence, err = s.spaceRepo.ResolveSharedRetrievalDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	}
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "current retrieval authority required"})
+		return
+	}
+	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
+		return
+	}
+	decisionRef, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	nonce, err := randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return
+	}
+	issuerRequest := spaces.PersonalRetrievalDecisionRequest{DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, Nonce: nonce}
+	var decision spaces.Decision
+	if membership.Kind == spaces.KindPersonal {
+		decision, err = spaces.IssuePersonalRetrievalDecision(evidence, issuerRequest, time.Now().UTC())
+	} else {
+		decision, err = spaces.IssueSharedRetrievalDecision(evidence, issuerRequest, time.Now().UTC())
+	}
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space retrieval is not authorized"})
 		return
 	}
 	token, err := spaces.SignDecision(key, decision)

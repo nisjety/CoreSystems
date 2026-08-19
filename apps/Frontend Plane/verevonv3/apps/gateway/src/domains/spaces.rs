@@ -230,38 +230,45 @@ pub(crate) async fn inject_personal_thread_context(
     // thread:create bearer for it: Control must independently resolve the
     // current retrieval entitlement and issue the target-specific authority.
     //
-    // Control issues retrieval authority for personal Spaces only — no
-    // shared-Space retrieval decision exists yet. For rooms the token stays
-    // empty, which downstream reads as "retrieval authority absent":
-    // model-gateway suppresses knowledge-base grounding for the turn rather
-    // than downgrading a Space-scoped request to an unscoped Data call. An
-    // envelope without space_kind is treated as personal, preserving the
-    // stricter behavior.
-    let space_kind = data
-        .get("space_kind")
-        .and_then(Value::as_str)
-        .unwrap_or("personal");
-    let retrieval_token = if space_kind == "personal" {
-        let retrieval_url = format!(
-            "{}/api/v1/internal/spaces/personal-retrieval-decision",
-            state.user_core_url
-        );
-        let (retrieval_status, Json(retrieval_response)) = proxy_json(
-            state,
-            Method::POST,
-            &retrieval_url,
-            Some(json!({
-                "space_ref": space_ref,
-                "idempotency_key": format!("space-retrieval-{}-{counter}", unix_nanos()),
-            })),
-            Some(org_id),
-            Some(&actor),
-            None,
-        )
-        .await;
-        if !retrieval_status.is_success() {
-            return Err((retrieval_status, Json(retrieval_response)));
-        }
+    // Control now issues retrieval authority for both personal and shared
+    // (room/project/case) Spaces via the unified retrieval-decision endpoint,
+    // which dispatches on the Space's own registered kind server-side (the
+    // same pattern thread-decision already uses for thread creation).
+    //
+    // retrieval_read_entitled is a separate, independently configured policy
+    // bit from thread_create_entitled (migration 019: "a thread-create grant
+    // never implies data access", default FALSE for every org). A FORBIDDEN
+    // response here means Control considered the request and affirmatively
+    // denied retrieval specifically — that must degrade this turn to
+    // ungrounded chat, not fail the turn outright, or every org that has
+    // chat enabled without separately opting into retrieval would lose chat
+    // entirely rather than just grounding. Any other non-success status
+    // (unreachable, 5xx, malformed response) still fails the whole call:
+    // an outage must never be silently treated as "retrieval is fine, just
+    // not entitled" — see scoped_retrieval_token's own contract in
+    // model-gateway/src/retrieval.rs.
+    let retrieval_url = format!(
+        "{}/api/v1/internal/spaces/retrieval-decision",
+        state.user_core_url
+    );
+    let (retrieval_status, Json(retrieval_response)) = proxy_json(
+        state,
+        Method::POST,
+        &retrieval_url,
+        Some(json!({
+            "space_ref": space_ref,
+            "idempotency_key": format!("space-retrieval-{}-{counter}", unix_nanos()),
+        })),
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    let retrieval_token = if retrieval_status == StatusCode::FORBIDDEN {
+        String::new()
+    } else if !retrieval_status.is_success() {
+        return Err((retrieval_status, Json(retrieval_response)));
+    } else {
         let retrieval_token = crate::envelope::unwrap_data(&retrieval_response)
             .get("token")
             .and_then(Value::as_str)
@@ -271,8 +278,6 @@ pub(crate) async fn inject_personal_thread_context(
             return Err(invalid_decision());
         }
         retrieval_token
-    } else {
-        String::new()
     };
     let context = json!({
         "space_id": required_decision_string(decision, "space_ref")?,
@@ -2932,9 +2937,7 @@ mod tests {
             .mount(&user_core)
             .await;
         Mock::given(wm_method("POST"))
-            .and(wm_path(
-                "/api/v1/internal/spaces/personal-retrieval-decision",
-            ))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"token": "control-retrieval-token"}
             })))
@@ -2987,9 +2990,7 @@ mod tests {
         assert!(request.headers.get("x-delegation-signature").is_some());
         let retrieval_request = received
             .iter()
-            .find(|request| {
-                request.url.path() == "/api/v1/internal/spaces/personal-retrieval-decision"
-            })
+            .find(|request| request.url.path() == "/api/v1/internal/spaces/retrieval-decision")
             .expect("retrieval decision issuance request");
         let retrieval_body: Value =
             serde_json::from_slice(&retrieval_request.body).expect("retrieval JSON");
@@ -3004,7 +3005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_room_thread_gets_authority_without_a_personal_retrieval_grant() {
+    async fn a_room_thread_gets_real_retrieval_authority_via_the_unified_endpoint() {
         // Serialized: reads process-global service URLs mutated by siblings.
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
         let user_core = MockServer::start().await;
@@ -3025,9 +3026,17 @@ mod tests {
             })))
             .mount(&user_core)
             .await;
-        // Deliberately no personal-retrieval-decision mock: a room turn must
-        // never request one — Control issues retrieval authority only for
-        // personal Spaces, and grounding degrades instead of the turn failing.
+        // Control now issues retrieval authority for rooms too, via the same
+        // unified endpoint a personal turn uses — the room kind is resolved
+        // server-side from the registered Space, not from anything this
+        // request claims.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "control-room-retrieval-token"}
+            })))
+            .mount(&user_core)
+            .await;
         let mut state = crate::tests::test_state(false);
         state.user_core_url = user_core.uri();
         let mut outbound = json!({
@@ -3043,7 +3052,10 @@ mod tests {
             outbound["space_context"]["space_decision_token"],
             "control-signed-token"
         );
-        assert_eq!(outbound["space_context"]["retrieval_decision_token"], "");
+        assert_eq!(
+            outbound["space_context"]["retrieval_decision_token"],
+            "control-room-retrieval-token"
+        );
         let received = user_core
             .received_requests()
             .await
@@ -3052,7 +3064,110 @@ mod tests {
             received.iter().all(|request| {
                 request.url.path() != "/api/v1/internal/spaces/personal-retrieval-decision"
             }),
-            "a room turn must not request a personal retrieval decision"
+            "a room turn must use the unified retrieval-decision endpoint, never the personal-only one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_retrieval_entitlement_degrades_to_ungrounded_chat_not_a_failed_turn() {
+        // Serialized: reads process-global service URLs mutated by siblings.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "token": "control-signed-token",
+                    "space_kind": "room",
+                    "decision": {
+                        "space_ref": "room-1", "decision_ref": "decision-1",
+                        "recipient_audience_ref": "space:room-1:recipient-audience:1", "privacy_policy_ref": "privacy-1",
+                        "recipient_audience_revision": 1, "recipient_audience_hash": "sha256:audience-1", "authority_revision": 7, "resource_authorization_ref": "resource-1",
+                        "action_schema_hash": "sha256:schema", "payload_digest": "sha256:payload",
+                        "idempotency_key": "idem-1"
+                    }
+                }
+            })))
+            .mount(&user_core)
+            .await;
+        // retrieval_read_entitled is a separate, independently configured
+        // policy flag from thread_create_entitled (defaults to FALSE for
+        // every org — migration 019). A FORBIDDEN response here means
+        // Control considered and denied retrieval specifically, which must
+        // degrade this turn to ungrounded chat, not fail it outright: an org
+        // with chat enabled but not yet opted into retrieval must still be
+        // able to chat.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                "error": "current retrieval authority required"
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "content": "hello", "space_ref": "room-1", "session_key": "session-1",
+            "idempotency_key": "idem-1"
+        });
+
+        inject_personal_thread_context(&state, &authenticated_user(), "org-1", &mut outbound)
+            .await
+            .expect("a denied retrieval entitlement must not fail the whole turn");
+        assert_eq!(
+            outbound["space_context"]["space_decision_token"],
+            "control-signed-token"
+        );
+        assert_eq!(outbound["space_context"]["retrieval_decision_token"], "");
+    }
+
+    #[tokio::test]
+    async fn a_retrieval_decision_outage_still_fails_the_whole_turn() {
+        // Serialized: reads process-global service URLs mutated by siblings.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "token": "control-signed-token",
+                    "space_kind": "personal",
+                    "decision": {
+                        "space_ref": "personal-1", "decision_ref": "decision-1",
+                        "recipient_audience_ref": "audience-1", "privacy_policy_ref": "privacy-1",
+                        "recipient_audience_revision": 3, "recipient_audience_hash": "sha256:audience-1", "authority_revision": 7, "resource_authorization_ref": "resource-1",
+                        "action_schema_hash": "sha256:schema", "payload_digest": "sha256:payload",
+                        "idempotency_key": "idem-1"
+                    }
+                }
+            })))
+            .mount(&user_core)
+            .await;
+        // Unlike a FORBIDDEN denial, an outage must never be silently treated
+        // as "retrieval just isn't entitled" — that would let a deployment
+        // gap or Control incident quietly downgrade every scoped chat to
+        // unscoped-equivalent (no grounding, no error) instead of surfacing
+        // the failure.
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/retrieval-decision"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": "Space authority repository unavailable"
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "content": "hello", "space_ref": "personal-1", "session_key": "session-1",
+            "idempotency_key": "idem-1"
+        });
+
+        let result =
+            inject_personal_thread_context(&state, &authenticated_user(), "org-1", &mut outbound)
+                .await;
+        assert!(
+            result.is_err(),
+            "a retrieval-decision outage must fail the whole turn, not degrade silently"
         );
     }
 

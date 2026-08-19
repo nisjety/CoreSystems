@@ -414,6 +414,15 @@ func TestIssuePersonalRetrievalDecisionFailsClosedWhenRepositoryIsUnavailable(t 
 	}
 }
 
+func TestIssueRetrievalDecisionFailsClosedWhenRepositoryIsUnavailable(t *testing.T) {
+	s := &Server{}
+	c, w := newGinJSONCtx(`{"space_ref":"space-1","idempotency_key":"retrieval-1"}`)
+	s.issueRetrievalDecision(c)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unwired Space repository: want 503, got %d", w.Code)
+	}
+}
+
 func TestIssuePersonalImportDecisionFailsClosedWhenRepositoryIsUnavailable(t *testing.T) {
 	s := &Server{}
 	c, w := newGinJSONCtx(`{"space_ref":"space-1","idempotency_key":"import-1"}`)
