@@ -145,10 +145,24 @@ pub fn parse_erasure_event(
 pub struct PurgeSummary {
     pub quickwit_admin_job_audit: u64,
     pub quickwit_admin_jobs: u64,
+    /// Whether a Quickwit index delete task was accepted for this org.
+    ///
+    /// Deliberately NOT a row/document count: Quickwit's `delete-tasks` API is
+    /// asynchronous — it records a delete query that the janitor applies later
+    /// by rewriting splits. Reporting a document count here would claim the
+    /// data is already gone when only the request has been accepted, which on
+    /// an erasure path is precisely the wrong direction to be wrong in.
+    ///
+    /// `false` when no client was supplied (index pruning unconfigured), so a
+    /// caller can tell "nothing to prune" apart from "pruning not wired up".
+    pub index_delete_task_submitted: bool,
 }
 
 impl PurgeSummary {
     /// Total rows deleted across every table in one purge run.
+    ///
+    /// Counts Postgres bookkeeping rows only; the index delete task is a
+    /// separate, asynchronous outcome — see `index_delete_task_submitted`.
     #[must_use]
     pub fn total(&self) -> u64 {
         self.quickwit_admin_job_audit + self.quickwit_admin_jobs
@@ -195,7 +209,50 @@ impl PurgeSummary {
 ///    platform-wide row from both statements — narrowing the purge in a second,
 ///    independent way on top of the `org_id = $1` predicate that is already
 ///    doing the intended filtering.
-pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Result<PurgeSummary> {
+pub async fn purge_organization_data(
+    pool: &PgPool,
+    org_id: &str,
+    quickwit: Option<&crate::quickwit::QuickwitClient>,
+) -> anyhow::Result<PurgeSummary> {
+    // The searchable copy goes FIRST, before any bookkeeping is deleted.
+    //
+    // Until this existed, an org erasure purged only the two Postgres tables
+    // below and left every one of the org's documents searchable in Quickwit —
+    // the actual personal data, still queryable, while the purge reported
+    // success. The capability was already here (`delete_by_query`, used by the
+    // per-document delete path and by `rebuild.rs` with this exact `org_id:`
+    // query shape); nothing wired it to org-wide erasure.
+    //
+    // Ordering is deliberate. If Quickwit is unreachable we return before
+    // touching Postgres, so a NAK'd redelivery retries the whole purge with the
+    // bookkeeping still intact to drive it. The reverse order could leave an
+    // org whose jobs are gone but whose documents are still indexed, with
+    // nothing left to indicate the prune never happened. Submitting the same
+    // delete query twice is harmless, so redelivery is safe.
+    let index_delete_task_submitted = match quickwit {
+        Some(client) => {
+            client
+                .delete_by_query(&format!(
+                    "org_id:{}",
+                    crate::quickwit::quote_query_value(org_id)
+                ))
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("Quickwit index prune failed for org {org_id}: {error}")
+                })?;
+            true
+        }
+        None => {
+            // Loud, because a silent skip here is an org that believes it was
+            // erased while remaining fully searchable.
+            tracing::error!(
+                org_id,
+                "GDPR erasure ran WITHOUT Quickwit index pruning: no client configured.                  The org's Postgres bookkeeping is purged but its indexed documents remain                  searchable and must be pruned out of band."
+            );
+            false
+        }
+    };
+
     // Phase 1 RLS: unscoped on purpose — see the doc comment above.
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
 
@@ -223,6 +280,7 @@ pub async fn purge_organization_data(pool: &PgPool, org_id: &str) -> anyhow::Res
     Ok(PurgeSummary {
         quickwit_admin_job_audit,
         quickwit_admin_jobs,
+        index_delete_task_submitted,
     })
 }
 
@@ -364,12 +422,30 @@ mod tests {
     }
 
     #[test]
-    fn purge_summary_total_sums_every_field() {
+    fn purge_summary_total_sums_every_row_field() {
         let summary = PurgeSummary {
             quickwit_admin_job_audit: 3,
             quickwit_admin_jobs: 2,
+            index_delete_task_submitted: true,
         };
         assert_eq!(summary.total(), 5);
+    }
+
+    /// `total()` counts Postgres rows only. The index prune is asynchronous in
+    /// Quickwit, so folding it into a row total would let a caller log
+    /// "6 purged" for 5 rows plus one submitted-but-not-yet-applied delete task.
+    #[test]
+    fn purge_summary_total_excludes_the_index_delete_task() {
+        let without = PurgeSummary {
+            quickwit_admin_job_audit: 1,
+            quickwit_admin_jobs: 1,
+            index_delete_task_submitted: false,
+        };
+        let with = PurgeSummary {
+            index_delete_task_submitted: true,
+            ..without
+        };
+        assert_eq!(without.total(), with.total());
     }
 
     /// Static-analysis guard on the purge SQL itself: every `DELETE`
