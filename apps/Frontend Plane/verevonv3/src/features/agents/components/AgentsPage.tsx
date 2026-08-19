@@ -8,6 +8,7 @@ import {
 } from 'solid-js'
 import {
   ChevronRight,
+  Compass,
   Gauge,
   Play,
   Puzzle,
@@ -116,6 +117,7 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
       <section aria-labelledby="agent-role-heading" class="agents-overview-section">
         <TaskConsoleEntry />
         <InstallationsEntry />
+        <ChiefCoreEntry />
         <div class="agents-role-grid">
           <For each={agentBlueprints}>
             {(role) => (
@@ -174,6 +176,30 @@ function InstallationsEntry() {
       </span>
       <span class="agents-task-console-entry__cta">
         {i18n.tr('Åpne installasjoner', 'Open installations')}
+        <ChevronRight class="size-4" strokeWidth={2.2} />
+      </span>
+    </A>
+  )
+}
+
+function ChiefCoreEntry() {
+  const i18n = useI18n()
+  return (
+    <A href="/agents/chief-core" class={cn('agents-task-console-entry', controlFocusClass)} aria-label={i18n.tr('Åpne Chief/Core for å se hvilke agenter som finnes i hvert rom', 'Open Chief/Core to see which agents already exist in each room')}>
+      <span class="agents-task-console-entry__icon">
+        <Compass class="size-5" strokeWidth={2.1} />
+      </span>
+      <span class="agents-task-console-entry__copy">
+        <span class="agents-task-console-entry__title">{i18n.tr('Chief/Core — ruting på tvers av rom', 'Chief/Core — cross-room routing')}</span>
+        <span class="agents-task-console-entry__desc">
+          {i18n.tr(
+            'Se hvilke agenter som allerede finnes i hvert rom, til hjelp når du skal bestemme hvor en oppgave hører hjemme.',
+            'See which agents already exist in each room, to help decide where a task belongs.',
+          )}
+        </span>
+      </span>
+      <span class="agents-task-console-entry__cta">
+        {i18n.tr('Åpne Chief/Core', 'Open Chief/Core')}
         <ChevronRight class="size-4" strokeWidth={2.2} />
       </span>
     </A>

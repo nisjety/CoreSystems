@@ -13,6 +13,7 @@ const SupportPage = lazy(() => import('@/features/support/components/SupportPage
 const AgentsPage = lazy(() => import('@/features/agents/components/AgentsPage'))
 const AgentRunConsole = lazy(() => import('@/features/agents/components/AgentRunConsole'))
 const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
+const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
 const OpsQualityPage = lazy(() => import('@/features/quality/components/OpsQualityPage'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
@@ -181,6 +182,7 @@ export default function App() {
         <Route path="/insights/experiments" component={() => <InsightsPage section="experiments" />} />
         <Route path="/agents" component={AgentsPage} />
         <Route path="/agents/installations" component={AgentInstallationsPage} />
+        <Route path="/agents/chief-core" component={ChiefCoreRoutingPage} />
         <Route path="/agents/runs" component={AgentRunConsole} />
         <Route path="/agents/cost" component={CostDashboardPage} />
         <Route path="/agents/quality" component={OpsQualityPage} />
