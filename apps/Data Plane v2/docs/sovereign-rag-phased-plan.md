@@ -569,11 +569,49 @@ no RLS** (single-layer); **two HIGH body-org-trust gaps** (aux HTTP handlers + g
 - **Steps:** extend the Art.17 cascade to **MinIO CAS** (raw + page images) and
   **Meilisearch**; verify Qdrant visual-multivector purge, Quickwit segment prune, and
   Dragonfly/semantic-cache eviction end-to-end. (Page-image Qdrant purge already wired in PR-D.)
-  **Meilisearch's slice of this ✅ (2026-08-07)** — `dataplane.documents.deleted`
-  wired to purge the keyword index (live-verified with a real signed event);
-  MinIO CAS, Qdrant visual-multivector, Quickwit segment prune, and
-  Dragonfly/semantic-cache eviction remain as stated (MinIO CAS closed
-  separately the same day — see the durability plan's adjacent entry).
+  **✅ COMPLETE 2026-08-19.** Meilisearch (2026-08-07) and MinIO CAS (same day) were closed
+  earlier. The remaining three were audited against source on 2026-08-19, and **the plan's own
+  list was wrong in both directions**:
+  - **Qdrant visual-multivector: was NOT a gap.** `embedding-engine-rs/src/gdpr.rs`'s
+    `purge_organization_data` already deletes org-scoped points from all three collections —
+    knowledge, wiki **and visual** — plus every MinIO CAS object, driven by
+    `verevon.gdpr.erasure.requested`. Nothing to build.
+  - **Quickwit index prune: real gap, now closed** (`3360725b`). `quickwit-adapter-rs`'s org
+    purge deleted only its two Postgres bookkeeping tables and never touched the index, so
+    **every one of the org's documents stayed searchable while the purge reported success.**
+    `delete_by_query` already existed (used by the per-document delete path and by
+    `rebuild.rs` with this exact `org_id:` shape); nothing had wired it to org-wide erasure. The
+    prune now runs **before** the Postgres deletes, so an unreachable Quickwit fails the purge
+    with bookkeeping intact to drive a retry, instead of leaving jobs deleted and documents
+    indexed with nothing left to show the prune never ran. Reported as
+    `index_delete_task_submitted` (a bool, not a count) because Quickwit applies delete tasks
+    asynchronously by rewriting splits — on an erasure path, claiming data is already gone is
+    the wrong direction to be wrong in.
+  - **Dragonfly/semantic-cache eviction: real gap, now closed** (`3360725b`). Cached retrieval
+    results are keyed `…{org_id}:v{org_version}:s{scope}:{key}` and outlive the Postgres rows,
+    so an erased org's previously cached answers stayed retrievable after its source rows were
+    gone. The purge now bumps the org's cache version after commit, making every existing key
+    unconstructable in one write — no wildcard scan across a shared Dragonfly, which is exactly
+    the operation to avoid on this path. Failure surfaces as `cache_version_after: None`.
+    ⚠ **Not covered, by construction**: the embedding cache
+    (`embed:{model_version}:{text_hash}`) is content-addressed with no org in its key and is
+    shared across orgs by design, so it cannot be purged per-org.
+  - 💡 **The new test assertion earned its place on first run.** It failed immediately: the cache
+    bump goes through an org-scoped transaction, and the erasure fixture never created the
+    `dataplane_app` role, so the invalidation degraded to a no-op that reported success — the
+    same inert-feature failure this rollout kept surfacing. Fixture now grants the role via the
+    shared helper and creates `org_versions`.
+  - **Live-verified 2026-08-19** on the running stack: a real
+    `verevon.gdpr.erasure.requested` published to the shared broker as `org-core-shared` (for a
+    deliberately **non-existent** org, so no real data was at risk) produced a Quickwit delete
+    task whose query is `org_id` **alone** — distinguishable from the pre-existing per-document
+    tasks that carry both `org_id` and `document_id`. Real corpus untouched (10 docs / 51 units).
+    ⚠ Method note: `wget` does not exist in the Quickwit container, and `2>/dev/null` turned that
+    into an empty response that read like "no delete tasks" — a false baseline. Use `curl` from
+    `quickwit-adapter`, which has it.
+  - Follow-up (`9e59796e`): the completion log reported row counts but was silent on the prune,
+    so an operator auditing an erasure could not tell whether the index was actually pruned. It
+    now carries that, and a purge that skipped the prune logs at **error**.
 - **Risk:** MEDIUM. **Complexity:** LOW-MEDIUM. **Depends on:** Phases 2-4.
 
 ### Phase 6 — Model Plane track *(separate plane — coordinate, don't build in DP)*
