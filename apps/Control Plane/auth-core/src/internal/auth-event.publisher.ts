@@ -160,6 +160,23 @@ export interface OrganizationPlanChangedEvent extends BaseEvent {
   changeReason?: string;
 }
 
+/**
+ * D-A billing-consolidation grant changed. Emitted whenever an org opts into
+ * or out of an org_group's consolidated billing, so billing-core can mirror the
+ * relationship into its own database (it cannot read auth-core's).
+ *
+ * `hostOrganizationId` is null on revocation: the grant no longer resolves to a
+ * host, and consumers must fall back to the org's own plan.
+ */
+export interface OrganizationBillingGroupChangedEvent extends BaseEvent {
+  type: 'organization.billing_group.changed';
+  organizationId: string;
+  orgGroupId: string | null;
+  hostOrganizationId: string | null;
+  billingConsolidation: boolean;
+  changedBy?: string;
+}
+
 export interface OrganizationUpdatedEvent extends BaseEvent {
   type: 'organization.updated';
   organizationId: string;
@@ -208,6 +225,7 @@ export type AuthEvent =
   | OrganizationUpdatedEvent
   | OrganizationDeletedEvent
   | OrganizationPlanChangedEvent
+  | OrganizationBillingGroupChangedEvent
   | OrganizationMemberAddedEvent
   | OrganizationMemberRemovedEvent;
 
@@ -757,6 +775,32 @@ export class AuthEventPublisher implements OnModuleInit, OnModuleDestroy {
       type: 'organization.plan.changed',
       traceId,
     } as OrganizationPlanChangedEvent);
+  }
+
+  /**
+   * Publish a billing-consolidation grant change so billing-core can mirror it.
+   *
+   * Subject naming follows the unprefixed `organization.*` types already
+   * declared here (organization.updated / .deleted / .plan.changed) rather than
+   * the `auth.`-prefixed ones, because the unprefixed subjects are exactly the
+   * ones billing-core subscribes to.
+   *
+   * Note for anyone tracing the plan mirror: auth-core *declares*
+   * publishOrganizationPlanChanged but nothing calls it -- org-core is the
+   * actual publisher of organization.plan.changed
+   * (org-core/internal/org/service_enhanced.go). What makes this event reach
+   * billing-core is not that method but the shared bus: auth-core, org-core and
+   * billing-core are all configured with NATS_URL=nats://controlplane-nats:4222.
+   */
+  async publishOrganizationBillingGroupChanged(
+    data: Omit<OrganizationBillingGroupChangedEvent, 'type' | 'timestamp'>,
+    traceId?: string,
+  ): Promise<void> {
+    await this.publishEvent({
+      ...data,
+      type: 'organization.billing_group.changed',
+      traceId,
+    } as OrganizationBillingGroupChangedEvent);
   }
 
   private getSubjectForEvent(eventType: string): string {
