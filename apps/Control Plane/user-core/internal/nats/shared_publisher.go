@@ -194,6 +194,26 @@ func (sp *SharedPublisher) PublishResourceGrantsChanged(
 	})
 }
 
+// PublishSpaceMembershipChanged publishes
+// aqencia.controlplane.space.membership_changed whenever a roster sync
+// activates or deactivates a user's Space membership (ReplaceMemberships's
+// stale-member and reactivation paths). Model Plane's session-core
+// subscribes to this to invalidate (active=false) or clear (active=true)
+// resource-scoped memory/run/thread authorization for this Space — org_id+
+// user_id ownership alone does not capture that a member was since removed
+// from, or restored to, the specific Space a run/thread happened in. Both
+// directions share one event/subject rather than two so a consumer can never
+// apply a stale revoke after a later restore purely from message reordering
+// on a fire-and-forget publish: the payload itself states the current fact.
+func (sp *SharedPublisher) PublishSpaceMembershipChanged(ctx context.Context, spaceRef, orgID, subjectID string, active bool) {
+	sp.Publish(ctx, "aqencia.controlplane.space.membership_changed", map[string]any{
+		"space_ref":  spaceRef,
+		"org_id":     orgID,
+		"subject_id": subjectID,
+		"active":     active,
+	})
+}
+
 // PublishDocumentAclChanged is the document-scoped back-compat wrapper around
 // PublishResourceGrantsChanged. permission_level is normalized to a role.
 func (sp *SharedPublisher) PublishDocumentAclChanged(ctx context.Context, aclID, orgID, documentID, userID, permissionLevel, action string) {

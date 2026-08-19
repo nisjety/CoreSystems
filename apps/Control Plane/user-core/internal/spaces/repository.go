@@ -2,6 +2,7 @@ package spaces
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
@@ -632,34 +633,43 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 // `membership_revision` and `authority_revision` advance only when a row was
 // actually written, mirroring the recipient-audience path. A no-op sync must
 // not invalidate every cached decision that keys on the revision.
-func (r *Repository) ReplaceMemberships(ctx context.Context, replacement MembershipReplacement) (*AuthorityRevision, error) {
+// ReplaceMemberships converges a Space's roster to the declared set. Its
+// second return value lists the "user"-subject IDs whose membership was
+// just deactivated (the stale-member path below), and its third is the
+// Space's org_id — the caller publishes a revocation event per subject so
+// other planes can invalidate resource-scoped authorization tied to this
+// Space, not just Control's own roster. org_id is returned rather than
+// re-derived from the caller's own identity because this endpoint's
+// principal (application-space-lifecycle) acts across every org's rosters,
+// not one verified-delegation org at a time.
+func (r *Repository) ReplaceMemberships(ctx context.Context, replacement MembershipReplacement) (*AuthorityRevision, []string, []string, string, error) {
 	if r == nil || r.db == nil {
-		return nil, fmt.Errorf("Space authority repository unavailable")
+		return nil, nil, nil, "", fmt.Errorf("Space authority repository unavailable")
 	}
 	if err := replacement.Validate(); err != nil {
-		return nil, err
+		return nil, nil, nil, "", err
 	}
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin Space membership replacement: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("begin Space membership replacement: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	space, err := registeredSpaceForUpdate(ctx, tx, replacement.SpaceRef)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNoCurrentMembership
+		return nil, nil, nil, "", ErrNoCurrentMembership
 	}
 	if err != nil {
-		return nil, fmt.Errorf("lock Space for membership replacement: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("lock Space for membership replacement: %w", err)
 	}
 	if space.RegistrationState != "active" {
-		return nil, fmt.Errorf("Space is not registered as active")
+		return nil, nil, nil, "", fmt.Errorf("Space is not registered as active")
 	}
 	if space.Kind == KindPersonal {
 		// A personal Space has exactly one subject by construction. Letting a
 		// roster sync widen it would quietly turn private storage into shared
 		// storage.
-		return nil, fmt.Errorf("a personal Space membership cannot be replaced")
+		return nil, nil, nil, "", fmt.Errorf("a personal Space membership cannot be replaced")
 	}
 
 	var revisions AuthorityRevision
@@ -670,13 +680,19 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		&revisions.Authority, &revisions.Membership, &revisions.Privacy,
 		&revisions.RecipientAudience, &revisions.Entitlement,
 	); err != nil {
-		return nil, fmt.Errorf("lock Space membership revision: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("lock Space membership revision: %w", err)
 	}
 
 	ownerKey := "user\x00" + strings.TrimSpace(space.OwnerPrincipalID)
 	managed := replacement.managedSubjectTypeSet()
 	declared := make(map[string]struct{}, len(replacement.Members)+1)
 	changed := false
+	// A subject reactivated here (previously active=FALSE, now rejoining)
+	// must have its earlier revocation event fully undone cross-plane too —
+	// otherwise a legitimately rejoined member stays permanently denied by
+	// session-core's space_membership_revocations projection, which only
+	// this repository can ever tell them to clear.
+	var reactivatedUserSubjects []string
 	for _, member := range replacement.Members {
 		subjectType := strings.TrimSpace(member.SubjectType)
 		subjectID := strings.TrimSpace(member.SubjectID)
@@ -694,6 +710,13 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		if subjectType+"\x00"+subjectID == ownerKey && role != "owner" {
 			continue
 		}
+		var wasActive sql.NullBool
+		if err := tx.QueryRow(ctx, `
+			SELECT active FROM space_memberships
+			WHERE space_ref=$1 AND subject_type=$2 AND subject_id=$3 FOR UPDATE`,
+			space.SpaceRef, subjectType, subjectID).Scan(&wasActive); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil, nil, "", fmt.Errorf("read prior Space member state: %w", err)
+		}
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO space_memberships (space_ref, subject_type, subject_id, role, active, granted_by)
 			VALUES ($1, $2, $3, $4, TRUE, 'application-space-membership-sync')
@@ -707,10 +730,13 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 			   OR space_memberships.active IS DISTINCT FROM TRUE`,
 			space.SpaceRef, subjectType, subjectID, role)
 		if err != nil {
-			return nil, fmt.Errorf("upsert Space member: %w", err)
+			return nil, nil, nil, "", fmt.Errorf("upsert Space member: %w", err)
 		}
 		if tag.RowsAffected() > 0 {
 			changed = true
+			if subjectType == "user" && wasActive.Valid && !wasActive.Bool {
+				reactivatedUserSubjects = append(reactivatedUserSubjects, subjectID)
+			}
 		}
 	}
 	// Preserve the owner even when the declared set omits them.
@@ -720,14 +746,14 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		SELECT subject_type, subject_id FROM space_memberships
 		WHERE space_ref=$1 AND active`, space.SpaceRef)
 	if err != nil {
-		return nil, fmt.Errorf("read current Space members: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("read current Space members: %w", err)
 	}
 	var stale []MemberGrant
 	for rows.Next() {
 		var current MemberGrant
 		if err := rows.Scan(&current.SubjectType, &current.SubjectID); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("scan current Space member: %w", err)
+			return nil, nil, nil, "", fmt.Errorf("scan current Space member: %w", err)
 		}
 		if managed != nil {
 			// Outside the caller's declared scope. org-core's roster sync knows
@@ -744,15 +770,19 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 	}
 	rows.Close()
 
+	var revokedUserSubjects []string
 	for _, member := range stale {
 		if _, err := tx.Exec(ctx, `
 			UPDATE space_memberships
 			SET active=FALSE, revision=revision+1, updated_at=NOW()
 			WHERE space_ref=$1 AND subject_type=$2 AND subject_id=$3`,
 			space.SpaceRef, member.SubjectType, member.SubjectID); err != nil {
-			return nil, fmt.Errorf("revoke Space member: %w", err)
+			return nil, nil, nil, "", fmt.Errorf("revoke Space member: %w", err)
 		}
 		changed = true
+		if member.SubjectType == "user" {
+			revokedUserSubjects = append(revokedUserSubjects, member.SubjectID)
+		}
 	}
 
 	if changed {
@@ -767,13 +797,13 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 			&revisions.Authority, &revisions.Membership, &revisions.Privacy,
 			&revisions.RecipientAudience, &revisions.Entitlement,
 		); err != nil {
-			return nil, fmt.Errorf("advance Space membership revision: %w", err)
+			return nil, nil, nil, "", fmt.Errorf("advance Space membership revision: %w", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit Space membership replacement: %w", err)
+		return nil, nil, nil, "", fmt.Errorf("commit Space membership replacement: %w", err)
 	}
-	return &revisions, nil
+	return &revisions, revokedUserSubjects, reactivatedUserSubjects, space.OrgID, nil
 }
 
 func canonicalRecipientSubjects(recipients []string) ([]string, error) {

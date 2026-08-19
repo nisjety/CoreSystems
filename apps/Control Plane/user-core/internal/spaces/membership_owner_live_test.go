@@ -65,7 +65,7 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 
 	// The roster names the owner as a plain member, exactly as org-core's list
 	// does, plus one genuine member.
-	if _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
+	if _, revoked, reactivated, gotOrgID, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
 		SpaceRef: spaceRef,
 		Members: []MemberGrant{
 			{SubjectType: "user", SubjectID: owner, Role: "editor"},
@@ -73,6 +73,12 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 		},
 	}); err != nil {
 		t.Fatalf("replace memberships: %v", err)
+	} else if len(revoked) != 0 {
+		t.Fatalf("a converging (non-revoking) sync reported revoked subjects: %v", revoked)
+	} else if len(reactivated) != 0 {
+		t.Fatalf("a freshly-added member was reported as reactivated: %v", reactivated)
+	} else if gotOrgID != orgID {
+		t.Fatalf("org_id = %q, want %q", gotOrgID, orgID)
 	}
 
 	var role string
@@ -95,9 +101,16 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 		t.Fatalf("declared member was not applied: role=%q active=%v", role, active)
 	}
 
-	// Absence revokes an ordinary member but still leaves the owner alone.
-	if _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{SpaceRef: spaceRef}); err != nil {
+	// Absence revokes an ordinary member but still leaves the owner alone,
+	// and the revocation is reported so the caller can fan it out
+	// cross-plane — the owner must never appear here even though they were
+	// also absent from this empty roster.
+	if _, revoked, reactivated, _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{SpaceRef: spaceRef}); err != nil {
 		t.Fatalf("empty replace: %v", err)
+	} else if len(revoked) != 1 || revoked[0] != other {
+		t.Fatalf("revoked subjects = %v, want exactly [%q]", revoked, other)
+	} else if len(reactivated) != 0 {
+		t.Fatalf("an empty replace unexpectedly reported a reactivation: %v", reactivated)
 	}
 	if err := pool.QueryRow(ctx,
 		`SELECT role, active FROM space_memberships WHERE space_ref=$1 AND subject_id=$2`,
@@ -114,6 +127,31 @@ func TestReplaceMembershipsNeverDemotesTheOwner(t *testing.T) {
 	}
 	if role != "owner" || !active {
 		t.Fatalf("an empty roster removed the owner: role=%q active=%v", role, active)
+	}
+
+	// The revoked member rejoins: a legitimate rejoin must be reported as a
+	// reactivation (so the caller can clear the cross-plane revocation it
+	// published above), never as another revocation.
+	if _, revoked, reactivated, _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
+		SpaceRef: spaceRef,
+		Members: []MemberGrant{
+			{SubjectType: "user", SubjectID: owner, Role: "owner"},
+			{SubjectType: "user", SubjectID: other, Role: "editor"},
+		},
+	}); err != nil {
+		t.Fatalf("rejoin replace: %v", err)
+	} else if len(revoked) != 0 {
+		t.Fatalf("a rejoin was unexpectedly also reported as a revocation: %v", revoked)
+	} else if len(reactivated) != 1 || reactivated[0] != other {
+		t.Fatalf("reactivated subjects = %v, want exactly [%q]", reactivated, other)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT role, active FROM space_memberships WHERE space_ref=$1 AND subject_id=$2`,
+		spaceRef, other).Scan(&role, &active); err != nil {
+		t.Fatalf("read rejoined member: %v", err)
+	}
+	if role != "editor" || !active {
+		t.Fatalf("rejoined member was not restored: role=%q active=%v", role, active)
 	}
 }
 
@@ -167,7 +205,7 @@ func TestUserScopedReplacementLeavesAgentsBound(t *testing.T) {
 	}
 
 	// The human roster converges and never mentions the agent.
-	if _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
+	if _, _, _, _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
 		SpaceRef:            spaceRef,
 		ManagedSubjectTypes: []string{"user"},
 		Members: []MemberGrant{
@@ -188,14 +226,19 @@ func TestUserScopedReplacementLeavesAgentsBound(t *testing.T) {
 	}
 
 	// Without a declared scope the same call still owns the whole roster, so an
-	// agent-aware caller can genuinely revoke one.
-	if _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
+	// agent-aware caller can genuinely revoke one. The revoked-subjects report
+	// is user-scoped: revoking a service-type agent must never surface here,
+	// since the cross-plane consumer this feeds only invalidates human
+	// resource-scoped authorization.
+	if _, revoked, _, _, err := repo.ReplaceMemberships(ctx, MembershipReplacement{
 		SpaceRef: spaceRef,
 		Members: []MemberGrant{
 			{SubjectType: "user", SubjectID: owner, Role: "owner"},
 		},
 	}); err != nil {
 		t.Fatalf("unscoped replace: %v", err)
+	} else if len(revoked) != 0 {
+		t.Fatalf("a service-subject revocation was reported as a user revocation: %v", revoked)
 	}
 	if err := pool.QueryRow(ctx,
 		`SELECT active FROM space_memberships WHERE space_ref=$1 AND subject_type='service' AND subject_id=$2`,

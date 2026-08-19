@@ -298,7 +298,7 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 		return
 	}
 	replacement.SpaceRef = strings.TrimSpace(c.Param("space_ref"))
-	revisions, err := s.spaceRepo.ReplaceMemberships(c.Request.Context(), replacement)
+	revisions, revokedUserSubjects, reactivatedUserSubjects, orgID, err := s.spaceRepo.ReplaceMemberships(c.Request.Context(), replacement)
 	if errors.Is(err, spaces.ErrNoCurrentMembership) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "registered Space not found"})
 		return
@@ -310,6 +310,23 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 		// at-least-once caller into a retry loop over an unfixable request.
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": err.Error()})
 		return
+	}
+	// Fire-and-forget, after the roster change is durably committed: other
+	// planes invalidate (revoked) or clear (reactivated) their own
+	// resource-scoped authorization on this Space for these subjects. A
+	// missed publish (broker down, process restart) only means the change
+	// isn't caught until the next membership change touches the same
+	// subject — never a regression from today's unconditional org+user
+	// check, and never a permanent lockout for a legitimately rejoined
+	// member either. orgID comes from the Space record ReplaceMemberships
+	// just resolved, not the caller's own identity: this endpoint's
+	// principal (application-space-lifecycle) syncs rosters across every
+	// org, not one verified-delegation org at a time.
+	for _, subjectID := range revokedUserSubjects {
+		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, false)
+	}
+	for _, subjectID := range reactivatedUserSubjects {
+		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, true)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"space_ref": replacement.SpaceRef,
