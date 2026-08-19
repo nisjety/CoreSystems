@@ -6,14 +6,16 @@ import { getAgentInstallations, type AgentInstallation } from '@/shared/api/spac
 import { useI18n } from '@/shared/i18n'
 
 /**
- * Scope plan §UI-4, narrow slice: a real, honest cross-Space view of the
- * org's agent definitions — "your view of your definitions," not the full
- * Blueprints/Definitions/Page-installations/Runs/Chief-Core restructure the
- * plan describes, which needs backend contracts (an org-wide registry read,
- * page/system installation storage) that do not exist yet. Every status
- * shown here is the SAME live Control-joined status a room's own Agent tab
- * would show for that binding — this page composes existing per-Space reads,
- * it does not keep a second cache that could drift from them.
+ * Scope plan §UI-4: an org-wide, cross-Space view of the org's agent
+ * definitions, backed by ADR-0002's registry
+ * (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`) rather than the
+ * narrow slice's original per-Space loop. Still "your view of your
+ * definitions," not the full Blueprints/Page-installations/Chief-Core
+ * restructure the plan describes — those need page/system installation
+ * storage this registry does not add. The status shown here is the
+ * Application binding's own status field; this page is a presence view, not
+ * proof the caller may currently act on a listed binding (ADR-0002,
+ * "presence, not authority").
  */
 export default function AgentInstallationsPage() {
   const i18n = useI18n()

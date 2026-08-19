@@ -14,7 +14,6 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use futures_util::future::join_all;
 use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -1455,18 +1454,34 @@ async fn space_agents(
     }
 }
 
-/// §UI-4 (narrow slice): every published agent definition the caller can see
-/// across the org's Spaces, grouped by definition with one row per Space it is
-/// installed in. Deliberately composes the SAME per-Space calls the Agent tab
-/// already uses (`control_space_index` for which Spaces the caller belongs to,
-/// `compose_space_agents` for that Space's live Control-joined roster) instead
-/// of a new cross-Space Convex query — an org-wide "list all bindings" read is
-/// exactly the kind of new backend contract the scope plan flags as undecided
-/// for the rest of UI-4 (Page/system installations, Chief/Core routing), so
-/// this reuses only what already has an owner and a truthfulness guarantee.
-/// One consequence worth naming: this can only see Spaces the caller
-/// themselves belongs to, same as the Agent tab — it is not an org-wide admin
-/// view of every room's agents, only "your view of your definitions."
+/// §UI-4: every published agent definition installed anywhere in the org,
+/// grouped by definition with one row per Space it is bound in — ADR-0002
+/// (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`, "Application Plane
+/// owns the cross-Space agent registry").
+///
+/// This narrow slice originally composed the per-Space calls the Agent tab
+/// already used (`control_space_index` + `compose_space_agents`, one
+/// Control-roster round trip per Space) because a new cross-Space Convex
+/// query was an undecided backend contract at the time. ADR-0002 settles
+/// that: Application already owns both source tables (`spaces`,
+/// `spaceAgentBindings`/`agents`) in the same Convex database, so this is now
+/// a single org-scoped read (`spaceAgents:agentInstallationsForOrgForGateway`)
+/// instead of an O(N) fan-out over the org's Spaces.
+///
+/// # Presence, not authority
+///
+/// The registry is gated on the caller's org membership only (which
+/// `agentInstallationsForOrgForGateway` itself verifies via
+/// `requireGatewayMember`, same as `spacesForOrgForGateway`) — it does NOT
+/// re-check each binding against Control's live per-Space roster the way
+/// `compose_space_agents` does for the single-Space Agent tab. That is
+/// intentional (ADR-0002, "the registry answers presence, not authority"):
+/// this is a read-only, org-wide LABEL surface — name, title, kind,
+/// lifecycle, which Space a binding lives in — never an implicit "and
+/// therefore the caller may invoke it." Nothing on this response path lets a
+/// caller act on a binding; any future surface that would must still resolve
+/// Control's roster for that specific Space first, exactly as
+/// `compose_space_agents` already does.
 async fn list_org_agent_installations(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1481,86 +1496,52 @@ async fn list_org_agent_installations(
             )),
         );
     }
-    let Some(index) = control_space_index(&state, &user, &org_id).await else {
+
+    let Ok(value) = convex_gateway_call(
+        &state,
+        "query",
+        "spaceAgents:agentInstallationsForOrgForGateway",
+        json!({ "externalAuthId": user.user_id, "externalOrgId": org_id }),
+    )
+    .await
+    else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(error(
-                "space_index_unavailable",
-                "The organization's Spaces could not be resolved.",
+                "agent_registry_unavailable",
+                "The organization's agent installations could not be resolved.",
             )),
         );
     };
-    let labels = organization_space_labels(&state, &user, &org_id).await;
-
-    let spaces: Vec<(String, String, String)> = index
-        .iter()
-        .filter_map(|entry| {
-            let space_ref = entry.get("space_ref").and_then(Value::as_str)?.to_owned();
-            let label = labels.iter().find(|candidate| {
-                candidate.get("spaceRef").and_then(Value::as_str) == Some(space_ref.as_str())
-            });
-            let space_name = label
-                .and_then(|value| value.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("Space")
-                .to_owned();
-            let space_kind = entry
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("room")
-                .to_owned();
-            Some((space_ref, space_name, space_kind))
-        })
-        .collect();
-
-    // Fetched concurrently: each is an independent Control+Convex round trip,
-    // and an org with several rooms should not pay for them one at a time. A
-    // Space whose read fails is skipped rather than failing the whole page —
-    // this is a presentation aggregate, not an authority decision, so a
-    // partial truthful answer beats an all-or-nothing one.
-    let fetches = spaces.iter().map(|(space_ref, space_name, space_kind)| {
-        let space_ref = space_ref.clone();
-        let space_name = space_name.clone();
-        let space_kind = space_kind.clone();
-        async {
-            let agents = compose_space_agents(&state, &user, &org_id, &space_ref)
-                .await
-                .unwrap_or_default();
-            (space_ref, space_name, space_kind, agents)
-        }
-    });
-    let per_space: Vec<(String, String, String, Vec<Value>)> = join_all(fetches).await;
+    let bindings = value.as_array().cloned().unwrap_or_default();
 
     let mut by_definition: std::collections::BTreeMap<String, Value> =
         std::collections::BTreeMap::new();
-    for (space_ref, space_name, space_kind, agents) in per_space {
-        for agent in agents {
-            // Only identity-published agents have a definition to group by; a
-            // Control-authorized subject Application has not described yet
-            // still renders per-Space (in the Agent tab) but has no
-            // cross-Space definition to attach an installation row to here.
-            let Some(agent_ref) = agent.get("agent_ref").and_then(Value::as_str) else {
-                continue;
-            };
-            let entry = by_definition.entry(agent_ref.to_owned()).or_insert_with(|| {
-                json!({
-                    "agent_ref": agent_ref,
-                    "name": agent.get("name").cloned().unwrap_or(Value::Null),
-                    "description": agent.get("description").cloned().unwrap_or(Value::Null),
-                    "definition_status": agent.get("definition_status").cloned().unwrap_or(Value::Null),
-                    "installations": [],
-                })
-            });
-            entry["installations"]
-                .as_array_mut()
-                .expect("literal array")
-                .push(json!({
-                    "space_ref": space_ref,
-                    "space_name": space_name,
-                    "space_kind": space_kind,
-                    "status": agent.get("status").cloned().unwrap_or(Value::Null),
-                }));
-        }
+    for binding in bindings {
+        // Only identity-published bindings have a definition to group by —
+        // the registry itself already drops any binding whose definition is
+        // gone, so every row reaching here has one.
+        let Some(agent_ref) = binding.get("agentRef").and_then(Value::as_str) else {
+            continue;
+        };
+        let entry = by_definition.entry(agent_ref.to_owned()).or_insert_with(|| {
+            json!({
+                "agent_ref": agent_ref,
+                "name": binding.get("name").cloned().unwrap_or(Value::Null),
+                "description": binding.get("description").cloned().unwrap_or(Value::Null),
+                "definition_status": binding.get("definitionStatus").cloned().unwrap_or(Value::Null),
+                "installations": [],
+            })
+        });
+        entry["installations"]
+            .as_array_mut()
+            .expect("literal array")
+            .push(json!({
+                "space_ref": binding.get("spaceRef").cloned().unwrap_or(Value::Null),
+                "space_name": binding.get("spaceName").cloned().unwrap_or(json!("Space")),
+                "space_kind": binding.get("spaceKind").cloned().unwrap_or(json!("room")),
+                "status": binding.get("status").cloned().unwrap_or(Value::Null),
+            }));
     }
 
     let definitions: Vec<Value> = by_definition.into_values().collect();
@@ -3790,14 +3771,11 @@ mod tests {
         (status, body)
     }
 
-    /// Drive `GET /agents/installations` with a given Control Space index and
-    /// per-space rosters/bindings. `spaces` is `(space_ref, kind, role, name)`;
-    /// `roster_by_space`/`bindings_by_space` key the same `space_ref`.
-    async fn list_org_agent_installations_response(
-        spaces: &[(&str, &str, &str, &str)],
-        roster_by_space: &[(&str, Value)],
-        bindings_by_space: &[(&str, Value)],
-    ) -> (u16, Value) {
+    /// Drive `GET /agents/installations` with a given
+    /// `spaceAgents:agentInstallationsForOrgForGateway` registry response
+    /// (ADR-0002). Unlike the narrow slice this replaced, there is no Control
+    /// roster to mock at all — the registry is a single Application read.
+    async fn list_org_agent_installations_response(registry_rows: Value) -> (u16, Value) {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(wm_path("/api/auth/get-session"))
@@ -3815,50 +3793,16 @@ mod tests {
             })))
             .mount(&user_core)
             .await;
-        let index: Vec<Value> = spaces
-            .iter()
-            .map(|(space_ref, kind, role, _name)| json!({"space_ref": space_ref, "kind": kind, "role": role}))
-            .collect();
-        Mock::given(wm_method("GET"))
-            .and(wm_path("/api/v1/internal/spaces"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"data": {"spaces": index}})),
-            )
-            .mount(&user_core)
-            .await;
-        for (space_ref, roster) in roster_by_space {
-            Mock::given(wm_method("GET"))
-                .and(wm_path(format!("/api/v1/internal/spaces/{space_ref}/roster")))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "data": {"members": roster, "count": roster.as_array().map(Vec::len).unwrap_or(0)}
-                })))
-                .mount(&user_core)
-                .await;
-        }
         let application = MockServer::start().await;
-        let labels: Vec<Value> = spaces
-            .iter()
-            .map(|(space_ref, kind, _role, name)| json!({"spaceRef": space_ref, "name": name, "kind": kind, "lifecycle": "active"}))
-            .collect();
         Mock::given(wm_method("POST"))
             .and(wm_path("/api/query"))
-            .and(wm_body_partial_json(
-                json!({"path": "spaces:spacesForOrgForGateway"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": labels})))
+            .and(wm_body_partial_json(json!({
+                "path": "spaceAgents:agentInstallationsForOrgForGateway",
+                "args": {"externalAuthId": "user-1", "externalOrgId": "org-1"},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": registry_rows})))
             .mount(&application)
             .await;
-        for (space_ref, bindings) in bindings_by_space {
-            Mock::given(wm_method("POST"))
-                .and(wm_path("/api/query"))
-                .and(wm_body_partial_json(json!({
-                    "path": "spaceAgents:spaceAgentBindingsForGateway",
-                    "args": {"spaceRef": space_ref},
-                })))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": bindings})))
-                .mount(&application)
-                .await;
-        }
         std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
         std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
         let mut state = crate::tests::test_state(false);
@@ -3883,29 +3827,29 @@ mod tests {
         (status, body)
     }
 
+    fn registry_row(space_ref: &str, space_name: &str, status: &str) -> Value {
+        json!({
+            "bindingRef": format!("sab_{space_ref}_svc-shared"),
+            "agentRef": "agent-1",
+            "subjectId": "svc-shared",
+            "spaceRef": space_ref,
+            "spaceName": space_name,
+            "spaceKind": "room",
+            "spaceLifecycle": "active",
+            "name": "Shared Agent",
+            "status": status,
+            "definitionStatus": "active",
+            "deliveryTargets": [],
+        })
+    }
+
     #[tokio::test]
     async fn an_agent_bound_in_two_rooms_reports_one_definition_with_two_installations() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let binding = |status: &str| {
-            json!({
-                "bindingRef": format!("sab_{status}"), "agentRef": "agent-1", "subjectId": "svc-shared",
-                "name": "Shared Agent", "status": status, "definitionStatus": "active", "deliveryTargets": [],
-            })
-        };
-        let (status, body) = list_org_agent_installations_response(
-            &[
-                ("space-a", "room", "owner", "Team Room"),
-                ("space-b", "room", "owner", "Ops Room"),
-            ],
-            &[
-                ("space-a", json!([service_member("svc-shared")])),
-                ("space-b", json!([service_member("svc-shared")])),
-            ],
-            &[
-                ("space-a", json!([binding("active")])),
-                ("space-b", json!([binding("pending")])),
-            ],
-        )
+        let (status, body) = list_org_agent_installations_response(json!([
+            registry_row("space-a", "Team Room", "active"),
+            registry_row("space-b", "Ops Room", "pending"),
+        ]))
         .await;
 
         assert_eq!(status, 200, "{body}");
@@ -3936,21 +3880,83 @@ mod tests {
         assert_eq!(by_space_ref("space-b")["status"], "pending");
     }
 
+    /// The registry itself already drops revoked bindings and bindings whose
+    /// definition is gone (see `spaceAgents.ts`'s
+    /// `projectAgentInstallationsForOrg` and its own unit tests) — so an empty
+    /// registry response is the only shape the gateway needs to render as "no
+    /// installations", and must not itself invent any.
     #[tokio::test]
-    async fn a_control_authorized_agent_with_no_published_identity_has_no_installation_row() {
+    async fn an_empty_registry_response_reports_no_definitions() {
         let _env = crate::config::TEST_ENV_LOCK.lock().await;
-        let (status, body) = list_org_agent_installations_response(
-            &[("space-a", "room", "owner", "Team Room")],
-            &[("space-a", json!([service_member("svc-orphan")]))],
-            &[("space-a", json!([]))],
-        )
+        let (status, body) = list_org_agent_installations_response(json!([])).await;
+
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["definitions"], json!([]));
+    }
+
+    /// A row with no `agentRef` (should never happen — the registry only
+    /// projects bindings it already joined to a live definition) is skipped
+    /// defensively rather than panicking or fabricating a group key.
+    #[tokio::test]
+    async fn a_registry_row_with_no_agent_ref_is_skipped() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = list_org_agent_installations_response(json!([
+            { "bindingRef": "sab_malformed", "spaceRef": "space-a", "status": "active" },
+        ]))
         .await;
 
         assert_eq!(status, 200, "{body}");
-        assert_eq!(
-            body["data"]["definitions"], json!([]),
-            "an unpublished Control subject has no definition to attach an installation row to: {body}"
-        );
+        assert_eq!(body["data"]["definitions"], json!([]));
+    }
+
+    /// A failed registry read degrades to 503, never to a false "no
+    /// installations" empty list — the same "could not check" vs. "there is
+    /// nothing" distinction the single-Space roster path already enforces.
+    #[tokio::test]
+    async fn a_failed_registry_read_returns_service_unavailable() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        // No APPLICATION_CONVEX_URL / APPLICATION_CONVEX_SERVICE_KEY set, so
+        // `convex_gateway_call` fails closed with `Err(())` before ever
+        // issuing an HTTP request.
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/agents/installations")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["error"]["code"], "agent_registry_unavailable");
     }
 
     fn service_member(subject_id: &str) -> Value {

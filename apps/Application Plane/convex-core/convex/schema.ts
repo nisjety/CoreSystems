@@ -641,7 +641,14 @@ export default defineSchema({
   })
     .index("by_binding_ref", ["bindingRef"])
     .index("by_space_ref", ["spaceRef"])
-    .index("by_space_and_subject", ["spaceRef", "subjectId"]),
+    .index("by_space_and_subject", ["spaceRef", "subjectId"])
+    // ADR-0002 (apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md): the
+    // org-wide registry (`spaceAgents:agentInstallationsForOrgForGateway`)
+    // needs every binding for an org in one indexed read, the same shape
+    // `spaces.by_external_org` already gives `spacesForOrgForGateway`.
+    // Additive and backward-compatible: computed from the `externalOrgId`
+    // every row already carries, no data migration required.
+    .index("by_external_org", ["externalOrgId"]),
 
   // Transactional outbox for Space lifecycle notifications. Consumers dedupe
   // by the immutable event ID and never infer authorization from this event.

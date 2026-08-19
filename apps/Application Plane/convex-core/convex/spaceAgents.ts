@@ -108,6 +108,173 @@ export const spaceAgentBindingsForGateway = query({
 });
 
 /**
+ * Cross-Space registry projection — ADR-0002
+ * (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`): "Application Plane
+ * owns the cross-Space agent registry." This is the join/filter logic behind
+ * `agentInstallationsForOrgForGateway` below, factored out as a plain function
+ * so it is unit-testable without a Convex `ctx.db` — this package has no
+ * harness for invoking `query`/`mutation` handlers directly against a mocked
+ * database (its existing Convex-side tests, e.g. `spaceDeletionReceipts.ts`'s
+ * `aggregateDeletionReceipts` or `spaceLifecycle.ts`'s
+ * `transitionSpaceLifecycle`, all follow this same pattern: extract the pure
+ * decision, unit-test that). See `test/spaceAgents.test.cjs`.
+ *
+ * Mirrors `spaceAgentBindingsForGateway`'s own join exactly — same `revoked`
+ * exclusion, same "a binding whose definition is gone is dropped" rule, same
+ * projected per-binding fields — plus the two facts a cross-Space view needs
+ * that a single-Space caller already knows: which Space each binding lives
+ * in, and that Space's own label/lifecycle.
+ */
+export type OrgAgentInstallationBinding = {
+  bindingRef: string;
+  spaceRef: string;
+  externalOrgId: string;
+  agentId: string;
+  subjectId: string;
+  displayName?: string;
+  title?: string;
+  status: "pending" | "active" | "paused" | "revoked" | "failed";
+  deliveryTargets?: unknown;
+  triggerModes?: unknown;
+  allowedTools?: unknown;
+  approvalMode?: unknown;
+  projectionVersion: number;
+  updatedAt: number;
+};
+
+export type OrgAgentInstallationDefinition = {
+  orgId?: unknown;
+  name: string;
+  description?: string;
+  avatarColor?: string;
+  status?: string;
+};
+
+export type OrgAgentInstallationSpace = {
+  name: string;
+  kind: string;
+  lifecycle: string;
+};
+
+export function projectAgentInstallationsForOrg(
+  bindings: readonly OrgAgentInstallationBinding[],
+  definitionsById: ReadonlyMap<string, OrgAgentInstallationDefinition | undefined>,
+  spacesByRef: ReadonlyMap<string, OrgAgentInstallationSpace | undefined>,
+  externalOrgId: string,
+) {
+  const visible = bindings.filter(
+    (binding) => binding.status !== "revoked" && binding.externalOrgId === externalOrgId,
+  );
+
+  const projected = [];
+  for (const binding of visible) {
+    // Same rule as spaceAgentBindingsForGateway: a binding whose definition is
+    // gone is dropped rather than rendered under a placeholder name — an
+    // agent card with no real definition behind it is precisely the ghost
+    // participant this design refuses to draw, org-wide or not.
+    const definition = definitionsById.get(binding.agentId);
+    if (!definition || definition.orgId === undefined) continue;
+
+    const space = spacesByRef.get(binding.spaceRef);
+
+    projected.push({
+      bindingRef: binding.bindingRef,
+      agentRef: binding.agentId,
+      subjectId: binding.subjectId,
+      // Cross-Space additions: a single-Space caller already knows which
+      // Space it asked about, but an org-wide reader needs the Space named
+      // per row, and its own label/lifecycle so it isn't a second round trip.
+      spaceRef: binding.spaceRef,
+      spaceName: space?.name,
+      spaceKind: space?.kind,
+      spaceLifecycle: space?.lifecycle,
+      name: binding.displayName ?? definition.name,
+      title: binding.title,
+      description: definition.description,
+      avatarColor: definition.avatarColor,
+      status: binding.status,
+      definitionStatus: definition.status,
+      deliveryTargets: binding.deliveryTargets ?? [],
+      triggerModes: binding.triggerModes,
+      allowedTools: binding.allowedTools,
+      approvalMode: binding.approvalMode,
+      projectionVersion: binding.projectionVersion,
+      updatedAt: binding.updatedAt,
+    });
+  }
+  return projected;
+}
+
+/**
+ * Every agent binding, across every Space in the organization, in one call —
+ * ADR-0002. Generalizes `spaceAgentBindingsForGateway`'s single-Space join
+ * (same non-revoked filter, same definition-presence requirement, same
+ * projected fields) to the whole org, reading `spaceAgentBindings` through
+ * the `by_external_org` index added for this query — the same shape
+ * `spacesForOrgForGateway` already uses on `spaces`' own `by_external_org`
+ * index.
+ *
+ * # Presence, not authority
+ *
+ * This answers "what's bound, where" for any org member — gated on org
+ * membership via `requireGatewayMember`, exactly like
+ * `spacesForOrgForGateway`/`spaceAgentBindingsForGateway`. It deliberately
+ * does NOT re-verify each binding against Control's live per-Space roster the
+ * way the gateway's `compose_space_agents` does for a single Space: doing
+ * that here would mean an N-call roster fan-out per read, exactly the
+ * per-Space loop this query exists to replace. Any caller that lets a user
+ * ACT on a listed binding (send it a message, invoke it) MUST still resolve
+ * that Space's Control roster first — this registry is read-only and is not
+ * a substitute for that check (ADR-0002, "the registry answers presence, not
+ * authority").
+ */
+export const agentInstallationsForOrgForGateway = query({
+  args: {
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const bindings = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_external_org", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+
+    // Batch the definition and Space lookups: one read per DISTINCT agent id
+    // / Space ref, never one per binding, so an org with many bindings across
+    // a handful of agents and Spaces doesn't pay for it N times over.
+    const definitionsById = new Map<string, any>();
+    for (const binding of bindings as any[]) {
+      const key = binding.agentId.toString();
+      if (definitionsById.has(key)) continue;
+      definitionsById.set(key, (await ctx.db.get(binding.agentId)) ?? undefined);
+    }
+
+    const spacesByRef = new Map<string, any>();
+    for (const binding of bindings as any[]) {
+      const spaceRef = binding.spaceRef as string;
+      if (spacesByRef.has(spaceRef)) continue;
+      const spaces = await ctx.db
+        .query("spaces")
+        .withIndex("by_space_ref", (q: any) => q.eq("spaceRef", spaceRef))
+        .collect();
+      if (spaces.length > 1) throw new Error("Space reference is ambiguous");
+      spacesByRef.set(spaceRef, spaces[0] ?? undefined);
+    }
+
+    return projectAgentInstallationsForOrg(
+      bindings as any,
+      definitionsById,
+      spacesByRef,
+      args.externalOrgId,
+    );
+  },
+});
+
+/**
  * The mentioned agent's own voice, for the gateway to inject into a turn it
  * has already authorized (`docs/space-defenition.md`, "Invocation rule").
  *

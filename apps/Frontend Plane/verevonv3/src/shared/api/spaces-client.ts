@@ -263,11 +263,15 @@ export function bindSpaceAgent(spaceRef: string, agentRef: string): Promise<Crea
 }
 
 /**
- * One agent definition and every Space (the caller can see) it is installed
- * in — scope plan §UI-4, narrow slice. Each installation's `status` is the
- * SAME live Control-joined status the Space's own Agent tab shows, not a
- * separate cross-Space cache, so this page and a room's Agent tab can never
- * silently disagree about whether a binding is active.
+ * One agent definition and every Space it is installed in, org-wide —
+ * ADR-0002 (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`). Each
+ * installation's `status` is the Application binding's own status field, the
+ * same value the Space's own Agent tab reads from its binding. Unlike the
+ * Agent tab's single-Space view, this list does NOT re-verify each binding
+ * against Control's live per-Space roster on every read (a presence
+ * registry, not an authorization surface — see the ADR) — so treat it as
+ * "what's installed, where" for display, never as proof the caller may
+ * invoke a listed binding.
  */
 export type AgentInstallation = {
   space_ref: string
@@ -285,11 +289,13 @@ export type AgentDefinitionInstallations = {
 }
 
 /**
- * Every agent definition with a published identity in at least one Space the
- * caller belongs to, grouped with its per-Space installations (scope plan
- * §UI-4). This is "your view of your definitions," not an org-wide admin
- * roster: it can only see Spaces Control already lists the caller as a
- * member of, the same boundary the Agent tab itself has.
+ * Every agent definition with a published identity anywhere in the caller's
+ * organization, grouped with its per-Space installations — ADR-0002's
+ * org-wide registry (`spaceAgents:agentInstallationsForOrgForGateway`), read
+ * through `GET /api/v1/agents/installations` in one call rather than the
+ * narrow slice's original per-Space loop. Gated on org membership only, so
+ * this can legitimately list a binding in a Space the caller cannot
+ * currently act in — presence, not authority.
  */
 export async function getAgentInstallations(): Promise<readonly AgentDefinitionInstallations[]> {
   const response = await requestJson<{ definitions: readonly AgentDefinitionInstallations[] }>(
