@@ -1519,7 +1519,12 @@ mod tests {
         let retrieval_body: Value =
             serde_json::from_slice(&retrieval_request.body).expect("retrieval JSON");
         assert_eq!(retrieval_body["space_ref"], "personal-1");
-        assert_eq!(retrieval_body["idempotency_key"], "space-retrieval-1");
+        // The suffix is a process-wide monotonic counter, so it must not be
+        // coupled to test ordering. The scoped prefix is the contract: this
+        // retrieval authority is a fresh effect, distinct from thread create.
+        assert!(retrieval_body["idempotency_key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("space-retrieval-")));
         assert!(retrieval_body.get("session_key").is_none());
     }
 
