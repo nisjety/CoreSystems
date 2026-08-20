@@ -4810,7 +4810,7 @@ fn agentic_run_stream(
                     crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
                         &state,
                         &run,
-                        "agent_dispatch_rejected",
+                        crate::session_flow::AgentDispatchFailure::Rejected,
                         &model_bearer,
                     )
                     .await;
@@ -4943,7 +4943,7 @@ fn agentic_run_stream(
                 match crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
                     &state,
                     &run,
-                    "agent_dispatch_rejected",
+                    crate::session_flow::AgentDispatchFailure::Rejected,
                     &model_bearer,
                 )
                 .await
@@ -4993,7 +4993,7 @@ fn agentic_run_stream(
                     crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
                         &state,
                         &run,
-                        "agent_dispatch_unreachable",
+                        crate::session_flow::AgentDispatchFailure::Unreachable,
                         &model_bearer,
                     )
                     .await;

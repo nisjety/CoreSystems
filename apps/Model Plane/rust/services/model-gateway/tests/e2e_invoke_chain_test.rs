@@ -2667,6 +2667,19 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
         format!("managed-run-for-{prepared_thread_id}")
     );
     assert_eq!(receipt.outcome, TerminalOutcome::Failed as i32);
+    assert_eq!(
+        receipt.source,
+        ManagedRunSource::GatewayAgentDispatchRejected as i32,
+        "the gateway's dispatch is the producer that failed either way"
+    );
+    // The durable half of the split: same source and outcome as a refused
+    // dispatch, distinguished only by this code, so an operator reading the
+    // receipt can tell a transient runner outage (retry the run) from a request
+    // the runner deliberately refused (fix the request).
+    assert_eq!(
+        receipt.failure_code, "dispatch_unreachable",
+        "an undelivered dispatch must not be recorded as a refusal"
+    );
 }
 
 /// The ambiguous arm: a connection that is ESTABLISHED and then broken, rather

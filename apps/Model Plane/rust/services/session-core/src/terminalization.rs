@@ -177,9 +177,16 @@ pub(crate) fn is_startable_source(source: pb::ManagedRunSource) -> bool {
     )
 }
 
+/// Must stay in sync with the `failure_code` CHECK on
+/// `managed_run_terminalization_outbox` (migration 0015, widened by 0033). A
+/// code missing here is rejected before any database access; one missing from
+/// the CHECK fails the write instead, so both lists move together.
+/// `outcome_unknown` is deliberately absent: it is set only by reconciliation,
+/// never submitted by a caller.
 const ALLOWED_FAILURE_CODES: &[&str] = &[
     "browser_failed",
     "dispatch_rejected",
+    "dispatch_unreachable",
     "execution_failed",
     "inference_failed",
     "provider_timeout",
@@ -1557,6 +1564,26 @@ mod tests {
                 "outcome={outcome:?} code={code:?} must fail closed"
             );
         }
+    }
+
+    /// Gateway distinguishes a refused dispatch from one that never reached this
+    /// service, so both codes must clear the allowlist — a code the allowlist
+    /// does not know is rejected before any database access, which would turn
+    /// the gateway's terminalization into `session_terminalization_failed` and
+    /// strand the very run it was trying to close.
+    #[test]
+    fn both_gateway_dispatch_failure_codes_are_allowlisted() {
+        for code in ["dispatch_rejected", "dispatch_unreachable"] {
+            assert_eq!(
+                validate_terminal_outcome(pb::TerminalOutcome::Failed, code)
+                    .unwrap_or_else(|error| panic!("{code} must be allowlisted: {error}")),
+                ManagedOutcome::Failed(code)
+            );
+        }
+        assert!(
+            validate_terminal_outcome(pb::TerminalOutcome::Failed, "outcome_unknown").is_err(),
+            "outcome_unknown is set by reconciliation only, never submitted by a caller"
+        );
     }
 
     #[test]
