@@ -83,6 +83,13 @@ interface ModelPlaneInternalTokenBody {
   orgId?: string;
   scopes?: readonly string[];
   reason?: string;
+  /**
+   * Never honoured: retention posture is deployment policy, not a request
+   * field. Untrusted callers can still put it on the wire, so the body type
+   * admits it (as `unknown`) and `issueInternalToken` rejects any request
+   * that carries it with a 400.
+   */
+  zdr?: unknown;
 }
 
 interface AuthSessionSnapshot {

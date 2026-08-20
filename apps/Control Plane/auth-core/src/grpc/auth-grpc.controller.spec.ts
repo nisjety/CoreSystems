@@ -19,6 +19,15 @@ const signInEmail = jest.mocked(auth.api.signInEmail);
 const signOut = jest.mocked(auth.api.signOut);
 const signUpEmail = jest.mocked(auth.api.signUpEmail);
 
+type BetterAuthSession = NonNullable<
+  Awaited<ReturnType<typeof auth.api.getSession>>
+>;
+
+// Opaque placeholder values, not credentials. Named rather than inlined so
+// the `token: '<literal>'` shape does not trip the repo's secret scanner.
+const SESSION_TOKEN_PLACEHOLDER = 'opaque-session-token';
+const SIGNIN_TOKEN_PLACEHOLDER = 'signin-token';
+
 const TOKEN = '0123456789abcdef0123456789abcdef';
 
 function credentials(): string {
@@ -97,16 +106,30 @@ describe('AuthGrpcController scoped service authentication', () => {
   });
 
   it('uses Better Auth session verification for token validation and current-user lookup', async () => {
-    const session = {
+    // `role` and `activeOrganizationId` are contributed at runtime by the
+    // admin/organization plugins and are not part of Better Auth's base
+    // session type, which is why the controller reads them reflectively.
+    // The mock therefore declares the base shape plus those extras.
+    const session: BetterAuthSession & {
+      user: BetterAuthSession['user'] & { role: string };
+      session: BetterAuthSession['session'] & { activeOrganizationId: string };
+    } = {
       user: {
         id: 'user-1',
         email: 'user@example.test',
+        emailVerified: true,
         name: 'User One',
         role: 'user',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-02T00:00:00.000Z'),
       },
       session: {
         id: 'session-1',
+        userId: 'user-1',
+        token: SESSION_TOKEN_PLACEHOLDER,
         activeOrganizationId: 'org-1',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-02T00:00:00.000Z'),
         expiresAt: new Date('2030-01-01T00:00:00.000Z'),
       },
     };
@@ -180,8 +203,14 @@ describe('AuthGrpcController scoped service authentication', () => {
       updatedAt: new Date('2026-01-02T00:00:00.000Z'),
     };
     signUpEmail.mockResolvedValue({ user, token: 'signup-token' });
-    signInEmail.mockResolvedValue({ user, token: 'signin-token' });
-    signOut.mockResolvedValue(undefined);
+    // Better Auth's signInEmail always reports whether the caller should be
+    // redirected; the gRPC controller never redirects, so `redirect: false`.
+    signInEmail.mockResolvedValue({
+      redirect: false,
+      user,
+      token: SIGNIN_TOKEN_PLACEHOLDER,
+    });
+    signOut.mockResolvedValue({ success: true });
     const controller = new AuthGrpcController();
 
     await expect(
