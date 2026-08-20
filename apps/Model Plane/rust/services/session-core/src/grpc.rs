@@ -4111,16 +4111,30 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("org_id is required"));
             }
             caller.authorize_org(&req.org_id)?;
+            // Ownership/sharing (SKILL-1): mirrors capability-core's
+            // SkillsHandler.listOrCreate, the correct reference
+            // implementation this table's scope/owner_user_id/shared_with
+            // columns were added for. That handler enforces this on read;
+            // this RPC selected the columns but never filtered on them,
+            // returning every org member's "private" skill to every caller.
+            // An admin-governance carve-out (SkillsHandler also shows an
+            // admin every shared-but-not-own skill) is deliberately omitted
+            // here: this crate's VerifiedIdentity carries no org-role claim,
+            // and omitting it only narrows admin visibility, never widens
+            // anyone's.
+            let caller_user_id = caller.user_id().unwrap_or_default().to_owned();
             let rows: Vec<Row> = sqlx::query_as(
                 "SELECT id, name, description, content, trigger_keywords,
                         trigger_file_patterns, tool_restrictions, enabled, origin,
                         scope, owner_user_id, shared_with
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
+                   AND (scope = 'org' OR owner_user_id = $3 OR shared_with ? $3)
                  ORDER BY name",
             )
             .bind(&req.org_id)
             .bind(req.enabled_only)
+            .bind(&caller_user_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -8920,6 +8934,133 @@ mod tests {
         assert_eq!(
             resolve_dataplane_addr(&[Some(String::new()), None], fallback),
             fallback
+        );
+    }
+
+    // -- list_agent_skills scope enforcement (real Postgres) -----------------
+    //
+    // SKILL-1 (0031_agent_skills_ownership.sql) added scope/owner_user_id/
+    // shared_with, mirroring capability-core's SkillsHandler.listOrCreate --
+    // the reference implementation that DOES enforce them on read. This RPC
+    // selected the columns but never filtered on them, so every "private"
+    // skill was returned to every org member. Rows are seeded directly via
+    // SQL (not upsert_agent_skill, which only ever writes scope='org' for
+    // its background-review origin) to exercise every scope/owner/share
+    // combination precisely.
+    //
+    // #[ignore]d so plain `cargo test` (no DB) skips it; run with a DB:
+    //   DATABASE_URL=… cargo test --bin session-core -- --ignored list_agent_skills_scope
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn list_agent_skills_scope_enforcement_against_real_pg() {
+        use super::SessionService;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+
+        let sfx = std::process::id();
+        let org_id = format!("las-org-{sfx}");
+        let (owner, sharee, stranger) = (
+            format!("las-owner-{sfx}"),
+            format!("las-sharee-{sfx}"),
+            format!("las-stranger-{sfx}"),
+        );
+
+        for (name, scope, owner_user_id, shared_with) in [
+            ("org-skill", "org", "", "[]"),
+            ("private-skill", "user", owner.as_str(), "[]"),
+            (
+                "shared-skill",
+                "user",
+                owner.as_str(),
+                &format!("[\"{sharee}\"]"),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO agent_skills
+                    (id, org_id, name, description, content, trigger_keywords,
+                     trigger_file_patterns, tool_restrictions, enabled, origin,
+                     scope, owner_user_id, shared_with, created_at, updated_at)
+                 VALUES ($1,$2,$3,'d','c','[]','[]','[]',true,'user',$4,$5,$6::jsonb,now(),now())
+                 ON CONFLICT (org_id, name) DO NOTHING",
+            )
+            .bind(format!("{name}-{sfx}"))
+            .bind(&org_id)
+            .bind(name)
+            .bind(scope)
+            .bind(owner_user_id)
+            .bind(shared_with)
+            .execute(&pool)
+            .await
+            .expect("seed skill");
+        }
+
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+
+        let list_as = |user_id: String| {
+            let org_id = org_id.clone();
+            let svc = &svc;
+            async move {
+                let mut request = Request::new(pb::ListAgentSkillsRequest {
+                    org_id: org_id.clone(),
+                    enabled_only: false,
+                });
+                request
+                    .extensions_mut()
+                    .insert(VerifiedIdentity::user_for_test(&org_id, &user_id));
+                svc.list_agent_skills(request)
+                    .await
+                    .expect("list_agent_skills")
+                    .into_inner()
+                    .skills
+                    .into_iter()
+                    .map(|s| s.name)
+                    .collect::<std::collections::BTreeSet<_>>()
+            }
+        };
+
+        let owner_view = list_as(owner.clone()).await;
+        assert!(
+            owner_view.contains("org-skill")
+                && owner_view.contains("private-skill")
+                && owner_view.contains("shared-skill"),
+            "the owner must see the org skill, their own private skill, and their own shared skill: {owner_view:?}"
+        );
+
+        let sharee_view = list_as(sharee.clone()).await;
+        assert!(
+            sharee_view.contains("org-skill") && sharee_view.contains("shared-skill"),
+            "the sharee must see the org skill and the skill shared with them: {sharee_view:?}"
+        );
+        assert!(
+            !sharee_view.contains("private-skill"),
+            "the sharee must NOT see a skill never shared with them: {sharee_view:?}"
+        );
+
+        let stranger_view = list_as(stranger.clone()).await;
+        assert!(
+            stranger_view.contains("org-skill"),
+            "a stranger must still see org-wide skills: {stranger_view:?}"
+        );
+        assert!(
+            !stranger_view.contains("private-skill") && !stranger_view.contains("shared-skill"),
+            "a stranger must see neither the owner's private skill nor a skill shared with someone else: {stranger_view:?}"
         );
     }
 }
