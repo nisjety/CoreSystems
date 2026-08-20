@@ -3139,6 +3139,9 @@ mod tests {
             tool_restrictions: Vec::new(),
             enabled: true,
             origin: "background_review".to_owned(),
+            scope: "org".to_owned(),
+            owner_user_id: String::new(),
+            shared_with: Vec::new(),
         }
     }
 

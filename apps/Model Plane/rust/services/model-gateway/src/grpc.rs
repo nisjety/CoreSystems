@@ -3778,6 +3778,16 @@ mod tests {
             }))
         }
 
+        async fn resolve_thread_owner(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ResolveThreadOwnerResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "resolve_thread_owner not needed in test",
+            ))
+        }
+
         async fn resolve_run_action_authority(
             &self,
             _: Request<ResolveRunActionAuthorityRequest>,

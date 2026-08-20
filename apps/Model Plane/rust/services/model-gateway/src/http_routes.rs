@@ -7843,6 +7843,16 @@ mod run_owner_publish_tests {
             }))
         }
 
+        async fn resolve_thread_owner(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ResolveThreadOwnerResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "resolve_thread_owner not needed in gateway test",
+            ))
+        }
+
         async fn resolve_run_action_authority(
             &self,
             _: TonicRequest<ResolveRunActionAuthorityRequest>,
