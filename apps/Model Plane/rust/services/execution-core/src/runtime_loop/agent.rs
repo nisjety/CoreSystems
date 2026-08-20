@@ -1946,6 +1946,14 @@ mod tests {
         );
     }
 
+    /// `tickets.create` is the one tool `permission::requires_durable_owner_approval`
+    /// classifies as owner-approval-only, so its descriptor must come back `ask`
+    /// even when the outer run asked for `auto`. The input has to be a VALID
+    /// `tickets.create` payload (`conversation_id` is required, both by the
+    /// frozen `TICKET_CREATE_MODEL_PARAMETERS_JSON` schema and by
+    /// `ticket_tools::parse_arguments`) — with `{}` the ticket continuation
+    /// binding rejects it as `invalid_argument` and the permission assertion
+    /// below is never reached.
     #[tokio::test]
     async fn owner_action_descriptor_cannot_preserve_auto_permission() {
         let request = pb::RunAgentRequest {
@@ -1958,7 +1966,7 @@ mod tests {
             &request,
             "step-1",
             crate::ticket_tools::TOOL_NAME,
-            r#"{}"#,
+            r#"{"conversation_id":"conv_1"}"#,
             "auto",
         )
         .await
