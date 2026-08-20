@@ -541,6 +541,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, embeddingEngineOrgErasureConsumerConfig()); err != nil {
 		return err
 	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, verevonGatewayOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -890,7 +893,7 @@ func ensureBillingPlanConsumer(js nats.JetStreamContext) error {
 	return nil
 }
 
-// orgErasureConsumerConfigs maps every one of the 14 org-erasure/GDPR durable
+// orgErasureConsumerConfigs maps every one of the 15 org-erasure/GDPR durable
 // consumer names on ControlSharedStreamName to its current wanted config.
 // Exists so a single named consumer can be converged (see
 // EnsureOrgErasureConsumer) without depending on every OTHER resource in
