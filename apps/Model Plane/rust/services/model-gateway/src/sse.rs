@@ -3105,7 +3105,11 @@ fn authored_instructions_message(state: &AppState, req: &InvokeRequest) -> Optio
             "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
         ));
     }
-    if let Some(space) = req.space_instructions.as_deref().and_then(non_empty_trimmed) {
+    if let Some(space) = req
+        .space_instructions
+        .as_deref()
+        .and_then(non_empty_trimmed)
+    {
         sections.push(format!(
             "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
         ));
@@ -5743,7 +5747,9 @@ mod tests {
     #[tokio::test]
     async fn org_layer_is_wrapped_in_non_override_framing() {
         let state = state_with_platform_instructions("");
-        let req = invoke_request(serde_json::json!({ "org_instructions": "Always answer in Norwegian." }));
+        let req = invoke_request(
+            serde_json::json!({ "org_instructions": "Always answer in Norwegian." }),
+        );
         let message = authored_instructions_message(&state, &req).expect("message");
         assert!(message.content.contains("Always answer in Norwegian."));
         assert!(message.content.contains("Organization instructions"));

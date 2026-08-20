@@ -28,9 +28,10 @@ use mp_contracts::model_plane::v1::{
     RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest,
     RecordOrchestrationEventResponse, ResolveRunActionAuthorityRequest,
     ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse,
-    ResolveScheduledStepAuthorityRequest, ResolveScheduledStepAuthorityResponse, RunDetail,
-    ScheduledStepContext, StreamRunEventsRequest, SubagentLineage, Todo, TodoState,
-    TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
+    ResolveScheduledStepAuthorityRequest, ResolveScheduledStepAuthorityResponse,
+    ResolveThreadOwnerRequest, ResolveThreadOwnerResponse, RunDetail, ScheduledStepContext,
+    StreamRunEventsRequest, SubagentLineage, Todo, TodoState, TransitionPlanRequest,
+    TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse,
 };
 use mp_events::publisher::InMemoryPublisher;
 use std::{
@@ -696,6 +697,15 @@ impl RunService for MockRunOwner {
                 && request.org_id == "org-owner"
                 && request.user_id == "owner-user",
         }))
+    }
+
+    async fn resolve_thread_owner(
+        &self,
+        _: TonicRequest<ResolveThreadOwnerRequest>,
+    ) -> Result<Response<ResolveThreadOwnerResponse>, Status> {
+        Err(Status::unimplemented(
+            "thread ownership not needed in orchestration route test",
+        ))
     }
 
     async fn resolve_run_action_authority(
