@@ -172,7 +172,12 @@ mod tests {
     #[tokio::test]
     async fn pinned_resolver_returns_only_the_preflighted_address() {
         let resolver = PinnedDnsResolver::default();
-        let vetted = SocketAddr::from((Ipv4Addr::new(203, 0, 113, 17), 443));
+        // Not an RFC 5737 TEST-NET literal: `resolve_guard` now blocks the
+        // documentation ranges (parity with capability-core's Go-side
+        // `mcpForbiddenRanges`), so a 203.0.113.0/24 address is no longer
+        // "vetted" — it would fail `pin` instead of demonstrating a
+        // successful preflight.
+        let vetted = SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 443));
         resolver
             .pin(ResolvedTarget {
                 host: "rebind.example".to_string(),
@@ -210,15 +215,18 @@ mod tests {
         // returned an empty or loopback set while reporting success would hand
         // the driver something unusable.
         //
-        // Uses an RFC 5737 TEST-NET-1 literal rather than a real hostname on
+        // Uses a real (non-reserved) IP literal rather than a real hostname on
         // purpose. An IP literal is resolved locally by `lookup_host`, so this
-        // test performs NO DNS and cannot hang or fail offline, and 192.0.2.0/24
-        // is reserved-but-not-private, so it passes `resolve_guard` for the
-        // right reason instead of by accident.
-        let target = resolve_public_url(&url("https://192.0.2.1/some/path"))
+        // test performs NO DNS and cannot hang or fail offline. Deliberately
+        // NOT an RFC 5737 TEST-NET-1/2/3 literal (192.0.2.0/24, 198.51.100.0/24,
+        // 203.0.113.0/24): `resolve_guard` now blocks the documentation ranges
+        // too (parity with capability-core's Go-side `mcpForbiddenRanges`), so
+        // those would fail this preflight for the right reason instead of
+        // passing it by accident.
+        let target = resolve_public_url(&url("https://93.184.216.34/some/path"))
             .await
             .expect("a public, non-private literal must preflight cleanly");
-        assert_eq!(target.host, "192.0.2.1");
+        assert_eq!(target.host, "93.184.216.34");
         assert!(
             !target.addresses.is_empty(),
             "a successful preflight must yield at least one address to pin to"

@@ -227,7 +227,14 @@ mod tests {
     #[test]
     fn test_ipv6_public_allowed() {
         let policy = QuarryRedirectPolicy::new();
-        assert!(!policy.is_private_ip("2001:db8::1".parse().unwrap()));
+        // Genuinely routable public addresses (Cloudflare and Google resolvers).
+        // This deliberately does NOT use 2001:db8::1: that is RFC 3849
+        // documentation space, never routable, and `quarry_security::heur`
+        // blocks it as an SSRF target -- so it was never a valid example of a
+        // public address, only one that happened to pass before the
+        // documentation range was covered.
+        assert!(!policy.is_private_ip("2606:4700:4700::1111".parse().unwrap()));
+        assert!(!policy.is_private_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 
     #[test]
