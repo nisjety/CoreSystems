@@ -771,4 +771,97 @@ mod tests {
 
         assert_eq!(all_observations.len(), 2);
     }
+
+    /// Deny-by-default guard for the governed visual-evidence capability.
+    /// `Screenshot`/`Pdf` are the only two actions whose whole purpose is to
+    /// mint visual evidence, so a driver that makes no `full_visual_fidelity`
+    /// claim must be refused rather than silently producing an unusable
+    /// artifact. Every remote provider driver
+    /// (Browserless/Kernel/Browserbase) is in exactly this state today, so
+    /// this is live behaviour, not a hypothetical.
+    #[tokio::test]
+    async fn screenshot_action_refused_when_driver_claims_no_visual_fidelity() {
+        use bytes::Bytes;
+        use quarry_browser::{BrowserDriver, BrowserSession};
+        use quarry_core::error::ErrorCode;
+        use quarry_core::ids::kinds;
+        use quarry_core::lease::{BrowserLease, ProxyAffinity};
+
+        /// Behaves exactly like `MockBrowserDriver` but keeps the default
+        /// (all-false) capability set.
+        struct NoVisualFidelityDriver(crate::tests::MockBrowserDriver);
+
+        #[async_trait::async_trait]
+        impl BrowserDriver for NoVisualFidelityDriver {
+            async fn configure_egress_policy(
+                &self,
+                session: &BrowserSession,
+                policy: quarry_browser::BrowserEgressPolicy,
+            ) -> QuarryResult<()> {
+                self.0.configure_egress_policy(session, policy).await
+            }
+            async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+                self.0.acquire(lease).await
+            }
+            async fn release(&self, session: BrowserSession) -> QuarryResult<()> {
+                self.0.release(session).await
+            }
+            async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+                self.0.goto(session, url).await
+            }
+            async fn content(&self, session: &BrowserSession) -> QuarryResult<Bytes> {
+                self.0.content(session).await
+            }
+            async fn screenshot(
+                &self,
+                session: &BrowserSession,
+                full_page: bool,
+            ) -> QuarryResult<Bytes> {
+                self.0.screenshot(session, full_page).await
+            }
+            async fn pdf(&self, session: &BrowserSession) -> QuarryResult<Bytes> {
+                self.0.pdf(session).await
+            }
+        }
+
+        let driver = Arc::new(NoVisualFidelityDriver(crate::tests::MockBrowserDriver));
+        assert!(!driver.capabilities().full_visual_fidelity);
+
+        let run_id: RunKind = Id::new();
+        let agent = AgentLoop::new(
+            driver.clone(),
+            make_constraints(10),
+            ZdrMode::Off,
+            run_id.clone(),
+        );
+
+        let lease = BrowserLease {
+            lease_id: kinds::LeaseKind::new(),
+            profile_id: kinds::ProfileKind::new(),
+            session_affinity_key: "t".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: "default".into(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: "test".into(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "test_org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+
+        let request = make_request(&run_id, AgentAction::Screenshot { full_page: false });
+        let error = match agent.execute(&[request], &session).await {
+            Err(error) => error,
+            Ok(result) => panic!("expected refusal, got termination {:?}", result.termination),
+        };
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert!(
+            error.message.contains("full-fidelity visual evidence"),
+            "unexpected refusal message: {}",
+            error.message
+        );
+    }
 }

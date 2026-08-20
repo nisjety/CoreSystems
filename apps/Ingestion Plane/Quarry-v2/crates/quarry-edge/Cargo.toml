@@ -92,6 +92,10 @@ postgres-queue = ["dep:sqlx", "quarry-runtime/postgres-queue"]
 http3 = ["quarry-runtime/http3"]
 
 [dev-dependencies]
+# Needed by the shared integration-test fixture: `BrowserDriver`'s
+# screenshot/pdf methods are typed in terms of `bytes::Bytes`, so a test
+# double for the agent driver has to be able to name the type.
+bytes = "1"
 wiremock = "0.6"
 serial_test = "3"
 # Real RS256 JWT+JWKS fixtures for the auth.rs dev-bypass-vs-real-JWT
