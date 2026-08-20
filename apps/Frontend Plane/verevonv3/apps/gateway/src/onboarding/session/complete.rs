@@ -145,6 +145,26 @@ pub(crate) async fn complete_onboarding(
     )
     .await;
 
+    // Re-prime the session-context cache from a post-commit live read so the
+    // very next /session/current (a reload right after completion) answers
+    // COMPLETED instead of racing a concurrent stale re-cache. If the live read
+    // still does not report COMPLETED, an upstream layer is serving stale data
+    // — exactly the bug that bounced completed users back into onboarding —
+    // so make it loud.
+    let refreshed = crate::upstream::refresh_session_context_cache(&state, &user).await;
+    let refreshed_status = refreshed
+        .get("onboardingStatus")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if refreshed_status != "COMPLETED" {
+        tracing::warn!(
+            user_id = %user.user_id,
+            org_id = %org_id,
+            onboarding_status = %refreshed_status,
+            "session context does not report COMPLETED immediately after a committed onboarding completion; an upstream cache is serving stale data"
+        );
+    }
+
     (
         StatusCode::OK,
         Json(ok(json!({

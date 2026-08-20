@@ -126,8 +126,11 @@ export const onboardingStateSchema = z.object({ step: nonEmptyString, state: z.u
 export const onboardingStateSavedSchema = z.object({ success: z.boolean().optional() })
 export const unknownRecordSchema = z.record(z.string(), z.unknown())
 export const onboardingLifecycleSchema = z.object({
-  state: z.enum(['PROFILE_READY', 'COMPLETED']),
-  orgId: nonEmptyString,
+  // CREATED = no organization yet (orgId is null there); PROFILE_READY = org
+  // active but onboarding not completed; COMPLETED = user-core committed
+  // completion.
+  state: z.enum(['CREATED', 'PROFILE_READY', 'COMPLETED']),
+  orgId: nonEmptyString.nullish(),
 })
 export const shippingCarriersResponseSchema = z.object({
   carriers: z.array(z.object({

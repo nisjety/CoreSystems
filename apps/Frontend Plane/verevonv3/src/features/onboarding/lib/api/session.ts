@@ -27,7 +27,10 @@ export async function fetchOnboardingStatus(): Promise<Record<string, unknown>> 
   return parseOnboardingResponse(unknownRecordSchema, await requestJson<unknown>(endpoint), endpoint)
 }
 
-export async function fetchOnboardingLifecycle(): Promise<{ state: 'PROFILE_READY' | 'COMPLETED'; orgId: string }> {
+export async function fetchOnboardingLifecycle(): Promise<{
+  state: 'CREATED' | 'PROFILE_READY' | 'COMPLETED'
+  orgId?: string | null
+}> {
   const endpoint = '/api/v1/onboarding/lifecycle'
   return parseOnboardingResponse(onboardingLifecycleSchema, await requestJson<unknown>(endpoint), endpoint)
 }

@@ -5,7 +5,7 @@ use axum::{
     Extension, Json,
 };
 use reqwest::Method;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
@@ -21,6 +21,8 @@ pub(crate) async fn onboarding_lifecycle(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
 ) -> Response {
+    // No active organization means onboarding has not produced (or the session
+    // has lost) an org yet — that is the honest CREATED state, not an error.
     let Some(org_id) = user
         .active_org_id
         .as_deref()
@@ -28,11 +30,12 @@ pub(crate) async fn onboarding_lifecycle(
         .filter(|value| !value.is_empty())
     else {
         return (
-            StatusCode::CONFLICT,
-            Json(error(
-                "organization_not_ready",
-                "Your organization is not active yet. Return to the organization step and retry.",
-            )),
+            StatusCode::OK,
+            Json(ok(json!({
+                "state": "CREATED",
+                "orgId": Value::Null,
+                "retryable": false,
+            }))),
         )
             .into_response();
     };
@@ -79,10 +82,21 @@ pub(crate) async fn onboarding_lifecycle(
             .into_response();
     }
 
+    // Completion is user-core's canonical bit, surfaced through the same
+    // session-context read /session/current uses. A Null context (user-core
+    // unreachable) cannot prove completion, so it reports the org-active
+    // default PROFILE_READY — completion is idempotent, so under-reporting is
+    // safe while over-reporting is not.
+    let context = crate::upstream::resolve_session_context(&state, &user).await;
+    let completed = context
+        .get("onboardingStatus")
+        .and_then(Value::as_str)
+        == Some("COMPLETED");
+
     (
         StatusCode::OK,
         Json(ok(json!({
-            "state": "PROFILE_READY",
+            "state": if completed { "COMPLETED" } else { "PROFILE_READY" },
             "orgId": org_id,
             "retryable": false,
         }))),

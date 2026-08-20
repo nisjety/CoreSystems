@@ -694,7 +694,16 @@ export default function OnboardingPage() {
   async function continueToPaywall() {
     setError(undefined)
     try {
-      await actions.fetchOnboardingLifecycle()
+      const lifecycle = await actions.fetchOnboardingLifecycle()
+      // CREATED is now an honest 200 (no organization yet), not a 409 — the
+      // paywall still needs an active org, so keep the user on this step.
+      if (lifecycle.state === 'CREATED') {
+        setError(i18n.tr(
+          'Organisasjonen er ikke klar ennå. Prøv igjen før du velger plan.',
+          'The organization is not ready yet. Try again before choosing a plan.',
+        ))
+        return
+      }
       setState('step', 'paywall')
     } catch (reason) {
       setError(
