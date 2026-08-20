@@ -4698,6 +4698,46 @@ fn is_confirmed_agent_dispatch_rejection(status: &tonic::Status) -> bool {
     )
 }
 
+/// A `Unavailable` that failed in the CONNECT phase, so the request provably
+/// never left this process.
+///
+/// `Unavailable` on its own is ambiguous — it covers both "never connected"
+/// and "connected, then lost the reply" — which is why
+/// [`is_confirmed_agent_dispatch_rejection`] excludes it wholesale. But the two
+/// have opposite durable consequences: if the connection was never established
+/// then no run can be executing in Execution Core, so leaving the prepared run
+/// open strands it in `running` with no worker to finish it.
+///
+/// The split keys on the errno carried in the transport error's source chain.
+/// `ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, and `EADDRNOTAVAIL` are only
+/// ever returned by `connect(2)` — once a connection is established the kernel
+/// reports a failure as `ECONNRESET`/`EPIPE` instead. Those post-connect kinds,
+/// and a bare `Unavailable` with no source (a server-sent load-shed, which by
+/// definition arrived), are deliberately NOT matched: the request may have been
+/// delivered, so the outcome stays unknown. A read timeout is likewise excluded
+/// — it cannot distinguish a slow accept from a slow reply.
+fn dispatch_never_reached_execution_core(status: &tonic::Status) -> bool {
+    if status.code() != tonic::Code::Unavailable {
+        return false;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(status);
+    while let Some(error) = source {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            ) {
+                return true;
+            }
+        }
+        source = std::error::Error::source(error);
+    }
+    false
+}
+
 /// Agentic run stream for the one already-prepared durable Session Core run.
 ///
 /// Execution Core owns agent progression, tool dispatch, approvals, assistant
@@ -4933,6 +4973,56 @@ fn agentic_run_stream(
                             code: "session_terminalization_failed".to_owned(),
                             message:
                                 "Unable to record the rejected agent run; it remains retriable."
+                                    .to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                }
+                return;
+            }
+            // Never connected, so nothing is running anywhere: terminalize the
+            // prepared run exactly as a confirmed rejection does, but tell the
+            // client it is RETRYABLE. The cause is a transport outage (Execution
+            // Core down or restarting), not a verdict on the request, so a fresh
+            // attempt may well succeed — unlike a deterministic rejection, where
+            // retrying reproduces the same refusal.
+            Ok(Ok(Err(status))) if dispatch_never_reached_execution_core(&status) => {
+                tracing::warn!(code = ?status.code(), run_id = %run.run_id, "RunAgent never reached Execution Core; connect phase failed");
+                let terminalized =
+                    crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(
+                        &state,
+                        &run,
+                        "agent_dispatch_unreachable",
+                        &model_bearer,
+                    )
+                    .await;
+                match terminalized {
+                    Ok(()) => {
+                        let failed = build_stream_envelope(
+                            &request_id,
+                            "RUN_FAILED",
+                            &org_id,
+                            &user_id,
+                            &model,
+                        );
+                        let _ = state
+                            .publisher
+                            .publish(&subjects::run_event_subject(&run.run_id), &failed)
+                            .await;
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "agent_dispatch_unreachable".to_owned(),
+                            message: "The agent runner could not be reached; nothing was started, so the run can be retried.".to_owned(),
+                            retryable: true,
+                        };
+                        let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                    }
+                    Err(terminal_error) => {
+                        tracing::error!(%terminal_error, run_id = %run.run_id, "undelivered agent dispatch could not be durably terminalized");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message:
+                                "Unable to record the undelivered agent run; it remains retriable."
                                     .to_owned(),
                             retryable: true,
                         };
@@ -5656,9 +5746,9 @@ fn publish_implicit_dissatisfaction(
 mod tests {
     use super::{
         agent_persona_message, authored_instructions_message, build_stream_envelope,
-        build_usage_envelope, classify_agentic_run_outcome, is_confirmed_agent_dispatch_rejection,
-        orchestration_event_to_step_update, sanitize_follow_up_suggestions, sanitize_thread_title,
-        AgenticRunOutcome,
+        build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
+        is_confirmed_agent_dispatch_rejection, orchestration_event_to_step_update,
+        sanitize_follow_up_suggestions, sanitize_thread_title, AgenticRunOutcome,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
@@ -6353,5 +6443,60 @@ mod tests {
         assert!(!is_confirmed_agent_dispatch_rejection(
             &tonic::Status::deadline_exceeded("timeout")
         ));
+    }
+
+    /// The dangerous direction for `dispatch_never_reached_execution_core` is a
+    /// FALSE POSITIVE: calling a delivered request undelivered terminalizes a
+    /// run that may really be executing. A server-sent `Unavailable` — a real
+    /// load-shed, which by definition arrived — is the closest such trap, and it
+    /// is distinguishable because it carries no transport source chain.
+    #[test]
+    fn a_delivered_unavailable_is_never_mistaken_for_an_undelivered_one() {
+        assert!(
+            !dispatch_never_reached_execution_core(&tonic::Status::unavailable("shedding load")),
+            "a server-sent Unavailable arrived at the server, so it was delivered"
+        );
+        assert!(!dispatch_never_reached_execution_core(
+            &tonic::Status::deadline_exceeded("slow")
+        ));
+        assert!(
+            !dispatch_never_reached_execution_core(&tonic::Status::permission_denied("denied")),
+            "a code-based confirmed rejection is classified by code, not by connect phase"
+        );
+    }
+
+    /// A real `connect(2)` failure against a closed port, which is the only way
+    /// to build the genuine tonic/hyper/io source chain this classifier walks —
+    /// `Status` exposes no constructor for one.
+    #[tokio::test]
+    async fn a_refused_connection_is_recognized_as_undelivered() {
+        use mp_contracts::model_plane::v1::execution_core_client::ExecutionCoreClient;
+
+        // Bind then drop, so the port is known-unused rather than guessed.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe port");
+        let addr = listener.local_addr().expect("probe addr");
+        drop(listener);
+
+        let mut client = ExecutionCoreClient::new(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .connect_lazy(),
+        );
+        let status = client
+            .run_agent(mp_contracts::model_plane::v1::RunAgentRequest::default())
+            .await
+            .expect_err("nothing is listening");
+
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(
+            dispatch_never_reached_execution_core(&status),
+            "ECONNREFUSED proves the request never left this process: {status:?}"
+        );
+        assert!(
+            !is_confirmed_agent_dispatch_rejection(&status),
+            "still not a code-based rejection — the two classifiers stay distinct"
+        );
     }
 }
