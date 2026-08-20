@@ -1,20 +1,22 @@
 import { useParams } from '@solidjs/router'
-import { Bot, Clock3, MessageCircle, Puzzle, Sparkles, Users } from 'lucide-solid'
-import { createResource, createSignal, For, onCleanup, onMount, Show, type Resource } from 'solid-js'
+import { Bot, Clock3, Loader2, MessageCircle, Puzzle, Sparkles, Users } from 'lucide-solid'
+import { createMemo, createResource, createSignal, For, onCleanup, onMount, Show, type Resource } from 'solid-js'
 
 import {
   getPersonalSpaceDeletionReceipt,
   getSpaceAgents,
   getSpaceContext,
+  getSpaceInstructions,
   getSpaceRoster,
   getSpaceThreads,
   requestPersonalSpaceDeletion,
+  updateSpaceInstructions,
   type SpaceAgent,
   type SpaceDeletionReceipt,
   type SpaceRosterMember,
   type SpaceThread,
 } from '@/shared/api/spaces-client'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import { spaceDisplayName } from '../lib/space-name'
 import {
   ACTIVE_RUN_STATUSES,
@@ -34,6 +36,15 @@ import { SpaceRoomTimeline } from './SpaceRoomTimeline'
 // server enforces this regardless; hiding the door is presentation.
 function canCreateAgent(role: string): boolean {
   return role === 'owner' || role === 'manager'
+}
+
+// ADR-0003's Space-instructions role floor: mirrors the gateway's own gate
+// (`SPACE_INSTRUCTIONS_WRITE_ROLES`), which itself mirrors Control's
+// `ValidateForSharedThread` floor — broader than `canCreateAgent` above
+// because editing standing instructions is a lower bar than granting agent
+// access.
+function canEditSpaceInstructions(role: string): boolean {
+  return role === 'editor' || role === 'manager' || role === 'owner'
 }
 
 // Membership is authoritative only at the server. Revalidate while the Space
@@ -203,19 +214,25 @@ export default function SpacePage() {
                     />
                   ),
                   agent: (
-                    <SpaceAgentPanel
-                      agents={agents}
-                      onCreateAgent={
-                        canCreateAgent(current().membership.role)
-                          ? () => setCreateAgentOpen(true)
-                          : undefined
-                      }
-                      onBindAgent={
-                        canCreateAgent(current().membership.role)
-                          ? () => setBindAgentOpen(true)
-                          : undefined
-                      }
-                    />
+                    <>
+                      <SpaceInstructionsSection
+                        spaceRef={current().space.space_ref}
+                        role={current().membership.role}
+                      />
+                      <SpaceAgentPanel
+                        agents={agents}
+                        onCreateAgent={
+                          canCreateAgent(current().membership.role)
+                            ? () => setCreateAgentOpen(true)
+                            : undefined
+                        }
+                        onBindAgent={
+                          canCreateAgent(current().membership.role)
+                            ? () => setBindAgentOpen(true)
+                            : undefined
+                        }
+                      />
+                    </>
                   ),
                   medlemmer: (
                     <SpaceMembersPanel
@@ -375,6 +392,120 @@ function SpaceActivityPanel(props: {
  * model, and a card implying them from a membership row would be the false
  * promise this tab was left honest to avoid.
  */
+const MAX_SPACE_INSTRUCTIONS_LENGTH = 4000
+
+/**
+ * ADR-0003's Space layer — owner/manager/editor-authored instructions that
+ * apply to every turn in this Space, composed with the platform and org
+ * layers (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`). Lives in the Agent
+ * tab: it shapes "the active model... and which actions are permitted here",
+ * the tab's own stated purpose (`SpaceCockpit`'s tab definitions).
+ */
+function SpaceInstructionsSection(props: { readonly spaceRef: string; readonly role: string }) {
+  const i18n = useI18n()
+  const [saved, { refetch }] = createResource(
+    () => props.spaceRef,
+    (spaceRef) => getSpaceInstructions(spaceRef),
+  )
+  const [draft, setDraft] = createSignal('')
+  const [dirty, setDirty] = createSignal(false)
+  const [submitting, setSubmitting] = createSignal(false)
+  const [formError, setFormError] = createSignal<string | null>(null)
+  const canEdit = createMemo(() => canEditSpaceInstructions(props.role))
+  const value = createMemo(() => (dirty() ? draft() : saved() ?? ''))
+
+  const handleSubmit = async (event: Event) => {
+    event.preventDefault()
+    if (submitting()) return
+    setSubmitting(true)
+    setFormError(null)
+    try {
+      await updateSpaceInstructions(props.spaceRef, value())
+      setDirty(false)
+      await refetch()
+    } catch (err) {
+      setFormError(
+        translateApiError(err, i18n.tr, {
+          no: 'Kunne ikke lagre instruksene for rommet.',
+          en: 'Could not save the Space instructions.',
+        }),
+      )
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <section class="verevon-space-view" aria-labelledby="space-instructions-title">
+      <div class="verevon-space-view__heading">
+        <div>
+          <p class="verevon-space-eyebrow">{i18n.tr('Instrukser', 'Instructions')}</p>
+          <h2 id="space-instructions-title">{i18n.tr('Instrukser for rommet', 'Instructions for this Space')}</h2>
+          <p>{i18n.tr(
+            'Legges til i hver samtale i dette rommet, sammen med organisasjonens instrukser. Kan utvide, men ikke overstyre dem.',
+            'Added to every conversation in this Space, alongside the organization instructions. May add to, but not override, them.',
+          )}</p>
+        </div>
+      </div>
+
+      <Show when={formError()}>
+        {(message) => (
+          <p class="verevon-space-projection-error" role="alert">{message()}</p>
+        )}
+      </Show>
+
+      <Show when={saved.error}>
+        <p class="verevon-space-projection-error" role="alert">
+          {i18n.tr('Kunne ikke laste instruksene for rommet.', 'Could not load the Space instructions.')}
+        </p>
+      </Show>
+
+      <Show
+        when={canEdit()}
+        fallback={
+          <Show
+            when={!saved.loading}
+            fallback={<p class="verevon-space-inline-status" role="status">{i18n.tr('Henter instrukser …', 'Loading instructions…')}</p>}
+          >
+            <Show
+              when={value().trim().length > 0}
+              fallback={<p>{i18n.tr('Ingen instrukser er lagt til for dette rommet ennå.', 'No instructions have been added to this Space yet.')}</p>}
+            >
+              <p style={{ "white-space": "pre-wrap" }}>{value()}</p>
+            </Show>
+          </Show>
+        }
+      >
+        <form onSubmit={handleSubmit}>
+          <Show
+            when={!saved.loading}
+            fallback={<p class="verevon-space-inline-status" role="status">{i18n.tr('Henter instrukser …', 'Loading instructions…')}</p>}
+          >
+            <textarea
+              aria-label={i18n.tr('Instrukser for rommet', 'Instructions for this Space')}
+              value={value()}
+              rows={6}
+              maxlength={MAX_SPACE_INSTRUCTIONS_LENGTH}
+              onInput={(event) => {
+                setDraft(event.currentTarget.value)
+                setDirty(true)
+              }}
+              class="verevon-settings-input verevon-settings-textarea"
+            />
+          </Show>
+          <div class="verevon-space-view__actions">
+            <button type="submit" class="verevon-space-secondary-action" disabled={submitting() || !dirty()}>
+              <Show when={submitting()} fallback={<><Sparkles size={15} aria-hidden="true" /> {i18n.tr('Lagre instrukser', 'Save instructions')}</>}>
+                <Loader2 size={15} aria-hidden="true" /> {i18n.tr('Lagrer…', 'Saving…')}
+              </Show>
+            </button>
+          </div>
+        </form>
+      </Show>
+    </section>
+  )
+}
+
 /**
  * The Space's agents, rendered as room participants rather than as a catalog.
  *

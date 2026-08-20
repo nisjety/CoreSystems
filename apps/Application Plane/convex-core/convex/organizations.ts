@@ -5,10 +5,12 @@
  * External services (auth-core, org-core) publish events via NATS which trigger syncs.
  */
 
-import { internalMutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
-import { assertServiceKey } from "./authz";
+import { assertServiceKey, requireGatewayMember } from "./authz";
+
+const MAX_INSTRUCTIONS_LENGTH = 4000;
 
 /**
  * Query: Get organization by external ID
@@ -182,5 +184,61 @@ export const getWithUsers = query({
       .collect();
 
     return { ...org, users };
+  },
+});
+
+/**
+ * ADR-0003 -- the org layer of the authored-instruction hierarchy. Read by
+ * model-gateway (via the BFF) on every chat turn to compose alongside the
+ * platform and Space layers. `null` (no org, or nothing authored) is the
+ * common case and produces no system-message segment downstream.
+ */
+export const instructionsForGateway = query({
+  args: {
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organizations = await ctx.db
+      .query("organizations")
+      .withIndex("by_external_id", (q: any) => q.eq("externalOrgId", args.externalOrgId))
+      .collect();
+    const organization = organizations.find((candidate: any) => candidate.syncStatus !== "deleted");
+    if (!organization) return null;
+    return { instructions: organization.instructions ?? null };
+  },
+});
+
+/**
+ * ADR-0003 -- org-admin authoring write. The gateway verifies the caller is
+ * an org owner/admin (`has_authorized_org_role`) before calling this; this
+ * mutation only re-verifies org membership (`requireGatewayMember`), the same
+ * trust split every other `*ForGateway` mutation in this file uses -- the
+ * admin decision itself is not re-derived here.
+ */
+export const setInstructionsForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    instructions: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const organization = await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const instructions = args.instructions?.trim() || undefined;
+    if ((instructions?.length ?? 0) > MAX_INSTRUCTIONS_LENGTH) {
+      throw new Error(`Organization instructions must be ${MAX_INSTRUCTIONS_LENGTH} characters or fewer`);
+    }
+
+    await ctx.db.patch(organization._id, {
+      instructions,
+      updatedAt: Date.now(),
+      updatedByExternalAuthId: args.externalAuthId,
+    });
+
+    return { instructions: instructions ?? null };
   },
 });

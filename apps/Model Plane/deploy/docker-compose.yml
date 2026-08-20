@@ -448,6 +448,13 @@ services:
       # disables the resolve path — servers with no stored OAuth tokens are
       # unaffected either way.
       MCP_OAUTH_SERVICE_TOKEN: ${MCP_OAUTH_SERVICE_TOKEN:-}
+      # ADR-0003 — the platform layer of the authored-instruction hierarchy
+      # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
+      # configuration, deliberately not a database row (no "platform
+      # operator" authority tier exists in this codebase). Composed ahead of
+      # the org and Space layers on every chat turn. Empty means no platform
+      # layer, same silent-absent contract as the other layers.
+      PLATFORM_SYSTEM_INSTRUCTIONS: ${PLATFORM_SYSTEM_INSTRUCTIONS:-}
     networks:
       default: {}
       inter-plane-bus:

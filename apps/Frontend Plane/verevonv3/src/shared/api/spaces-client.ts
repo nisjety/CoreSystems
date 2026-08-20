@@ -98,6 +98,30 @@ export async function listSpaces(): Promise<readonly SpaceSummary[]> {
   return response.spaces
 }
 
+/**
+ * ADR-0003's Space layer of the authored-instruction hierarchy. Any active
+ * Space member (viewer included) may read it — it shapes every turn a viewer
+ * takes part in too, not only an editor's; writing is gated at the gateway to
+ * `editor`/`manager`/`owner` (`spaces.rs::SPACE_INSTRUCTIONS_WRITE_ROLES`).
+ */
+export async function getSpaceInstructions(spaceRef: string): Promise<string> {
+  const response = await requestJson<{ instructions: string | null }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/instructions`,
+  )
+  return response.instructions ?? ''
+}
+
+export async function updateSpaceInstructions(spaceRef: string, instructions: string): Promise<string> {
+  const response = await requestJson<{ instructions: string | null }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/instructions`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ instructions }),
+    },
+  )
+  return response.instructions ?? ''
+}
+
 export function getSpaceContext(spaceRef: string): Promise<SpaceContext> {
   return requestJson(`/api/v1/spaces/${encodeURIComponent(spaceRef)}/context`)
 }

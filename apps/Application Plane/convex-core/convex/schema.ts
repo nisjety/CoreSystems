@@ -28,7 +28,14 @@ export default defineSchema({
     sourceRevision: v.optional(v.number()),
     sourceEventId: v.optional(v.string()),
     sourceFingerprint: v.optional(v.string()),
-    
+
+    // ADR-0003: org-admin-authored instructions, composed into every chat
+    // turn's system message alongside the platform and Space layers. Plain
+    // optional content, not an authority decision (see the ADR's "Presence,
+    // not authority" section) -- no versioning in this slice.
+    instructions: v.optional(v.string()),
+    updatedByExternalAuthId: v.optional(v.string()),
+
     createdAt: v.number(),
     updatedAt: v.number(),
     deletedAt: v.optional(v.number()),
@@ -556,6 +563,12 @@ export default defineSchema({
     ),
     lifecycleRevision: v.number(),
     controlResourceRef: v.optional(v.string()),
+    // ADR-0003: Space owner/manager-authored instructions, composed into
+    // every turn in this Space alongside the platform and org layers. Same
+    // "presence, not authority" status as `organizations.instructions` --
+    // authored content, never an authorization primitive.
+    instructions: v.optional(v.string()),
+    updatedByExternalAuthId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

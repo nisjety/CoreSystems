@@ -5883,6 +5883,18 @@ pub struct InvokeRequest {
     /// only ever carries the agent's `subject_id` ref.
     #[serde(default)]
     pub agent_system_prompt: Option<String>,
+    /// ADR-0003 — the org layer of the authored-instruction hierarchy,
+    /// resolved server-side (Convex `organizations.instructions`) by the BFF
+    /// gateway on every turn with a verified org. Same provenance/trust notes
+    /// as `org_name`: never client-suppliable, framing text only.
+    #[serde(default)]
+    pub org_instructions: Option<String>,
+    /// ADR-0003 — the Space layer of the authored-instruction hierarchy,
+    /// resolved server-side (Convex `spaces.instructions`) by the BFF gateway
+    /// when the turn carries a Space reference. Same provenance/trust notes
+    /// as `agent_name`.
+    #[serde(default)]
+    pub space_instructions: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).

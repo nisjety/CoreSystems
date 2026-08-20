@@ -11,6 +11,7 @@ export const workspaceSettingsSectionIds = [
   'finetune',
   'mcp',
   'skills',
+  'org-instructions',
   'plugins',
   'cron',
   'quotas',
@@ -112,6 +113,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Ferdigheter',
     description: 'Org-dekkende ferdigheter agenten bruker i chat — instrukser som injiseres når en samtale treffer utløser-nøkkelordene.',
     saveLabel: 'Lagre ferdigheter',
+  },
+  {
+    id: 'org-instructions',
+    label: 'Organisasjonsinstrukser',
+    title: 'Organisasjonsinstrukser',
+    description: 'Instrukser som gjelder for hele organisasjonen og legges til i hver samtale, sammen med rom- og agentinstrukser.',
+    saveLabel: 'Lagre instrukser',
   },
   {
     id: 'plugins',

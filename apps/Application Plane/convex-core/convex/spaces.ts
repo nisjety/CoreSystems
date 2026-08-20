@@ -1431,3 +1431,65 @@ export const rejectRegistrationClaim = internalMutation({
     return { status: "rejected" as const };
   },
 });
+
+const MAX_SPACE_INSTRUCTIONS_LENGTH = 4000;
+
+/**
+ * ADR-0003 -- the Space layer of the authored-instruction hierarchy. Read by
+ * model-gateway (via the BFF) on every turn in this Space, composed with the
+ * platform and org layers. `null` (no Space, wrong org, or nothing authored)
+ * produces no system-message segment downstream.
+ */
+export const instructionsForGateway = query({
+  args: {
+    spaceRef: v.string(),
+    externalOrgId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space || space.externalOrgId !== args.externalOrgId) return null;
+    return { instructions: space.instructions ?? null };
+  },
+});
+
+/**
+ * ADR-0003 -- Space owner/manager/editor authoring write. The gateway
+ * verifies the caller holds one of those Space roles (Control's live
+ * membership, `editor`/`manager`/`owner`) before calling this; this mutation
+ * only re-verifies org membership (`requireGatewayMember`), the same trust
+ * split every other `*ForGateway` mutation in this file uses -- the
+ * Space-role decision itself is not re-derived here (Space roles are not a
+ * Convex-tracked concept; see `spaceAgents.ts`'s identical convention).
+ */
+export const setInstructionsForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    instructions: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+    const space = await getSpaceByRef(ctx, args.spaceRef);
+    if (!space || space.externalOrgId !== args.externalOrgId) {
+      throw new Error("Space not found");
+    }
+
+    const instructions = args.instructions?.trim() || undefined;
+    if ((instructions?.length ?? 0) > MAX_SPACE_INSTRUCTIONS_LENGTH) {
+      throw new Error(`Space instructions must be ${MAX_SPACE_INSTRUCTIONS_LENGTH} characters or fewer`);
+    }
+
+    await ctx.db.patch(space._id, {
+      instructions,
+      updatedAt: Date.now(),
+      updatedByExternalAuthId: args.externalAuthId,
+    });
+
+    return { instructions: instructions ?? null };
+  },
+});

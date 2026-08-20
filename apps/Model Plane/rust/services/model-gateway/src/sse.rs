@@ -910,12 +910,13 @@ pub async fn invoke_stream_sse(
     if let Some(identity_message) = identity_context_message(&req) {
         messages.insert(0, identity_message);
     }
-    // Persona goes first of all — ahead of identity context — so a mentioned
-    // agent's own instructions are the first thing the model reads, exactly
-    // the way `identity_context_message` primes the grounding content that
-    // follows it. Absent on every turn nobody addressed to an agent.
-    if let Some(persona_message) = agent_persona_message(&req) {
-        messages.insert(0, persona_message);
+    // Authored instructions go first of all — ahead of identity context — so
+    // the platform/org/Space/agent hierarchy is the first thing the model
+    // reads, exactly the way `identity_context_message` primes the grounding
+    // content that follows it. Absent only when every layer is empty (ADR-0003,
+    // `apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`).
+    if let Some(instructions_message) = authored_instructions_message(&state, &req) {
+        messages.insert(0, instructions_message);
     }
     // Skills: match this turn against the org's skill catalogue (disk-loaded +
     // learned) and inject the top matches as system context so a triggered skill
@@ -3069,6 +3070,60 @@ fn temporal_awareness_message() -> ChatMessage {
     }
 }
 
+/// ADR-0003's non-empty check: trims and treats blank as absent, the same
+/// rule every layer of the authored-instruction hierarchy already applies to
+/// its own field.
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Composes ADR-0003's authored-instruction hierarchy — platform (deployment
+/// env config) → org → Space → per-agent persona — into one system message,
+/// replacing `agent_persona_message`'s old mention-only firing with
+/// unconditional firing on every turn that carries at least one non-empty
+/// layer. Each of the org/Space layers is wrapped in prompt-level framing
+/// asking it not to override the layer(s) before it — advisory only, the same
+/// strength as today's per-agent instructions, never a code-enforced boundary
+/// (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`, "Composition and
+/// enforcement"). The agent-specific layer is unchanged from today
+/// (`agent_persona_message`'s own text, including its "you are currently
+/// answering as" framing) — only its firing condition (mention-gated) stays
+/// as-is; it is simply the last section here instead of the sole message.
+///
+/// `None` only when platform, org, Space, and agent are ALL empty —
+/// preserving today's silent-no-message behavior for a deployment/org/Space
+/// that has authored nothing and a turn nobody mentioned.
+fn authored_instructions_message(state: &AppState, req: &InvokeRequest) -> Option<ChatMessage> {
+    let mut sections: Vec<String> = Vec::new();
+
+    if let Some(platform) = non_empty_trimmed(&state.platform_instructions) {
+        sections.push(platform.to_owned());
+    }
+    if let Some(org) = req.org_instructions.as_deref().and_then(non_empty_trimmed) {
+        sections.push(format!(
+            "--- Organization instructions (may add to, but must not override, the platform instructions above) ---\n{org}"
+        ));
+    }
+    if let Some(space) = req.space_instructions.as_deref().and_then(non_empty_trimmed) {
+        sections.push(format!(
+            "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
+        ));
+    }
+    if let Some(persona) = agent_persona_message(req) {
+        sections.push(persona.content);
+    }
+
+    if sections.is_empty() {
+        return None;
+    }
+    Some(ChatMessage {
+        role: "system".to_owned(),
+        content: sections.join("\n\n"),
+        name: String::new(),
+    })
+}
+
 /// Persona for a turn addressed to a Space agent by `@` mention
 /// (`docs/space-defenition.md`, "Invocation rule"). Absent on every ordinary
 /// Chat turn and on a Space turn nobody mentioned — the room's default
@@ -3077,7 +3132,8 @@ fn temporal_awareness_message() -> ChatMessage {
 /// Deliberately separate from `identity_context_message`: that message frames
 /// who the *user* is; this frames who is *answering*. Both can be present on
 /// the same turn (a mentioned agent still knows which org and user it's
-/// talking to).
+/// talking to). Composed into [`authored_instructions_message`] as the final
+/// layer; no longer called directly as the sole system-message source.
 fn agent_persona_message(req: &InvokeRequest) -> Option<ChatMessage> {
     let agent_name = req
         .agent_name
@@ -5595,12 +5651,13 @@ fn publish_implicit_dissatisfaction(
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_persona_message, build_stream_envelope, build_usage_envelope,
-        classify_agentic_run_outcome, is_confirmed_agent_dispatch_rejection,
+        agent_persona_message, authored_instructions_message, build_stream_envelope,
+        build_usage_envelope, classify_agentic_run_outcome, is_confirmed_agent_dispatch_rejection,
         orchestration_event_to_step_update, sanitize_follow_up_suggestions, sanitize_thread_title,
         AgenticRunOutcome,
     };
     use crate::http_routes::InvokeRequest;
+    use crate::state::AppState;
 
     fn invoke_request(extra: serde_json::Value) -> InvokeRequest {
         let mut body = serde_json::json!({
@@ -5651,6 +5708,75 @@ mod tests {
         // never render a personaless "You are currently answering as ." line.
         let req = invoke_request(serde_json::json!({ "agent_name": "   " }));
         assert!(agent_persona_message(&req).is_none());
+    }
+
+    // ── ADR-0003: authored-instruction hierarchy composition ───────────────
+
+    fn state_with_platform_instructions(platform: &str) -> AppState {
+        let mut state = AppState::new();
+        state.platform_instructions = platform.to_owned();
+        state
+    }
+
+    // `AppState::new()` builds lazy gRPC channels and an HTTP client that
+    // require a Tokio runtime context even just to construct — hence
+    // `#[tokio::test]` here rather than the plain `#[test]` every other
+    // function in this module uses, matching `trajectory.rs`'s precedent for
+    // tests that touch `AppState`.
+
+    #[tokio::test]
+    async fn no_authored_instructions_message_when_every_layer_is_empty() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({}));
+        assert!(authored_instructions_message(&state, &req).is_none());
+    }
+
+    #[tokio::test]
+    async fn platform_only_produces_the_bare_platform_text() {
+        let state = state_with_platform_instructions("Never discuss competitor pricing.");
+        let req = invoke_request(serde_json::json!({}));
+        let message = authored_instructions_message(&state, &req).expect("message");
+        assert_eq!(message.role, "system");
+        assert_eq!(message.content, "Never discuss competitor pricing.");
+    }
+
+    #[tokio::test]
+    async fn org_layer_is_wrapped_in_non_override_framing() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({ "org_instructions": "Always answer in Norwegian." }));
+        let message = authored_instructions_message(&state, &req).expect("message");
+        assert!(message.content.contains("Always answer in Norwegian."));
+        assert!(message.content.contains("Organization instructions"));
+        assert!(message.content.contains("must not override"));
+    }
+
+    #[tokio::test]
+    async fn all_four_layers_compose_in_platform_org_space_agent_order() {
+        let state = state_with_platform_instructions("Platform rule.");
+        let req = invoke_request(serde_json::json!({
+            "org_instructions": "Org rule.",
+            "space_instructions": "Space rule.",
+            "agent_name": "Driftsassistent",
+            "agent_system_prompt": "Agent rule.",
+        }));
+        let message = authored_instructions_message(&state, &req).expect("message");
+        let platform_at = message.content.find("Platform rule.").expect("platform");
+        let org_at = message.content.find("Org rule.").expect("org");
+        let space_at = message.content.find("Space rule.").expect("space");
+        let agent_at = message.content.find("Agent rule.").expect("agent");
+        assert!(platform_at < org_at);
+        assert!(org_at < space_at);
+        assert!(space_at < agent_at);
+    }
+
+    #[tokio::test]
+    async fn blank_org_and_space_instructions_are_treated_as_absent() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({
+            "org_instructions": "   ",
+            "space_instructions": "   ",
+        }));
+        assert!(authored_instructions_message(&state, &req).is_none());
     }
 
     // ── AI thread-title sanitizer ───────────────────────────────────────────

@@ -41,6 +41,14 @@ pub(super) async fn invoke_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message);
     }
+    // ADR-0003 — must run before `inject_personal_thread_context`, which
+    // consumes the Space reference fields this one still needs to peek at.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut outbound_body)
+            .await
+    {
+        return (status, body);
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,

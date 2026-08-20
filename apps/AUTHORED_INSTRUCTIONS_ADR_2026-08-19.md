@@ -1,7 +1,11 @@
 # ADR-0003: Authored instruction hierarchy (platform + org + Space, composed with agent persona)
 
 **Date**: 2026-08-19
-**Status**: proposed
+**Status**: implemented (2026-08-20) — platform env var, both Convex fields +
+queries/mutations, gateway injection + authoring routes, model-gateway
+composition, and both authoring UIs all landed in the same change; see
+`project_authored_instructions_implementation_2026-08-20` memory for the
+verification trail.
 **Deciders**: CoreSystem product direction (Application/Frontend/Model implementation owner)
 **Supersedes nothing; extends** `apps/SPACE_AUTHORITY_ADR_2026-08-13.md` (ADR-0001)
 and `apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md` (ADR-0002) — this decision

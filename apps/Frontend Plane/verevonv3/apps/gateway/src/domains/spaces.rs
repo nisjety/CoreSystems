@@ -657,6 +657,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 		)
         .route("/api/v1/spaces/{space_ref}/roster", get(space_roster))
         .route(
+            "/api/v1/spaces/{space_ref}/instructions",
+            get(get_space_instructions).patch(update_space_instructions),
+        )
+        .route(
             "/api/v1/agents/installations",
             get(list_org_agent_installations),
         )
@@ -1743,6 +1747,174 @@ async fn require_space_agent_grant_role(
     Ok(())
 }
 
+/// ADR-0003's Space-instructions role floor: `editor`/`manager`/`owner`, not
+/// `viewer` — this is a durable write that affects every future turn in the
+/// Space, not a read. Mirrors Control's own `ValidateForSharedThread` floor
+/// (`user-core/internal/spaces/personal_thread_decision.go`).
+const SPACE_INSTRUCTIONS_WRITE_ROLES: [&str; 3] = ["editor", "manager", "owner"];
+
+/// Resolves the caller's live Control-issued role on `space_ref` and returns
+/// it on success — same `GET .../membership` call as
+/// [`require_space_agent_grant_role`], generalized to return the role instead
+/// of hard-coding one allow-list, since the read path (any active member) and
+/// the write path (`editor`/`manager`/`owner`) need different floors over the
+/// same membership fact.
+async fn resolve_space_role(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let actor = ActionActor {
+        user_id: user.user_id.clone(),
+        user_email: user.user_email.clone(),
+        user_name: user.user_name.clone(),
+        user_role: user.auth_role.clone().unwrap_or_default(),
+    };
+    let membership_url = format!(
+        "{}/api/v1/internal/spaces/{}/membership",
+        state.user_core_url,
+        urlencoding::encode(space_ref)
+    );
+    let (membership_status, Json(membership_response)) = proxy_json(
+        state,
+        Method::GET,
+        &membership_url,
+        None,
+        Some(org_id),
+        Some(&actor),
+        None,
+    )
+    .await;
+    if !membership_status.is_success() {
+        return Err((membership_status, Json(membership_response)));
+    }
+    Ok(crate::envelope::unwrap_data(&membership_response)
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned())
+}
+
+/// GET `/api/v1/spaces/{space_ref}/instructions` — any active Space member
+/// (viewer included) may read the Space's authored instructions: they affect
+/// every turn a viewer takes part in too, not only an editor's.
+async fn get_space_instructions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to resolve a Space.",
+            )),
+        );
+    }
+    let space_ref = space_ref.trim();
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    if let Err(response) = resolve_space_role(&state, &user, &org_id, space_ref).await {
+        return response;
+    }
+    let instructions = fetch_space_instructions(&state, &org_id, space_ref).await;
+    (
+        StatusCode::OK,
+        Json(json!({"data": {"instructions": instructions}})),
+    )
+}
+
+#[derive(Deserialize)]
+struct UpdateSpaceInstructionsRequest {
+    #[serde(default)]
+    instructions: Option<String>,
+}
+
+const MAX_SPACE_INSTRUCTIONS_LENGTH: usize = 4000;
+
+/// PATCH `/api/v1/spaces/{space_ref}/instructions` — ADR-0003's Space-layer
+/// authoring write, gated to `editor`/`manager`/`owner` (see
+/// [`SPACE_INSTRUCTIONS_WRITE_ROLES`]).
+async fn update_space_instructions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(space_ref): Path<String>,
+    Json(body): Json<UpdateSpaceInstructionsRequest>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    if org_id.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership is required to resolve a Space.",
+            )),
+        );
+    }
+    let space_ref = space_ref.trim();
+    if space_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_space", "A Space reference is required.")),
+        );
+    }
+    let role = match resolve_space_role(&state, &user, &org_id, space_ref).await {
+        Ok(role) => role,
+        Err(response) => return response,
+    };
+    if !SPACE_INSTRUCTIONS_WRITE_ROLES.contains(&role.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "space_role_cannot_edit_instructions",
+                "Only a Space editor, manager, or owner can change its instructions.",
+            )),
+        );
+    }
+    let instructions = body.instructions.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    // Character count, not byte length — see orgs/instructions.rs's identical
+    // check for why: Convex and the browser both count characters, and a
+    // byte-length check would wrongly reject valid Norwegian text.
+    if instructions.is_some_and(|value| value.chars().count() > MAX_SPACE_INSTRUCTIONS_LENGTH) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "instructions_too_long",
+                "Space instructions must be 4000 characters or fewer.",
+            )),
+        );
+    }
+    let result = convex_gateway_call(
+        &state,
+        "mutation",
+        "spaces:setInstructionsForGateway",
+        json!({
+            "externalAuthId": user.user_id,
+            "externalOrgId": org_id,
+            "spaceRef": space_ref,
+            "instructions": instructions,
+        }),
+    )
+    .await;
+    match result {
+        Ok(value) => (StatusCode::OK, Json(json!({"data": value}))),
+        Err(()) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "instructions_unavailable",
+                "Space instructions could not be saved.",
+            )),
+        ),
+    }
+}
+
 /// Step 2 of the governed two-step, shared by create and bind: declare the
 /// room's full service roster to Control and report whether it accepted.
 async fn confirm_space_agent_membership(state: &AppState, org_id: &str, space_ref: &str) -> bool {
@@ -2083,6 +2255,100 @@ fn peek_space_ref(object: &serde_json::Map<String, Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// ADR-0003's org layer: the org-admin-authored instruction, resolved from
+/// Convex. `None` for an org with nothing authored — same absent-means-quiet
+/// contract as `fetch_agent_persona`.
+async fn fetch_org_instructions(state: &AppState, org_id: &str) -> Option<String> {
+    let value = convex_gateway_call(
+        state,
+        "query",
+        "organizations:instructionsForGateway",
+        json!({ "externalOrgId": org_id }),
+    )
+    .await
+    .ok()?;
+    value
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// ADR-0003's Space layer: the Space owner/manager/editor-authored
+/// instruction, resolved from Convex. `None` for a Space with nothing
+/// authored, or one Convex cannot resolve for this org.
+async fn fetch_space_instructions(state: &AppState, org_id: &str, space_ref: &str) -> Option<String> {
+    let value = convex_gateway_call(
+        state,
+        "query",
+        "spaces:instructionsForGateway",
+        json!({ "externalOrgId": org_id, "spaceRef": space_ref }),
+    )
+    .await
+    .ok()?;
+    value
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// ADR-0003 — stamps the org (always, when `org_id` is known) and Space
+/// (when the turn carries a `space_ref`) authored-instruction layers onto the
+/// outbound turn as `org_instructions`/`space_instructions`, the two fields
+/// `model-gateway`'s composed authored-instructions message reads. Fires on
+/// every turn, unlike the mention-gated agent persona — a personal chat with
+/// no Space still gets the org layer.
+///
+/// Any client-supplied value for either field is discarded first: these are
+/// server-resolved, same provenance/trust class as `org_name`/`agent_name`,
+/// never client-suppliable.
+///
+/// The Space layer is gated on the caller's own live Control membership
+/// (`resolve_space_role`) before Convex is even asked — the same gate the
+/// `GET/PATCH .../instructions` routes use. This does NOT rely on
+/// `inject_personal_thread_context` independently rejecting a non-member's
+/// `space_ref` afterward: that rejection happens to occur today, but nothing
+/// ties its timing to this function, and a future change to either call site
+/// could silently turn an unrelated ordering assumption into a real
+/// cross-Space instructions disclosure.
+///
+/// Must run before [`inject_personal_thread_context`], which is the call that
+/// removes the Space reference fields from the body — this only peeks at
+/// `space_ref`, mirroring [`inject_mentioned_space_agent_persona`].
+pub(crate) async fn inject_authored_instructions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_chat_request",
+                "Chat request must be an object.",
+            )),
+        )
+    })?;
+    object.remove("org_instructions");
+    object.remove("space_instructions");
+
+    let org_id = org_id.trim();
+    if org_id.is_empty() {
+        return Ok(());
+    }
+    if let Some(instructions) = fetch_org_instructions(state, org_id).await {
+        object.insert("org_instructions".to_owned(), json!(instructions));
+    }
+
+    if let Some(space_ref) = peek_space_ref(object) {
+        resolve_space_role(state, user, org_id, &space_ref).await?;
+        if let Some(instructions) = fetch_space_instructions(state, org_id, &space_ref).await {
+            object.insert("space_instructions".to_owned(), json!(instructions));
+        }
+    }
+    Ok(())
+}
+
 /// Exchange a client-supplied `@` mention for a Control- and
 /// Application-verified agent persona, injected into the outbound turn as
 /// `agent_name`/`agent_system_prompt` — the two fields
@@ -2383,7 +2649,10 @@ async fn personal_space_lifecycle(
 // supply only their authenticated session; these facades add the verified user
 // and active-org facts at the server boundary rather than accepting them from a
 // browser body.
-async fn convex_gateway_call(
+//
+// `pub(crate)` so `domains::orgs::instructions` can reuse it for the org
+// layer's authoring write, rather than duplicating this Convex-call plumbing.
+pub(crate) async fn convex_gateway_call(
     state: &AppState,
     operation: &str,
     path: &str,
@@ -2590,10 +2859,10 @@ async fn space_actions(
 #[cfg(test)]
 mod tests {
     use super::{
-        forward_owner_grant_mutation, inject_mentioned_space_agent_persona,
-        inject_personal_schedule_create_context, inject_personal_thread_context,
-        personal_import_ingress_decision, space_actions, thread_items_match_space,
-        OwnerGrantMutationRequest,
+        forward_owner_grant_mutation, inject_authored_instructions,
+        inject_mentioned_space_agent_persona, inject_personal_schedule_create_context,
+        inject_personal_thread_context, personal_import_ingress_decision, space_actions,
+        thread_items_match_space, OwnerGrantMutationRequest, UpdateSpaceInstructionsRequest,
     };
     use crate::config::AppState;
     use axum::{
@@ -4911,5 +5180,324 @@ mod tests {
             Some("org-1")
         );
         assert!(membership.headers.get("x-delegation-signature").is_some());
+    }
+
+    // ── ADR-0003: authored-instruction hierarchy ────────────────────────────
+
+    async fn authored_instructions_test_state(
+        org_response: Value,
+        space_response: Value,
+    ) -> (AppState, MockServer, MockServer) {
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "organizations:instructionsForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": org_response})))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaces:instructionsForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": space_response})))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        // Any turn carrying a `space_ref` now has its Space layer gated on a
+        // live Control membership check (`resolve_space_role`) before Convex
+        // is even asked — this default "viewer" response lets a scoped test
+        // reach the Convex mocks above without needing its own membership
+        // stub, unless it specifically wants to test a non-member rejection.
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-1/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-1", "kind": "room", "role": "viewer"}
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        (state, application, user_core)
+    }
+
+    #[tokio::test]
+    async fn org_instructions_are_injected_on_a_personal_turn_with_no_space() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = authored_instructions_test_state(
+            json!({"instructions": "Always answer in Norwegian."}),
+            Value::Null,
+        )
+        .await;
+        let mut body = json!({"content": "hello"});
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_ok());
+        assert_eq!(body["org_instructions"], "Always answer in Norwegian.");
+        assert!(
+            body.get("space_instructions").is_none(),
+            "no space_ref was carried, so no Space layer should be looked up at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn space_instructions_are_injected_alongside_org_instructions_when_scoped() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = authored_instructions_test_state(
+            json!({"instructions": "Org rule."}),
+            json!({"instructions": "Space rule."}),
+        )
+        .await;
+        let mut body = json!({"content": "hello", "space_ref": "space-1"});
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_ok());
+        assert_eq!(body["org_instructions"], "Org rule.");
+        assert_eq!(body["space_instructions"], "Space rule.");
+        // Peeked, not consumed: `inject_personal_thread_context` still needs it.
+        assert_eq!(body["space_ref"], "space-1");
+    }
+
+    #[tokio::test]
+    async fn a_non_member_never_receives_that_spaces_instructions() {
+        // The membership stub `authored_instructions_test_state` mounts only
+        // answers for "space-1"; a `space_ref` it has never heard of gets
+        // Control's genuine 404, exactly like a real non-member would.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = authored_instructions_test_state(
+            json!({"instructions": "Org rule."}),
+            json!({"instructions": "Space rule."}),
+        )
+        .await;
+        let mut body = json!({"content": "hello", "space_ref": "someone-elses-space"});
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_err(), "a non-member's Space read must fail closed");
+        assert!(
+            body.get("space_instructions").is_none(),
+            "no Space content may leak to a caller Control never confirmed as a member"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_client_supplied_instructions_field_never_survives_uninspected() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) =
+            authored_instructions_test_state(Value::Null, Value::Null).await;
+        let mut body = json!({
+            "content": "hello",
+            "org_instructions": "forged org instructions",
+            "space_instructions": "forged space instructions",
+        });
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "org-1", &mut body).await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_ok());
+        assert!(
+            body.get("org_instructions").is_none(),
+            "a forged value must not survive just because Convex had nothing authored"
+        );
+        assert!(body.get("space_instructions").is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_org_id_injects_nothing() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application, _user_core) = authored_instructions_test_state(
+            json!({"instructions": "Org rule."}),
+            Value::Null,
+        )
+        .await;
+        let mut body = json!({"content": "hello"});
+        let result =
+            inject_authored_instructions(&state, &authenticated_user(), "", &mut body).await;
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+
+        assert!(result.is_ok());
+        assert!(body.get("org_instructions").is_none());
+    }
+
+    async fn space_instructions_response(
+        role: &str,
+        method: &str,
+        path: &str,
+        write_body: Option<Value>,
+    ) -> (u16, Value) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId":"user-1", "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/internal/spaces/space-1/membership"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"space_ref": "space-1", "kind": "room", "role": role}
+            })))
+            .mount(&user_core)
+            .await;
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaces:instructionsForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"instructions": "Existing rule."}
+            })))
+            .mount(&application)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/mutation"))
+            .and(wm_body_partial_json(
+                json!({"path": "spaces:setInstructionsForGateway"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "value": {"instructions": "New rule."}
+            })))
+            .mount(&application)
+            .await;
+        std::env::set_var("APPLICATION_CONVEX_URL", application.uri());
+        std::env::set_var("APPLICATION_CONVEX_SERVICE_KEY", "application-test-key");
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", "better-auth.session_token=session-1");
+        let request = if let Some(body) = write_body {
+            request
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        } else {
+            request.body(Body::empty()).unwrap()
+        };
+        let response = crate::build_router(state).oneshot(request).await.unwrap();
+        std::env::remove_var("APPLICATION_CONVEX_URL");
+        std::env::remove_var("APPLICATION_CONVEX_SERVICE_KEY");
+        let status = response.status().as_u16();
+        let parsed: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
+    #[tokio::test]
+    async fn a_viewer_can_read_space_instructions() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_instructions_response(
+            "viewer",
+            "GET",
+            "/api/v1/spaces/space-1/instructions",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["instructions"], "Existing rule.");
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cannot_write_space_instructions() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_instructions_response(
+            "viewer",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "New rule."})),
+        )
+        .await;
+        assert_eq!(status, 403, "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_editor_can_write_space_instructions() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_instructions_response(
+            "editor",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "New rule."})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["data"]["instructions"], "New rule.");
+    }
+
+    #[tokio::test]
+    async fn an_owner_can_write_space_instructions() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_instructions_response(
+            "owner",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "New rule."})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[tokio::test]
+    async fn overlong_space_instructions_are_rejected_before_reaching_convex() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_instructions_response(
+            "owner",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "x".repeat(4001)})),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+    }
+
+    /// 'æ' is 2 bytes in UTF-8. 4000 of them is exactly at the character
+    /// limit but 8000 bytes — a byte-length check would wrongly reject this
+    /// valid Norwegian text.
+    #[tokio::test]
+    async fn four_thousand_norwegian_characters_are_accepted() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body) = space_instructions_response(
+            "owner",
+            "PATCH",
+            "/api/v1/spaces/space-1/instructions",
+            Some(json!({"instructions": "æ".repeat(4000)})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[test]
+    fn update_space_instructions_request_deserializes_a_missing_instructions_field() {
+        let parsed: UpdateSpaceInstructionsRequest = serde_json::from_value(json!({})).unwrap();
+        assert!(parsed.instructions.is_none());
     }
 }

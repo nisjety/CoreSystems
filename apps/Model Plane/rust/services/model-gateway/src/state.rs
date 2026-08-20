@@ -182,6 +182,14 @@ pub struct AppState {
     /// arbitrary tenant owns the server being called." Empty disables the
     /// resolve path entirely (falls back to `server.token`).
     pub mcp_oauth_service_token: String,
+    /// ADR-0003's platform layer of the authored-instruction hierarchy:
+    /// deployment-level configuration, not a database row — no "platform
+    /// operator" authority tier exists anywhere in this codebase (roles stop
+    /// at org-admin), and inventing one for a value with exactly one
+    /// realistic editor (whoever operates the deployment) is out of scope.
+    /// Empty means no platform layer, same silent-absent contract as every
+    /// other layer.
+    pub platform_instructions: String,
     /// Shared reqwest client for HTTP proxy calls to capability-core.
     pub http_client: reqwest::Client,
     /// Phase 7 B5 — model price catalogue cache (cost-core `GET /api/v1/pricing`).
@@ -351,6 +359,7 @@ impl AppState {
             application_core_internal_key: String::new(),
             verevon_public_origin: "http://localhost:5173".to_owned(),
             mcp_oauth_service_token: String::new(),
+            platform_instructions: String::new(),
             http_client: reqwest::Client::new(),
             // Pricing disabled by default (no cost-core URL); `from_env` wires it
             // from COST_CORE_URL. A disabled cache emits a null cost, never a fake.
@@ -543,6 +552,8 @@ impl AppState {
         let verevon_public_origin = std::env::var("VEREVON_PUBLIC_ORIGIN")
             .unwrap_or_else(|_| "http://localhost:5173".to_owned());
         let mcp_oauth_service_token = std::env::var("MCP_OAUTH_SERVICE_TOKEN").unwrap_or_default();
+        let platform_instructions =
+            std::env::var("PLATFORM_SYSTEM_INSTRUCTIONS").unwrap_or_default();
         let http_client = reqwest::Client::new();
         // Phase 7 B5 — pricing cache against cost-core's HTTP API (COST_CORE_URL).
         // Shared between both publisher branches below; cheap clone (Arc inner).
@@ -655,6 +666,7 @@ impl AppState {
             state.application_core_internal_key = application_core_internal_key.clone();
             state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
+            state.platform_instructions = platform_instructions.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache.clone();
             state.retrieval_client = retrieval_client;
@@ -699,6 +711,7 @@ impl AppState {
             state.application_core_internal_key = application_core_internal_key;
             state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
+            state.platform_instructions = platform_instructions.clone();
             state.http_client = http_client;
             state.pricing = pricing_cache;
             state.retrieval_client = retrieval_client;

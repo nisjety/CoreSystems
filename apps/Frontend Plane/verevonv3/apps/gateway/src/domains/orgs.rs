@@ -1,5 +1,6 @@
 mod deletion;
 mod info;
+mod instructions;
 mod members;
 mod quotas;
 mod roles;
@@ -36,6 +37,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/{id}/settings",
             patch(settings::update_org_settings),
+        )
+        // ADR-0003 — org layer of the authored-instruction hierarchy (Convex,
+        // not org-core, hence a separate route from `/settings` above).
+        .route(
+            "/api/v1/orgs/{id}/instructions",
+            get(instructions::get_org_instructions).patch(instructions::update_org_instructions),
         )
         // Quotas (spend/token ceilings). Control Plane owns these; model-gateway
         // reads them for cost-core's budget check. Previously org-core had the
