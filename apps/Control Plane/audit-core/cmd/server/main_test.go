@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,21 +69,17 @@ func TestDeploymentWiresNamedCredentialedExtraPlaneBuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	applicationText := string(applicationCompose)
-	start := strings.Index(applicationText, "  nats:\n")
-	end := strings.Index(applicationText[start:], "  application-prometheus:\n")
-	if start < 0 || end < 0 {
-		t.Fatal("Application NATS service block not found")
+	natsBlock, err := composeServiceBlock(applicationText, "nats")
+	if err != nil {
+		t.Fatal(err)
 	}
-	natsBlock := applicationText[start : start+end]
-	if !strings.Contains(natsBlock, "inter-plane-bus:\n        aliases:\n          - application-nats") {
+	if !composeNetworkHasAlias(natsBlock, "inter-plane-bus", "application-nats") {
 		t.Fatal("Application NATS is not reachable by stable alias on inter-plane-bus")
 	}
-	leadsStart := strings.Index(applicationText, "  leads-core:\n")
-	leadsEnd := strings.Index(applicationText[leadsStart:], "  information-core:\n")
-	if leadsStart < 0 || leadsEnd < 0 {
-		t.Fatal("Application leads-core block not found")
+	leadsBlock, err := composeServiceBlock(applicationText, "leads-core")
+	if err != nil {
+		t.Fatal(err)
 	}
-	leadsBlock := applicationText[leadsStart : leadsStart+leadsEnd]
 	if !strings.Contains(leadsBlock, "NATS_URL: nats://application-nats:4222") ||
 		!strings.Contains(leadsBlock, "NATS_USER: application-leads") ||
 		!strings.Contains(leadsBlock, "NATS_PASSWORD: ${APPLICATION_LEADS_NATS_PASSWORD:") {
@@ -191,17 +189,11 @@ func TestPlaneRuntimePrincipalsCannotReachJetStreamAdminOrAuditConsumerSubjects(
 		{name: "model", path: filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"), runtimeUser: "model-gateway-runtime", inbox: "_INBOX.MODEL_GATEWAY_RUNTIME", allowedSubject: "mp.v1.run.fixture.event", delivery: "_VEREVON.AUDIT.DELIVER.model.audit-v2", ack: "$JS.ACK.VEREVON_CONTROL_OBSERVABILITY.audit-core-model-v3-audit.1.1.1.1.1"},
 		{name: "application", path: filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"), runtimeUser: "application-social", inbox: "_INBOX.APPLICATION_SOCIAL", allowedSubject: "verevon.application.social.fixture", delivery: "_VEREVON.AUDIT.DELIVER.application.audit-v2", ack: "$JS.ACK.VEREVON_CONTROL_OBSERVABILITY.audit-core-application-v3-audit.1.1.1.1.1"},
 	}
-	for _, envName := range []string{
-		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
-		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
-		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
-		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
-		"APPLICATION_LEADS_NATS_PASSWORD", "APPLICATION_NOTIFICATION_NATS_PASSWORD",
-		"AUDIT_APPLICATION_NATS_PASSWORD", "APPLICATION_NATS_PROVISIONER_PASSWORD",
-	} {
-		t.Setenv(envName, strconv.Quote(password))
+	brokerConfigs := make([]string, 0, len(planes))
+	for _, plane := range planes {
+		brokerConfigs = append(brokerConfigs, plane.path)
 	}
+	setScopedBrokerPasswords(t, password, brokerConfigs...)
 	for _, plane := range planes {
 		t.Run(plane.name, func(t *testing.T) {
 			options, err := natsserver.ProcessConfigFile(plane.path)
@@ -276,20 +268,14 @@ func TestPlaneRuntimePrincipalsCannotReachJetStreamAdminOrAuditConsumerSubjects(
 
 func TestApplicationModelConsumersUseScopedCredentialsAndLegacyTokenIsRejected(t *testing.T) {
 	const password = "0123456789abcdef0123456789abcdef"
-	for _, envName := range []string{
-		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
-		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
-		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
-		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-	} {
-		t.Setenv(envName, strconv.Quote(password))
-	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test path")
 	}
 	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	options, err := natsserver.ProcessConfigFile(filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"))
+	modelBrokerConfig := filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf")
+	setScopedBrokerPasswords(t, password, modelBrokerConfig)
+	options, err := natsserver.ProcessConfigFile(modelBrokerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,10 +731,13 @@ func TestApplicationLocalBrokerUsesPerServicePrincipals(t *testing.T) {
 			!strings.Contains(block, "NATS_PASSWORD: ${"+principal.password+":?") {
 			t.Fatalf("%s is not wired to scoped local principal %s", principal.service, principal.user)
 		}
-		for _, forbidden := range []string{"\n      NATS_TOKEN:", "\n      VEREVON_NATS_TOKEN:", "APPLICATION_NATS_RUNTIME_PASSWORD"} {
-			if strings.Contains(block, forbidden) {
+		for _, forbidden := range []string{"NATS_TOKEN", "VEREVON_NATS_TOKEN"} {
+			if composeDeclaresEnvKey(block, forbidden) {
 				t.Fatalf("%s still receives shared local broker credential %q", principal.service, forbidden)
 			}
+		}
+		if strings.Contains(block, "APPLICATION_NATS_RUNTIME_PASSWORD") {
+			t.Fatalf("%s still receives the shared Application runtime credential", principal.service)
 		}
 		userBlock, blockErr := natsUserConfigBlock(broker, principal.user)
 		if blockErr != nil {
@@ -840,28 +829,14 @@ func TestConvexControlProjectionUsesScopedPreprovisionedConsumer(t *testing.T) {
 
 func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *testing.T) {
 	const password = "0123456789abcdef0123456789abcdef"
-	for _, envName := range []string{
-		"AUTH_SHARED_NATS_PASSWORD", "USER_SHARED_NATS_PASSWORD",
-		"ORG_SHARED_NATS_PASSWORD", "BILLING_SHARED_NATS_PASSWORD",
-		"SESSION_SHARED_NATS_PASSWORD", "APPLICATION_CONVEX_CONTROL_NATS_PASSWORD",
-		"DOCUMENTS_GDPR_NATS_PASSWORD",
-		"CONTROL_SHARED_BRIDGE_PASSWORD", "CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
-		"SESSION_CORE_GDPR_NATS_PASSWORD", "CONVERSATION_CORE_GDPR_NATS_PASSWORD",
-		"QUARRY_CONTROL_GDPR_NATS_PASSWORD", "NOTIFICATION_CORE_GDPR_NATS_PASSWORD",
-		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "EMBEDDING_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
-		"WIKI_STORE_GDPR_NATS_PASSWORD", "RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD",
-		"DATA_QUALITY_GDPR_NATS_PASSWORD", "DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD",
-		"QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD", "COST_CORE_GDPR_NATS_PASSWORD",
-	} {
-		t.Setenv(envName, strconv.Quote(password))
-	}
-
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test path")
 	}
 	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	options, err := natsserver.ProcessConfigFile(filepath.Join(controlRoot, "control-shared-nats.conf"))
+	sharedBrokerConfig := filepath.Join(controlRoot, "control-shared-nats.conf")
+	setScopedBrokerPasswords(t, password, sharedBrokerConfig)
+	options, err := natsserver.ProcessConfigFile(sharedBrokerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,20 +1090,14 @@ func TestFreshControlSharedBrokerAllowsOnlyThePreprovisionedConvexProjection(t *
 
 func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 	const password = "0123456789abcdef0123456789abcdef"
-	for _, envName := range []string{
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD",
-		"APPLICATION_INSIGHT_NATS_PASSWORD", "APPLICATION_LEADS_NATS_PASSWORD",
-		"APPLICATION_NOTIFICATION_NATS_PASSWORD", "AUDIT_APPLICATION_NATS_PASSWORD",
-		"APPLICATION_NATS_PROVISIONER_PASSWORD",
-	} {
-		t.Setenv(envName, strconv.Quote(password))
-	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test path")
 	}
 	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	options, err := natsserver.ProcessConfigFile(filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"))
+	applicationBrokerConfig := filepath.Join(controlRoot, "..", "Application Plane", "nats.conf")
+	setScopedBrokerPasswords(t, password, applicationBrokerConfig)
+	options, err := natsserver.ProcessConfigFile(applicationBrokerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1241,32 +1210,18 @@ func TestFreshApplicationBrokerSupportsScopedActiveClients(t *testing.T) {
 
 func TestScopedBrokerConfigsParse(t *testing.T) {
 	rawPassword := "1e99e912345678901234567890123456"
-	for _, name := range []string{
-		"AUTH_NATS_PASSWORD", "USER_NATS_PASSWORD", "ORG_NATS_PASSWORD", "BILLING_NATS_PASSWORD", "SESSION_NATS_PASSWORD",
-		"AUDIT_CONTROL_NATS_PASSWORD", "CONTROL_NATS_PROVISIONER_PASSWORD",
-		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
-		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
-		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
-		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
-		"APPLICATION_LEADS_NATS_PASSWORD", "APPLICATION_NOTIFICATION_NATS_PASSWORD",
-		"AUDIT_APPLICATION_NATS_PASSWORD", "APPLICATION_NATS_PROVISIONER_PASSWORD",
-	} {
-		// NATS resolves an environment variable as configuration syntax. Compose
-		// wraps only the broker's copy in quotes so arbitrary generated values
-		// (including numeric/exponent-like prefixes) parse as the exact string.
-		t.Setenv(name, strconv.Quote(rawPassword))
-	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test path")
 	}
 	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	for _, path := range []string{
+	paths := []string{
 		filepath.Join(controlRoot, "nats.conf"),
 		filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"),
 		filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"),
-	} {
+	}
+	setScopedBrokerPasswords(t, rawPassword, paths...)
+	for _, path := range paths {
 		options, err := natsserver.ProcessConfigFile(path)
 		if err != nil {
 			t.Fatalf("parse scoped broker config %s: %v", path, err)
@@ -1280,30 +1235,7 @@ func TestScopedBrokerConfigsParse(t *testing.T) {
 }
 
 func TestScopedBrokerMonitoringBindsLoopback(t *testing.T) {
-	rawPassword := strconv.Quote("0123456789abcdef0123456789abcdef")
-	for _, name := range []string{
-		"AUTH_NATS_PASSWORD", "USER_NATS_PASSWORD", "ORG_NATS_PASSWORD", "BILLING_NATS_PASSWORD", "SESSION_NATS_PASSWORD",
-		"AUDIT_CONTROL_NATS_PASSWORD", "CONTROL_NATS_PROVISIONER_PASSWORD",
-		"AUTH_SHARED_NATS_PASSWORD", "USER_SHARED_NATS_PASSWORD", "ORG_SHARED_NATS_PASSWORD", "BILLING_SHARED_NATS_PASSWORD",
-		"SESSION_SHARED_NATS_PASSWORD", "APPLICATION_CONVEX_CONTROL_NATS_PASSWORD", "CONTROL_SHARED_BRIDGE_PASSWORD",
-		"DOCUMENTS_GDPR_NATS_PASSWORD",
-		"CONTROL_SHARED_NATS_PROVISIONER_PASSWORD",
-		"SESSION_CORE_GDPR_NATS_PASSWORD", "CONVERSATION_CORE_GDPR_NATS_PASSWORD",
-		"QUARRY_CONTROL_GDPR_NATS_PASSWORD", "NOTIFICATION_CORE_GDPR_NATS_PASSWORD",
-		"INDEX_ENGINE_GDPR_NATS_PASSWORD", "EMBEDDING_ENGINE_GDPR_NATS_PASSWORD", "GRAPH_INDEX_GDPR_NATS_PASSWORD",
-		"WIKI_STORE_GDPR_NATS_PASSWORD", "RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD",
-		"DATA_QUALITY_GDPR_NATS_PASSWORD", "DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD",
-		"QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD", "COST_CORE_GDPR_NATS_PASSWORD",
-		"MODEL_GATEWAY_NATS_PASSWORD", "MODEL_SESSION_CORE_NATS_PASSWORD", "MODEL_CAPABILITY_CORE_NATS_PASSWORD",
-		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD", "MODEL_TOOL_COMPLETION_NATS_PASSWORD", "MODEL_COST_CORE_NATS_PASSWORD",
-		"AUDIT_MODEL_NATS_PASSWORD", "MODEL_NATS_PROVISIONER_PASSWORD",
-		"APPLICATION_CONVEX_MODEL_NATS_PASSWORD", "APPLICATION_INSIGHT_MODEL_NATS_PASSWORD",
-		"APPLICATION_CONVERSATION_NATS_PASSWORD", "APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD", "APPLICATION_SOCIAL_NATS_PASSWORD", "APPLICATION_INSIGHT_NATS_PASSWORD",
-		"APPLICATION_LEADS_NATS_PASSWORD", "APPLICATION_NOTIFICATION_NATS_PASSWORD",
-		"AUDIT_APPLICATION_NATS_PASSWORD", "APPLICATION_NATS_PROVISIONER_PASSWORD",
-	} {
-		t.Setenv(name, rawPassword)
-	}
+	rawPassword := "0123456789abcdef0123456789abcdef"
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test path")
@@ -1315,6 +1247,11 @@ func TestScopedBrokerMonitoringBindsLoopback(t *testing.T) {
 		"model":          filepath.Join(controlRoot, "..", "Model Plane", "deploy", "nats.conf"),
 		"application":    filepath.Join(controlRoot, "..", "Application Plane", "nats.conf"),
 	}
+	paths := make([]string, 0, len(configs))
+	for _, path := range configs {
+		paths = append(paths, path)
+	}
+	setScopedBrokerPasswords(t, rawPassword, paths...)
 	for name, path := range configs {
 		options, err := natsserver.ProcessConfigFile(path)
 		if err != nil {
@@ -1364,7 +1301,7 @@ func TestControlReleaseUsesDistinctServicePrincipals(t *testing.T) {
 			!strings.Contains(block, "NATS_PASSWORD: ${"+principal.password+":?") {
 			t.Fatalf("%s is not wired to its scoped principal", principal.service)
 		}
-		if strings.Contains(block, "\n      NATS_TOKEN:") {
+		if composeDeclaresEnvKey(block, "NATS_TOKEN") {
 			t.Fatalf("%s release block still wires legacy local NATS token auth", principal.service)
 		}
 		if !strings.Contains(broker, `user: "`+principal.user+`"`) ||
@@ -1410,19 +1347,14 @@ func TestControlReleaseUsesDistinctServicePrincipals(t *testing.T) {
 
 func TestFreshControlBrokerSupportsScopedDomainAndRequestReplyContracts(t *testing.T) {
 	password := "0123456789abcdef0123456789abcdef"
-	for _, name := range []string{
-		"AUTH_NATS_PASSWORD", "USER_NATS_PASSWORD", "ORG_NATS_PASSWORD",
-		"BILLING_NATS_PASSWORD", "SESSION_NATS_PASSWORD",
-		"AUDIT_CONTROL_NATS_PASSWORD", "CONTROL_NATS_PROVISIONER_PASSWORD",
-	} {
-		t.Setenv(name, strconv.Quote(password))
-	}
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve test path")
 	}
 	controlRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
-	options, err := natsserver.ProcessConfigFile(filepath.Join(controlRoot, "nats.conf"))
+	controlBrokerConfig := filepath.Join(controlRoot, "nats.conf")
+	setScopedBrokerPasswords(t, password, controlBrokerConfig)
+	options, err := natsserver.ProcessConfigFile(controlBrokerConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1567,8 +1499,47 @@ func natsUserConfigBlock(config, user string) (string, error) {
 	return config[start : start+len(marker)+end], nil
 }
 
+// composeServiceIndent reports the indentation a compose file uses for the keys
+// of its top-level `services` map. Control and Application Plane compose files
+// indent with four spaces while Model Plane deploy uses two, so block
+// extraction has to read each file's own convention instead of assuming one.
+func composeServiceIndent(compose string) (string, error) {
+	lines := strings.Split(compose, "\n")
+	servicesLine := -1
+	for index, line := range lines {
+		if strings.TrimRight(line, " \t") == "services:" {
+			servicesLine = index
+			break
+		}
+	}
+	if servicesLine < 0 {
+		return "", errors.New("compose has no top-level services map")
+	}
+	width := 0
+	for _, line := range lines[servicesLine+1:] {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		lineWidth := len(line) - len(strings.TrimLeft(line, " "))
+		if lineWidth == 0 {
+			break
+		}
+		if width == 0 || lineWidth < width {
+			width = lineWidth
+		}
+	}
+	if width == 0 {
+		return "", errors.New("compose services map is empty")
+	}
+	return strings.Repeat(" ", width), nil
+}
+
 func composeServiceBlock(compose, service string) (string, error) {
-	startMarker := "  " + service + ":\n"
+	indent, err := composeServiceIndent(compose)
+	if err != nil {
+		return "", err
+	}
+	startMarker := indent + service + ":\n"
 	start := -1
 	if strings.HasPrefix(compose, startMarker) {
 		start = 0
@@ -1587,12 +1558,96 @@ func composeServiceBlock(compose, service string) (string, error) {
 		}
 		lineStart := offset + next + 1
 		line := rest[lineStart:]
-		if strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && !strings.HasPrefix(line, "  #") {
+		if strings.HasPrefix(line, indent) && !strings.HasPrefix(line, indent+" ") && !strings.HasPrefix(line, indent+"#") {
 			return compose[start : restStart+lineStart-1], nil
 		}
 		offset = lineStart
 	}
 	return compose[start:], nil
+}
+
+// composeNetworkHasAlias reports whether a compose service block joins the named
+// network under the named alias. The mapping form (network key, then `aliases`)
+// is required: attaching through the list form publishes no stable cross-plane
+// name, which is exactly what the Audit buses depend on.
+func composeNetworkHasAlias(block, network, alias string) bool {
+	networkIndent := -1
+	inAliases := false
+	for _, line := range strings.Split(block, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		width := len(line) - len(strings.TrimLeft(line, " \t"))
+		if networkIndent < 0 {
+			if trimmed == network+":" {
+				networkIndent = width
+			}
+			continue
+		}
+		if width <= networkIndent {
+			return false
+		}
+		switch {
+		case trimmed == "aliases:":
+			inAliases = true
+		case inAliases && trimmed == "- "+alias:
+			return true
+		}
+	}
+	return false
+}
+
+// composeDeclaresEnvKey reports whether a compose service block declares the
+// given key (at any indentation) rather than merely mentioning the name inside
+// another key or value.
+func composeDeclaresEnvKey(block, key string) bool {
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), key+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// scopedBrokerPasswordVariable matches the environment variables a NATS
+// configuration substitutes for a scoped principal's password. The `_PASSWORD`
+// suffix, which every broker credential variable carries, keeps `$JS.…` subject
+// literals out of the match.
+var scopedBrokerPasswordVariable = regexp.MustCompile(`\$([A-Z][A-Z0-9_]*_PASSWORD)\b`)
+
+// setScopedBrokerPasswords exports a value for every password variable the given
+// broker configurations reference. The set is derived from the configuration
+// rather than enumerated here on purpose: a plane that adds a principal adds a
+// variable, and an enumerated list would leave it unresolved and fail the whole
+// broker parse instead of testing the Audit contract it is here to test.
+func setScopedBrokerPasswords(t *testing.T, password string, configPaths ...string) {
+	t.Helper()
+	seen := make(map[string]struct{})
+	names := make([]string, 0, 32)
+	for _, path := range configPaths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read scoped broker config %s: %v", path, err)
+		}
+		for _, match := range scopedBrokerPasswordVariable.FindAllStringSubmatch(string(contents), -1) {
+			if _, exists := seen[match[1]]; exists {
+				continue
+			}
+			seen[match[1]] = struct{}{}
+			names = append(names, match[1])
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("no scoped password variables found in %v", configPaths)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		// NATS resolves an environment variable as configuration syntax. Compose
+		// wraps only the broker's copy in quotes so arbitrary generated values
+		// (including numeric/exponent-like prefixes) parse as the exact string.
+		t.Setenv(name, strconv.Quote(password))
+	}
 }
 
 func assertMainPermissionDenied(t *testing.T, connection *nats.Conn, permissionErrors <-chan error, operation string, action func() error) {
