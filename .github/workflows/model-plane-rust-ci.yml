@@ -87,9 +87,11 @@ jobs:
         run: cargo check --workspace --all-targets
 
       # The run-side gate. Compiling a test proves nothing about whether its
-      # assertions hold — or even execute.
-      - name: Run library tests
-        run: cargo test --workspace --lib --no-fail-fast
+      # assertions hold — or even execute. Covers every unit AND integration
+      # target; the one live-stack test (execution-core's browser_agent_e2e)
+      # is correctly #[ignore]d and stays skipped here.
+      - name: Run tests
+        run: cargo test --workspace --no-fail-fast
 
 # Deliberately NOT in this workflow, so nobody mistakes its green for
 # coverage it does not provide:
@@ -106,12 +108,11 @@ jobs:
 #     (execution-core's verification_result_for and ExecutionService::new /
 #     new_with_scheduled_step_verifier, model-gateway's parse_mcp_tool_name).
 #
-#   * Non-lib test EXECUTION. Integration targets are compiled above but not
-#     run, because `cargo test --workspace` is currently red on one
-#     pre-existing failure unrelated to any of the above:
-#     model-gateway's e2e_invoke_chain_test ::
-#     invoke_stream_agentic_reuses_the_prepared_session_run, which fails with
-#     `agent_dispatch_unavailable` (confirmed failing on clean main). Fix or
-#     #[ignore] that test, then promote the last step to
-#     `cargo test --workspace --no-fail-fast`. The genuinely live-stack test
-#     (execution-core's browser_agent_e2e) is already correctly #[ignore]d.
+# Non-lib test execution WAS excluded here when this workflow landed, because
+# model-gateway's e2e_invoke_chain_test ::
+# invoke_stream_agentic_reuses_the_prepared_session_run was red on main. That
+# test asserted `agent_dispatch_rejected` for a setup that actually produces a
+# transport-level `Unavailable`, so it has since been re-pointed at the
+# contract that holds and the `rejected` half given its own test with a mock
+# Execution Core. The full suite is green (2070 passed, 24 ignored), so the
+# run step above is no longer restricted to --lib.
