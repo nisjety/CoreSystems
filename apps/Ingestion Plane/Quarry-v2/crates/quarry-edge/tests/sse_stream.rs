@@ -40,6 +40,7 @@ impl Driver for StubPageDriver {
             headers: vec![("content-type".to_string(), "text/html".to_string())],
             body: b"<html><body><a href=\"/x\">x</a></body></html>".to_vec(),
             duration_ms: 1,
+            served_by: DriverKind::Static,
         })
     }
 }

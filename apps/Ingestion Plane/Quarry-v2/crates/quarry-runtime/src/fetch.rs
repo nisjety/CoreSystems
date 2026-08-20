@@ -23,6 +23,13 @@ pub struct FetchResponse {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub duration_ms: u64,
+    /// The driver that actually produced this response. Set by each
+    /// concrete driver; fallback wrappers (`FallbackDriver`,
+    /// `TransportFallbackDriver`) pass it through untouched. Consumers
+    /// must attribute output to this field, not to `Driver::kind()` on
+    /// the driver they hold — after chain rotation the wrapper's
+    /// `kind()` still reports the planned primary.
+    pub served_by: DriverKind,
 }
 
 pub struct StaticDriver {
@@ -296,6 +303,7 @@ impl StaticDriver {
             headers,
             body,
             duration_ms: start.elapsed().as_millis() as u64,
+            served_by: DriverKind::Static,
         })
     }
 }
