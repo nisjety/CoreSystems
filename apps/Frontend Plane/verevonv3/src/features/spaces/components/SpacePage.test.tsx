@@ -15,6 +15,12 @@ const spacesClient = vi.hoisted(() => ({
   getPersonalSpaceDeletionReceipt: vi.fn(),
   listSpaces: vi.fn(),
   requestPersonalSpaceDeletion: vi.fn(),
+  // ADR-0003: the Agent tab now renders SpaceInstructionsSection, which reads
+  // (and, for an editor/manager/owner, writes) the Space's authored
+  // instructions. Both must exist on the mock or every test in this file
+  // fails at module-resolution time, before it renders anything.
+  getSpaceInstructions: vi.fn(),
+  updateSpaceInstructions: vi.fn(),
 }))
 
 vi.mock('@/shared/api/spaces-client', () => ({
@@ -28,6 +34,8 @@ vi.mock('@/shared/api/spaces-client', () => ({
   getPersonalSpaceDeletionReceipt: spacesClient.getPersonalSpaceDeletionReceipt,
   listSpaces: spacesClient.listSpaces,
   requestPersonalSpaceDeletion: spacesClient.requestPersonalSpaceDeletion,
+  getSpaceInstructions: spacesClient.getSpaceInstructions,
+  updateSpaceInstructions: spacesClient.updateSpaceInstructions,
 }))
 
 vi.mock('@/features/chat/lib/chat-thread-history', () => ({
@@ -86,6 +94,13 @@ describe('SpacePage', () => {
     spacesClient.getSpaceAgents.mockReset()
     spacesClient.getSpaceAgents.mockResolvedValue([])
     spacesClient.getSpaceRoster.mockResolvedValue([])
+    // Default to "nothing authored" so the Agent tab's instructions section
+    // resolves without asserting anything about it here; the section's own
+    // read/write gating is covered server-side in the gateway's tests.
+    spacesClient.getSpaceInstructions.mockReset()
+    spacesClient.getSpaceInstructions.mockResolvedValue('')
+    spacesClient.updateSpaceInstructions.mockReset()
+    spacesClient.updateSpaceInstructions.mockResolvedValue('')
     spacesClient.getSpaceThreads.mockResolvedValue({ ...personalContext, threads: [] })
     spacesClient.listSpaces.mockResolvedValue([personalContext.space])
     chatClient.streamChat.mockReset()
