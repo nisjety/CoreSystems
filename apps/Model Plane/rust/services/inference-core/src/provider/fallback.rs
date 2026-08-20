@@ -402,6 +402,8 @@ impl FallbackChain {
         // Foundry Claude has no deployment-type variable of its own; its region is
         // the only signal, and absent one it stays `Global`.
         let azure_anthropic_residency = classify(cfg.azure_anthropic_region.as_deref(), false);
+        // Cohere has no deployment-type variable either; region is the only signal.
+        let azure_cohere_residency = classify(cfg.azure_cohere_region.as_deref(), false);
 
         for name in &cfg.provider_order {
             match name.as_str() {
@@ -456,6 +458,30 @@ impl FallbackChain {
                                 providers.push(("anthropic".to_owned(), Arc::new(p)));
                                 info!(provider = "anthropic", "provider registered");
                             }
+                        }
+                    }
+                }
+                "cohere" | "azure-cohere" => {
+                    // exclusive_catalog: true — this endpoint serves only its own
+                    // declared deployment, so it can coexist with Azure OpenAI's
+                    // wildcard-ish catalog instead of stealing its traffic (see
+                    // `provider_serves_model`).
+                    if let (Some(endpoint), Some(key)) =
+                        (&cfg.azure_cohere_endpoint, &cfg.azure_cohere_api_key)
+                    {
+                        if let Ok(p) = OpenAiProvider::new_azure_ai_unified(
+                            key.clone(),
+                            endpoint.clone(),
+                            cfg.azure_cohere_api_version.clone(),
+                        ) {
+                            let p = p
+                                .with_identity("cohere", azure_cohere_residency, true)
+                                .with_model_catalog(
+                                    vec![cfg.azure_cohere_deployment.clone()],
+                                    Vec::new(),
+                                );
+                            providers.push(("cohere".to_owned(), Arc::new(p)));
+                            info!(provider = "cohere", "provider registered");
                         }
                     }
                 }

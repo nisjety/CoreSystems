@@ -60,6 +60,35 @@ pub struct InferenceConfig {
     /// (from `AZURE_ANTHROPIC_DEPLOYMENTS`). Used for `list_models`.
     pub azure_anthropic_deployments: Vec<String>,
 
+    /// Azure AI Foundry unified inference endpoint hosting Cohere's `MaaS` chat
+    /// deployment, e.g. `https://core-ai-rg.services.ai.azure.com/models`
+    /// (from `AZURE_COHERE_ENDPOINT`). Every non-self-hosted model must come
+    /// from an Azure AI Foundry deployment — this is Command A Plus's, the
+    /// live successor to the retired "Command R+" model name.
+    pub azure_cohere_endpoint: Option<String>,
+
+    /// API key for the Azure Cohere resource (from `AZURE_COHERE_API_KEY`).
+    /// Kept separate from `azure_openai_api_key` rather than falling back to
+    /// it, matching the Azure Anthropic precedent: same-resource reuse is
+    /// common but not guaranteed, so this must be configured explicitly.
+    pub azure_cohere_api_key: Option<String>,
+
+    /// API version for the unified AI Model Inference route (from
+    /// `AZURE_COHERE_API_VERSION`). Defaults to `2024-05-01-preview`, the
+    /// version live-verified against this account's Cohere deployments.
+    pub azure_cohere_api_version: String,
+
+    /// Deployment name of the Command A Plus chat model on the Azure Cohere
+    /// resource (from `AZURE_COHERE_DEPLOYMENT`). Chat-only: this provider
+    /// declares no embedding catalog.
+    pub azure_cohere_deployment: String,
+
+    /// Explicit residency region of the Azure Cohere resource (from
+    /// `AZURE_COHERE_REGION`). Same rationale as
+    /// [`Self::azure_anthropic_region`] — a separate resource, so it does not
+    /// inherit `azure_openai_region`'s geography.
+    pub azure_cohere_region: Option<String>,
+
     /// Maximum retries per provider before falling back.
     pub max_retries_per_provider: u32,
 
@@ -157,6 +186,9 @@ impl InferenceConfig {
     /// # Errors
     ///
     /// Returns an error if `INFERENCE_PROVIDER_ORDER` is unset.
+    // Linear env-var-to-field reads plus the residency/ZDR wiring; reads
+    // top-to-bottom and isn't worth fragmenting across helpers.
+    #[allow(clippy::too_many_lines)]
     pub fn from_env() -> Result<Self> {
         let provider_order = std::env::var("INFERENCE_PROVIDER_ORDER")
             .unwrap_or_else(|_| "anthropic,openai".to_owned())
@@ -211,6 +243,7 @@ impl InferenceConfig {
 
         let azure_openai_region = trimmed_env("AZURE_OPENAI_REGION");
         let azure_anthropic_region = trimmed_env("AZURE_ANTHROPIC_REGION");
+        let azure_cohere_region = trimmed_env("AZURE_COHERE_REGION");
 
         // One `today` for the whole boot so every provider surface evaluates its
         // in-force window against the same date.
@@ -265,6 +298,12 @@ impl InferenceConfig {
                     "claude-opus-4-8",
                 ],
             ),
+            azure_cohere_endpoint: std::env::var("AZURE_COHERE_ENDPOINT").ok(),
+            azure_cohere_api_key: std::env::var("AZURE_COHERE_API_KEY").ok(),
+            azure_cohere_api_version: std::env::var("AZURE_COHERE_API_VERSION")
+                .unwrap_or_else(|_| "2024-05-01-preview".to_owned()),
+            azure_cohere_deployment: std::env::var("AZURE_COHERE_DEPLOYMENT")
+                .unwrap_or_else(|_| "cohere-command-a-plus".to_owned()),
             max_retries_per_provider: max_retries,
             cache_ttl_secs: cache_ttl,
             verevon_intent_enabled,
@@ -274,6 +313,7 @@ impl InferenceConfig {
             router_policy_refresh_secs,
             azure_openai_region,
             azure_anthropic_region,
+            azure_cohere_region,
             azure_openai_zdr,
             azure_anthropic_zdr,
             azure_openai_deployment_type,

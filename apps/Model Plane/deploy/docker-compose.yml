@@ -573,7 +573,7 @@ services:
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
-      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
+      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
@@ -600,6 +600,16 @@ services:
       AZURE_ANTHROPIC_ENDPOINT: ${AZURE_ANTHROPIC_ENDPOINT:-}
       AZURE_ANTHROPIC_API_KEY: ${AZURE_ANTHROPIC_API_KEY:-}
       AZURE_ANTHROPIC_DEPLOYMENTS: ${AZURE_ANTHROPIC_DEPLOYMENTS:-}
+      # Azure AI Foundry Cohere (core-ai-rg, same resource as AZURE_OPENAI_*
+      # above but the unified "AI Model Inference API" route, not the classic
+      # /openai/deployments/{name} shape). When set, the `cohere` provider
+      # slot serves Command A Plus — exclusive_catalog, so it never absorbs
+      # another provider's traffic.
+      AZURE_COHERE_ENDPOINT: ${AZURE_COHERE_ENDPOINT:-}
+      AZURE_COHERE_API_KEY: ${AZURE_COHERE_API_KEY:-}
+      AZURE_COHERE_API_VERSION: ${AZURE_COHERE_API_VERSION:-2024-05-01-preview}
+      AZURE_COHERE_DEPLOYMENT: ${AZURE_COHERE_DEPLOYMENT:-cohere-command-a-plus}
+      AZURE_COHERE_REGION: ${AZURE_COHERE_REGION:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
       OPENAI_CHAT_MODELS: ${OPENAI_CHAT_MODELS:-}
