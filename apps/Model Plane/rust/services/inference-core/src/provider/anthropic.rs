@@ -9,10 +9,13 @@
 //!   and an `api-version` query param both 401 — do not add them). This is the
 //!   fix for the direct API returning 400 "credit balance too low".
 
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use super::zdr::ZdrAttestation;
 use super::{InferChunk, InferRequest, InferResponse, ModelInfo, ProviderError, ProviderRouter};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -50,6 +53,17 @@ pub struct AnthropicProvider {
     client: reqwest::Client,
     api_key: String,
     flavor: AnthropicFlavor,
+    /// Evidence-bound ZDR attestation for this exact resource, or `None` when the
+    /// operator makes no ZDR claim.
+    ///
+    /// Before this field existed, `capabilities()` hardcoded `supports_zdr: false`
+    /// with no way to override it, so *every* ZDR-flagged request was skipped past
+    /// both Claude routes — direct and Azure Foundry — and a chain with no other
+    /// ZDR-capable provider returned `ZdrUnavailable`. The exclusion was silent:
+    /// nothing distinguished "Claude cannot do ZDR" from "Claude was not asked".
+    zdr: Option<Arc<ZdrAttestation>>,
+    /// The strongest residency guarantee this resource honors.
+    residency: super::Residency,
 }
 
 impl AnthropicProvider {
@@ -70,6 +84,8 @@ impl AnthropicProvider {
             client: crate::provider::provider_http_client(),
             api_key,
             flavor: AnthropicFlavor::Direct,
+            zdr: None,
+            residency: super::Residency::Global,
         })
     }
 
@@ -103,7 +119,27 @@ impl AnthropicProvider {
             client: crate::provider::provider_http_client(),
             api_key,
             flavor: AnthropicFlavor::Azure { endpoint, models },
+            zdr: None,
+            residency: super::Residency::Global,
         })
+    }
+
+    /// Attach an evidence-bound ZDR attestation to this exact resource.
+    ///
+    /// Mirrors [`super::openai::OpenAiProvider::with_zdr_attestation`]. The
+    /// direct `api.anthropic.com` route is never promoted implicitly: a caller
+    /// must pass an attestation that named that surface.
+    #[must_use]
+    pub fn with_zdr_attestation(mut self, attestation: Option<Arc<ZdrAttestation>>) -> Self {
+        self.zdr = attestation;
+        self
+    }
+
+    /// Declare the strongest residency guarantee this resource honors.
+    #[must_use]
+    pub const fn with_residency(mut self, residency: super::Residency) -> Self {
+        self.residency = residency;
+        self
     }
 
     /// The Messages API URL for the active flavor.
@@ -519,12 +555,24 @@ impl ProviderRouter for AnthropicProvider {
         // Claude: tools, vision, extended thinking, streaming; 200k context.
         // No first-party embeddings API.
         super::ProviderCapabilities {
+            provider_id: self.provider_name().to_owned(),
+            // `claude` addresses either flavor; `anthropic` is the historical
+            // spelling callers send for the Foundry deployment.
+            aliases: match &self.flavor {
+                AnthropicFlavor::Direct => vec!["claude".to_owned()],
+                AnthropicFlavor::Azure { .. } => {
+                    vec!["claude".to_owned(), "anthropic".to_owned()]
+                }
+            },
+            model_family: super::ModelFamily::Anthropic,
+            residency: self.residency,
+            exclusive_catalog: false,
             supports_tools: true,
             supports_vision: true,
             supports_thinking: true,
             supports_streaming: true,
             supports_embeddings: false,
-            supports_zdr: false,
+            supports_zdr: self.zdr.is_some(),
             modalities: vec!["chat".to_owned(), "vision".to_owned()],
             max_context_tokens: 200_000,
             max_output_tokens: 8_192,
@@ -1198,5 +1246,101 @@ mod flavor_tests {
         assert!(is_cheap_claude("claude-3-5-haiku-20241022"));
         assert!(!is_cheap_claude("claude-opus-4-8"));
         assert!(!is_cheap_claude("claude-sonnet-4-6"));
+    }
+}
+
+#[cfg(test)]
+mod zdr_capability_tests {
+    use std::sync::Arc;
+
+    use super::{AnthropicProvider, ProviderRouter as _};
+    use crate::provider::zdr::{RawAttestation, ZdrAttestation};
+
+    fn attestation() -> Arc<ZdrAttestation> {
+        let mut raw = RawAttestation {
+            resource_id: "/subscriptions/abc/rg/eu/foundry-claude".to_owned(),
+            approval_ref: "MAM-2026-0043".to_owned(),
+            effective_date: "2026-06-01".to_owned(),
+            review_by: "2027-06-01".to_owned(),
+            reviewer: "ima@aquatiq.com".to_owned(),
+            digest: String::new(),
+        };
+        // Use the shared canonical digest rather than recomputing it here: a second
+        // implementation of the canonical form is a second thing that can drift.
+        raw.digest = crate::provider::zdr::canonical_digest(&raw);
+        Arc::new(
+            ZdrAttestation::validate(
+                "AZURE_ANTHROPIC",
+                &raw,
+                chrono::NaiveDate::from_ymd_opt(2026, 8, 17).expect("static date"),
+            )
+            .expect("fixture attestation must validate"),
+        )
+    }
+
+    /// The regression this change exists for: `capabilities()` previously
+    /// hardcoded `supports_zdr: false` with no builder, so the fallback chain
+    /// skipped *both* Claude routes for every ZDR-flagged request and a chain
+    /// with no other ZDR-capable provider returned `ZdrUnavailable`. Nothing
+    /// distinguished "Claude cannot do ZDR" from "Claude was never asked".
+    #[test]
+    fn attested_azure_foundry_claude_advertises_zdr() {
+        let provider = AnthropicProvider::new_azure(
+            "k",
+            "https://res.services.ai.azure.com",
+            vec!["claude-sonnet-4-6".to_owned()],
+        )
+        .expect("azure provider")
+        .with_zdr_attestation(Some(attestation()));
+        assert!(
+            provider.capabilities().supports_zdr,
+            "an attested Foundry Claude resource must be eligible for ZDR traffic"
+        );
+    }
+
+    /// Deny-by-default still holds: no attestation, no ZDR. Geography, transport
+    /// encryption and a caller's `zdr` bit are not evidence of Anthropic's
+    /// retention behavior on this resource.
+    #[test]
+    fn unattested_azure_foundry_claude_does_not_advertise_zdr() {
+        let provider = AnthropicProvider::new_azure(
+            "k",
+            "https://res.services.ai.azure.com",
+            vec!["claude-sonnet-4-6".to_owned()],
+        )
+        .expect("azure provider");
+        assert!(
+            !provider.capabilities().supports_zdr,
+            "an unattested resource must never advertise ZDR"
+        );
+    }
+
+    /// The direct `api.anthropic.com` route is never promoted implicitly — an
+    /// attestation has to be handed to it deliberately, and the default is off.
+    #[test]
+    fn direct_anthropic_defaults_to_no_zdr() {
+        let provider = AnthropicProvider::new("k").expect("direct provider");
+        assert!(!provider.capabilities().supports_zdr);
+    }
+
+    /// `zdr` participates in the advertised feature flags the SPA gates on, so a
+    /// newly attested resource must surface there too rather than only in the
+    /// routing decision.
+    #[test]
+    fn attested_provider_advertises_the_zdr_feature_flag() {
+        let provider = AnthropicProvider::new_azure(
+            "k",
+            "https://res.services.ai.azure.com",
+            vec!["claude-sonnet-4-6".to_owned()],
+        )
+        .expect("azure provider")
+        .with_zdr_attestation(Some(attestation()));
+        assert!(
+            provider
+                .capabilities()
+                .feature_flags()
+                .contains(&"zdr".to_owned()),
+            "an attested provider must advertise the zdr feature family"
+        );
     }
 }

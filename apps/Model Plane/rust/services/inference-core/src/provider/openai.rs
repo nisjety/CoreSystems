@@ -1,9 +1,12 @@
 //! OpenAI-compatible provider — calls a configurable base URL with SSE streaming.
 
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use super::zdr::ZdrAttestation;
 use super::{
     narrow_f64, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
     ProviderError, ProviderRouter,
@@ -26,6 +29,20 @@ enum OpenAiFlavor {
         endpoint: String,
         api_version: String,
     },
+    /// Azure AI Foundry's unified "AI Model Inference API" — the route `MaaS`
+    /// deployments (Cohere Command A Plus, `DeepSeek`, etc.) speak in this
+    /// account, confirmed live: `POST {endpoint}/chat/completions?api-version=…`
+    /// with `api-key` auth and the deployment name in the JSON body's `model`
+    /// field, not the URL path. Distinct from both existing flavors: it needs
+    /// Azure's `api-key` header (not `OpenAi`'s bearer token) but `OpenAi`'s
+    /// path-only URL shape (not Azure's `/openai/deployments/{model}/...`).
+    /// The request/response bodies are genuinely OpenAI-chat-completions-shaped
+    /// (verified against a real deployment), so this reuses every existing
+    /// builder/parser below rather than adding a new module.
+    UnifiedAzureAi {
+        endpoint: String,
+        api_version: String,
+    },
 }
 
 /// OpenAI-compatible inference provider.
@@ -36,7 +53,17 @@ pub struct OpenAiProvider {
     flavor: OpenAiFlavor,
     chat_models: Vec<String>,
     embedding_models: Vec<String>,
-    zdr_confirmed: bool,
+    /// Evidence-bound ZDR attestation for this exact deployment, or `None` when
+    /// the operator makes no ZDR claim.
+    zdr: Option<Arc<ZdrAttestation>>,
+    /// Registry id override. `None` uses the flavor-derived name (`openai` /
+    /// `azure-openai`); a third-party OpenAI-compatible endpoint sets its own so
+    /// it is addressable alongside them instead of colliding on one id.
+    provider_id: Option<String>,
+    /// The strongest residency guarantee this endpoint honors.
+    residency: super::Residency,
+    /// Whether this endpoint serves only its declared catalog.
+    exclusive_catalog: bool,
 }
 
 impl OpenAiProvider {
@@ -69,7 +96,10 @@ impl OpenAiProvider {
                 "text-embedding-3-small".to_owned(),
                 "text-embedding-3-large".to_owned(),
             ],
-            zdr_confirmed: false,
+            zdr: None,
+            provider_id: None,
+            residency: super::Residency::Global,
+            exclusive_catalog: false,
         })
     }
 
@@ -116,17 +146,119 @@ impl OpenAiProvider {
             },
             chat_models: Vec::new(),
             embedding_models: Vec::new(),
-            zdr_confirmed: false,
+            zdr: None,
+            provider_id: None,
+            residency: super::Residency::Global,
+            exclusive_catalog: false,
         })
     }
 
-    /// Mark this exact deployment as covered by an independently verified ZDR
-    /// contract. The configuration default is false and direct `OpenAI` routes
-    /// are never promoted implicitly.
+    /// Create a provider for Azure AI Foundry's unified "AI Model Inference
+    /// API" — the wire shape `MaaS` deployments (Cohere Command A Plus, etc.)
+    /// speak, distinct from classic Azure `OpenAI` deployments. Confirmed
+    /// live: `POST {endpoint}/chat/completions?api-version=…` with `api-key`
+    /// auth and the deployment name in the request body's `model` field.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Unavailable`] if `api_key` or `endpoint` is empty.
+    pub fn new_azure_ai_unified(
+        api_key: impl Into<String>,
+        endpoint: impl Into<String>,
+        api_version: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let api_key = api_key.into();
+        if api_key.is_empty() {
+            return Err(ProviderError::Unavailable(
+                "azure ai unified provider api key is empty".to_owned(),
+            ));
+        }
+
+        let endpoint = endpoint.into();
+        if endpoint.trim().is_empty() {
+            return Err(ProviderError::Unavailable(
+                "azure ai unified provider endpoint is empty".to_owned(),
+            ));
+        }
+
+        let api_version = api_version.into();
+        let api_version = if api_version.trim().is_empty() {
+            "2024-05-01-preview".to_owned()
+        } else {
+            api_version
+        };
+
+        Ok(Self {
+            client: crate::provider::provider_http_client(),
+            api_key,
+            flavor: OpenAiFlavor::UnifiedAzureAi {
+                endpoint,
+                api_version,
+            },
+            chat_models: Vec::new(),
+            embedding_models: Vec::new(),
+            zdr: None,
+            provider_id: None,
+            residency: super::Residency::Global,
+            exclusive_catalog: false,
+        })
+    }
+
+    /// Attach an evidence-bound ZDR attestation to this exact deployment.
+    ///
+    /// Replaces the previous `with_zdr_confirmed(bool)`: a boolean recorded only
+    /// that someone typed `true`, which survives a copy-pasted `.env` and a stale
+    /// deployment. The attestation names the resource, the retention-exception
+    /// approval, its effective date and its reviewer, and is digest-bound over
+    /// all four — see [`ZdrAttestation`]. Direct `OpenAI` routes are never
+    /// promoted implicitly.
     #[must_use]
-    pub fn with_zdr_confirmed(mut self, confirmed: bool) -> Self {
-        self.zdr_confirmed = confirmed;
+    pub fn with_zdr_attestation(mut self, attestation: Option<Arc<ZdrAttestation>>) -> Self {
+        self.zdr = attestation;
         self
+    }
+
+    /// Register this endpoint under its own id, with its own residency and a
+    /// catalog it must not stray outside.
+    ///
+    /// This is what makes a second OpenAI-compatible provider addressable. Before
+    /// it, every OpenAI-shaped provider registered as `openai`/`azure-openai`,
+    /// matched the same hints, and the first one registered won every non-Claude
+    /// model — so a sovereign endpoint could not coexist with Azure at all.
+    #[must_use]
+    pub fn with_identity(
+        mut self,
+        provider_id: impl Into<String>,
+        residency: super::Residency,
+        exclusive_catalog: bool,
+    ) -> Self {
+        self.provider_id = Some(provider_id.into());
+        self.residency = residency;
+        self.exclusive_catalog = exclusive_catalog;
+        self
+    }
+
+    /// Declare this endpoint's residency without changing its id.
+    #[must_use]
+    pub const fn with_residency(mut self, residency: super::Residency) -> Self {
+        self.residency = residency;
+        self
+    }
+
+    /// `provider_hint` synonyms that should resolve to this provider.
+    ///
+    /// Only the built-in flavors carry synonyms: `openai`/`azure` are historical
+    /// spellings callers already send for the Azure deployment. A custom endpoint
+    /// gets none, so its id is the only way to address it and it can never absorb
+    /// a hint meant for Azure.
+    fn hint_aliases(&self) -> Vec<String> {
+        if self.provider_id.is_some() {
+            return Vec::new();
+        }
+        match &self.flavor {
+            OpenAiFlavor::OpenAi { .. } | OpenAiFlavor::UnifiedAzureAi { .. } => Vec::new(),
+            OpenAiFlavor::Azure { .. } => vec!["openai".to_owned(), "azure".to_owned()],
+        }
     }
 
     /// Override the startup model/deployment catalogue returned by `ListModels`.
@@ -155,6 +287,14 @@ impl OpenAiProvider {
                 model,
                 api_version
             ),
+            OpenAiFlavor::UnifiedAzureAi {
+                endpoint,
+                api_version,
+            } => format!(
+                "{}/chat/completions?api-version={}",
+                endpoint.trim_end_matches('/'),
+                api_version
+            ),
         }
     }
 
@@ -172,20 +312,34 @@ impl OpenAiProvider {
                 model,
                 api_version
             ),
+            OpenAiFlavor::UnifiedAzureAi {
+                endpoint,
+                api_version,
+            } => format!(
+                "{}/embeddings?api-version={}",
+                endpoint.trim_end_matches('/'),
+                api_version
+            ),
         }
     }
 
-    fn provider_name(&self) -> &'static str {
+    fn provider_name(&self) -> &str {
+        if let Some(id) = &self.provider_id {
+            return id;
+        }
         match &self.flavor {
             OpenAiFlavor::OpenAi { .. } => "openai",
             OpenAiFlavor::Azure { .. } => "azure-openai",
+            OpenAiFlavor::UnifiedAzureAi { .. } => "azure-ai-unified",
         }
     }
 
     fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.flavor {
             OpenAiFlavor::OpenAi { .. } => request.bearer_auth(&self.api_key),
-            OpenAiFlavor::Azure { .. } => request.header("api-key", &self.api_key),
+            OpenAiFlavor::Azure { .. } | OpenAiFlavor::UnifiedAzureAi { .. } => {
+                request.header("api-key", &self.api_key)
+            }
         }
     }
 }
@@ -334,6 +488,20 @@ fn is_reasoning_model(model: &str) -> bool {
     normalized.starts_with("gpt-5") || normalized.starts_with("o1") || normalized.starts_with("o3")
 }
 
+/// Strip Cohere Command A's `<|START_TEXT|>`/`<|END_TEXT|>` sentinels from a
+/// non-streamed `message.content` string (confirmed live: every response
+/// wraps its visible answer in these; neither GPT-4o/GPT-5 nor Claude do
+/// this). Each side is stripped independently so a `max_tokens`-truncated
+/// response — which may carry the opening sentinel with no closing one —
+/// still comes out clean.
+fn strip_cohere_text_sentinels(content: &str) -> String {
+    let without_prefix = content.strip_prefix("<|START_TEXT|>").unwrap_or(content);
+    without_prefix
+        .strip_suffix("<|END_TEXT|>")
+        .unwrap_or(without_prefix)
+        .to_owned()
+}
+
 /// Classify a deployment id into a UI modality group. The Azure chat-deployment
 /// catalog (`AZURE_OPENAI_CHAT_DEPLOYMENTS`) may legitimately include
 /// image/video/transcribe deployments on the same resource; group them so the
@@ -372,20 +540,45 @@ impl ProviderRouter for OpenAiProvider {
     fn capabilities(&self) -> super::ProviderCapabilities {
         // GPT-4o / GPT-5 / o-series: tools, vision, reasoning, streaming, and
         // a first-party embeddings API. Conservative context/output bounds.
+        // The unified-Azure-AI flavor fronts MaaS chat deployments (e.g.
+        // Cohere Command A Plus) with no vision/embeddings arm of their own.
+        let (
+            supports_vision,
+            supports_embeddings,
+            modalities,
+            max_context_tokens,
+            max_output_tokens,
+        ) = match &self.flavor {
+            OpenAiFlavor::UnifiedAzureAi { .. } => {
+                (false, false, vec!["chat".to_owned()], 128_000, 8_192)
+            }
+            OpenAiFlavor::OpenAi { .. } | OpenAiFlavor::Azure { .. } => (
+                true,
+                true,
+                vec![
+                    "chat".to_owned(),
+                    "vision".to_owned(),
+                    "embeddings".to_owned(),
+                ],
+                128_000,
+                16_384,
+            ),
+        };
         super::ProviderCapabilities {
+            provider_id: self.provider_name().to_owned(),
+            aliases: self.hint_aliases(),
+            model_family: super::ModelFamily::OpenAiCompatible,
+            residency: self.residency,
+            exclusive_catalog: self.exclusive_catalog,
             supports_tools: true,
-            supports_vision: true,
+            supports_vision,
             supports_thinking: true,
             supports_streaming: true,
-            supports_embeddings: true,
-            supports_zdr: self.zdr_confirmed,
-            modalities: vec![
-                "chat".to_owned(),
-                "vision".to_owned(),
-                "embeddings".to_owned(),
-            ],
-            max_context_tokens: 128_000,
-            max_output_tokens: 16_384,
+            supports_embeddings,
+            supports_zdr: self.zdr.is_some(),
+            modalities,
+            max_context_tokens,
+            max_output_tokens,
         }
     }
 
@@ -426,10 +619,15 @@ impl ProviderRouter for OpenAiProvider {
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-        let content = json["choices"][0]["message"]["content"]
+        let raw_content = json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or("")
             .to_owned();
+        let content = if matches!(self.flavor, OpenAiFlavor::UnifiedAzureAi { .. }) {
+            strip_cohere_text_sentinels(&raw_content)
+        } else {
+            raw_content
+        };
         let model_used = json["model"].as_str().unwrap_or("unknown").to_owned();
         let stop_reason = json["choices"][0]["finish_reason"]
             .as_str()
@@ -489,6 +687,7 @@ impl ProviderRouter for OpenAiProvider {
 
         let request_id = req.request_id.clone();
         let model = req.model.clone();
+        let strip_text_sentinels = matches!(self.flavor, OpenAiFlavor::UnifiedAzureAi { .. });
         let (tx, rx) = mpsc::channel(64);
 
         tokio::spawn(async move {
@@ -553,6 +752,17 @@ impl ProviderRouter for OpenAiProvider {
                                 .as_str()
                                 .unwrap_or("")
                                 .to_owned();
+                            // Command A Plus streams `<|START_TEXT|>`/`<|END_TEXT|>`
+                            // as their own isolated delta chunks bracketing the
+                            // visible answer (confirmed live) — drop them rather
+                            // than forward the literal sentinel to the caller.
+                            let delta = if strip_text_sentinels
+                                && matches!(delta.as_str(), "<|START_TEXT|>" | "<|END_TEXT|>")
+                            {
+                                String::new()
+                            } else {
+                                delta
+                            };
                             // Stream content as it arrives (done=false). The
                             // terminal `done` (with real token counts) is emitted
                             // only on [DONE] / stream end so the usage chunk is read.
@@ -598,7 +808,10 @@ impl ProviderRouter for OpenAiProvider {
             ));
         }
 
-        let include_model = matches!(&self.flavor, OpenAiFlavor::OpenAi { .. });
+        let include_model = matches!(
+            &self.flavor,
+            OpenAiFlavor::OpenAi { .. } | OpenAiFlavor::UnifiedAzureAi { .. }
+        );
         let body = build_embedding_request_body(req, include_model);
         let url = self.embeddings_url(&req.model);
 
@@ -788,6 +1001,105 @@ mod tests {
             provider.embeddings_url("text-embedding-3-large"),
             "https://example.openai.azure.com/openai/deployments/text-embedding-3-large/embeddings?api-version=2025-01-01-preview",
         );
+    }
+
+    #[test]
+    fn unified_azure_ai_chat_url_puts_model_in_body_not_path() {
+        let provider = OpenAiProvider::new_azure_ai_unified(
+            "key",
+            "https://core-ai-rg.services.ai.azure.com/models/",
+            "2024-05-01-preview",
+        )
+        .expect("unified azure ai provider");
+
+        // Deliberately NOT parameterized by model, unlike the classic Azure
+        // flavor above — the deployment name belongs in the JSON body only.
+        assert_eq!(
+            provider.chat_completions_url("cohere-command-a-plus"),
+            "https://core-ai-rg.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview",
+        );
+    }
+
+    #[test]
+    fn unified_azure_ai_embeddings_url_puts_model_in_body_not_path() {
+        let provider = OpenAiProvider::new_azure_ai_unified(
+            "key",
+            "https://core-ai-rg.services.ai.azure.com/models",
+            "2024-05-01-preview",
+        )
+        .expect("unified azure ai provider");
+
+        assert_eq!(
+            provider.embeddings_url("embed-v-4-0"),
+            "https://core-ai-rg.services.ai.azure.com/models/embeddings?api-version=2024-05-01-preview",
+        );
+    }
+
+    #[test]
+    fn unified_azure_ai_uses_api_key_header_not_bearer_token() {
+        let provider = OpenAiProvider::new_azure_ai_unified(
+            "secret-key",
+            "https://core-ai-rg.services.ai.azure.com/models",
+            "2024-05-01-preview",
+        )
+        .expect("unified azure ai provider");
+
+        let built = provider
+            .apply_auth(provider.client.get("https://example.invalid"))
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            built.headers().get("api-key").and_then(|v| v.to_str().ok()),
+            Some("secret-key"),
+        );
+        assert!(built
+            .headers()
+            .get(reqwest::header::AUTHORIZATION)
+            .is_none());
+    }
+
+    #[test]
+    fn strip_cohere_text_sentinels_removes_both_markers() {
+        assert_eq!(
+            strip_cohere_text_sentinels("<|START_TEXT|>Red  \nBlue  \nGreen<|END_TEXT|>"),
+            "Red  \nBlue  \nGreen",
+        );
+    }
+
+    #[test]
+    fn strip_cohere_text_sentinels_handles_truncated_response_missing_end_marker() {
+        // A max_tokens-truncated response can carry the opening sentinel with
+        // no closing one — each side strips independently, so this must not
+        // silently drop the (still useful, if incomplete) visible text.
+        assert_eq!(
+            strip_cohere_text_sentinels("<|START_TEXT|>Red  \nBl"),
+            "Red  \nBl",
+        );
+    }
+
+    #[test]
+    fn strip_cohere_text_sentinels_is_a_noop_on_plain_content() {
+        assert_eq!(strip_cohere_text_sentinels("OK"), "OK");
+    }
+
+    #[test]
+    fn unified_azure_ai_carries_no_hint_aliases() {
+        let provider = OpenAiProvider::new_azure_ai_unified(
+            "key",
+            "https://core-ai-rg.services.ai.azure.com/models",
+            "2024-05-01-preview",
+        )
+        .expect("unified azure ai provider")
+        .with_identity("cohere", super::super::Residency::Global, true)
+        .with_model_catalog(vec!["cohere-command-a-plus".to_owned()], Vec::new());
+
+        let caps = provider.capabilities();
+        assert_eq!(caps.provider_id, "cohere");
+        assert!(caps.aliases.is_empty());
+        assert!(caps.exclusive_catalog);
+        assert!(!caps.supports_embeddings);
+        assert!(!caps.supports_vision);
+        assert_eq!(caps.modalities, vec!["chat".to_owned()]);
     }
 
     #[test]

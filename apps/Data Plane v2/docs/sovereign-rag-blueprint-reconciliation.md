@@ -55,7 +55,7 @@ note above.** Detail: `visual-rag-integration-plan.md`.
 | Blueprint component | Reality in CoreSystem | Verdict |
 |---|---|---|
 | **Dragonfly "semantic cache"** (entry firewall + *semantic vector match*) | ~~Dragonfly has **no RediSearch → cannot do vector search**. Exact-match KV only.~~ **Corrected 2026-07-10: the deployed `df-v1.37.0` DOES support real `FT.CREATE ... VECTOR HNSW` + `FT.SEARCH ... KNN` (live-tested, real cosine ranking) — this premise is outdated.** The *semantic* cache is still implemented as **Qdrant `semantic_response_cache`** (built; authz-scoped in PR-A; currently `SEMANTIC_CACHE_ENABLED=false` in the live env). | ⚠️ Split still stands, but re-justify on "Qdrant is already the vector SoR, avoid a second synced ANN store" — not on Dragonfly being incapable. |
-| **Not Diamond meta-router** | Model Plane already has an intent/router layer (cost-core complexity scoring, model-router, inference-core `FallbackChain` Budget/Balance/Genius). | ⚠️ **Plane boundary + sovereignty.** This is **Model Plane**, not Data Plane, and partly exists. "Not Diamond" is an external **US SaaS** called per query — contradicts the sovereignty thesis and adds latency. Use a **local** classifier (the blueprint itself says "localized random forest"). |
+| **Not Diamond meta-router** | Model Plane already has an intent/router layer: `inference-core/src/provider/intent.rs` (`classify()`/`choose()`/`resolve()`, the heuristic complexity scorer + mode/budget resolution) and `routing_policy.rs` (the same weights/table externalized into a runtime-tunable, session-core-persisted `RoutingPolicy`), consumed as the first step of every unary/streaming call via `provider/fallback.rs`'s `FallbackChain::infer`/`infer_stream`. | ✅ **Plane boundary respected, and fully done — not "partly exists."** This is **Model Plane**, not Data Plane. "Not Diamond" itself has zero code references anywhere in this repo (2026-08-19 full-repo grep) — it exists only as prose in this doc and `sovereign-rag-phased-plan.md` proposing what to replace it with. The **local** classifier those docs ask for (the blueprint's own "localized random forest" alternative) is already live and satisfies the ask: pure CPU, deterministic, sub-10ms, no network call in the hot path, no training data. Nothing further to build for the router itself. |
 | **Cohere Command R+ reasoner + LangGraph/Agno loop** | Model Plane **execution-core** (Rust agent loop, governed multi-tool, HITL, runs-history) + inference-core. | ⚠️ **Plane boundary.** Reasoning/agent loop is **Model Plane** and already exists in Rust. Don't bolt on a second (Python LangGraph/Agno) runtime — add Command R+ as an inference-core **provider**. |
 | **Local Llama 3.3 via vLLM** | Not present. | ✅ **Net-new** — but a **Model Plane** inference-core provider, not a Data Plane component. |
 | **Qdrant SoR — ColQwen2 multivectors** | Qdrant SoR is built. We implemented **Cohere Embed v4 single-vector** (1536), *deliberately* to avoid self-hosted GPU + the multivector/MaxSim rewrite. | 🔱 **THE fork.** Embed v4 (built, managed, Azure-EU) vs ColQwen2 (sovereign, GPU, multivector — reverses PR-B/C/D and re-adds the multivector work we cut). See "Decision 1". |
@@ -101,7 +101,8 @@ router, Llama/vLLM, Command R+, LangGraph, Redis session → **Model Plane** cha
   your highest-recall arm; the blueprint omits it.
 - **Drop pgvector** (Qdrant is the vector SoR). **No second Redis** (Dragonfly +
   session-core cover it).
-- "Not Diamond" → **local classifier** (sovereign, <10ms, no external call).
+- "Not Diamond" → **local classifier** (sovereign, <10ms, no external call) — **already shipped**
+  in Model Plane's `inference-core/src/provider/intent.rs` + `routing_policy.rs`; nothing to build.
 
 ## Recommended sequence
 
@@ -115,13 +116,15 @@ router, Llama/vLLM, Command R+, LangGraph, Redis session → **Model Plane** cha
    the embedder-choice fork itself is still open.)
 3. **Fold graph into the fused RRF path** + (optionally) **add Meilisearch** as the
    keyword arm → matches the blueprint's 4-arm retrieval (Data Plane).
-4. **Model Plane track** (separate): local router classifier, Command R+ provider,
-   vLLM Llama provider — only if/when reasoning moves in-house.
+4. **Model Plane track** (separate): local router classifier (done — see reconciliation table
+   above), Command R+ provider, vLLM Llama provider — the latter two only if/when reasoning
+   moves in-house.
 
 ## On the blueprint's 3 "deep dives"
 - **#1 GPU/infra sizing** — *blocked on Decision 1*. Only meaningful if ColQwen2/Llama
   self-host is chosen. Premature otherwise.
 - **#2 Postgres schema & Graph-RAG** — *useful now, mostly decoupled*. Graph is the one
   retrieval arm not yet fused; designing its schema + fusion is real outstanding work.
-- **#3 Not Diamond routing** — *Model Plane*; reframe as a **local** classifier design
-  (don't introduce an external US router into a sovereign system).
+- **#3 Not Diamond routing** — *Model Plane*; **not a deep dive anymore** — the local classifier
+  it would have designed already exists and is live (`intent.rs` + `routing_policy.rs`, wired at
+  `fallback.rs`). No external US router was ever introduced.

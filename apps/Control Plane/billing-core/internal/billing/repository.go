@@ -693,3 +693,51 @@ func NewDefaultAccount(orgID string) Account {
 		UpdatedAt:          time.Now().UTC(),
 	}
 }
+
+// --- D-A billing-group mirror (inheritance only; see billing_group.go) ---
+
+// UpsertBillingGroup mirrors an auth-core billing-consolidation grant.
+func (r *Repository) UpsertBillingGroup(ctx context.Context, group BillingGroup) error {
+	const query = `
+		INSERT INTO billing_group_memberships (org_id, host_org_id, org_group_id, billing_consolidation, updated_at)
+		VALUES ($1, $2, $3, $4, now())
+		ON CONFLICT (org_id) DO UPDATE SET
+			host_org_id = EXCLUDED.host_org_id,
+			org_group_id = EXCLUDED.org_group_id,
+			billing_consolidation = EXCLUDED.billing_consolidation,
+			updated_at = now()
+	`
+	if _, err := r.pool.Exec(ctx, query, group.OrgID, group.HostOrgID,
+		group.OrgGroupID, group.BillingConsolidation); err != nil {
+		return fmt.Errorf("upsert billing group: %w", err)
+	}
+	return nil
+}
+
+// DeleteBillingGroup removes an org's inheritance, restoring its own plan.
+func (r *Repository) DeleteBillingGroup(ctx context.Context, orgID string) error {
+	if _, err := r.pool.Exec(ctx,
+		`DELETE FROM billing_group_memberships WHERE org_id = $1`, orgID); err != nil {
+		return fmt.Errorf("delete billing group: %w", err)
+	}
+	return nil
+}
+
+// GetBillingGroup returns the org's mirrored grant, or nil when it has none.
+func (r *Repository) GetBillingGroup(ctx context.Context, orgID string) (*BillingGroup, error) {
+	const query = `
+		SELECT org_id, host_org_id, org_group_id, billing_consolidation
+		FROM billing_group_memberships
+		WHERE org_id = $1 AND billing_consolidation
+	`
+	var group BillingGroup
+	err := r.pool.QueryRow(ctx, query, orgID).Scan(
+		&group.OrgID, &group.HostOrgID, &group.OrgGroupID, &group.BillingConsolidation)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get billing group: %w", err)
+	}
+	return &group, nil
+}

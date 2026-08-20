@@ -96,6 +96,41 @@ func (s *Subscriber) Start(ctx context.Context) error {
 		return err
 	}
 
+	// D-A: mirror billing-consolidation grants. Published directly by auth-core,
+	// which owns the org_group_grant tables -- unlike organization.created/
+	// .updated above, which reach this bus as org-core re-broadcasts. All three
+	// services share NATS_URL=nats://controlplane-nats:4222, which is what makes
+	// the subject reachable.
+	//
+	// Plain subscribe rather than the JetStream plan-change consumer: a missed
+	// grant notification is a staleness problem the next change corrects, and
+	// until then the read path falls back to the org's own plan -- it can never
+	// grant a tier nobody paid for. Losing an inheritance is visible to the
+	// customer; wrongly granting one is not.
+	if _, err = s.client.Subscribe("organization.billing_group.changed", func(msg *nats.Msg) {
+		payload, decodeErr := decodeEventData(msg.Data)
+		if decodeErr != nil {
+			log.Printf("billing-core invalid organization.billing_group.changed payload: %v", decodeErr)
+			return
+		}
+
+		orgID := readString(payload, "organization_id", "organizationId")
+		if orgID == "" {
+			return
+		}
+		hostOrgID := readString(payload, "host_organization_id", "hostOrganizationId")
+		orgGroupID := readString(payload, "org_group_id", "orgGroupId")
+		consolidation := readBool(payload, "billing_consolidation", "billingConsolidation")
+
+		if applyErr := s.service.ApplyBillingGroupChange(
+			ctx, orgID, hostOrgID, orgGroupID, consolidation,
+		); applyErr != nil {
+			log.Printf("billing-core failed to apply billing group change: %v", applyErr)
+		}
+	}); err != nil {
+		return err
+	}
+
 	if err = s.startPlanChangeConsumer(ctx); err != nil {
 		return err
 	}
@@ -291,6 +326,17 @@ func readString(payload map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// readBool defaults to false, so a payload that omits the flag is treated as
+// "not granted" rather than silently granting inheritance.
+func readBool(payload map[string]interface{}, keys ...string) bool {
+	for _, key := range keys {
+		if value, ok := payload[key].(bool); ok {
+			return value
+		}
+	}
+	return false
 }
 
 func readMap(payload map[string]interface{}, key string) map[string]interface{} {

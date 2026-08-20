@@ -12,7 +12,8 @@ use super::routing_policy::RoutingPolicy;
 use super::{
     anthropic::AnthropicProvider, endpoint_region_is_non_eu, intent, is_eu_region,
     normalize_region_token, openai::OpenAiProvider, EmbedRequest, EmbedResponse, InferChunk,
-    InferRequest, InferResponse, ModelInfo, ProviderCapabilities, ProviderError, ProviderRouter,
+    InferRequest, InferResponse, ModelFamily, ModelInfo, ProviderCapabilities, ProviderError,
+    ProviderRouter, Residency,
 };
 use crate::cache::PromptCache;
 use crate::config::InferenceConfig;
@@ -91,6 +92,15 @@ pub struct FallbackChain {
     defaults: ProviderDefaults,
     /// What this deployment can actually serve, used to prune tool-ladder rungs.
     deployed: DeployedModels,
+    /// Per-provider model catalog, snapshotted once at boot from each provider's
+    /// `list_models`.
+    ///
+    /// Keyed by registry id, unlike [`DeployedModels`], which has one slot per
+    /// *family* and therefore cannot distinguish two providers of the same family.
+    /// That family-level granularity is why a second OpenAI-compatible provider
+    /// could not previously coexist with Azure. Only consulted for providers that
+    /// declare `exclusive_catalog`.
+    catalogs: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// The deployment names that gate each model family on this resource.
@@ -279,18 +289,46 @@ impl ThrottleState {
 /// still reach one `OpenAI` rung on a resource with all four Claude deployments.
 const MAX_TOOL_LADDER_STEPS: usize = 4;
 
-/// Whether a registered provider can serve the requested model. Anthropic-shaped
-/// providers serve only `claude-*`; `OpenAI`-shaped providers serve everything
-/// else. An unspecified model is served by any provider (it resolves to that
-/// provider's default). This stops the chain wasting an attempt — and emitting a
-/// spurious 404 — by sending a Claude model to the `OpenAI` surface or an
-/// `OpenAI` model to the Anthropic surface.
-fn provider_serves_model(provider_name: &str, model: &str) -> bool {
+/// Whether a registered provider can serve the requested model.
+///
+/// Anthropic-family providers serve only `claude-*`; `OpenAI`-compatible ones
+/// serve everything else. An unspecified model is served by any provider (it
+/// resolves to that provider's default). This stops the chain wasting an attempt
+/// — and emitting a spurious 404 — by sending a Claude model to the `OpenAI`
+/// surface or vice versa.
+///
+/// The family now comes from the provider's own declaration rather than from
+/// `matches!(provider_name, "anthropic" | "azure-anthropic")`. That literal was
+/// the reason a third OpenAI-compatible provider could not be added: every such
+/// provider registered under one of two known names, so the chain could not tell
+/// them apart and the first registered absorbed every non-Claude model.
+///
+/// A provider that declares `exclusive_catalog` is additionally held to its own
+/// catalog. Sovereign providers must: routing an unrecognised model to one either
+/// 404s or gets silently served from a brokered upstream outside the residency
+/// boundary the tier was sold on — and the latter looks like success.
+fn provider_serves_model(
+    caps: &ProviderCapabilities,
+    catalog: Option<&[String]>,
+    model: &str,
+) -> bool {
     if is_unspecified_model(model) {
         return true;
     }
-    let anthropic_provider = matches!(provider_name, "anthropic" | "azure-anthropic");
-    anthropic_provider == is_anthropic_model(model)
+    let family_matches = match caps.model_family {
+        ModelFamily::Anthropic => is_anthropic_model(model),
+        ModelFamily::OpenAiCompatible => !is_anthropic_model(model),
+    };
+    if !family_matches {
+        return false;
+    }
+    if !caps.exclusive_catalog {
+        return true;
+    }
+    // Exclusive: an empty catalog serves nothing rather than everything. A
+    // sovereign provider misconfigured with no catalog must go quiet, not become
+    // a wildcard.
+    catalog.is_some_and(|models| models.iter().any(|known| known.eq_ignore_ascii_case(model)))
 }
 
 impl FallbackChain {
@@ -307,10 +345,65 @@ impl FallbackChain {
     #[allow(clippy::too_many_lines)]
     pub fn from_config(cfg: &InferenceConfig) -> Self {
         let mut providers: Vec<(String, BoxedProvider)> = Vec::new();
+
+        // Validated at config load; Arc'd once so each registration site shares
+        // one instance rather than cloning four Strings per provider.
+        let azure_openai_zdr = cfg.azure_openai_zdr.clone().map(Arc::new);
+        let azure_anthropic_zdr = cfg.azure_anthropic_zdr.clone().map(Arc::new);
+
+        // Correlate each attestation with the endpoint it is supposed to cover. The
+        // digest cannot do this: it binds the fields to each other, not to a host.
+        if let (Some(zdr), Some(endpoint)) = (
+            azure_openai_zdr.as_ref(),
+            cfg.azure_openai_endpoint.as_deref(),
+        ) {
+            zdr.warn_on_endpoint_mismatch("azure-openai", endpoint);
+        }
+        if let (Some(zdr), Some(endpoint)) = (
+            azure_anthropic_zdr.as_ref(),
+            cfg.azure_anthropic_endpoint.as_deref(),
+        ) {
+            zdr.warn_on_endpoint_mismatch("azure-anthropic", endpoint);
+        }
+
         let has_explicit_azure = cfg
             .provider_order
             .iter()
             .any(|name| matches!(name.as_str(), "azure" | "azure-openai"));
+
+        // Residency per Azure resource, classified independently.
+        //
+        // These are separate Azure resources -- the checked-in config points them
+        // at core-ai-rg.cognitiveservices.azure.com and
+        // cloude-ai-resource.services.ai.azure.com -- so neither may inherit the
+        // other's geography. An earlier version of this code did exactly that, and
+        // would have declared Foundry Claude EU-resident on the strength of
+        // AZURE_OPENAI_REGION alone.
+        //
+        // `Eu` requires positive evidence: a known-EU region AND, where the
+        // deployment type is declared, a non-global one. Unknown is classified
+        // `Global` rather than promoted, because "we cannot prove this stays in the
+        // EU" and "this stays in the EU" are different claims and only one of them
+        // is true. Phase 0's deployment-type gate deliberately only warns when the
+        // type is unset; promoting the same silence to an affirmative `Eu` here
+        // would turn a known blind spot into a stated guarantee.
+        let classify = |region: Option<&str>, declared_global: bool| -> Residency {
+            let region_is_eu = region
+                .map(normalize_region_token)
+                .is_some_and(|region| is_eu_region(&region));
+            Residency::classify(region_is_eu, declared_global)
+        };
+        let azure_declared_global = cfg
+            .azure_openai_deployment_type
+            .as_deref()
+            .is_some_and(crate::config::deployment_type_is_global);
+        let azure_openai_residency =
+            classify(cfg.azure_openai_region.as_deref(), azure_declared_global);
+        // Foundry Claude has no deployment-type variable of its own; its region is
+        // the only signal, and absent one it stays `Global`.
+        let azure_anthropic_residency = classify(cfg.azure_anthropic_region.as_deref(), false);
+        // Cohere has no deployment-type variable either; region is the only signal.
+        let azure_cohere_residency = classify(cfg.azure_cohere_region.as_deref(), false);
 
         for name in &cfg.provider_order {
             match name.as_str() {
@@ -324,7 +417,8 @@ impl FallbackChain {
                             cfg.azure_openai_api_version.clone(),
                         ) {
                             let p = p
-                                .with_zdr_confirmed(cfg.azure_openai_zdr_confirmed)
+                                .with_zdr_attestation(azure_openai_zdr.clone())
+                                .with_residency(azure_openai_residency)
                                 .with_model_catalog(
                                     cfg.azure_openai_chat_deployments.clone(),
                                     cfg.azure_openai_embedding_deployments.clone(),
@@ -349,6 +443,9 @@ impl FallbackChain {
                             endpoint.clone(),
                             cfg.azure_anthropic_deployments.clone(),
                         ) {
+                            let p = p
+                                .with_zdr_attestation(azure_anthropic_zdr.clone())
+                                .with_residency(azure_anthropic_residency);
                             providers.push(("azure-anthropic".to_owned(), Arc::new(p)));
                             info!(provider = "azure-anthropic", "provider registered");
                             registered_azure_anthropic = true;
@@ -364,6 +461,30 @@ impl FallbackChain {
                         }
                     }
                 }
+                "cohere" | "azure-cohere" => {
+                    // exclusive_catalog: true — this endpoint serves only its own
+                    // declared deployment, so it can coexist with Azure OpenAI's
+                    // wildcard-ish catalog instead of stealing its traffic (see
+                    // `provider_serves_model`).
+                    if let (Some(endpoint), Some(key)) =
+                        (&cfg.azure_cohere_endpoint, &cfg.azure_cohere_api_key)
+                    {
+                        if let Ok(p) = OpenAiProvider::new_azure_ai_unified(
+                            key.clone(),
+                            endpoint.clone(),
+                            cfg.azure_cohere_api_version.clone(),
+                        ) {
+                            let p = p
+                                .with_identity("cohere", azure_cohere_residency, true)
+                                .with_model_catalog(
+                                    vec![cfg.azure_cohere_deployment.clone()],
+                                    Vec::new(),
+                                );
+                            providers.push(("cohere".to_owned(), Arc::new(p)));
+                            info!(provider = "cohere", "provider registered");
+                        }
+                    }
+                }
                 "openai" => {
                     let mut registered_azure = false;
                     if !has_explicit_azure {
@@ -376,7 +497,8 @@ impl FallbackChain {
                                 cfg.azure_openai_api_version.clone(),
                             ) {
                                 let p = p
-                                    .with_zdr_confirmed(cfg.azure_openai_zdr_confirmed)
+                                    .with_zdr_attestation(azure_openai_zdr.clone())
+                                    .with_residency(azure_openai_residency)
                                     .with_model_catalog(
                                         cfg.azure_openai_chat_deployments.clone(),
                                         cfg.azure_openai_embedding_deployments.clone(),
@@ -421,6 +543,52 @@ impl FallbackChain {
         let configured_region =
             normalize_region_token(cfg.azure_openai_region.as_deref().unwrap_or_default());
         let azure_registered = providers.iter().any(|(name, _)| name == "azure-openai");
+
+        // Global-deployment gate — STARTUP fail-loud (deny-by-default).
+        //
+        // A `Global`/`GlobalStandard` Azure deployment routes to whichever region
+        // has capacity, so data can be at rest in the European geography while
+        // *inference* runs anywhere in the world. The region check above cannot
+        // see this: an EU-region resource can still host a Global deployment, and
+        // the endpoint host carries neither fact. Left unchecked it silently voids
+        // the EU-boundary claim for every request, which is precisely the failure
+        // this gate exists to make impossible.
+        //
+        // Unset is a warning rather than a rejection: existing deployments
+        // predate the variable, and refusing to boot on absence would take the
+        // running stack down for a claim it may not even be making. Explicitly
+        // declaring Global is a rejection.
+        if azure_registered {
+            match cfg.azure_openai_deployment_type.as_deref() {
+                Some(declared) if crate::config::deployment_type_is_global(declared) => {
+                    assert!(
+                        cfg.allow_global_deployment,
+                        "global deployment residency: AZURE_OPENAI_DEPLOYMENT_TYPE={declared:?} \
+                         processes inference in any Azure region worldwide, which voids the EU \
+                         residency claim, and MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT is off. \
+                         Refusing to boot. Re-deploy the model as DataZoneStandard (EU) or a \
+                         regional Standard deployment, or set \
+                         MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT=1 to explicitly accept worldwide \
+                         processing."
+                    );
+                    warn!(
+                        deployment_type = %declared,
+                        "AZURE_OPENAI_DEPLOYMENT_TYPE is global and MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT \
+                         is set — inference may be processed outside the EU"
+                    );
+                }
+                Some(declared) => {
+                    info!(deployment_type = %declared, "azure openai deployment type declared");
+                }
+                None => {
+                    warn!(
+                        "AZURE_OPENAI_DEPLOYMENT_TYPE is unset — cannot prove the Azure OpenAI \
+                         deployment keeps inference inside the EU. Set it (e.g. DataZoneStandard) \
+                         so the global-deployment gate can enforce the residency claim."
+                    );
+                }
+            }
+        }
         if azure_registered && !cfg.allow_non_eu_embedding {
             let region_is_non_eu =
                 !configured_region.is_empty() && !is_eu_region(&configured_region);
@@ -507,6 +675,57 @@ impl FallbackChain {
             }
         }
 
+        // Residency posture, recorded per provider at boot.
+        //
+        // This warns rather than aborting, matching the EU embedding gate's actual
+        // precedent: that gate fires only when it can *positively determine* a
+        // non-EU region, and lets an unknown one through. Aborting on `Global`
+        // would also abort on merely-unproven, which after the classification above
+        // includes every deployment that has not yet set a region -- i.e. the
+        // running stack. A crash loop is a worse outcome than an honest log line,
+        // and nothing is silently misrepresented: `Global` is what gets recorded
+        // and logged.
+        //
+        // Real enforcement belongs on the request path, where a caller asks for a
+        // minimum residency and a provider that cannot meet it is skipped the way
+        // a non-ZDR provider already is. That needs a residency field on
+        // InferRequest, which needs the proto, and is deferred with the rest of the
+        // request-side work (strategy doc Phase 2). Until then this is disclosure,
+        // not a control -- and it is labelled as such rather than dressed up.
+        for (name, provider) in &providers {
+            let declared = provider.capabilities_dyn().residency;
+            if declared > Residency::Global {
+                info!(provider = %name, residency = declared.as_str(), "provider residency declared");
+            } else if cfg.allow_global_residency_providers {
+                info!(
+                    provider = %name,
+                    "provider declares no residency commitment; explicitly accepted via \
+                     MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY"
+                );
+            } else {
+                warn!(
+                    provider = %name,
+                    "provider declares NO residency commitment: traffic to it may be processed \
+                     outside the EU/EEA. Set its region (AZURE_OPENAI_REGION / \
+                     AZURE_ANTHROPIC_REGION) to an EU region, or set \
+                     MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY=1 to record this as accepted."
+                );
+            }
+        }
+
+        // Snapshot each provider's catalog once, keyed by registry id.
+        let catalogs = providers
+            .iter()
+            .map(|(name, provider)| {
+                let models = provider
+                    .list_models_dyn()
+                    .into_iter()
+                    .map(|model| model.id)
+                    .collect();
+                (name.clone(), models)
+            })
+            .collect();
+
         Self {
             providers,
             max_retries: cfg.max_retries_per_provider,
@@ -517,6 +736,7 @@ impl FallbackChain {
             residency,
             defaults: ProviderDefaults::from_config(cfg),
             deployed,
+            catalogs,
         }
     }
 
@@ -530,7 +750,21 @@ impl FallbackChain {
             enabled: false,
             ..RoutingPolicy::default()
         };
+        // Snapshot catalogs the same way `from_config` does, so an exclusive-catalog
+        // provider behaves identically under test and in production.
+        let catalogs = providers
+            .iter()
+            .map(|(name, provider)| {
+                let models = provider
+                    .list_models_dyn()
+                    .into_iter()
+                    .map(|model| model.id)
+                    .collect();
+                (name.clone(), models)
+            })
+            .collect();
         Self {
+            catalogs,
             providers,
             max_retries,
             cache: Arc::new(PromptCache::new(300)),
@@ -615,19 +849,27 @@ impl FallbackChain {
         self.providers.len()
     }
 
-    fn provider_matches(name: &str, hint: &str) -> bool {
-        // Normalise: lowercase + treat '_' and '-' as equivalent. Phase 3 B-spike
-        // root cause: a caller sending `azure_openai` (underscore) matched zero
-        // providers (registry id is `azure-openai`), yielding AllExhausted(0) with
-        // no server log. Normalising both sides makes the hop robust to either form.
-        let hint = hint.trim().to_ascii_lowercase().replace('_', "-");
-        let name = name.to_ascii_lowercase().replace('_', "-");
-        hint.is_empty()
-            || hint == name
-            || (hint == "openai" && name == "azure-openai")
-            || (hint == "azure" && name == "azure-openai")
-            || (hint == "anthropic" && name == "azure-anthropic")
-            || (hint == "claude" && (name == "anthropic" || name == "azure-anthropic"))
+    /// Whether `hint` addresses the provider registered as `name`.
+    ///
+    /// Aliases now come from the provider's own `capabilities().aliases` rather
+    /// than a fixed table here. The table hardcoded that `openai` and `azure` mean
+    /// `azure-openai` and that `anthropic` means `azure-anthropic`, so a new
+    /// provider was unaddressable until someone extended it — and any new
+    /// OpenAI-compatible provider would have been silently captured by the
+    /// `openai` alias meant for Azure.
+    ///
+    /// Normalisation is retained: lowercase, and `_` treated as `-`. Phase 3
+    /// B-spike root cause was a caller sending `azure_openai` (underscore) while
+    /// the registry id is `azure-openai`, matching zero providers and yielding
+    /// `AllExhausted(0)` with no server log.
+    fn hint_matches(hint: &str, name: &str, aliases: &[String]) -> bool {
+        let normalise = |value: &str| value.trim().to_ascii_lowercase().replace('_', "-");
+        let hint = normalise(hint);
+        if hint.is_empty() {
+            return true;
+        }
+        let name = normalise(name);
+        hint == name || aliases.iter().any(|alias| normalise(alias) == hint)
     }
 
     /// Default chat model for a registered provider, used when the request
@@ -640,6 +882,11 @@ impl FallbackChain {
             "anthropic" => super::anthropic::DEFAULT_ANTHROPIC_MODEL,
             _ => super::openai::DEFAULT_OPENAI_MODEL,
         }
+    }
+
+    /// This provider's boot-snapshotted catalog, if it has one.
+    fn catalog_for(&self, provider_name: &str) -> Option<&[String]> {
+        self.catalogs.get(provider_name).map(Vec::as_slice)
     }
 
     /// Whether this deployment is known to be able to serve `model`. Unknown
@@ -789,17 +1036,20 @@ impl FallbackChain {
         throttle: &mut ThrottleState,
     ) -> Option<InferResponse> {
         for (name, provider) in &self.providers {
-            if !Self::provider_matches(name, &req.provider_hint) {
+            // One capabilities() read per provider, reused by all three gates
+            // below: it allocates, and the ZDR gate already paid for it.
+            let caps = provider.capabilities_dyn();
+            if !Self::hint_matches(&req.provider_hint, name, &caps.aliases) {
                 continue;
             }
             // Skip providers that cannot serve the requested model family — a
             // `claude-*` model must not hit the OpenAI surface (it would 404 the
             // deployment) and vice-versa. Unspecified models pass (they resolve
             // to the provider's default below).
-            if !provider_serves_model(name, model) {
+            if !provider_serves_model(&caps, self.catalog_for(name), model) {
                 continue;
             }
-            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+            if req.zdr && !caps.supports_zdr {
                 warn!(
                     provider = %name,
                     request_id = %req.request_id,
@@ -992,13 +1242,14 @@ impl FallbackChain {
         throttle: &mut ThrottleState,
     ) -> Option<mpsc::Receiver<InferChunk>> {
         for (name, provider) in &self.providers {
-            if !Self::provider_matches(name, &req.provider_hint) {
+            let caps = provider.capabilities_dyn();
+            if !Self::hint_matches(&req.provider_hint, name, &caps.aliases) {
                 continue;
             }
-            if !provider_serves_model(name, model) {
+            if !provider_serves_model(&caps, self.catalog_for(name), model) {
                 continue;
             }
-            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+            if req.zdr && !caps.supports_zdr {
                 warn!(
                     provider = %name,
                     request_id = %req.request_id,
@@ -1097,10 +1348,11 @@ impl FallbackChain {
         let mut total_attempts: u32 = 0;
 
         for (name, provider) in &self.providers {
-            if !Self::provider_matches(name, &req.provider_hint) {
+            let caps = provider.capabilities_dyn();
+            if !Self::hint_matches(&req.provider_hint, name, &caps.aliases) {
                 continue;
             }
-            if req.zdr && !provider.capabilities_dyn().supports_zdr {
+            if req.zdr && !caps.supports_zdr {
                 warn!(
                     provider = %name,
                     request_id = %req.request_id,
@@ -1181,7 +1433,9 @@ impl FallbackChain {
     pub fn list_models(&self, modality: &str, provider: &str) -> Vec<ModelInfo> {
         self.providers
             .iter()
-            .filter(|(name, _)| Self::provider_matches(name, provider))
+            .filter(|(name, candidate)| {
+                Self::hint_matches(provider, name, &candidate.capabilities_dyn().aliases)
+            })
             .flat_map(|(_, provider)| provider.list_models_dyn())
             .filter(|model| modality.is_empty() || model.modality == modality)
             .collect()
@@ -1260,39 +1514,149 @@ mod resolution_tests {
         );
     }
 
+    /// Capabilities for a provider of `family`, as the real providers declare
+    /// them. Routing is now driven by these declarations rather than by matching
+    /// the registry-name string, so the tests below assert on declarations too.
+    fn caps_for(family: ModelFamily, aliases: &[&str]) -> ProviderCapabilities {
+        ProviderCapabilities {
+            model_family: family,
+            aliases: aliases.iter().map(|a| (*a).to_owned()).collect(),
+            residency: Residency::Eu,
+            ..ProviderCapabilities::default()
+        }
+    }
+
+    fn anthropic_caps() -> ProviderCapabilities {
+        caps_for(ModelFamily::Anthropic, &["claude", "anthropic"])
+    }
+
+    fn openai_caps() -> ProviderCapabilities {
+        caps_for(ModelFamily::OpenAiCompatible, &["openai", "azure"])
+    }
+
     #[test]
     fn model_family_gating() {
-        // Claude models only on the Anthropic-shaped providers.
-        assert!(provider_serves_model("anthropic", "claude-haiku-4-5"));
-        assert!(provider_serves_model("azure-anthropic", "claude-opus-4-8"));
-        assert!(!provider_serves_model("azure-openai", "claude-haiku-4-5"));
-        assert!(!provider_serves_model("openai", "claude-sonnet-4-6"));
+        // Claude models only on the Anthropic-family providers.
+        assert!(provider_serves_model(
+            &anthropic_caps(),
+            None,
+            "claude-haiku-4-5"
+        ));
+        assert!(provider_serves_model(
+            &anthropic_caps(),
+            None,
+            "claude-opus-4-8"
+        ));
+        assert!(!provider_serves_model(
+            &openai_caps(),
+            None,
+            "claude-haiku-4-5"
+        ));
+        assert!(!provider_serves_model(
+            &openai_caps(),
+            None,
+            "claude-sonnet-4-6"
+        ));
 
-        // Non-Claude models only on the OpenAI-shaped providers.
-        assert!(provider_serves_model("azure-openai", "gpt-4o-mini"));
-        assert!(provider_serves_model("azure-openai", "model-router"));
-        assert!(provider_serves_model("openai", "deepseek-v3-2"));
-        assert!(!provider_serves_model("anthropic", "gpt-4o-mini"));
-        assert!(!provider_serves_model("azure-anthropic", "model-router"));
+        // Non-Claude models only on the OpenAI-compatible providers.
+        assert!(provider_serves_model(&openai_caps(), None, "gpt-4o-mini"));
+        assert!(provider_serves_model(&openai_caps(), None, "model-router"));
+        assert!(provider_serves_model(&openai_caps(), None, "deepseek-v3-2"));
+        assert!(!provider_serves_model(
+            &anthropic_caps(),
+            None,
+            "gpt-4o-mini"
+        ));
+        assert!(!provider_serves_model(
+            &anthropic_caps(),
+            None,
+            "model-router"
+        ));
 
         // Unspecified models pass on every provider (resolve to its default).
-        for p in ["anthropic", "azure-anthropic", "openai", "azure-openai"] {
-            assert!(provider_serves_model(p, ""));
-            assert!(provider_serves_model(p, "verevon-auto"));
+        for caps in [anthropic_caps(), openai_caps()] {
+            assert!(provider_serves_model(&caps, None, ""));
+            assert!(provider_serves_model(&caps, None, "verevon-auto"));
         }
+    }
+
+    /// A sovereign provider must serve only what it actually hosts. Routing an
+    /// unrecognised model to one either 404s or gets silently served from a
+    /// brokered upstream outside the residency boundary the tier was sold on —
+    /// and the second failure mode looks like success.
+    #[test]
+    fn exclusive_catalog_provider_serves_only_its_own_models() {
+        let caps = ProviderCapabilities {
+            model_family: ModelFamily::OpenAiCompatible,
+            residency: Residency::Norway,
+            exclusive_catalog: true,
+            ..ProviderCapabilities::default()
+        };
+        let catalog = vec!["lynx-instruct-30b".to_owned(), "norskgpt-8b".to_owned()];
+
+        assert!(provider_serves_model(
+            &caps,
+            Some(&catalog),
+            "lynx-instruct-30b"
+        ));
+        // Case-insensitive, matching the non-exclusive catalog check.
+        assert!(provider_serves_model(
+            &caps,
+            Some(&catalog),
+            "LYNX-INSTRUCT-30B"
+        ));
+        // In-family but not hosted here: must NOT be accepted.
+        assert!(!provider_serves_model(&caps, Some(&catalog), "gpt-4o-mini"));
+        // Out-of-family stays refused by the family gate.
+        assert!(!provider_serves_model(
+            &caps,
+            Some(&catalog),
+            "claude-haiku-4-5"
+        ));
+    }
+
+    /// An exclusive provider with no catalog must go quiet rather than become a
+    /// wildcard — a misconfigured sovereign endpoint absorbing every model is the
+    /// worst possible failure here.
+    #[test]
+    fn exclusive_catalog_with_no_catalog_serves_nothing() {
+        let caps = ProviderCapabilities {
+            model_family: ModelFamily::OpenAiCompatible,
+            residency: Residency::Norway,
+            exclusive_catalog: true,
+            ..ProviderCapabilities::default()
+        };
+        assert!(!provider_serves_model(&caps, None, "gpt-4o-mini"));
+        assert!(!provider_serves_model(&caps, Some(&[]), "gpt-4o-mini"));
+        // An unspecified model still resolves to the provider's own default.
+        assert!(provider_serves_model(&caps, None, ""));
     }
 
     #[test]
     fn anthropic_hint_matches_azure_anthropic() {
-        assert!(FallbackChain::provider_matches(
+        let aliases = anthropic_caps().aliases;
+        assert!(FallbackChain::hint_matches(
+            "anthropic",
             "azure-anthropic",
-            "anthropic"
+            &aliases
         ));
-        assert!(FallbackChain::provider_matches("azure-anthropic", "claude"));
-        assert!(FallbackChain::provider_matches("anthropic", "claude"));
-        assert!(FallbackChain::provider_matches("azure-openai", "azure"));
+        assert!(FallbackChain::hint_matches(
+            "claude",
+            "azure-anthropic",
+            &aliases
+        ));
+        assert!(FallbackChain::hint_matches("claude", "anthropic", &aliases));
+        assert!(FallbackChain::hint_matches(
+            "azure",
+            "azure-openai",
+            &openai_caps().aliases
+        ));
         // A claude hint must not match the OpenAI surface.
-        assert!(!FallbackChain::provider_matches("azure-openai", "claude"));
+        assert!(!FallbackChain::hint_matches(
+            "claude",
+            "azure-openai",
+            &openai_caps().aliases
+        ));
     }
 
     #[test]
@@ -1300,26 +1664,106 @@ mod resolution_tests {
         // Phase 3 B-spike regression: a caller sending `azure_openai` (underscore)
         // must match the `azure-openai` provider id. Before normalisation this
         // matched zero providers → AllExhausted(0) with no server log.
-        assert!(FallbackChain::provider_matches(
+        let openai = openai_caps().aliases;
+        let anthropic = anthropic_caps().aliases;
+        assert!(FallbackChain::hint_matches(
+            "azure_openai",
             "azure-openai",
-            "azure_openai"
+            &openai
         ));
-        assert!(FallbackChain::provider_matches(
+        assert!(FallbackChain::hint_matches(
+            "AZURE_OPENAI",
             "azure-openai",
-            "AZURE_OPENAI"
+            &openai
         ));
-        assert!(FallbackChain::provider_matches(
+        assert!(FallbackChain::hint_matches(
+            "azure_anthropic",
             "azure-anthropic",
-            "azure_anthropic"
+            &anthropic
         ));
         // Hyphen/underscore equivalence must not over-match across surfaces.
-        assert!(!FallbackChain::provider_matches("azure-openai", "claude"));
+        assert!(!FallbackChain::hint_matches(
+            "claude",
+            "azure-openai",
+            &openai
+        ));
+    }
+
+    /// A provider declaring no aliases is addressable only by its own id. This is
+    /// what stops a newly added OpenAI-compatible provider from being captured by
+    /// the `openai`/`azure` aliases that the Azure deployment claims — the exact
+    /// collision that made a second such provider impossible before.
+    #[test]
+    fn custom_provider_is_addressable_only_by_its_own_id() {
+        let no_aliases: Vec<String> = Vec::new();
+        assert!(FallbackChain::hint_matches(
+            "bineric",
+            "bineric",
+            &no_aliases
+        ));
+        assert!(FallbackChain::hint_matches("", "bineric", &no_aliases));
+        // The Azure aliases must not reach it.
+        assert!(!FallbackChain::hint_matches(
+            "openai",
+            "bineric",
+            &no_aliases
+        ));
+        assert!(!FallbackChain::hint_matches(
+            "azure",
+            "bineric",
+            &no_aliases
+        ));
+        // And its id must not reach Azure.
+        assert!(!FallbackChain::hint_matches(
+            "bineric",
+            "azure-openai",
+            &openai_caps().aliases
+        ));
+    }
+
+    /// Residency is ordered so a request can express a minimum with `>=`, and so
+    /// the registration gate can reject "no commitment" with one comparison.
+    #[test]
+    fn residency_is_ordered_weakest_to_strongest() {
+        assert!(Residency::Norway > Residency::Eu);
+        assert!(Residency::Eu > Residency::Global);
+        assert_eq!(Residency::default(), Residency::Global);
+    }
+
+    #[test]
+    fn residency_parses_operator_tokens_and_rejects_typos() {
+        assert_eq!(Residency::parse("norway"), Some(Residency::Norway));
+        assert_eq!(Residency::parse("SOVEREIGN"), Some(Residency::Norway));
+        assert_eq!(Residency::parse(" eu "), Some(Residency::Eu));
+        assert_eq!(Residency::parse("eu_resident"), Some(Residency::Eu));
+        assert_eq!(Residency::parse("global"), Some(Residency::Global));
+        // A typo must not silently become "no commitment".
+        assert_eq!(Residency::parse("noway"), None);
+        assert_eq!(Residency::parse(""), None);
     }
 
     /// Records the model it was invoked with so tests can assert resolution.
     struct RecordingProvider {
         seen_model: Arc<Mutex<Option<String>>>,
         zdr_supported: bool,
+        /// Which family this double stands in for.
+        ///
+        /// Routing reads the family from the provider's own declaration rather
+        /// than from its registry name, so a double registered as
+        /// `azure-anthropic` must *say* it is Anthropic-family or the chain will
+        /// correctly refuse every `claude-*` model. `Default` gives
+        /// `OpenAiCompatible`, so Claude-serving doubles set this explicitly.
+        family: ModelFamily,
+    }
+
+    impl Default for RecordingProvider {
+        fn default() -> Self {
+            Self {
+                seen_model: Arc::new(Mutex::new(None)),
+                zdr_supported: false,
+                family: ModelFamily::OpenAiCompatible,
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -1327,6 +1771,10 @@ mod resolution_tests {
         fn capabilities(&self) -> crate::provider::ProviderCapabilities {
             crate::provider::ProviderCapabilities {
                 supports_zdr: self.zdr_supported,
+                model_family: self.family,
+                // Doubles are registered under real ids; declare EU so the
+                // residency registration gate is not what these tests exercise.
+                residency: Residency::Eu,
                 ..crate::provider::ProviderCapabilities::default()
             }
         }
@@ -1357,6 +1805,7 @@ mod resolution_tests {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen,
             zdr_supported: false,
+            family: ModelFamily::Anthropic,
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
     }
@@ -1409,6 +1858,7 @@ mod resolution_tests {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
             zdr_supported: false,
+            ..RecordingProvider::default()
         });
         let chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1)
@@ -1437,6 +1887,7 @@ mod resolution_tests {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
             zdr_supported: false,
+            ..RecordingProvider::default()
         });
         // new_with_providers defaults intent_enabled = false.
         let chain =
@@ -1457,10 +1908,12 @@ mod resolution_tests {
         let unverified: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: unverified_seen.clone(),
             zdr_supported: false,
+            ..RecordingProvider::default()
         });
         let verified: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: verified_seen.clone(),
             zdr_supported: true,
+            ..RecordingProvider::default()
         });
         let chain = FallbackChain::new_with_providers(
             vec![
@@ -1484,6 +1937,7 @@ mod resolution_tests {
         let unavailable: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: unavailable_seen.clone(),
             zdr_supported: false,
+            ..RecordingProvider::default()
         });
         let unavailable_chain =
             FallbackChain::new_with_providers(vec![("openai".to_owned(), unavailable)], 1);
@@ -1505,6 +1959,7 @@ mod resolution_tests {
             crate::provider::ProviderCapabilities {
                 supports_embeddings: true,
                 supports_zdr: self.zdr_supported,
+                residency: Residency::Eu,
                 ..crate::provider::ProviderCapabilities::default()
             }
         }
@@ -1733,6 +2188,11 @@ mod resolution_tests {
         asked: Arc<Mutex<Vec<String>>>,
         serves: Vec<&'static str>,
         retry_after_ms: u64,
+        /// Which surface this double stands in for. The ladder tests register one
+        /// of each in a single chain, so the family gate has to be able to tell
+        /// them apart — and it now does that from this declaration rather than
+        /// from the registry name.
+        family: ModelFamily,
     }
 
     impl ThrottlingProvider {
@@ -1750,6 +2210,14 @@ mod resolution_tests {
 
     #[async_trait::async_trait]
     impl ProviderRouter for ThrottlingProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                model_family: self.family,
+                residency: Residency::Eu,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             self.record(&req.model)?;
             Ok(InferResponse {
@@ -1785,11 +2253,13 @@ mod resolution_tests {
             asked: asked.clone(),
             serves: claude_serves,
             retry_after_ms: 60_000,
+            family: ModelFamily::Anthropic,
         });
         let openai: BoxedProvider = Arc::new(ThrottlingProvider {
             asked: asked.clone(),
             serves: openai_serves,
             retry_after_ms: 60_000,
+            family: ModelFamily::OpenAiCompatible,
         });
         FallbackChain::new_with_providers(
             vec![
@@ -2002,6 +2472,7 @@ mod resolution_tests {
             asked: asked.clone(),
             serves: vec![],
             retry_after_ms: 60_000,
+            family: ModelFamily::Anthropic,
         });
         let chain =
             FallbackChain::new_with_providers(vec![("azure-anthropic".to_owned(), claude)], 1);
@@ -2134,6 +2605,7 @@ mod resolution_tests {
         let provider: BoxedProvider = Arc::new(RecordingProvider {
             seen_model: seen.clone(),
             zdr_supported: false,
+            ..RecordingProvider::default()
         });
         let mut chain =
             FallbackChain::new_with_providers(vec![("azure-openai".to_owned(), provider)], 1);

@@ -233,6 +233,7 @@ mod tests {
         // same swap already made for the RFC 5737/documentation literals in
         // quarry-runtime's dns_guard.rs/fetch.rs tests.
         let policy = QuarryRedirectPolicy::new();
+        assert!(!policy.is_private_ip("2606:4700:4700::1111".parse().unwrap()));
         assert!(!policy.is_private_ip("2001:4860:4860::8888".parse().unwrap()));
     }
 

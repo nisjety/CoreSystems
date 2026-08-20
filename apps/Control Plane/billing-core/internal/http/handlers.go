@@ -157,7 +157,11 @@ func (s *Server) checkEntitlement(c *gin.Context) {
 	// Report the *effective* plan (elevated to Pro during an active trial) as
 	// `plan` so tier-based gates (e.g. integration-core requires "pro") pass
 	// pre-paywall; `base_plan` preserves the org-mirrored stored plan.
-	effectivePlan := billing.EffectivePlan(account, time.Now().UTC())
+	// Resolved, not raw: includes D-A billing-group inheritance so `plan` cannot
+	// disagree with `allowed`, which CanUseFeature already resolves the same way.
+	effectivePlan := s.billingCore.ResolveEffectivePlan(
+		c.Request.Context(), account, time.Now().UTC(),
+	)
 	c.JSON(status, gin.H{
 		"org_id":         orgID,
 		"feature":        feature,

@@ -827,6 +827,18 @@ func (s *Service) CanUseFeature(ctx context.Context, orgID, feature string) (boo
 		return true, account, nil
 	}
 
+	// D-A billing-group inheritance, checked LAST so it can only ever widen
+	// access, never withdraw it. Entitlements are a stored map refreshed on plan
+	// change, so inheriting a tier does not populate them; the inherited tier's
+	// default entitlements are resolved here at read time instead. Keeping this
+	// derived rather than writing the host's entitlements onto the member means a
+	// revoked grant needs no undo -- it simply stops resolving.
+	if inherited := s.ResolveEffectivePlan(ctx, account, time.Now().UTC()); inherited != EffectivePlan(account, time.Now().UTC()) {
+		if defaultEntitlementsForPlan(inherited)[feature] {
+			return true, account, nil
+		}
+	}
+
 	return false, account, nil
 }
 

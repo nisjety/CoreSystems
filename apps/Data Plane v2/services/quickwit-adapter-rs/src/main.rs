@@ -76,8 +76,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("NATS_SHARED_URL not set; quickwit-adapter GDPR erasure consumer disabled");
     } else {
         let gdpr_pool = pool.clone();
+        // The erasure worker gets its own client handle: an org purge must be
+        // able to prune the searchable index, not just its Postgres bookkeeping.
+        let gdpr_quickwit = quickwit.clone();
         tokio::spawn(async move {
-            run_gdpr_erasure_worker(gdpr_pool, gdpr_nats_url).await;
+            run_gdpr_erasure_worker(gdpr_pool, gdpr_nats_url, gdpr_quickwit).await;
         });
     }
 
@@ -184,9 +187,9 @@ fn signed_event_consumers_enabled(value: &str) -> bool {
 /// Runs the GDPR organization-erasure consumer forever, restarting on any
 /// connection failure (missing pre-provisioned consumer, dropped broker
 /// connection, etc.) rather than letting the task exit silently.
-async fn run_gdpr_erasure_worker(pool: sqlx::PgPool, nats_url: String) {
+async fn run_gdpr_erasure_worker(pool: sqlx::PgPool, nats_url: String, quickwit: QuickwitClient) {
     loop {
-        if let Err(error) = gdpr_nats::run(pool.clone(), nats_url.clone()).await {
+        if let Err(error) = gdpr_nats::run(pool.clone(), nats_url.clone(), quickwit.clone()).await {
             tracing::error!(?error, "quickwit-adapter GDPR erasure consumer failed");
         } else {
             tracing::warn!("quickwit-adapter GDPR erasure consumer ended unexpectedly");

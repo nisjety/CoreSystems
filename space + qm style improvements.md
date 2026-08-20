@@ -1,7 +1,10 @@
 # Space + QM-Style Improvements
 
 Date: 2026-08-16
+Last reconciled: 2026-08-17
 Scope: Verevon v3 and the active CoreSystem planes
+QM baseline: `d719f54075afee4648be75240fa02adb3a9071f0`
+CoreSystem baseline: `520a7a6b410a79b4b368a33b949abea1a0da4e37`
 Reference: local QM clone at `/Volumes/Lagring/Triodelab/qm`
 
 ## Executive conclusion
@@ -10,7 +13,9 @@ CoreSystem has **not yet achieved QM parity as a product/runtime system**.
 
 CoreSystem is stronger than QM in enterprise authority, multi-tenancy, ZDR/residency, signed delegation, grounded retrieval, evidence, typed business actions, cost accounting, and durable orchestration design. QM is currently more coherent end-to-end: one scope resolves the agent, workspace, permissions, memory, tools, background work, delivery, and Slack/web continuity.
 
-The Verevon × QM tracker confirms that all release and adoption sequences remain `[~]`; none is `[x]` ([comparison plan](<apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:10>)).
+The Verevon × QM tracker confirms that the release and adoption program remains
+in progress; source slices are marked `[~]` until their stated live/candidate
+evidence exists ([comparison plan](<apps/Frontend Plane/verevonv3/docs/VEREVON_QM_COMPARISON_AND_ADOPTION_PLAN_2026-08-13.md:10>)).
 
 ## What makes QM work
 
@@ -65,17 +70,17 @@ QM's deployment directory validates configuration, checks live state, records im
 | Multi-tenancy, residency, ZDR | CoreSystem leads. Preserve Control authority and privacy boundaries. |
 | Membership and revocation | Split. CoreSystem authority is stronger; revision fencing must cover membership, grants, entitlements, privacy, and recipient audience. |
 | Context resolution | QM leads in coherence; CoreSystem leads in retrieval depth. Add `ResolvedSpaceContext`. |
-| Space/project cockpit | QM leads. V3 needs a scope-centric `/spaces/:spaceId` cockpit. |
+| Space/project cockpit | QM still leads in all-resource coherence. V3 now has a server-derived Personal Space cockpit plus a narrow `/agents/installations` Definitions + Space installations projection; the full all-resource home is still open. |
 | Shared conversations and safe fork | QM leads. Space-owned threads and audience-filtered replay remain incomplete. |
 | Business actions | CoreSystem leads in catalog breadth, but runtime execution coverage is incomplete. |
-| Human/agent action parity | CoreSystem gap. TS registry, gateway dispatch, and Model eligibility are still separate contracts. |
+| Human/agent action parity | Source progress, not parity. V3 has registry drift checks and actor-specific Model-view plumbing, but owner execution coverage and live proof remain incomplete. |
 | Approvals and proof | CoreSystem has stronger primitives; release/deployed continuation evidence remains open. |
 | Runs and recovery | CoreSystem has stronger architecture; QM has useful lease/idempotency invariants to port as tests. |
 | Workspace and memory | QM leads in coherent scope ownership; CoreSystem leads in retrieval and learned-memory depth. |
 | Skills | Split. CoreSystem has versioned capability/skill infrastructure; QM has the better authorable/progressive-disclosure product. |
 | Watches and delivery | QM leads. CoreSystem now has the source delivery/reconciliation boundary, but candidate/HA proof and the watch primitive remain incomplete. |
 | Slack/web continuity | QM leads. Channel Plane remains future/docs-only in CoreSystem. |
-| Deployment packaging | QM leads in one coherent deployment contract; CoreSystem has broader infrastructure but no candidate/rollback proof. |
+| Deployment packaging | QM leads in one coherent deployment contract; CoreSystem has broader infrastructure and conformance scripts, but no signed candidate/rollback proof. |
 
 ## What is already better in CoreSystem
 
@@ -176,6 +181,43 @@ continuation after restart, Application HA delivery replay, and an immutable
 candidate plus rollback target. Until those are observed, `tickets.create`
 must remain unavailable to Model and the system remains QM-inspired rather
 than QM-parity complete.
+
+## 2026-08-17 reconciliation: the next approved slices
+
+The checked-out QM implementation is `d719f540`; its latest change fixes
+command-form approval boundary matching and adds evaluator coverage. No newer
+QM scope, monitor, delivery, keychain, or deployment contract was found in the
+clone. CoreSystem is `520a7a6`, which includes the following additional
+verified V3 slice:
+
+- `GET /api/v1/agents/installations` and `/agents/installations` provide a
+  server-composed, read-only view of agent definitions installed in the
+  caller's Spaces.
+- The view reuses Control membership and the room Agent tab's confirmed
+  per-Space bindings, groups by agent definition, and omits unconfirmed
+  service-subject bindings. This is deliberately not a new registry or a
+  browser-authored authority path.
+- The live check was read-only. It proves the projection and navigation, not
+  agent execution, owner effects, or release readiness.
+
+The next work is therefore not another disconnected Agent page. It is:
+
+1. Decide the owner and contract for a durable cross-Space agent registry,
+   Page/system installations, and run/receipt references; keep the current
+   composed read until that ADR is accepted.
+2. Make `ResolvedSpaceContext` the common input to chat, retrieval, authored
+   instructions, skills, schedules, approvals, runs, and delivery, with
+   resource ACL intersection and recipient-audience revision checks.
+3. Clear the immutable-candidate gates for the already-built source lanes:
+   Auth Core/service bindings, owner-effect receipts, approval continuation,
+   provider/ZDR, HA delivery replay, promotion evidence, and rollback.
+4. Add QM's missing coherence features in dependency order: durable watches;
+   durable Space workspace and CAS overlays; authored/revisioned memory;
+   governed skills; and a scoped credential broker that never exposes secrets
+   to the model.
+
+Until those gates pass, describe the result as **QM-inspired with a stronger
+enterprise authority model**, not as a QM-equivalent runtime.
 
 ## Final decision
 

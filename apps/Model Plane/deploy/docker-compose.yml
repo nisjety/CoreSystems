@@ -580,7 +580,7 @@ services:
       INFERENCE_CORE_AUTH_AUDIENCE: ${INFERENCE_CORE_AUTH_AUDIENCE:?INFERENCE_CORE_AUTH_AUDIENCE is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
-      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai}
+      INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
@@ -607,6 +607,16 @@ services:
       AZURE_ANTHROPIC_ENDPOINT: ${AZURE_ANTHROPIC_ENDPOINT:-}
       AZURE_ANTHROPIC_API_KEY: ${AZURE_ANTHROPIC_API_KEY:-}
       AZURE_ANTHROPIC_DEPLOYMENTS: ${AZURE_ANTHROPIC_DEPLOYMENTS:-}
+      # Azure AI Foundry Cohere (core-ai-rg, same resource as AZURE_OPENAI_*
+      # above but the unified "AI Model Inference API" route, not the classic
+      # /openai/deployments/{name} shape). When set, the `cohere` provider
+      # slot serves Command A Plus — exclusive_catalog, so it never absorbs
+      # another provider's traffic.
+      AZURE_COHERE_ENDPOINT: ${AZURE_COHERE_ENDPOINT:-}
+      AZURE_COHERE_API_KEY: ${AZURE_COHERE_API_KEY:-}
+      AZURE_COHERE_API_VERSION: ${AZURE_COHERE_API_VERSION:-2024-05-01-preview}
+      AZURE_COHERE_DEPLOYMENT: ${AZURE_COHERE_DEPLOYMENT:-cohere-command-a-plus}
+      AZURE_COHERE_REGION: ${AZURE_COHERE_REGION:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_API_BASE: ${OPENAI_API_BASE:-https://api.openai.com/v1}
       OPENAI_CHAT_MODELS: ${OPENAI_CHAT_MODELS:-}
@@ -632,10 +642,48 @@ services:
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2025-01-01-preview}
       AZURE_OPENAI_REGION: ${AZURE_OPENAI_REGION:-}
-      # Fail closed for ZDR requests unless an operator has evidence that this
-      # exact deployment is covered by a provider-side ZDR contract. Region is
-      # not sufficient evidence. Keep false until that contract is verified.
+      # Azure AI Foundry Claude is a SEPARATE Azure resource from Azure OpenAI, so
+      # it carries its own region. Neither may inherit the other's geography: an
+      # unset region here means "cannot prove EU", classified as no residency
+      # commitment rather than promoted to EU.
+      AZURE_ANTHROPIC_REGION: ${AZURE_ANTHROPIC_REGION:-}
+      # Declared Azure OpenAI deployment type (DataZoneStandard / Standard /
+      # GlobalStandard). Neither the endpoint host nor the region reveals this, and
+      # a Global deployment in an EU region still processes inference worldwide —
+      # so leaving it unset means the EU boundary cannot be proven, and the
+      # provider is classified as making no residency commitment.
+      AZURE_OPENAI_DEPLOYMENT_TYPE: ${AZURE_OPENAI_DEPLOYMENT_TYPE:-}
+      # Deny-by-default: an explicitly Global/Worldwide deployment type refuses to
+      # boot unless this is set, because it voids the EU residency claim.
+      MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT: ${MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT:-false}
+      # Records that a provider making no residency commitment is accepted. Without
+      # it the service still boots but logs a warning per such provider.
+      MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY: ${MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY:-false}
+      # ZDR is evidence-bound. The legacy boolean below is read ONLY to reject an
+      # unbacked assertion: with it true and no attestation supplied, the service
+      # refuses to boot rather than silently serving ZDR traffic on no evidence.
+      # Supply all five variables per resource, or leave the boolean false.
+      # REVIEW_BY bounds the claim: past that date the attestation stops granting
+      # ZDR rather than coasting on nobody remembering the approval lapsed.
+      #   printf '%s\n%s\n%s\n%s\n%s\n' \
+      #     "$RESOURCE_ID" "$APPROVAL_REF" "$EFFECTIVE_DATE" "$REVIEW_BY" "$REVIEWER" \
+      #     | sha256sum
       AZURE_OPENAI_ZDR_CONFIRMED: ${AZURE_OPENAI_ZDR_CONFIRMED:-false}
+      AZURE_OPENAI_ZDR_RESOURCE_ID: ${AZURE_OPENAI_ZDR_RESOURCE_ID:-}
+      AZURE_OPENAI_ZDR_APPROVAL_REF: ${AZURE_OPENAI_ZDR_APPROVAL_REF:-}
+      AZURE_OPENAI_ZDR_EFFECTIVE_DATE: ${AZURE_OPENAI_ZDR_EFFECTIVE_DATE:-}
+      AZURE_OPENAI_ZDR_REVIEW_BY: ${AZURE_OPENAI_ZDR_REVIEW_BY:-}
+      AZURE_OPENAI_ZDR_REVIEWER: ${AZURE_OPENAI_ZDR_REVIEWER:-}
+      AZURE_OPENAI_ZDR_DIGEST: ${AZURE_OPENAI_ZDR_DIGEST:-}
+      # The Foundry Claude resource has its own retention approval, so its own
+      # attestation. Before this existed no Claude route could serve ZDR at all.
+      AZURE_ANTHROPIC_ZDR_CONFIRMED: ${AZURE_ANTHROPIC_ZDR_CONFIRMED:-false}
+      AZURE_ANTHROPIC_ZDR_RESOURCE_ID: ${AZURE_ANTHROPIC_ZDR_RESOURCE_ID:-}
+      AZURE_ANTHROPIC_ZDR_APPROVAL_REF: ${AZURE_ANTHROPIC_ZDR_APPROVAL_REF:-}
+      AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE: ${AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE:-}
+      AZURE_ANTHROPIC_ZDR_REVIEW_BY: ${AZURE_ANTHROPIC_ZDR_REVIEW_BY:-}
+      AZURE_ANTHROPIC_ZDR_REVIEWER: ${AZURE_ANTHROPIC_ZDR_REVIEWER:-}
+      AZURE_ANTHROPIC_ZDR_DIGEST: ${AZURE_ANTHROPIC_ZDR_DIGEST:-}
       AZURE_OPENAI_DEPLOYMENT: ${AZURE_OPENAI_DEPLOYMENT:-}
       AZURE_OPENAI_CHAT_DEPLOYMENTS: ${AZURE_OPENAI_CHAT_DEPLOYMENTS:-}
       AZURE_OPENAI_EMBEDDING_DEPLOYMENT: ${AZURE_OPENAI_EMBEDDING_DEPLOYMENT:-}
