@@ -151,6 +151,22 @@ services:
             # the credential that registers Spaces.
             APPLICATION_ORG_CORE_SERVICE_TOKEN: ${APPLICATION_ORG_CORE_SERVICE_TOKEN:-}
             CONTROL_SPACE_MEMBERSHIP_BASE_URL: ${CONTROL_SPACE_MEMBERSHIP_BASE_URL:-http://user-core:3012/api/v1/internal/spaces}
+        volumes:
+            # `npx convex dev` (startup.sh) only pushes what it can see. Without this
+            # mount /app/convex is the snapshot baked at image-build time, so every
+            # edit under convex-core/convex/ needs a full image rebuild before it
+            # reaches the running backend -- the failure mode convex-core/
+            # docker-compose.yml already warns about (Wave 7 G35 controlSessions,
+            # Wave 10 G43 byUser never arriving). That sibling file has carried this
+            # mount all along; THIS file is the one the running application-plane
+            # project uses, and it had drifted without it.
+            #
+            # Read-write, unlike convex-backend's `:ro` mount of the same path:
+            # `convex dev` regenerates convex/_generated on every function change,
+            # and those files are tracked in git, so they are meant to land in the
+            # working tree and be committed. Expect gateway starts to be able to
+            # touch them; that is the intended workflow, not churn.
+            - ./convex-core/convex:/app/convex
         networks:
             - app-net
         healthcheck:
