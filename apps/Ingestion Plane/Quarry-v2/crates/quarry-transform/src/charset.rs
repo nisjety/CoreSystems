@@ -62,9 +62,15 @@ pub fn decode(body: &[u8], declared_charset: Option<&str>) -> DecodedBody {
         }
     }
     // Sniff. `chardetng` wants ≥ a few KB to make a confident call.
+    //
+    // `last=true` is only correct when the detector has seen the ENTIRE
+    // stream: chardetng returns UTF-8 only for input that is valid UTF-8
+    // in full, so a window that happens to end midway through a
+    // multi-byte sequence would read as invalid UTF-8, flip the guess to
+    // windows-1252, and mojibake the whole body (`å` → `Ã¥`).
     let sniff_window = body.len().min(64 * 1024);
     let mut det = EncodingDetector::new();
-    det.feed(&body[..sniff_window], true);
+    det.feed(&body[..sniff_window], sniff_window == body.len());
     let enc = det.guess(None, true);
     let (text_cow, _, _) = enc.decode(body);
     DecodedBody {
@@ -175,5 +181,41 @@ mod tests {
     fn never_panics_on_empty() {
         let out = decode(&[], None);
         assert_eq!(out.text, "");
+    }
+
+    #[test]
+    fn sniff_survives_a_window_edge_inside_a_multibyte_char() {
+        // Regression: a > 64 KB valid-UTF-8 body whose sniff-window edge
+        // lands INSIDE a multi-byte character. Feeding that window with
+        // `last=true` told chardetng the stream ends on an incomplete
+        // sequence — invalid UTF-8 — so it guessed windows-1252 and the
+        // whole body decoded as mojibake ("på" → "pÃ¥"). Fetch paths
+        // with no Content-Type header (the browser driver) always take
+        // this sniff branch, so the guess must stay boundary-proof.
+        const WINDOW: usize = 64 * 1024;
+        let mut html = String::from(
+            "<!doctype html><html><head><meta charset=\"utf-8\">\
+             <title>Global leder på Trygg Mat</title></head><body>",
+        );
+        let filler = "Aquatiq er global leder på trygg mat — hygiene og løsninger. ";
+        while html.len() + filler.len() < WINDOW - 1 {
+            html.push_str(filler);
+        }
+        // ASCII padding up to WINDOW-1, then one 'å' (0xC3 0xA5) so the
+        // window edge at byte WINDOW splits it in half.
+        while html.len() < WINDOW - 1 {
+            html.push(' ');
+        }
+        html.push('å');
+        html.push_str("resten av siden</body></html>");
+        let body = html.into_bytes();
+        assert!(body.len() > WINDOW);
+        assert_eq!(body[WINDOW - 1], 0xC3);
+        assert_eq!(body[WINDOW], 0xA5);
+
+        let out = decode(&body, None);
+        assert_eq!(out.encoding, "UTF-8");
+        assert!(out.text.contains("Global leder på Trygg Mat"));
+        assert!(!out.text.contains("Ã¥"));
     }
 }
