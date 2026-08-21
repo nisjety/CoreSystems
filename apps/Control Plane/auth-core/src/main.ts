@@ -18,6 +18,7 @@ import { selectNatsCredentials } from './nats/nats-credentials';
 import type { Server } from '@grpc/grpc-js';
 import type { PackageDefinition } from '@grpc/proto-loader';
 import type { Express, Request, Response } from 'express';
+import { disconnectRedis } from './db/redis';
 
 /** Positive-integer env parse; falls back on absent, malformed, or <= 0 values. */
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -244,5 +245,49 @@ async function bootstrap() {
   console.log(`📙 Docs Hub: ${await app.getUrl()}/docs/hub`);
   console.log(`📗 oRPC OpenAPI: ${await app.getUrl()}/orpc/openapi.json`);
   console.log(`📗 oRPC Swagger UI: ${await app.getUrl()}/orpc/docs`);
+  // Graceful shutdown.
+  //
+  // Nothing here listened for signals before, while `src/db/redis.ts` did --
+  // and its handler never exited. Because a registered listener suppresses
+  // Node's default terminate-on-signal behaviour, SIGTERM became a no-op and
+  // Docker had to SIGKILL this container after the 15s grace period on every
+  // single redeploy (`die exit=137`). In-flight requests and anything relying
+  // on an orderly close were lost each time.
+  //
+  // `app.close()` stops the HTTP server, stops the NATS and gRPC microservices,
+  // and runs the Nest lifecycle hooks. Redis is not a Nest provider, so it is
+  // closed explicitly afterwards. The watchdog is there so a wedged close still
+  // exits well inside the 15s grace period -- a hard exit we choose is strictly
+  // better than a SIGKILL we do not.
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    console.log(`🛑 ${signal} received, shutting down`);
+
+    const watchdog = setTimeout(() => {
+      console.error('Shutdown still running after 10s, exiting immediately');
+      process.exit(1);
+    }, 10_000);
+    watchdog.unref();
+
+    try {
+      await app.close();
+      await disconnectRedis();
+      clearTimeout(watchdog);
+      console.log('👋 Shutdown complete');
+      process.exit(0);
+    } catch (error) {
+      clearTimeout(watchdog);
+      console.error('Error during shutdown:', error);
+      process.exit(1);
+    }
+  };
+
+  process.once('SIGTERM', (signal) => void shutdown(signal));
+  process.once('SIGINT', (signal) => void shutdown(signal));
+
 }
 void bootstrap();

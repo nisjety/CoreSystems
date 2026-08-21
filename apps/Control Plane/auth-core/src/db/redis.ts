@@ -289,28 +289,29 @@ export const redisSecondaryStorage = {
 export { redis };
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  if (isConnected) {
-    redis
-      .disconnect()
-      .then(() => {
-        console.log('🔌 Redis connection closed');
-      })
-      .catch((error) => {
-        console.error('Error closing Redis connection:', error);
-      });
+//
+// This used to register `process.on('SIGINT')` and `process.on('SIGTERM')`
+// handlers here, at module scope. That was the reason `auth-service` never
+// stopped on SIGTERM: registering a listener for a signal REPLACES Node's
+// default terminate-the-process behaviour, and neither handler ever called
+// `process.exit()`. The HTTP server, the NATS client and the gRPC server each
+// keep the event loop alive on their own, so the process simply carried on --
+// Docker waited out the full 15s stop_grace_period and then SIGKILLed the
+// container. Observed on every redeploy as `kill sig=15` -> 15s -> `kill sig=9`
+// -> `die exit=137`. When `isConnected` was false it was worse still: the
+// handler swallowed the signal and did nothing whatsoever.
+//
+// Shutdown is now driven from main.ts, which closes the Nest application and
+// then calls this. Do NOT re-register signal handlers in this module.
+export async function disconnectRedis(): Promise<void> {
+  if (!isConnected) {
+    return;
   }
-});
-
-process.on('SIGTERM', () => {
-  if (isConnected) {
-    redis
-      .disconnect()
-      .then(() => {
-        console.log('🔌 Redis connection closed');
-      })
-      .catch((error) => {
-        console.error('Error closing Redis connection:', error);
-      });
+  isConnected = false;
+  try {
+    await redis.disconnect();
+    console.log('🔌 Redis connection closed');
+  } catch (error) {
+    console.error('Error closing Redis connection:', error);
   }
-});
+}
