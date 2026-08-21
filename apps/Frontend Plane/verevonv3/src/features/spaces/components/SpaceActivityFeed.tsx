@@ -67,7 +67,7 @@ export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
         <For each={items()}>
           {(item) => (
             <li class={rowClass(item)}>
-              <a class="verevon-activity-link" href={item.href}>
+              <a class="verevon-activity-link" href={item.href} link>
                 <span class="verevon-activity-verb">{item.verb}</span>
                 {': '}
                 <span class="verevon-activity-object">{item.object}</span>

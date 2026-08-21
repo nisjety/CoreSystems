@@ -48,8 +48,8 @@ export function DashboardTabs(props: {
                 type="button"
                 onClick={() => props.onTabChange(tab)}
                 title={i18n.tr(`Vis ${tabLabel(tab).toLowerCase()}`, `Show ${tabLabel(tab).toLowerCase()}`)}
-                classList={{ 'dashboard-home-tabs__tab--active': props.activeTab === tab }}
-                aria-pressed={props.activeTab === tab}
+                class={{ 'dashboard-home-tabs__tab--active': props.activeTab === tab }}
+                aria-pressed={props.activeTab === tab ? 'true' : 'false'}
               >
                 {tabLabel(tab)}
               </button>

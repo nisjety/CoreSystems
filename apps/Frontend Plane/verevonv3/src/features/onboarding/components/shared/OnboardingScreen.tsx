@@ -1,4 +1,4 @@
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { onboardingFooterLinks, type Step } from '@/features/onboarding/lib/model'
 import { OnboardingTopbar } from '@/features/onboarding/components/shared/OnboardingTopbar'
 import { VerevonScreen } from '@/shared/ui/verevon/VerevonScreen'

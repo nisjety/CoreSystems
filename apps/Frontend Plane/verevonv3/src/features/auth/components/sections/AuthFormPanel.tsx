@@ -1,5 +1,5 @@
-import { Building2, CheckCircle2, ChevronDown, Eye, KeyRound, Lock, Mail, Phone, UserRound } from 'lucide-solid'
-import { createMemo, createSignal, For, onCleanup, onMount, Show, type Accessor } from 'solid-js'
+import { Building2, CheckCircle2, ChevronDown, Eye, KeyRound, Lock, Mail, Phone, UserRound } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show, type Accessor } from 'solid-js'
 import type { AuthCopy, AuthMode, Locale } from '@/features/auth/lib/model'
 import type { SocialProvider } from '@/features/auth/lib/model'
 import { TurnstileChallenge } from '@/features/auth/components/sections/TurnstileChallenge'
@@ -324,9 +324,8 @@ function AuthLanguageMenu(props: {
                   <button
                     type="button"
                     role="menuitemradio"
-                    aria-checked={selected()}
-                    class="auth-dropdown-option"
-                    classList={{ 'auth-dropdown-option--selected': selected() }}
+                    aria-checked={selected() ? 'true' : 'false'}
+                    class={['auth-dropdown-option', { 'auth-dropdown-option--selected': selected() }]}
                     onClick={() => {
                       props.onSelect(option.code)
                       setOpen(false)
@@ -369,7 +368,7 @@ function PhoneCountryMenu(props: {
         class="auth-phone-country__chrome"
         aria-label={i18n.tr('Landskode', 'Country code')}
         aria-haspopup="menu"
-        aria-expanded={open()}
+        aria-expanded={open() ? 'true' : 'false'}
         aria-controls={open() ? 'auth-phone-country-menu' : undefined}
         onClick={() => setOpen((current) => !current)}
       >
@@ -387,9 +386,8 @@ function PhoneCountryMenu(props: {
                   <button
                     type="button"
                     role="menuitemradio"
-                    aria-checked={selected()}
-                    class="auth-dropdown-option"
-                    classList={{ 'auth-dropdown-option--selected': selected() }}
+                    aria-checked={selected() ? 'true' : 'false'}
+                    class={['auth-dropdown-option', { 'auth-dropdown-option--selected': selected() }]}
                     onClick={() => {
                       props.onChange(country.dialCode)
                       setOpen(false)
@@ -412,20 +410,27 @@ function PhoneCountryMenu(props: {
 }
 
 function useAuthDropdownDismiss(root: () => HTMLDivElement | undefined, close: () => void) {
-  onMount(() => {
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (root()?.contains(event.target as Node)) return
-      close()
-    }
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close()
-    }
+  createEffect(
+    () => undefined,
+    () => {
+      const closeOnOutsidePointer = (event: PointerEvent) => {
+        if (root()?.contains(event.target as Node)) return
+        close()
+      }
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') close()
+      }
 
-    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
-    window.addEventListener('keydown', closeOnEscape)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
-      window.removeEventListener('keydown', closeOnEscape)
-    })
-  })
+      document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+      window.addEventListener('keydown', closeOnEscape)
+
+      // createEffect's effect (second) function runs with no owner context —
+      // onCleanup() here always warns NO_OWNER_CLEANUP and silently never
+      // runs. Returning the cleanup directly is what actually gets wired up.
+      return () => {
+        document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+        window.removeEventListener('keydown', closeOnEscape)
+      }
+    },
+  )
 }

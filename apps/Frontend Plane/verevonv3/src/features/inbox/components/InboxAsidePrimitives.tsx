@@ -1,5 +1,6 @@
-import { ChevronDown, Plus } from 'lucide-solid'
-import { createSignal, For, Show, type JSX } from 'solid-js'
+import { For, Show, createSignal } from 'solid-js'
+import { ChevronDown, Plus } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import {
   formatDateKey,
   type CalendarEvent,
@@ -45,11 +46,11 @@ export function MiniCalendarGrid(props: {
               <button
                 type="button"
                 onClick={() => props.onSelect(day)}
-                classList={{ 'verevon-inbox-mini-calendar__day--selected': selected() }}
+                class={{ 'verevon-inbox-mini-calendar__day--selected': selected() }}
               >
                 <span>{day.toLocaleDateString(localeDateTime(i18n.locale()), { weekday: 'short' }).slice(0, 1)}</span>
-                <strong classList={{ 'verevon-inbox-mini-calendar__today': isToday() && !selected() }}>{day.getDate()}</strong>
-                <em classList={{ 'verevon-inbox-mini-calendar__event-dot': eventDates().has(key()) }} />
+                <strong class={{ 'verevon-inbox-mini-calendar__today': isToday() && !selected() }}>{day.getDate()}</strong>
+                <em class={{ 'verevon-inbox-mini-calendar__event-dot': eventDates().has(key()) }} />
               </button>
             )
           }}
@@ -126,8 +127,8 @@ export function AsideTabButton(props: {
       role="tab"
       id={props.id}
       aria-controls={props.controls}
-      aria-selected={props.active}
-      tabIndex={props.active ? 0 : -1}
+      aria-selected={props.active ? 'true' : 'false'}
+      tabindex={props.active ? 0 : -1}
       onKeyDown={handleTabKeyDown}
       onClick={() => props.onClick()}
       class={cn('verevon-inbox-aside-tab', props.active && 'verevon-inbox-aside-tab--active')}
@@ -148,7 +149,7 @@ export function AccordionSection(props: {
 
   return (
     <section class="verevon-inbox-accordion">
-      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open()}>
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open() ? 'true' : 'false'}>
         {props.icon}
         <span>{props.title}</span>
         <ChevronDown class={cn('size-4 verevon-inbox-accordion__chevron', open() && 'rotate-180')} />
@@ -186,7 +187,7 @@ export function FieldRow(props: { label: string; muted?: boolean; value: string 
   return (
     <div class="verevon-inbox-field-row">
       <span>{props.label}</span>
-      <strong classList={{ 'verevon-inbox-field-row__muted': props.muted }}>{props.value}</strong>
+      <strong class={{ 'verevon-inbox-field-row__muted': Boolean(props.muted) }}>{props.value}</strong>
     </div>
   )
 }

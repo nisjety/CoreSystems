@@ -6,6 +6,7 @@ use crate::{
     audience_tokens::get_audience_token,
     config::AppState,
     contracts::{PlanRecommendation, RecommendContext},
+    domains::chat::shared,
     middleware::AuthenticatedUser,
 };
 
@@ -44,12 +45,29 @@ pub(crate) async fn fetch_remote_recommendation(
         .filter(|role| !role.is_empty())
         .unwrap_or("member");
 
+    // model-gateway's recommend_plan handler extracts a VerifiedInferenceBearer
+    // from `x-inference-authorization` (a separate aud=inference-core user
+    // token, same as the chat path) — without it the route rejects before the
+    // model is ever consulted and the recommendation degrades to the local
+    // heuristic. Mint it up front and fail loudly when it can't be minted.
+    let inference_token = match shared::required_inference_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::warn!(?err, "plan recommendation inference-core token mint failed");
+            return None;
+        }
+    };
+
     let mut request = state
         .client
         .post(&state.model_recommend_url)
         .header("x-internal-api-key", &state.internal_api_key)
         .header("x-user-id", &user.user_id)
         .header("x-user-role", user_role)
+        .header(
+            "x-inference-authorization",
+            format!("Bearer {inference_token}"),
+        )
         .json(&json!({
             "context": context,
             "locale": context.locale.clone().unwrap_or_else(|| "en".into())
@@ -59,6 +77,10 @@ pub(crate) async fn fetch_remote_recommendation(
     }
     let response = request.send().await.ok()?;
     if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            "model-gateway recommend/plan returned non-success"
+        );
         return None;
     }
     let body = response.json::<Value>().await.ok()?;

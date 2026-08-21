@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   Bell,
   ChevronLeft,
@@ -12,9 +11,10 @@ import {
   User,
   Users,
   type LucideProps,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch, type Component, type JSX } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch, type Component } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { Dynamic } from '@solidjs/web'
 import type { VerevonRoute, WorkspaceIdentity } from '@/features/core/lib/shell-data'
 import {
   createNavbarCalendarEvent,
@@ -168,9 +168,12 @@ function CalendarDropdown(props: {
   const selectedEvents = createMemo(() => calendar().events.filter((event) => formatDateKey(new Date(event.start)) === selectedKey()))
   const selectedNotes = createMemo(() => calendar().notes.filter((note) => note.date === selectedKey()))
 
-  createEffect(() => {
-    setCalendar(props.state)
-  })
+  createEffect(
+    () => props.state,
+    (state) => {
+      setCalendar(state)
+    },
+  )
 
   const saveEvent = async () => {
     const title = eventTitle().trim()
@@ -223,7 +226,7 @@ function CalendarDropdown(props: {
             <button
               type="button"
               onClick={() => setActiveTab(tab)}
-              classList={{ 'core-calendar-panel__tab--active': activeTab() === tab }}
+              class={{ 'core-calendar-panel__tab--active': activeTab() === tab }}
             >
               {tab === 'calendar' ? i18n.tr('kalender', 'calendar') : i18n.tr('notater', 'notes')}
             </button>
@@ -396,8 +399,9 @@ function NotificationRow(props: {
 }) {
   const i18n = useI18n()
   return (
-    <A
+    <a
       href={props.item.href ?? '/inbox'}
+      link
       onClick={() => props.onOpen(props.item.id)}
       class={cn('core-notification-row', props.bordered ? 'core-notification-row--bordered' : '')}
     >
@@ -419,7 +423,7 @@ function NotificationRow(props: {
           </Show>
         </div>
       </div>
-    </A>
+    </a>
   )
 }
 
@@ -430,8 +434,9 @@ function MessageRow(props: {
 }) {
   const i18n = useI18n()
   return (
-    <A
+    <a
       href={props.item.href ?? '/inbox'}
+      link
       onClick={() => props.onOpen(props.item.id)}
       class={cn('core-message-row', props.bordered ? 'core-notification-row--bordered' : '')}
     >
@@ -450,7 +455,7 @@ function MessageRow(props: {
           <span class="core-unread-dot" />
         </Show>
       </div>
-    </A>
+    </a>
   )
 }
 
@@ -481,10 +486,10 @@ function CalendarGrid(props: {
               <button
                 type="button"
                 onClick={() => props.onSelect(day)}
-                classList={{ 'core-calendar-grid__day--selected': sameDay(day, props.selectedDate) }}
+                class={{ 'core-calendar-grid__day--selected': sameDay(day, props.selectedDate) }}
               >
                 {day.getDate()}
-                <span classList={{ 'core-calendar-grid__event-dot': eventDates().has(dayKey()) }} />
+                <span class={{ 'core-calendar-grid__event-dot': eventDates().has(dayKey()) }} />
               </button>
             )
           }}
@@ -534,7 +539,7 @@ function TabHeader(props: { tabs: string[] }) {
     <div class="core-navbar-panel-tabs">
       <For each={props.tabs}>
         {(tab, index) => (
-          <button type="button" classList={{ 'core-navbar-panel-tabs__tab--active': index() === 0 }}>
+          <button type="button" class={{ 'core-navbar-panel-tabs__tab--active': index() === 0 }}>
             {tab}
             <Show when={index() === 0}>
               <span />
@@ -557,7 +562,7 @@ function EmptyPanel(props: { text: string }) {
 function PanelFooter(props: { href: VerevonRoute; label: string }) {
   return (
     <div class="core-panel-footer">
-      <A href={props.href}>{props.label}</A>
+      <a href={props.href} link>{props.label}</a>
     </div>
   )
 }

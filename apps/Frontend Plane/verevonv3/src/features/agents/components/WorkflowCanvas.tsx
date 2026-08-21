@@ -6,9 +6,9 @@ import {
   Mic,
   Send,
   Sparkles,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { For } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+import { Dynamic } from '@solidjs/web'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { cn } from '@/shared/lib/cn'
 import type { WorkflowBuilderToolId } from '@/features/agents/lib/agent-roles'

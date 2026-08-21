@@ -8,8 +8,7 @@ export function DashboardPlanBadge(props: { planLabel: string }) {
   const isTrial = () => props.planLabel.trim().toLowerCase() === 'trial'
   return (
     <span
-      class="dashboard-home-plan-badge"
-      classList={{ 'dashboard-home-plan-badge--paid': !isTrial() }}
+      class={['dashboard-home-plan-badge', { 'dashboard-home-plan-badge--paid': !isTrial() }]}
     >
       {localPlanLabel(props.planLabel, i18n)} {i18n.tr('plan', 'Plan')}
       <Show when={isTrial()}>

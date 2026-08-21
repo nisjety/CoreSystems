@@ -8,7 +8,7 @@ import {
   ArrowDown,
   EyeOff,
   Square,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   DashboardComposer,
 } from '@/features/dashboard/home/DashboardComposer'
@@ -108,11 +108,13 @@ export default function ChatPage() {
 
   return (
     <div
-      class={`verevon-chat-page${launchMotion() ? ' verevon-chat-page-launch' : ''}`}
-      classList={{
-        'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
-        'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
-      }}
+      class={[
+        `verevon-chat-page${launchMotion() ? ' verevon-chat-page-launch' : ''}`,
+        {
+          'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
+          'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
+        },
+      ]}
     >
       <Show when={launchMotion()}>
         <div class="verevon-chat-launch-wash" aria-hidden="true" />

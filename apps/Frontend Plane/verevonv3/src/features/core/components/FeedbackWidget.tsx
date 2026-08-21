@@ -1,5 +1,5 @@
 import { useLocation } from '@solidjs/router'
-import { MessageCircleMore, X } from 'lucide-solid'
+import { MessageCircleMore, X } from '@/shared/icons'
 import { createMemo, createSignal, Show } from 'solid-js'
 import { useI18n } from '@/shared/i18n'
 import { submitFeedback } from '@/shared/api/inbox-client'
@@ -97,7 +97,7 @@ export function FeedbackWidget() {
             </p>
             <VerevonTextarea
               value={note()}
-              maxLength={MAX_NOTE_LENGTH}
+              maxlength={MAX_NOTE_LENGTH}
               rows={3}
               autofocus
               disabled={state() === 'sending' || state() === 'sent'}

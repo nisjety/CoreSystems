@@ -1,4 +1,4 @@
-import { Eye } from 'lucide-solid'
+import { Eye } from '@/shared/icons'
 import { cn } from '@/shared/lib/cn'
 import { useI18n } from '@/shared/i18n'
 

@@ -1,5 +1,5 @@
-import { Download, Loader2, ShieldAlert, Trash2 } from 'lucide-solid'
-import { createSignal, For, onMount, Show } from 'solid-js'
+import { Download, Loader2, ShieldAlert, Trash2 } from '@/shared/icons'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 import { signIn, signOut } from '@/shared/api/auth-client'
 import { getPreferences, updatePreferences, type CrawlIngestMode } from '@/shared/api/settings-client'
 import {
@@ -68,11 +68,14 @@ export function PrivacyDataSection() {
   const [savingMode, setSavingMode] = createSignal(false)
   const [modeError, setModeError] = createSignal<string | null>(null)
 
-  onMount(() => {
-    void getPreferences()
-      .then((prefs) => setIngestMode(prefs.crawlIngestMode ?? 'auto'))
-      .catch(() => undefined)
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      void getPreferences()
+        .then((prefs) => setIngestMode(prefs.crawlIngestMode ?? 'auto'))
+        .catch(() => undefined)
+    },
+  )
 
   async function changeIngestMode(mode: CrawlIngestMode) {
     const previous = ingestMode()

@@ -1,13 +1,11 @@
 import {
   createEffect,
   createContext,
-  onCleanup,
-  onMount,
   useContext,
   type Accessor,
-  type JSX,
 } from 'solid-js'
-import { createStore } from 'solid-js/store'
+import type { JSX } from '@solidjs/web'
+import { createStore } from 'solid-js'
 import {
   defaultAgentSelectionId,
   defaultChatbotAddOnId,
@@ -68,14 +66,16 @@ export function AgentsProvider(props: { children: JSX.Element; routeLocation?: A
   // client-side navigation without emitting a browser `popstate` event, so
   // keep this URL-derived state in sync through that reactive boundary rather
   // than letting a prior /agents selection leak into another workspace.
-  createEffect(() => {
-    const routeLocation = props.routeLocation
-    if (!routeLocation) return
-    setState(readLocationStateFromSnapshot(routeLocation.pathname, routeLocation.search))
-  })
+  createEffect(
+    () => props.routeLocation,
+    (routeLocation) => {
+      if (!routeLocation) return
+      setState(() => readLocationStateFromSnapshot(routeLocation.pathname, routeLocation.search))
+    },
+  )
 
   const syncFromWindow = () => {
-    setState(readLocationState())
+    setState(() => readLocationState())
   }
 
   const pushAgentLocation = (updateUrl: (url: URL) => void) => {
@@ -84,7 +84,7 @@ export function AgentsProvider(props: { children: JSX.Element; routeLocation?: A
     const url = new URL(window.location.href)
     updateUrl(url)
     window.history.pushState(null, '', `${url.pathname}${url.search}${url.hash}`)
-    setState(readLocationState(url))
+    setState(() => readLocationState(url))
   }
 
   const contextValue: AgentSelectionContextValue = {
@@ -216,18 +216,19 @@ export function AgentsProvider(props: { children: JSX.Element; routeLocation?: A
     },
   }
 
-  onMount(() => {
-    syncFromWindow()
-    window.addEventListener('popstate', syncFromWindow)
-    onCleanup(() => {
-      window.removeEventListener('popstate', syncFromWindow)
-    })
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      syncFromWindow()
+      window.addEventListener('popstate', syncFromWindow)
+      return () => window.removeEventListener('popstate', syncFromWindow)
+    },
+  )
 
   return (
-    <AgentSelectionContext.Provider value={contextValue}>
+    <AgentSelectionContext value={contextValue}>
       {props.children}
-    </AgentSelectionContext.Provider>
+    </AgentSelectionContext>
   )
 }
 

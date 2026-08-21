@@ -1,4 +1,4 @@
-import { KeyRound, ShieldAlert } from 'lucide-solid'
+import { KeyRound, ShieldAlert } from '@/shared/icons'
 import {
   SectionHeader,
   SettingsButton,

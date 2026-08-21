@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { buttonClasses, type ButtonShape, type ButtonSize, type ButtonVariant } from '@/shared/ui/button-classes'
 
 type ButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -9,13 +10,13 @@ type ButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
 }
 
 export function Button(allProps: ButtonProps) {
-  const [local, props] = splitProps(allProps, ['class', 'type', 'variant', 'size', 'fullWidth', 'shape'])
+  const rest = omit(allProps, 'class', 'type', 'variant', 'size', 'fullWidth', 'shape')
 
   return (
     <button
-      {...props}
-      class={buttonClasses(local)}
-      type={local.type ?? 'button'}
+      {...rest}
+      class={buttonClasses(allProps)}
+      type={allProps.type ?? 'button'}
     />
   )
 }

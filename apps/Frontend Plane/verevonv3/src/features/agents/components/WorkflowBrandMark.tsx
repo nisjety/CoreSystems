@@ -1,5 +1,5 @@
-import type { JSX } from 'solid-js'
-import { Bot, FileText } from 'lucide-solid'
+import type { JSX } from '@solidjs/web'
+import { Bot, FileText } from '@/shared/icons'
 import { cn } from '@/shared/lib/cn'
 import type { BrandMarkId } from '@/features/agents/lib/verevon-workflow-builder-data'
 

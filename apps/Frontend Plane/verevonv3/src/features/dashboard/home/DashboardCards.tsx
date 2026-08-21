@@ -1,7 +1,7 @@
+import { For, Match, Show, Switch, createEffect, createSignal, onCleanup } from 'solid-js'
 
-import { A } from '@solidjs/router'
-import { Activity, ArrowUpRight, CloudSun, MessageSquare, Newspaper, RefreshCw, Wind } from 'lucide-solid'
-import { createEffect, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js'
+import { Activity, ArrowUpRight, CloudSun, MessageSquare, Newspaper, RefreshCw, Wind } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import type { DashboardCard } from '@/features/dashboard/home/dashboard-cards'
 import {
   formatDerivedTrafficMetadata,
@@ -67,9 +67,12 @@ function createLiveInformationState<T>(config: {
     }
   }
 
-  onMount(() => {
-    void loadSnapshot()
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      void loadSnapshot()
+    },
+  )
 
   onCleanup(() => {
     cancelled = true
@@ -148,7 +151,7 @@ function DashboardImageCard(props: {
             {i18n.tr(props.card.category, props.card.categoryEn)}
           </div>
 
-          <A href={props.card.href} class="block">
+          <a href={props.card.href} link class="block">
             <div class="verevon-dashboard-card-media">
               <img
                 src={props.card.image ?? '/imagens/arched-corridor-1.jpeg'}
@@ -162,7 +165,7 @@ function DashboardImageCard(props: {
                 <p>{i18n.tr(props.card.description, props.card.descriptionEn)}</p>
               </div>
             </div>
-          </A>
+          </a>
 
           <button
             type="button"
@@ -321,14 +324,16 @@ function NewsDashboardCard(props: { card: DashboardCard; onPrompt: (card: Dashbo
     }
   }
 
-  createEffect(() => {
-    const selected = category()
-    if (selected === 'all') {
-      void loadSharedNews()
-      return
-    }
-    void load(selected)
-  })
+  createEffect(
+    () => category(),
+    (selected) => {
+      if (selected === 'all') {
+        void loadSharedNews()
+        return
+      }
+      void load(selected)
+    },
+  )
 
   onCleanup(() => {
     cancelled = true

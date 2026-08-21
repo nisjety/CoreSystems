@@ -1,6 +1,6 @@
-import { A } from '@solidjs/router'
-import { ArrowUpRight, Sparkles } from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { ArrowUpRight, Sparkles } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { SourceRow } from '@/features/inbox/components/InboxAsidePrimitives'
 import { runAssist, type AssistResult, type AssistSource } from '@/features/inbox/lib/inbox-ai'
 import { readChatThreadTranscript, setActiveChatThreadId, type ChatThreadTranscriptTurn } from '@/features/chat/lib/chat-thread-history'
@@ -100,17 +100,19 @@ export function OutboundVerevonRail(props: { intent: OutboundIntent | null; orgI
   const persistedAnswer = createMemo(() => latestAssistantAnswer(threadTurns() ?? []))
   const visibleAnswer = createMemo(() => answer() || persistedAnswer())
 
-  createEffect(() => {
-    const current = scope()
-    requestId += 1
-    setQuestion('')
-    setAnswer(null)
-    setSources([])
-    setRunMetadata(null)
-    setError(null)
-    setLoading(false)
-    setThreadId(current ? readSupportChatThread(current) : null)
-  })
+  createEffect(
+    () => scope(),
+    (current) => {
+      requestId += 1
+      setQuestion('')
+      setAnswer(null)
+      setSources([])
+      setRunMetadata(null)
+      setError(null)
+      setLoading(false)
+      setThreadId(current ? readSupportChatThread(current) : null)
+    },
+  )
 
   const matchesScope = (expected: SupportChatThreadScope) => {
     const current = scope()
@@ -159,7 +161,7 @@ export function OutboundVerevonRail(props: { intent: OutboundIntent | null; orgI
           <>
             <header class="verevon-outbound-verevon__header">
               <div><Sparkles class="size-4" /><strong>Verevon</strong></div>
-              <Show when={threadId()}>{(id) => <A href="/chat" onClick={() => setActiveChatThreadId(id())}>{i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" /></A>}</Show>
+              <Show when={threadId()}>{(id) => <a href="/chat" link onClick={() => setActiveChatThreadId(id())}>{i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" /></a>}</Show>
             </header>
 
             <section class="verevon-outbound-verevon__context" aria-label={i18n.tr('Kvitteringskontekst', 'Receipt context')}>

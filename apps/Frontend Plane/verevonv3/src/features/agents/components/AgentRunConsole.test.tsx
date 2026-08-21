@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatStreamHandlers } from '@/shared/api/chat-client'
 import type { ProofBundle, RunEventHandlers } from '@/shared/api/run-console-client'
@@ -72,11 +73,12 @@ import AgentRunConsole from './AgentRunConsole'
 Element.prototype.scrollIntoView = vi.fn()
 
 function renderConsole() {
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={AgentRunConsole} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component: AgentRunConsole }],
+    history: memoryHistory(),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 function pendingApproval(): Approval {
@@ -112,6 +114,7 @@ async function driveToApprovalDeck(): Promise<RunEventHandlers> {
   mockListApprovals.mockResolvedValueOnce([pendingApproval()])
 
   fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+  flush()
   fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
 
   await waitFor(() => expect(runEventHandlers).toBeDefined())
@@ -292,6 +295,7 @@ function driveToConnectedRun(): void {
   mockListApprovals.mockResolvedValue([])
 
   fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Book a shipment' } })
+  flush()
   fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
 }
 

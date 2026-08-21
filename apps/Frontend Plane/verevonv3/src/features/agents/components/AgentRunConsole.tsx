@@ -1,14 +1,14 @@
 import {
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   For,
   onCleanup,
   Show,
-  type JSX,
 } from 'solid-js'
-import { createStore } from 'solid-js/store'
+import type { JSX } from '@solidjs/web'
+import { createStore } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   ArrowLeft,
   Bot,
@@ -34,8 +34,7 @@ import {
   Users,
   Wrench,
   type LucideProps,
-} from 'lucide-solid'
-import { A } from '@solidjs/router'
+} from '@/shared/icons'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
 import { agentBlueprints } from '@/features/agents/lib/verevon-agent-blueprints'
@@ -267,7 +266,7 @@ export default function AgentRunConsole() {
     replayController = new AbortController()
     setSelectedRunId(run.runId)
 
-    setState({
+    setState(() => ({
       status: statusToRunStatus(run.status),
       runId: run.runId,
       threadId: run.threadId ?? state.threadId,
@@ -280,7 +279,7 @@ export default function AgentRunConsole() {
       citations: [],
       usage: null,
       error: run.error && run.error.trim().length > 0 ? run.error : null,
-    })
+    }))
 
     void streamRunEvents(run.runId, buildRunHandlers(), replayController.signal)
     void refreshApprovals(run.runId)
@@ -292,17 +291,22 @@ export default function AgentRunConsole() {
   // appended in arrival order with a generated key.
 
   const upsertById = (entry: TimelineEntry) => {
-    setState('timeline', (entries) => {
-      const index = entries.findIndex((item) => item.id === entry.id)
-      if (index < 0) return [...entries, entry]
-      const next = entries.slice()
+    setState((s) => {
+      const index = s.timeline.findIndex((item) => item.id === entry.id)
+      if (index < 0) {
+        s.timeline = [...s.timeline, entry]
+        return
+      }
+      const next = s.timeline.slice()
       next[index] = { ...next[index]!, ...entry }
-      return next
+      s.timeline = next
     })
   }
 
   const append = (entry: TimelineEntry) => {
-    setState('timeline', (entries) => [...entries, entry])
+    setState((s) => {
+      s.timeline = [...s.timeline, entry]
+    })
   }
 
   // ── Approvals ────────────────────────────────────────────────────────────
@@ -313,7 +317,7 @@ export default function AgentRunConsole() {
       // The user may have switched to a different run while this was in
       // flight (a new run, or a history replay) — don't stomp its approvals
       // with a stale fetch for a run that's no longer live.
-      if (state.runId === runId) setState('approvals', approvals)
+      if (state.runId === runId) setState((s) => { s.approvals = approvals })
     } catch {
       // A run with no orchestration worker has no approvals endpoint state yet —
       // keep whatever we have; a sparse run must never surface as an error.
@@ -333,7 +337,7 @@ export default function AgentRunConsole() {
       await cancelRun(targetRunId).catch(() => undefined)
       // Guard against a newer run having started while cancelRun was in
       // flight — don't stomp its status with this stale decision's outcome.
-      if (state.runId === targetRunId) setState('status', 'cancelled')
+      if (state.runId === targetRunId) setState((s) => { s.status = 'cancelled' })
     }
     await refreshApprovals(targetRunId)
   }
@@ -342,13 +346,17 @@ export default function AgentRunConsole() {
     const runId = state.runId
     // Mark the decision in-flight (spinner + disabled buttons) before any await,
     // so the active control reflects the pending network call immediately.
-    setState('decidingIds', (prev) => (prev.includes(approvalId) ? prev : [...prev, approvalId]))
+    setState((s) => {
+      s.decidingIds = s.decidingIds.includes(approvalId) ? s.decidingIds : [...s.decidingIds, approvalId]
+    })
     // Optimistically drop the decided approval so the card resolves instantly.
-    setState('approvals', (prev) => prev.filter((approval) => approval.id !== approvalId))
+    setState((s) => {
+      s.approvals = s.approvals.filter((approval) => approval.id !== approvalId)
+    })
     // Clear any stale banner from an earlier decision in this run — nothing else
     // does, so a confirmed-success reconciliation below would otherwise leave a
     // stale error on screen indefinitely.
-    setState('error', null)
+    setState((s) => { s.error = null })
     try {
       await decideApproval(approvalId, decision)
       if (runId) await applyDecisionFollowThrough(runId, decision)
@@ -359,7 +367,7 @@ export default function AgentRunConsole() {
       // state before asserting failure, instead of trusting the network error
       // alone.
       if (!runId) {
-        setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
+        setState((s) => { s.error = i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.') })
       } else {
         const fresh = await listApprovals(runId, controller?.signal).catch(() => null)
         if (state.runId !== runId) {
@@ -370,12 +378,14 @@ export default function AgentRunConsole() {
           // re-fetch) with no server-side signal either way — worth a trace
           // even without a logging library, since this is otherwise invisible.
           console.warn('[AgentRunConsole] decideApproval failed and the reconciliation re-fetch also failed; could not confirm whether the decision landed', { approvalId, runId, decision })
-          setState('error', i18n.tr(
-            'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
-            "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
-          ))
+          setState((s) => {
+            s.error = i18n.tr(
+              'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
+              "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
+            )
+          })
         } else {
-          setState('approvals', fresh)
+          setState((s) => { s.approvals = fresh })
           const match = fresh.find((approval) => approval.id === approvalId)
           const expected = decision === 'approve' ? 'GRANTED' : 'DENIED'
           if (!match) {
@@ -383,10 +393,12 @@ export default function AgentRunConsole() {
             // approval isn't in it at all, so there's genuinely nothing to read
             // a status from. Distinct log from the fresh === null branch above.
             console.warn('[AgentRunConsole] decideApproval failed and the reconciliation re-fetch no longer lists this approval at all', { approvalId, runId, decision })
-            setState('error', i18n.tr(
-              'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
-              "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
-            ))
+            setState((s) => {
+              s.error = i18n.tr(
+                'Vi fikk ikke bekreftet om avgjørelsen din ble registrert. Vent litt før du prøver på nytt.',
+                "We couldn't confirm whether your decision went through. Please wait a moment before trying again.",
+              )
+            })
           } else {
             // Canonicalized already by normalizeApproval, but matched the same
             // defensive uppercasing + PENDING fallback `pendingApprovals` uses
@@ -397,18 +409,22 @@ export default function AgentRunConsole() {
               // It actually went through — proceed exactly as success would have.
               await applyDecisionFollowThrough(runId, decision)
             } else if (matchStatus === 'PENDING') {
-              setState('error', i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.'))
+              setState((s) => { s.error = i18n.tr('Kunne ikke registrere avgjørelsen din — prøv igjen.', 'Could not record your decision — try again.') })
             } else {
-              setState('error', i18n.tr(
-                'Denne forespørselen er allerede avgjort — trolig av en annen bruker.',
-                'This request has already been decided — likely by someone else.',
-              ))
+              setState((s) => {
+                s.error = i18n.tr(
+                  'Denne forespørselen er allerede avgjort — trolig av en annen bruker.',
+                  'This request has already been decided — likely by someone else.',
+                )
+              })
             }
           }
         }
       }
     } finally {
-      setState('decidingIds', (prev) => prev.filter((id) => id !== approvalId))
+      setState((s) => {
+        s.decidingIds = s.decidingIds.filter((id) => id !== approvalId)
+      })
     }
   }
 
@@ -463,7 +479,7 @@ export default function AgentRunConsole() {
         })
       },
       onRunPaused: (event) => {
-        setState('status', 'paused')
+        setState((s) => { s.status = 'paused' })
         if (state.runId) void refreshApprovals(state.runId)
         append({
           id: `paused-${event.approvalId ?? state.timeline.length}`,
@@ -475,7 +491,7 @@ export default function AgentRunConsole() {
         })
       },
       onRunResumed: (event) => {
-        if (state.status === 'paused') setState('status', 'running')
+        if (state.status === 'paused') setState((s) => { s.status = 'running' })
         append({
           id: `resumed-${event.approvalId ?? state.timeline.length}`,
           kind: 'resume',
@@ -568,7 +584,7 @@ export default function AgentRunConsole() {
     runEventsStarted = false
     setSelectedRunId(null)
 
-    setState({
+    setState(() => ({
       status: 'running',
       runId: null,
       threadId: null,
@@ -581,23 +597,23 @@ export default function AgentRunConsole() {
       citations: [],
       usage: null,
       error: null,
-    })
+    }))
 
     const chatHandlers: ChatStreamHandlers = {
       onConnected: ({ runId, threadId, model }) => {
-        if (threadId) setState('threadId', threadId)
-        if (model) setState('modelUsed', model)
+        if (threadId) setState((s) => { s.threadId = threadId })
+        if (model) setState((s) => { s.modelUsed = model })
         if (runId) {
-          setState('runId', runId)
+          setState((s) => { s.runId = runId })
           // Capture run id, THEN start the durable raw-event stream exactly once.
           startRunEvents(runId)
         }
       },
       onMessage: ({ content: delta }) => {
-        setState('answer', (prev) => prev + delta)
+        setState((s) => { s.answer = s.answer + delta })
       },
       onReasoning: ({ delta }) => {
-        if (delta) setState('reasoning', (prev) => prev + delta)
+        if (delta) setState((s) => { s.reasoning = s.reasoning + delta })
       },
       onStep: (event) => {
         if (!event.id && !event.title) return
@@ -613,10 +629,10 @@ export default function AgentRunConsole() {
         // run-events stream's `run_paused_for_approval` arrives — react to either.
         const rawStatus = (event.status ?? '').toLowerCase()
         if (rawStatus === 'paused') {
-          setState('status', 'paused')
+          setState((s) => { s.status = 'paused' })
           const runId = state.runId ?? event.id
           if (runId) {
-            if (!state.runId) setState('runId', runId)
+            if (!state.runId) setState((s) => { s.runId = runId })
             void refreshApprovals(runId)
           }
         }
@@ -655,10 +671,10 @@ export default function AgentRunConsole() {
         const id = event.id ?? event.url ?? `cite-${state.citations.length}`
         const url = event.url ?? ''
         if (!url && !event.title) return
-        setState('citations', (prev) => {
-          if (prev.some((item) => item.id === id)) return prev
-          return [
-            ...prev,
+        setState((s) => {
+          if (s.citations.some((item) => item.id === id)) return
+          s.citations = [
+            ...s.citations,
             {
               id,
               title: event.title ?? url,
@@ -669,18 +685,20 @@ export default function AgentRunConsole() {
         })
       },
       onUsage: (usage) => {
-        setState('usage', {
-          inputTokens: usage.inputTokens,
-          outputTokens: usage.outputTokens,
-          costUsd: usage.costUsd,
-          latencyMs: usage.latencyMs,
-          confidence: usage.confidence,
+        setState((s) => {
+          s.usage = {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            costUsd: usage.costUsd,
+            latencyMs: usage.latencyMs,
+            confidence: usage.confidence,
+          }
         })
       },
       onDone: () => {
         // Don't clobber a paused/cancelled run — the chat stream can close while
         // the durable run is still gated on a human decision.
-        setState('status', (prev) => (prev === 'running' ? 'done' : prev))
+        setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
       },
       onError: ({ message }) => {
         // The agentic stream can close early in a sparse dev stack; only flip to
@@ -688,11 +706,11 @@ export default function AgentRunConsole() {
         // inference after ~25s) still reads as a completed run.
         if (controller?.signal.aborted) return
         if (state.answer.trim().length > 0) {
-          setState('status', (prev) => (prev === 'running' ? 'done' : prev))
+          setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
           return
         }
-        setState('status', 'failed')
-        setState('error', message)
+        setState((s) => { s.status = 'failed' })
+        setState((s) => { s.error = message })
       },
     }
 
@@ -717,14 +735,14 @@ export default function AgentRunConsole() {
     ).then(() => {
       // streamChat resolves when the SSE stream ends; settle any non-terminal
       // state so the UI never hangs in "running" after the stream closed.
-      setState('status', (prev) => (prev === 'running' ? 'done' : prev))
+      setState((s) => { s.status = s.status === 'running' ? 'done' : s.status })
     })
   }
 
   const cancel = () => {
     controller?.abort()
     if (state.runId) void cancelRun(state.runId).catch(() => undefined)
-    setState('status', 'cancelled')
+    setState((s) => { s.status = 'cancelled' })
   }
 
   const useExample = (text: string) => {
@@ -755,23 +773,27 @@ export default function AgentRunConsole() {
   // The approval deck is the highest-priority surface: scroll it into view when a
   // new pending approval appears, unless the user prefers reduced motion.
   let deckRef: HTMLDivElement | undefined
-  createEffect(() => {
-    if (pendingApprovals().length === 0) return
-    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
-    deckRef?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' })
-  })
+  createEffect(
+    () => pendingApprovals().length,
+    (count) => {
+      if (count === 0) return
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+      deckRef?.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' })
+    },
+  )
 
   // Refresh the history rail when a live run settles so the just-finished run
   // (and its final status) shows up without a reload. Reading `state.status`
   // and `state.runId` makes this re-run on each transition; the bump only
   // fires on a terminal status for a real run.
-  createEffect(() => {
-    const status = state.status
-    const runId = state.runId
-    if (runId && (status === 'done' || status === 'failed' || status === 'cancelled')) {
-      setHistoryTick((tick) => tick + 1)
-    }
-  })
+  createEffect(
+    () => ({ status: state.status, runId: state.runId }),
+    ({ status, runId }) => {
+      if (runId && (status === 'done' || status === 'failed' || status === 'cancelled')) {
+        setHistoryTick((tick) => tick + 1)
+      }
+    },
+  )
 
   return (
     <div class="verevon-run-console">
@@ -813,11 +835,10 @@ export default function AgentRunConsole() {
           </section>
 
           <section
-            class="verevon-run-console__live"
-            classList={{
+            class={['verevon-run-console__live', {
               'verevon-run-console__live--active': isActive(),
               'verevon-run-console__live--awaiting': awaiting(),
-            }}
+            }]}
             aria-label={i18n.tr('Aktiv kjøring', 'Live run')}
           >
             <Show when={pendingApprovals().length > 0}>
@@ -903,9 +924,9 @@ function RunConsoleHeader(props: {
   return (
     <header class="verevon-run-console__topbar">
       <div class="verevon-run-console__title-group">
-        <A href="/agents" class={cn('verevon-run-console__back', controlFocusClass)} aria-label={i18n.tr('Tilbake til agenter', 'Back to agents')}>
+        <a href="/agents" link class={cn('verevon-run-console__back', controlFocusClass)} aria-label={i18n.tr('Tilbake til agenter', 'Back to agents')}>
           <ArrowLeft size={16} />
-        </A>
+        </a>
         <div>
           <p class="verevon-run-console__eyebrow">
             <Sparkles size={13} strokeWidth={2.1} /> {i18n.tr('Oppgavekonsoll', 'Task console')}
@@ -1026,7 +1047,7 @@ function Launcher(props: {
                   <button
                     type="button"
                     role="radio"
-                    aria-checked={selected()}
+                    aria-checked={selected() ? 'true' : 'false'}
                     tabindex={selected() ? 0 : -1}
                     disabled={props.isActive}
                     onClick={() => props.onBlueprint(item.id)}
@@ -1066,7 +1087,7 @@ function Launcher(props: {
                   <button
                     type="button"
                     role="radio"
-                    aria-checked={selected()}
+                    aria-checked={selected() ? 'true' : 'false'}
                     tabindex={selected() ? 0 : -1}
                     disabled={props.isActive}
                     onClick={() => props.onMode(item.id)}
@@ -1168,7 +1189,7 @@ function PresetPicker(props: {
             return (
               <button
                 type="button"
-                aria-pressed={active()}
+                aria-pressed={active() ? 'true' : 'false'}
                 disabled={props.disabled}
                 onClick={() => props.onSelect(preset)}
                 class={cn(
@@ -1333,8 +1354,7 @@ function AnswerPanel(props: {
           )}
         >
           <div
-            class="verevon-run-answer__body"
-            classList={{ 'verevon-run-answer--streaming': props.streaming }}
+            class={['verevon-run-answer__body', { 'verevon-run-answer--streaming': props.streaming }]}
           >
             <For each={props.answer.split('\n')}>
               {(line) => (line.trim() ? <p>{line}</p> : <br />)}
@@ -1348,11 +1368,10 @@ function AnswerPanel(props: {
       <Show when={terminal()}>
         <Show when={props.status !== 'failed'}>
           <div
-            class="verevon-run-answer__status"
-            classList={{
+            class={['verevon-run-answer__status', {
               'verevon-run-answer__status--done': props.status === 'done',
               'verevon-run-answer__status--cancelled': props.status === 'cancelled',
-            }}
+            }]}
           >
             <Show
               when={props.status === 'cancelled'}
@@ -2035,9 +2054,8 @@ function HistoryRail(props: {
         <button
           type="button"
           role="tab"
-          class="verevon-run-history__tab"
-          classList={{ 'verevon-run-history__tab--active': props.source === 'thread' }}
-          aria-selected={props.source === 'thread'}
+          class={['verevon-run-history__tab', { 'verevon-run-history__tab--active': props.source === 'thread' }]}
+          aria-selected={props.source === 'thread' ? 'true' : 'false'}
           onClick={() => props.onSource('thread')}
         >
           {i18n.tr('Denne samtalen', 'This conversation')}
@@ -2045,9 +2063,8 @@ function HistoryRail(props: {
         <button
           type="button"
           role="tab"
-          class="verevon-run-history__tab"
-          classList={{ 'verevon-run-history__tab--active': props.source === 'system' }}
-          aria-selected={props.source === 'system'}
+          class={['verevon-run-history__tab', { 'verevon-run-history__tab--active': props.source === 'system' }]}
+          aria-selected={props.source === 'system' ? 'true' : 'false'}
           onClick={() => props.onSource('system')}
         >
           {i18n.tr('Planlagte', 'Scheduled')}
@@ -2089,8 +2106,7 @@ function HistoryRail(props: {
                       <li>
                         <button
                           type="button"
-                          class="verevon-run-history__row"
-                          classList={{ 'verevon-run-history__row--active': run.runId === props.activeRunId }}
+                          class={['verevon-run-history__row', { 'verevon-run-history__row--active': run.runId === props.activeRunId }]}
                           aria-current={run.runId === props.activeRunId ? 'true' : undefined}
                           onClick={() => props.onSelect(run)}
                         >

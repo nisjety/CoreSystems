@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { switchActiveOrganization } from '@/shared/api/organization-client'
@@ -15,15 +15,17 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 function renderInvitation(invitationId = 'inv_123') {
-  window.history.pushState(null, '', `/accept-invitation/${invitationId}`)
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/accept-invitation/:invitationId" component={AcceptInvitationPage} />
-      <Route path="/dashboard" component={() => <div>Dashboard</div>} />
-      <Route path="/onboarding" component={() => <div>Onboarding</div>} />
-      <Route path="/login" component={() => <div>Login</div>} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [
+      { path: '/accept-invitation/:invitationId', component: AcceptInvitationPage },
+      { path: '/dashboard', component: () => <div>Dashboard</div> },
+      { path: '/onboarding', component: () => <div>Onboarding</div> },
+      { path: '/login', component: () => <div>Login</div> },
+    ],
+    history: memoryHistory(`/accept-invitation/${invitationId}`),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 describe('AcceptInvitationPage', () => {

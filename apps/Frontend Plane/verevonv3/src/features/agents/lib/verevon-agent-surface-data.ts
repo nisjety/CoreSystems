@@ -1,4 +1,4 @@
-import { CheckCircle2, Sparkles, TicketCheck } from 'lucide-solid'
+import { CheckCircle2, Sparkles, TicketCheck } from '@/shared/icons'
 import type { RoleFeature } from '@/features/agents/lib/verevon-agent-page-types'
 
 export const serviceResolutionQueue = [

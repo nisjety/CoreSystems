@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SocialOperationsPage from '@/features/social/components/SocialOperationsPage'
@@ -13,12 +13,12 @@ import type {
 } from '@/shared/api/social-client'
 
 function renderSocialOperations(section: Parameters<typeof SocialOperationsPage>[0]['section']) {
-  window.history.pushState(null, '', `/social/${section}`)
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={() => <SocialOperationsPage section={section} />} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component: () => <SocialOperationsPage section={section} /> }],
+    history: memoryHistory(`/social/${section}`),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 function waitForSocial(assertion: () => void) {

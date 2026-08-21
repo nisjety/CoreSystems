@@ -125,7 +125,8 @@ services:
         stop_signal: SIGTERM
         stop_grace_period: 15s
         env_file:
-            - ./convex-core/.env.local
+            - path: ./convex-core/.env.local
+              required: false
         environment:
             CONVEX_BACKEND_URL: http://convex-backend:3210
             CONVEX_INTERNAL_SERVICE_KEY: ${CONVEX_INTERNAL_SERVICE_KEY:?CONVEX_INTERNAL_SERVICE_KEY must be set}
@@ -193,7 +194,8 @@ services:
             retries: 3
             start_period: 30s
         env_file:
-            - ./convex-core/.env.local
+            - path: ./convex-core/.env.local
+              required: false
         environment:
             # Auth-canonical Control projections use a scoped, pre-provisioned
             # consumer on the Control shared broker.

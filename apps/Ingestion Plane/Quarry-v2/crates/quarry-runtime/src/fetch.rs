@@ -25,6 +25,19 @@ pub struct FetchResponse {
     pub duration_ms: u64,
 }
 
+/// Redirect-hop ceiling for `do_fetch`. Real sites commonly chain
+/// apex→www→locale (2–3 hops); 5 covers that with margin while still
+/// bounding redirect loops.
+const MAX_REDIRECT_HOPS: usize = 5;
+
+/// What one egress-planned request produced: a final response, or a redirect
+/// whose target still has to pass the same preflight the entry URL did before
+/// any follow-up request is allowed to touch the network.
+enum SendOutcome {
+    Response(FetchResponse),
+    Redirect { status: u16, location: Url },
+}
+
 pub struct StaticDriver {
     /// The only direct-egress client. Its resolver has no DNS fallback --
     /// every direct request is pinned to a preflighted address, either one
@@ -167,14 +180,66 @@ impl StaticDriver {
     /// then free to respond `304 Not Modified` with an empty body and
     /// we propagate that status up to the caller (which can short-
     /// circuit by re-using the previously stored artifact).
+    ///
+    /// Redirects are followed manually, never by reqwest: each hop's target
+    /// is a fresh SSRF boundary, so before any follow-up request the target
+    /// re-runs `resolve_public_url` — the exact preflight the entry URL
+    /// passed — and its addresses are pinned via `hints.resolved_target`,
+    /// closing the "otherwise safe public URL redirects to a private or
+    /// metadata address" hole that implicit following would open. Hops are
+    /// capped at `MAX_REDIRECT_HOPS`; conditional validators only apply to
+    /// the entry URL (they describe the entry resource, not the target's).
     async fn do_fetch(&self, url: &Url, hints: &FetchHints) -> QuarryResult<FetchResponse> {
+        let mut current_url = url.clone();
+        let mut current_hints = hints.clone();
+        for hop in 0..=MAX_REDIRECT_HOPS {
+            match self.fetch_via_egress(&current_url, &current_hints).await? {
+                SendOutcome::Response(resp) => return Ok(resp),
+                SendOutcome::Redirect { status, location } => {
+                    if hop == MAX_REDIRECT_HOPS {
+                        break;
+                    }
+                    // Same public-address policy as the entry URL; the pinned
+                    // resolver then connects only to these vetted addresses.
+                    let target = resolve_public_url(&location).await?;
+                    tracing::debug!(
+                        from = %current_url,
+                        to = %location,
+                        status,
+                        hop,
+                        "following redirect after target re-validation"
+                    );
+                    current_hints.resolved_target = Some(target);
+                    current_hints.if_none_match = None;
+                    current_hints.if_modified_since = None;
+                    current_url = location;
+                }
+            }
+        }
+        Err(QuarryError::new(
+            ErrorCode::SecurityBlocked,
+            format!("static fetch exceeded {MAX_REDIRECT_HOPS} redirect hops"),
+        ))
+    }
+
+    /// One egress-planned pass for a single, already-validated URL: plan
+    /// egress identities, attempt each until one yields a response, and
+    /// surface redirects to `do_fetch` for target re-validation.
+    async fn fetch_via_egress(&self, url: &Url, hints: &FetchHints) -> QuarryResult<SendOutcome> {
         let host = url.host_str().unwrap_or("").to_string();
         let plan = self.egress.plan(hints, url)?;
         let mut attempts = Vec::with_capacity(plan.len());
         for (idx, decision) in plan.iter().enumerate() {
             let client = self.client_for_decision(decision, hints, url).await?;
             match self.send_once(client, url, hints).await {
-                Ok(resp) => {
+                Ok(SendOutcome::Redirect { status, location }) => {
+                    // The origin answered; a redirect is not an egress block,
+                    // so record the status for host health and hand the hop
+                    // decision back to do_fetch instead of rotating proxies.
+                    self.egress.mark_http_status(&host, &decision.identity, status);
+                    return Ok(SendOutcome::Redirect { status, location });
+                }
+                Ok(SendOutcome::Response(resp)) => {
                     self.egress
                         .mark_http_status(&host, &decision.identity, resp.status);
                     if crate::fingerprint_rotation::is_block_status(resp.status)
@@ -198,7 +263,7 @@ impl StaticDriver {
                         }
                         return Err(blocked_error(resp.status, attempts));
                     }
-                    return Ok(resp);
+                    return Ok(SendOutcome::Response(resp));
                 }
                 Err(err) => {
                     self.egress.mark_transport_error(&host, &decision.identity);
@@ -234,7 +299,7 @@ impl StaticDriver {
         client: &reqwest::Client,
         url: &Url,
         hints: &FetchHints,
-    ) -> QuarryResult<FetchResponse> {
+    ) -> QuarryResult<SendOutcome> {
         let start = std::time::Instant::now();
         let mut req = client.get(url.clone());
         if let Some(etag) = hints.if_none_match.as_deref() {
@@ -262,16 +327,43 @@ impl StaticDriver {
             QuarryError::new(code, format!("static fetch: {e}"))
         })?;
         let status = resp.status().as_u16();
-        // Redirect targets have not passed Quarry's URL preflight or DNS guard.
-        // Do not hand them to reqwest's implicit redirect engine: the target
-        // could resolve to a private or metadata address after an otherwise
-        // safe public URL was accepted. A caller can surface the original
-        // redirect and submit a separately reviewed target later.
+        // Redirect targets have not passed Quarry's URL preflight or DNS guard,
+        // so they never go through reqwest's implicit redirect engine (the
+        // client is built with Policy::none): the target could resolve to a
+        // private or metadata address after an otherwise safe public URL was
+        // accepted. Surface the parsed target to do_fetch, which re-runs the
+        // full preflight before any follow-up request.
         if resp.status().is_redirection() {
-            return Err(QuarryError::new(
-                ErrorCode::SecurityBlocked,
-                "static fetch redirect blocked pending target validation",
-            ));
+            let location = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or_else(|| {
+                    QuarryError::new(
+                        ErrorCode::SecurityBlocked,
+                        "static fetch redirect carried no readable Location target",
+                    )
+                })?;
+            // Join resolves relative targets against the redirecting URL.
+            let next = url.join(location).map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::SecurityBlocked,
+                    format!("static fetch redirect target failed to parse: {e}"),
+                )
+            })?;
+            if !matches!(next.scheme(), "http" | "https") {
+                return Err(QuarryError::new(
+                    ErrorCode::SecurityBlocked,
+                    format!(
+                        "static fetch redirect to non-http scheme blocked: {}",
+                        next.scheme()
+                    ),
+                ));
+            }
+            return Ok(SendOutcome::Redirect {
+                status,
+                location: next,
+            });
         }
         let final_url = resp.url().clone();
         let headers = resp
@@ -290,13 +382,13 @@ impl StaticDriver {
                 .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("read body: {e}")))?
                 .to_vec()
         };
-        Ok(FetchResponse {
+        Ok(SendOutcome::Response(FetchResponse {
             status,
             final_url,
             headers,
             body,
             duration_ms: start.elapsed().as_millis() as u64,
-        })
+        }))
     }
 }
 
@@ -533,7 +625,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_driver_rejects_redirects_before_contacting_the_target() {
+    async fn redirect_to_a_private_target_is_blocked_before_contact() {
+        // Redirects are followed, but each hop's target re-runs the public-
+        // address preflight first. MockServer binds loopback, so the hop is
+        // exactly the "safe public URL redirects to a private address" attack:
+        // the guard must reject it without the target ever seeing a request.
         let target = MockServer::start().await;
         Mock::given(any())
             .respond_with(ResponseTemplate::new(200).set_body_string("target reached"))
@@ -556,6 +652,42 @@ mod tests {
 
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
         assert!(target.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_non_http_scheme_is_blocked() {
+        let redirector = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(302).insert_header("location", "ftp://files.example/x"),
+            )
+            .mount(&redirector)
+            .await;
+
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let url: Url = format!("{}/redirect", redirector.uri()).parse().unwrap();
+
+        let err = driver.fetch(&url).await.unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        assert!(err.message.contains("non-http scheme"));
+    }
+
+    #[tokio::test]
+    async fn redirect_without_a_location_header_is_blocked() {
+        let redirector = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(302))
+            .mount(&redirector)
+            .await;
+
+        let driver = StaticDriver::new(Duration::from_secs(2), "QuarryTest/1.0").unwrap();
+        let url: Url = format!("{}/redirect", redirector.uri()).parse().unwrap();
+
+        let err = driver.fetch(&url).await.unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+        assert!(err.message.contains("no readable Location"));
     }
 
     #[tokio::test]

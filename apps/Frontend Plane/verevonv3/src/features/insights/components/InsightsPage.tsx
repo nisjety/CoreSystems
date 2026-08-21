@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   BarChart3,
   BookOpen,
@@ -14,9 +13,10 @@ import {
   PlugZap,
   TrendingUp,
   type LucideProps,
-} from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show, type Component } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { buildHeadlineMetrics, type HeadlineMetric } from '@/features/insights/lib/insights-headline-metrics'
 import {
   loadKnowledgeInsightsSnapshot,
@@ -178,19 +178,20 @@ export default function InsightsPage(props: { section?: InsightsSection }) {
           <h1>{i18n.tr('Verevon Innsikt', 'Verevon Insights')}</h1>
           <p>{config().description}</p>
         </div>
-        <A href="/settings/integrations">{i18n.tr('Administrer tilkoblinger', 'Manage connectors')}</A>
+        <a href="/settings/integrations" link>{i18n.tr('Administrer tilkoblinger', 'Manage connectors')}</a>
       </section>
 
       <nav class="verevon-insights-tabs" aria-label={i18n.tr('Innsikt-seksjoner', 'Insights sections')}>
         <For each={visibleSections()}>
           {(section) => (
-            <A
+            <a
               class={cn('verevon-insights-tab', section.id === activeSection() && 'is-active')}
               href={insightsHref(section.id)}
+              link
             >
               <Dynamic component={section.icon} size={14} />
               {section.label}
-            </A>
+            </a>
           )}
         </For>
       </nav>
@@ -255,7 +256,7 @@ function ScopePicker(props: { onChange: (scope: InsightsScope) => void; scope: I
             <button
               type="button"
               class={cn(props.scope === option.id && 'is-active')}
-              aria-pressed={props.scope === option.id}
+              aria-pressed={props.scope === option.id ? 'true' : 'false'}
               onClick={() => props.onChange(option.id)}
             >
               {option.label}
@@ -278,7 +279,7 @@ function RangePicker(props: { onChange: (range: InsightsRange) => void; range: I
             <button
               type="button"
               class={cn(props.range === option.id && 'is-active')}
-              aria-pressed={props.range === option.id}
+              aria-pressed={props.range === option.id ? 'true' : 'false'}
               onClick={() => props.onChange(option.id)}
             >
               {option.id === 'all' ? i18n.tr('Alle', 'All') : option.label}

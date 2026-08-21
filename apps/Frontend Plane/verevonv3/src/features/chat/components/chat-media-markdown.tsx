@@ -3,10 +3,8 @@ import {
   CheckCircle2,
   Clock3,
   Square,
-} from 'lucide-solid'
-import {
-  type JSX,
-} from 'solid-js'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import {
   imageArtifactSrc,
   looksLikeImageContent,

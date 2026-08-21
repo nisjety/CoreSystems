@@ -1,6 +1,7 @@
-import { createResource, Show, type JSX } from 'solid-js'
-import { A } from '@solidjs/router'
-import { ArrowLeft, Gauge, TrendingUp, TrendingDown, Minus, CheckCircle2, XCircle, Activity } from 'lucide-solid'
+import { Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { ArrowLeft, Gauge, TrendingUp, TrendingDown, Minus, CheckCircle2, XCircle, Activity } from '@/shared/icons'
 import { getQualityRollup } from '@/shared/api/eval-client'
 
 // Ops/Quality dashboard (Phase 7 B6). Renders accuracy (run success rate) and
@@ -25,9 +26,9 @@ export default function OpsQualityPage() {
     <div class="verevon-quality">
       <style>{QUALITY_CSS}</style>
       <header class="verevon-quality__topbar">
-        <A href="/agents" class="verevon-quality__back" aria-label="Back to agents">
+        <a href="/agents" link class="verevon-quality__back" aria-label="Back to agents">
           <ArrowLeft size={16} />
-        </A>
+        </a>
         <div>
           <p class="verevon-quality__eyebrow">
             <Gauge size={13} strokeWidth={2.1} /> Ops &amp; quality

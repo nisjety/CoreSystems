@@ -1,5 +1,6 @@
-import { Database, Loader2, ShieldCheck, ShieldOff, Sparkles, Unplug } from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { Database, Loader2, ShieldCheck, ShieldOff, Sparkles, Unplug } from '@/shared/icons'
+import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   aggregateToolActions,
   aggregateWorkspaceActivity,

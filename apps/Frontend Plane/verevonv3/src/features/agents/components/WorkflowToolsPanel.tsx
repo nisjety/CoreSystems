@@ -1,6 +1,6 @@
-import { Bot, MoreHorizontal, Search, X } from 'lucide-solid'
+import { Bot, MoreHorizontal, Search, X } from '@/shared/icons'
 import { createMemo, createSignal, For } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+import { Dynamic } from '@solidjs/web'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { cn } from '@/shared/lib/cn'
 import {
@@ -142,7 +142,7 @@ function WorkflowToolCard(props: {
   return (
     <button
       type="button"
-      draggable
+      draggable="true"
       aria-label={i18n.tr(`Velg verktøyet ${props.label}`, `Select ${props.label} tool`)}
       onClick={() => props.onSelect(props.toolId)}
       onDragStart={(event) => {

@@ -1,5 +1,6 @@
-import { Check, ChevronDown, Info } from 'lucide-solid'
-import { For, Show, splitProps, type JSX } from 'solid-js'
+import { For, Show, omit } from 'solid-js'
+import { Check, ChevronDown, Info } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
@@ -106,7 +107,7 @@ export function SettingsField(props: {
           type={props.type ?? 'text'}
           value={props.value}
           disabled={props.disabled}
-          readOnly={props.readOnly}
+          readonly={props.readOnly}
           placeholder={props.placeholder}
           onInput={props.onInput}
           aria-describedby={helpId()}
@@ -218,22 +219,22 @@ export function SettingsButton(allProps: JSX.ButtonHTMLAttributes<HTMLButtonElem
   settingsSize?: 'xs' | 'sm' | 'md'
   variant?: 'primary' | 'secondary'
 }) {
-  const [local, props] = splitProps(allProps, ['children', 'class', 'danger', 'settingsSize', 'type', 'variant'])
+  const props = omit(allProps, 'children', 'class', 'danger', 'settingsSize', 'type', 'variant')
 
   return (
     <button
       {...props}
-      type={local.type ?? 'button'}
+      type={allProps.type ?? 'button'}
       class={cn(
         'verevon-settings-button',
-        local.variant === 'primary' && 'verevon-settings-button--primary',
-        local.settingsSize === 'xs' && 'verevon-settings-button--xs',
-        local.settingsSize === 'sm' && 'verevon-settings-button--sm',
-        local.danger && 'verevon-settings-button--danger',
-        local.class,
+        allProps.variant === 'primary' && 'verevon-settings-button--primary',
+        allProps.settingsSize === 'xs' && 'verevon-settings-button--xs',
+        allProps.settingsSize === 'sm' && 'verevon-settings-button--sm',
+        allProps.danger && 'verevon-settings-button--danger',
+        allProps.class,
       )}
     >
-      {local.children}
+      {allProps.children}
     </button>
   )
 }

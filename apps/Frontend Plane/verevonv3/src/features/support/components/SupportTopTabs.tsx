@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import { For } from 'solid-js'
 import { supportSurfaceHref, type SupportSurface } from '@/features/support/lib/support-navigation'
 import { useI18n } from '@/shared/i18n'
@@ -16,16 +15,17 @@ export function SupportTopTabs(props: { active: SupportSurface }) {
     <nav class="verevon-support-switcher" aria-label={i18n.tr('Supportvisning', 'Support view')} role="tablist">
       <For each={tabs()}>
         {(tab) => (
-          <A
+          <a
             href={supportSurfaceHref(tab.id)}
+            link
             role="tab"
-            aria-selected={props.active === tab.id}
-            tabIndex={props.active === tab.id ? 0 : -1}
+            aria-selected={props.active === tab.id ? 'true' : 'false'}
+            tabindex={props.active === tab.id ? 0 : -1}
             onKeyDown={handleTabKeyDown}
-            classList={{ 'verevon-support-switcher__item--active': props.active === tab.id }}
+            class={{ 'verevon-support-switcher__item--active': props.active === tab.id }}
           >
             {tab.label}
-          </A>
+          </a>
         )}
       </For>
     </nav>

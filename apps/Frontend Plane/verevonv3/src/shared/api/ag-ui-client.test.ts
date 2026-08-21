@@ -34,9 +34,12 @@ describe('AG-UI client adapter', () => {
         browseWeb: true,
       },
     })
+    // knowledge.recrawl_source is a known registry action but Model eligibility
+    // is fail-closed (see model-eligibility.ts / agent-tools.ts) until an owner
+    // exposes a governed operation contract, so it is stripped here rather than
+    // forwarded as a callable tool.
     expect((body.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
       'web_search',
-      'knowledge.recrawl_source',
     ])
     expect(body.data).toEqual(body.forwardedProps)
   })

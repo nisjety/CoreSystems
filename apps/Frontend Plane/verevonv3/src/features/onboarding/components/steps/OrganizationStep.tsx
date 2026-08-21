@@ -1,4 +1,4 @@
-import { Fingerprint, Info } from 'lucide-solid'
+import { Fingerprint, Info } from '@/shared/icons'
 import { For, Show } from 'solid-js'
 import type { BrregEnhet } from '@/features/onboarding/lib/api'
 import { OnboardingField } from '@/features/onboarding/components/shared/OnboardingField'

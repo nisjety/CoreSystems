@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import AccountSettingsPage from '@/features/settings/components/AccountSettingsPage'
 import { CoreSidebar } from '@/features/core/components/CoreSidebar'
@@ -12,12 +13,12 @@ import { workspaceSettingsSections } from '@/features/settings/lib/settings-sect
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 function renderWithRouter(component: () => JSX.Element, path: string) {
-  window.history.pushState(null, '', path)
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={component} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component }],
+    history: memoryHistory(path),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 afterEach(() => {
@@ -173,7 +174,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
@@ -199,9 +202,11 @@ describe('workspace settings page', () => {
     fireEvent.input(screen.getByRole('textbox', { name: /inviter via e-post/i }), {
       target: { value: 'new@example.com' },
     })
+    flush()
     fireEvent.change(screen.getByRole('combobox', { name: /^rolle$/i }), {
       target: { value: 'admin' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /inviter medlem/i }))
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([path]) => path === '/api/v1/orgs/org_1/members/invite')
@@ -214,6 +219,7 @@ describe('workspace settings page', () => {
     fireEvent.change(screen.getByRole('combobox', { name: /rolle for teammate/i }), {
       target: { value: 'admin' },
     })
+    flush()
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/org_1/members/user_2/role')).toBe(true)
     })
@@ -222,6 +228,7 @@ describe('workspace settings page', () => {
       (screen.getByRole('button', { name: /fjern teammate/i }) as HTMLButtonElement).disabled,
     ).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /fjern teammate/i }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /bekreft fjerning av teammate/i }))
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([path]) => path === '/api/v1/orgs/org_1/members/user_2')).toBe(true)
@@ -235,7 +242,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     let invited = false
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -266,6 +275,7 @@ describe('workspace settings page', () => {
     fireEvent.input(screen.getByRole('textbox', { name: /inviter via e-post/i }), {
       target: { value: 'new@example.com' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /inviter medlem/i }))
 
     expect(await screen.findAllByText('new@example.com')).not.toHaveLength(0)
@@ -280,7 +290,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
@@ -317,7 +329,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     let removed = false
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -351,6 +365,7 @@ describe('workspace settings page', () => {
       (screen.getByRole('button', { name: /fjern teammate/i }) as HTMLButtonElement).disabled,
     ).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /fjern teammate/i }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /bekreft fjerning av teammate/i }))
 
     await waitFor(() => expect(screen.queryByText('teammate@example.com')).toBeNull())
@@ -364,7 +379,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/members' && !init?.method) {
@@ -392,6 +409,7 @@ describe('workspace settings page', () => {
       (screen.getByRole('button', { name: /fjern teammate/i }) as HTMLButtonElement).disabled,
     ).toBe(false))
     fireEvent.click(screen.getByRole('button', { name: /fjern teammate/i }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /bekreft fjerning av teammate/i }))
 
     expect(await screen.findByRole('alert')).toBeTruthy()
@@ -662,7 +680,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_google', name: 'Google org', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init
       const url = String(input)
@@ -711,7 +731,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_multi', name: 'Multi account org', role: 'owner' })
+    flush()
 
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -741,8 +763,11 @@ describe('workspace settings page', () => {
 
     render(() => <VerevonWorkspaceSettingsPage section="integrations" />)
 
-    expect(await screen.findByText('ima@example.com')).toBeTruthy()
-    expect(screen.getByText('second@example.com')).toBeTruthy()
+    // The two connections render as one combined detail line each (email ·
+    // display name · account id · …), not an isolated email-only text node,
+    // so match the email as a substring rather than the row's exact text.
+    expect(await screen.findByText(/ima@example\.com/)).toBeTruthy()
+    expect(screen.getByText(/second@example\.com/)).toBeTruthy()
     expect(screen.getAllByRole('button', { name: 'Koble til annen konto' })).toHaveLength(2)
   })
 
@@ -753,7 +778,9 @@ describe('workspace settings page', () => {
       name: 'Owner',
       emailVerified: true,
     })
+    flush()
     markSessionOnboardingComplete({ id: 'org_one', name: 'One', role: 'owner' })
+    flush()
 
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryProvider } from '@/app/providers/QueryProvider'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
@@ -15,13 +16,15 @@ import { I18nProvider } from '@/shared/i18n'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 function renderWithRouter(component: () => JSX.Element, path = '/dashboard') {
-  window.history.pushState(null, '', path)
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component }],
+    history: memoryHistory(path),
+    explicitLinks: true,
+  })
   return render(() => (
     <QueryProvider>
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/*all" component={component} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     </QueryProvider>
   ))
@@ -136,15 +139,18 @@ describe('v2 dashboard shell port', () => {
     renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Søk' }))
+    flush()
     expect(screen.getByRole('heading', { name: 'Søk på nett og i Verevon' })).toBeTruthy()
     expect(screen.getByRole('combobox', { name: 'Søk i selskapets kunnskap' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Send søkekontekst til chat' })).toBeTruthy()
     fireEvent.input(screen.getByRole('combobox', { name: 'Søk i selskapets kunnskap' }), {
       target: { value: 'agent status' },
     })
+    flush()
     expect(screen.queryByText('AI operations status')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Innhent' }))
+    flush()
     // The unified browser chrome dropped the composer's decorative caption
     // block ("… Verevon indekserer alt."), so the panel heading now appears
     // exactly once and the caption text is gone by design.
@@ -159,15 +165,18 @@ describe('v2 dashboard shell port', () => {
     const file = new File(['hello'], 'brief.pdf', { type: 'application/pdf' })
 
     fireEvent.change(input, { target: { files: [file] } })
+    flush()
 
     expect(screen.getByText('brief.pdf')).toBeTruthy()
     expect(screen.getByText('5 B')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'AI-forbedre' }))
+    flush()
     expect((screen.getByRole('textbox', { name: 'Meld Verevon' }) as HTMLTextAreaElement).value)
       .toBe('Beskriv og analyser vedlagte fil(er): brief.pdf')
 
     fireEvent.click(screen.getByRole('button', { name: 'Fjern brief.pdf' }))
+    flush()
     expect(screen.queryByText('brief.pdf')).toBeNull()
   })
 
@@ -194,13 +203,16 @@ describe('v2 dashboard shell port', () => {
     await waitFor(() => expect(screen.getByText('Vis alle samtaler')).toBeTruthy())
 
     fireEvent.click(screen.getByRole('button', { name: 'Innstillinger' }))
+    flush()
     expect(screen.getByText('Stemmespråk')).toBeTruthy()
     expect(screen.getByText('Kortfattet')).toBeTruthy()
     expect(screen.getByText('Balansert')).toBeTruthy()
     expect(screen.getByText('Detaljert')).toBeTruthy()
     expect(screen.getByText('Legg til filer eller bilder')).toBeTruthy()
     expect(screen.getByText('Ta et skjermbilde')).toBeTruthy()
-    expect(screen.getByText('Legg til i prosjekt')).toBeTruthy()
+    // "Legg til i prosjekt" (Add to project) was removed from the composer
+    // settings menu in eeb99146 ("checkpoint cross-plane space authority and
+    // hardening"), well before this migration — it no longer renders here.
     expect(screen.getByText('Ferdigheter')).toBeTruthy()
     expect(screen.getByText('Koblinger')).toBeTruthy()
 
@@ -221,7 +233,9 @@ describe('v2 dashboard shell port', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'Meld Verevon' }), {
       target: { value: 'Oppsummer kundesaker' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Send melding' }))
+    flush()
 
     expect(screen.getByText('Oppsummer kundesaker')).toBeTruthy()
     // The composer model selector defaults to the "Verevon Balance" intent mode
@@ -230,6 +244,7 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByText(/Verevon Balance · Auto/)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Historikk' }))
+    flush()
     expect(screen.getByText('I dag')).toBeTruthy()
     expect(screen.getAllByText('Oppsummer kundesaker').length).toBeGreaterThanOrEqual(2)
   })
@@ -238,13 +253,16 @@ describe('v2 dashboard shell port', () => {
     renderWithRouter(() => <CoreNavbar activeRoute="/dashboard" workspace={demoWorkspaceIdentity} />)
 
     fireEvent.click(screen.getByRole('button', { name: '0 uleste meldinger' }))
+    flush()
     expect(screen.getByText('Vis alle meldinger')).toBeTruthy()
     expect(screen.getByText('Koble til Novu for å vise innboks og Verevon AI-chatmeldinger.')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Kalender' }))
+    flush()
     expect(screen.getByText('Ingen hendelser denne dagen')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Åpne profilmeny' }))
+    flush()
     expect(screen.getByText('Abonnement')).toBeTruthy()
   })
 
@@ -360,8 +378,10 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByText('Kampanjeplanlegger')).toBeTruthy()
     expect(screen.getByText('Sosiale utkast')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Slå sammen Opprett' }))
+    flush()
     expect(screen.queryByText('Kampanjeplanlegger')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Utvid Opprett' }))
+    flush()
     expect(screen.getByText('Kampanjeplanlegger')).toBeTruthy()
 
     renderSidebar('/social/trends')
@@ -539,6 +559,7 @@ describe('v2 dashboard shell port', () => {
     ))
 
     fireEvent.click(screen.getByRole('button', { name: 'Bytt til English' }))
+    flush()
 
     expect(screen.getByText('Search knowledge base')).toBeTruthy()
     expect(screen.getByText('Create agent')).toBeTruthy()

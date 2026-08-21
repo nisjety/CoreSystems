@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   ArrowUpRight,
   Blocks,
@@ -25,9 +24,9 @@ import {
   Search,
   Table2,
   type LucideProps,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type Component } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
 import { KnowledgeAddSourceModal } from '@/features/knowledge/components/KnowledgeAddSourceModal'
 import { KnowledgeOperatingMapCanvas } from '@/features/knowledge/components/KnowledgeOperatingMapCanvas'
 // The Graf tab renders a 2D scene (knowledgeGraph2D.ts) styled to match the
@@ -355,92 +354,111 @@ export default function KnowledgePage() {
       : []
   })
 
-  onMount(() => {
-    const requestedSourceId = new URLSearchParams(window.location.search).get('source')?.trim() ?? ''
-    if (
-      requestedSourceId.length > 0 &&
-      requestedSourceId.length <= 256 &&
-      /^[A-Za-z0-9_-]+$/.test(requestedSourceId)
-    ) {
-      setSelectedSourceId(requestedSourceId)
-      setActiveView('chunks')
-    }
-    const controller = new AbortController()
-    void (async () => {
-      try {
-        const ctx = await getSessionContext()
-        activeOrgId = ctx.orgId ?? ctx.orgs?.[0]?.id ?? ''
-        activeUserId = ctx.userId
-      } catch {
-        // Leave org empty; loadKnowledgeSources resolves it from the session itself.
+  createEffect(
+    () => undefined,
+    () => {
+      const requestedSourceId = new URLSearchParams(window.location.search).get('source')?.trim() ?? ''
+      if (
+        requestedSourceId.length > 0 &&
+        requestedSourceId.length <= 256 &&
+        /^[A-Za-z0-9_-]+$/.test(requestedSourceId)
+      ) {
+        setSelectedSourceId(requestedSourceId)
+        setActiveView('chunks')
       }
-      await Promise.all([
-        loadKnowledgeWorkspace(controller.signal),
-        loadOperatingMapWorkspace(controller.signal),
-      ])
-    })()
-    onCleanup(() => controller.abort())
-  })
+      const controller = new AbortController()
+      void (async () => {
+        try {
+          const ctx = await getSessionContext()
+          activeOrgId = ctx.orgId ?? ctx.orgs?.[0]?.id ?? ''
+          activeUserId = ctx.userId
+        } catch {
+          // Leave org empty; loadKnowledgeSources resolves it from the session itself.
+        }
+        await Promise.all([
+          loadKnowledgeWorkspace(controller.signal),
+          loadOperatingMapWorkspace(controller.signal),
+        ])
+      })()
+      return () => controller.abort()
+    },
+  )
 
   // Keep the graph's top level current without user action: re-read the
   // workspace on a slow interval and whenever the tab regains focus. Deeper
   // tiers are projections of the same payload, so one quiet refresh keeps the
   // whole tree honest while only the top level is on screen by default.
-  onMount(() => {
-    const controller = new AbortController()
-    const refresh = () => {
-      if (document.visibilityState !== 'visible') return
-      // Never race a user-initiated mutation; its own reload lands after it.
-      if (busyAction() !== null) return
-      void loadKnowledgeWorkspace(controller.signal, { quiet: true })
-    }
-    const timer = window.setInterval(refresh, KNOWLEDGE_REFRESH_INTERVAL_MS)
-    document.addEventListener('visibilitychange', refresh)
-    onCleanup(() => {
-      window.clearInterval(timer)
-      document.removeEventListener('visibilitychange', refresh)
-      controller.abort()
-    })
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      const controller = new AbortController()
+      const refresh = () => {
+        if (document.visibilityState !== 'visible') return
+        // Never race a user-initiated mutation; its own reload lands after it.
+        if (busyAction() !== null) return
+        void loadKnowledgeWorkspace(controller.signal, { quiet: true })
+      }
+      const timer = window.setInterval(refresh, KNOWLEDGE_REFRESH_INTERVAL_MS)
+      document.addEventListener('visibilitychange', refresh)
+      return () => {
+        window.clearInterval(timer)
+        document.removeEventListener('visibilitychange', refresh)
+        controller.abort()
+      }
+    },
+  )
 
-  createEffect(() => {
-    const payload = liveKnowledge()
-    if (!payload) return
-    if (!payload.collections.some((collection) => collection.id === selectedCollectionId())) {
-      setSelectedCollectionId(payload.collections[0]?.id ?? 'all')
-    }
-  })
+  createEffect(
+    () => ({ payload: liveKnowledge(), selectedCollectionId: selectedCollectionId() }),
+    ({ payload, selectedCollectionId }) => {
+      if (!payload) return
+      if (!payload.collections.some((collection) => collection.id === selectedCollectionId)) {
+        setSelectedCollectionId(payload.collections[0]?.id ?? 'all')
+      }
+    },
+  )
 
-  createEffect(() => {
-    const knowledge = visibleKnowledge()
-    if (!knowledge) return
-    if (!selectedSourceId() || !knowledge.sources.some((source) => source.id === selectedSourceId())) {
-      setSelectedSourceId(knowledge.sources[0]?.id ?? null)
-    }
-    // Default the inspector to the workspace root so the tab opens with real
-    // context instead of an empty "no node selected" panel.
-    const hierarchy = graphHierarchy()
-    if (hierarchy && (!selectedGraphNodeId() || !hierarchy.byId.has(selectedGraphNodeId()!))) {
-      setSelectedGraphNodeId(hierarchy.rootId)
-    }
-  })
+  createEffect(
+    () => ({
+      knowledge: visibleKnowledge(),
+      selectedSourceId: selectedSourceId(),
+      hierarchy: graphHierarchy(),
+      selectedGraphNodeId: selectedGraphNodeId(),
+    }),
+    ({ knowledge, selectedSourceId, hierarchy, selectedGraphNodeId }) => {
+      if (!knowledge) return
+      if (!selectedSourceId || !knowledge.sources.some((source) => source.id === selectedSourceId)) {
+        setSelectedSourceId(knowledge.sources[0]?.id ?? null)
+      }
+      // Default the inspector to the workspace root so the tab opens with real
+      // context instead of an empty "no node selected" panel.
+      if (hierarchy && (!selectedGraphNodeId || !hierarchy.byId.has(selectedGraphNodeId!))) {
+        setSelectedGraphNodeId(hierarchy.rootId)
+      }
+    },
+  )
 
   // One-shot requests from the shared knowledge-filter store: the sidebar's
   // "Legg til samling" button raises the add-source flag (possibly before this
   // page mounts, right before navigating here) — consume it exactly once.
-  createEffect(() => {
-    if (knowledgeAddSourceRequested()) {
-      setKnowledgeAddSourceRequested(false)
-      setAddSourceOpen(true)
-    }
-  })
-  createEffect(() => {
-    const requestedView = knowledgeRequestedView()
-    if (requestedView) {
-      setKnowledgeRequestedView(null)
-      setActiveView(requestedView)
-    }
-  })
+  createEffect(
+    () => knowledgeAddSourceRequested(),
+    (requested) => {
+      if (requested) {
+        setKnowledgeAddSourceRequested(false)
+        setAddSourceOpen(true)
+      }
+    },
+  )
+  createEffect(
+    () => knowledgeRequestedView(),
+    (requestedView) => {
+      if (requestedView) {
+        setKnowledgeRequestedView(null)
+        setActiveView(requestedView)
+      }
+    },
+  )
 
   /**
    * `quiet` drives the background refresh that keeps the graph's top level
@@ -1021,7 +1039,7 @@ function WorkspaceHeader(props: {
           type="button"
           class={cn('knowledge-toolbar-button', props.filtersOpen && 'knowledge-toolbar-button--active')}
           aria-label={i18n.tr('Filtrer kunnskap', 'Filter knowledge')}
-          aria-expanded={props.filtersOpen}
+          aria-expanded={props.filtersOpen ? 'true' : 'false'}
           title={i18n.tr('Filtrer etter samling og type', 'Filter by collection and type')}
           onClick={() => props.onToggleFilters()}
         >
@@ -1033,7 +1051,7 @@ function WorkspaceHeader(props: {
             type="button"
             class={cn('knowledge-toolbar-view__button', props.layout === 'grid' && 'knowledge-toolbar-view__button--active')}
             aria-label={i18n.tr('Rutenettvisning', 'Grid view')}
-            aria-pressed={props.layout === 'grid'}
+            aria-pressed={props.layout === 'grid' ? 'true' : 'false'}
             onClick={() => props.onLayoutChange('grid')}
           >
             <Grid2X2 class="size-4" />
@@ -1042,17 +1060,17 @@ function WorkspaceHeader(props: {
             type="button"
             class={cn('knowledge-toolbar-view__button', props.layout === 'list' && 'knowledge-toolbar-view__button--active')}
             aria-label={i18n.tr('Listevisning', 'List view')}
-            aria-pressed={props.layout === 'list'}
+            aria-pressed={props.layout === 'list' ? 'true' : 'false'}
             onClick={() => props.onLayoutChange('list')}
           >
             <List class="size-4" />
           </button>
         </div>
         <SegmentedView activeView={props.activeView} onActiveViewChange={props.onActiveViewChange} />
-        <A href="/ingestions" class="button button--secondary button--md knowledge-link-button">
+        <a href="/ingestions" link class="button button--secondary button--md knowledge-link-button">
           <ArrowUpRight class="size-4" />
           {i18n.tr('Innhenting', 'Ingestions')}
-        </A>
+        </a>
         <Button size="md" onClick={props.onSync} disabled={props.syncing}>
           <RefreshCw class={cn('size-4', props.syncing && 'knowledge-spin')} />
           {i18n.tr('Synkroniser', 'Sync')}
@@ -1099,7 +1117,7 @@ function KnowledgeFilterRow(props: {
         <button
           type="button"
           class={cn('knowledge-filter-chip', props.typeFilter === null && 'knowledge-filter-chip--active')}
-          aria-pressed={props.typeFilter === null}
+          aria-pressed={props.typeFilter === null ? 'true' : 'false'}
           onClick={() => props.onTypeFilterChange(null)}
         >
           {i18n.tr('Alle', 'All')}
@@ -1109,7 +1127,7 @@ function KnowledgeFilterRow(props: {
             <button
               type="button"
               class={cn('knowledge-filter-chip', props.typeFilter === type && 'knowledge-filter-chip--active')}
-              aria-pressed={props.typeFilter === type}
+              aria-pressed={props.typeFilter === type ? 'true' : 'false'}
               onClick={() => props.onTypeFilterChange(props.typeFilter === type ? null : type)}
             >
               {type}
@@ -1681,7 +1699,7 @@ function ChunksCanvas(props: {
               {(source) => (
                 <button
                   type="button"
-                  aria-pressed={source.id === props.selectedSource?.id}
+                  aria-pressed={source.id === props.selectedSource?.id ? 'true' : 'false'}
                   onClick={() => props.onSelectSource(source.id)}
                   class={cn('knowledge-chunk-source-button', source.id === props.selectedSource?.id && 'knowledge-chunk-source-button--active')}
                 >
@@ -1737,40 +1755,46 @@ function GraphPanel(props: {
     })
   }
 
-  onMount(() => {
-    const reducedMotion = typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
-      : false
-    sceneController = createKnowledgeGraph2DScene(graphRef, hostRef, {
-      reducedMotion,
-      onHoverNode: (node) => setHoveringNode(Boolean(node)),
-      onSelectNode: (pick) => {
-        if (pick) activateNode(pick.node.id)
-      },
-      onZoomChange: setZoomPercent,
-    })
-    if (sceneController) {
-      const data = sceneData()
-      sceneController.setData(data.nodes, data.edges)
-      if (props.selectedNode) sceneController.setActiveNode(props.selectedNode.id)
-      setZoomPercent(sceneController.zoomPercent())
-    }
-    onCleanup(() => {
-      sceneController?.dispose()
-      sceneController = undefined
-    })
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      const reducedMotion = typeof window.matchMedia === 'function'
+        ? window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        : false
+      sceneController = createKnowledgeGraph2DScene(graphRef, hostRef, {
+        reducedMotion,
+        onHoverNode: (node) => setHoveringNode(Boolean(node)),
+        onSelectNode: (pick) => {
+          if (pick) activateNode(pick.node.id)
+        },
+        onZoomChange: setZoomPercent,
+      })
+      if (sceneController) {
+        const data = sceneData()
+        sceneController.setData(data.nodes, data.edges)
+        if (props.selectedNode) sceneController.setActiveNode(props.selectedNode.id)
+        setZoomPercent(sceneController.zoomPercent())
+      }
+      return () => {
+        sceneController?.dispose()
+        sceneController = undefined
+      }
+    },
+  )
 
-  createEffect(() => {
-    const data = sceneData()
-    sceneController?.setData(data.nodes, data.edges)
-  })
+  createEffect(
+    () => sceneData(),
+    (data) => sceneController?.setData(data.nodes, data.edges),
+  )
 
-  createEffect(() => {
-    // Sync external selection (e.g. cleared by parent) into the scene without
-    // re-firing onSelectNode: setActiveNode only repositions the highlight.
-    sceneController?.setActiveNode(props.selectedNode?.id)
-  })
+  createEffect(
+    () => props.selectedNode?.id,
+    (id) => {
+      // Sync external selection (e.g. cleared by parent) into the scene without
+      // re-firing onSelectNode: setActiveNode only repositions the highlight.
+      sceneController?.setActiveNode(id)
+    },
+  )
 
   const zoom = (direction: 1 | -1) => {
     const next = sceneController?.zoom(direction)
@@ -1795,15 +1819,13 @@ function GraphPanel(props: {
 
       <div
         ref={hostRef}
-        class="onboarding-source-graph knowledge-graph-scene"
-        classList={{ 'onboarding-source-graph--empty': !hasNodes() }}
+        class={['onboarding-source-graph knowledge-graph-scene', { 'onboarding-source-graph--empty': !hasNodes() }]}
         role="region"
         aria-label={i18n.tr('Kunnskapskildegraf', 'Knowledge source graph')}
       >
         <div
           ref={graphRef}
-          class="onboarding-source-graph__engine"
-          classList={{ 'onboarding-source-graph__engine--hovering': hoveringNode() }}
+          class={['onboarding-source-graph__engine', { 'onboarding-source-graph__engine--hovering': hoveringNode() }]}
           aria-label={hasNodes()
             ? i18n.tr('Interaktiv 3D-kunnskapsgraf', 'Interactive 3D knowledge graph')
             : i18n.tr('Kunnskapsgraf uten noder ennå', 'Knowledge graph with no nodes yet')}

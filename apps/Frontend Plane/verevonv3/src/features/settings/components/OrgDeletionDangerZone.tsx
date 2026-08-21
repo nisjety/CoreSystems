@@ -1,4 +1,4 @@
-import { Loader2, ShieldAlert, Trash2 } from 'lucide-solid'
+import { Loader2, ShieldAlert, Trash2 } from '@/shared/icons'
 import { createSignal, Show } from 'solid-js'
 import { SettingsButton } from '@/features/settings/components/settings-ui'
 import { ApiError } from '@/shared/api/http'

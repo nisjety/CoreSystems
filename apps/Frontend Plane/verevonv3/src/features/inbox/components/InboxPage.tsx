@@ -1,5 +1,6 @@
 import { useLocation, useNavigate } from '@solidjs/router'
-import { createEffect, createMemo, createResource, createSignal, onCleanup, onMount } from 'solid-js'
+import { createEffect, createMemo, createSignal } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { ConversationPanel } from '@/features/inbox/components/ConversationPanel'
 import { InboxAside, type RecentConversationRef } from '@/features/inbox/components/InboxAside'
 import { InboxWorkModal, type InboxModalRequest, type InboxTicketLinkRequest } from '@/features/inbox/components/InboxWorkModal'
@@ -149,14 +150,16 @@ export default function InboxPage() {
       })
       : Promise.resolve([] as LiveTicket[]),
   )
-  createEffect(() => {
-    inboxQueryKey()
-    refreshRequestVersion += 1
-    paginationRequestVersion += 1
-    setOlderTickets([])
-    setNextConversationCursor(null)
-    setOlderTicketsLoading(false)
-  })
+  createEffect(
+    () => inboxQueryKey(),
+    () => {
+      refreshRequestVersion += 1
+      paginationRequestVersion += 1
+      setOlderTickets([])
+      setNextConversationCursor(null)
+      setOlderTicketsLoading(false)
+    },
+  )
   const baseTickets = () => {
     const seen = new Set<string>()
     return [...(ticketsRes() ?? []), ...olderTickets()].filter((ticket) => {
@@ -371,33 +374,35 @@ export default function InboxPage() {
   let loadedOrgId = ''
   let orgGeneration = 0
   let detailRequestVersion = 0
-  createEffect(() => {
-    const nextOrgId = orgId()
-    if (!nextOrgId || nextOrgId === loadedOrgId) return
-    orgGeneration += 1
-    detailRequestVersion += 1
+  createEffect(
+    () => orgId(),
+    (nextOrgId) => {
+      if (!nextOrgId || nextOrgId === loadedOrgId) return
+      orgGeneration += 1
+      detailRequestVersion += 1
 
-    if (loadedOrgId) {
-      // Never retain or render a prior tenant's resource values while the new
-      // organization is loading. createResource ignores stale async results.
-      mutateTickets([])
-      mutateSupportTickets([])
-      mutateGroups([])
-      mutateInboxConnections({ connections: [], unavailable: false, message: null })
-      setSelectedTicket(null)
-      setArticles([])
-      setArticlesLoading(false)
-      setSentiment(null)
-      setReplyText('')
+      if (loadedOrgId) {
+        // Never retain or render a prior tenant's resource values while the new
+        // organization is loading. createResource ignores stale async results.
+        mutateTickets([])
+        mutateSupportTickets([])
+        mutateGroups([])
+        mutateInboxConnections({ connections: [], unavailable: false, message: null })
+        setSelectedTicket(null)
+        setArticles([])
+        setArticlesLoading(false)
+        setSentiment(null)
+        setReplyText('')
 		setReplyInternal(false)
-      setReplySending(false)
-      setPendingReplyIntent(null)
-      setSuggesting(false)
-      setNotice(null)
+        setReplySending(false)
+        setPendingReplyIntent(null)
+        setSuggesting(false)
+        setNotice(null)
 		setInboxRefreshNotice(null)
-    }
-    loadedOrgId = nextOrgId
-  })
+      }
+      loadedOrgId = nextOrgId
+    },
+  )
 
   const agents = createMemo<Agent[]>(() => {
     const profile = ctx()
@@ -411,19 +416,22 @@ export default function InboxPage() {
     }]
   })
 
-  createEffect(() => {
-    if (routeKey() === location.search) return
-    detailRequestVersion += 1
-    setRouteKey(location.search)
-    setActiveTab(routeFilter().activeTab)
-    setNotice(null)
-    setReplyText('')
+  createEffect(
+    () => ({ current: routeKey(), search: location.search, activeTab: routeFilter().activeTab }),
+    ({ current, search, activeTab }) => {
+      if (current === search) return
+      detailRequestVersion += 1
+      setRouteKey(search)
+      setActiveTab(activeTab)
+      setNotice(null)
+      setReplyText('')
 		setReplyInternal(false)
-    setSelectedTicket(null)
-    setSentiment(null)
-    setArticles([])
-    setArticlesLoading(false)
-  })
+      setSelectedTicket(null)
+      setSentiment(null)
+      setArticles([])
+      setArticlesLoading(false)
+    },
+  )
 
   const filteredTickets = createMemo(() => {
     const filter = routeFilter()
@@ -490,41 +498,51 @@ export default function InboxPage() {
   }
 
   let openedConversationKey = ''
-  createEffect(() => {
-    const conversationId = requestedConversationId()
-    const requestOrgId = orgId()
-    if (!conversationId || !requestOrgId) {
-      openedConversationKey = ''
-      return
-    }
-    const key = `${requestOrgId}:${conversationId}`
-    if (openedConversationKey === key) return
-    openedConversationKey = key
-
-    const listed = baseTickets().find((ticket) => ticket.conversationId === conversationId)
-    if (listed) {
-      void loadTicketDetails(listed)
-      return
-    }
-
-    // A global review item may refer to a conversation outside the current list
-    // page. Hydrate only that canonical record rather than pretending it is
-    // absent or fetching unrelated customer content.
-    void getConversationDetail(requestOrgId, conversationId).then((detail) => {
-      if (requestedConversationId() !== conversationId || requestOrgId !== orgId()) return
-      const ticket = {
-        ...detail.ticket,
-        supportTicket: supportTicketByConversation().get(detail.ticket.conversationId) ?? null,
+  createEffect(
+    // compute: gather every tracked read up front, including the `listed`
+    // lookup (a pure derivation over baseTickets()), so the effect below is
+    // free to run untracked.
+    () => {
+      const conversationId = requestedConversationId()
+      const requestOrgId = orgId()
+      const listed = conversationId && requestOrgId
+        ? baseTickets().find((ticket) => ticket.conversationId === conversationId)
+        : undefined
+      return { conversationId, requestOrgId, listed }
+    },
+    ({ conversationId, requestOrgId, listed }) => {
+      if (!conversationId || !requestOrgId) {
+        openedConversationKey = ''
+        return
       }
-      setSelectedTicket(ticket)
-      setArticles(detail.articles)
-      setArticlesLoading(false)
-      replaceTicketInPages(ticket)
-    }).catch((reason) => {
-      if (requestedConversationId() !== conversationId || requestOrgId !== orgId()) return
-      setNotice(translateApiError(reason, i18n.tr, { no: 'Samtalen fra gjennomgangskøen kunne ikke lastes.', en: 'The review-queue conversation could not be loaded.' }))
-    })
-  })
+      const key = `${requestOrgId}:${conversationId}`
+      if (openedConversationKey === key) return
+      openedConversationKey = key
+
+      if (listed) {
+        void loadTicketDetails(listed)
+        return
+      }
+
+      // A global review item may refer to a conversation outside the current list
+      // page. Hydrate only that canonical record rather than pretending it is
+      // absent or fetching unrelated customer content.
+      void getConversationDetail(requestOrgId, conversationId).then((detail) => {
+        if (requestedConversationId() !== conversationId || requestOrgId !== orgId()) return
+        const ticket = {
+          ...detail.ticket,
+          supportTicket: supportTicketByConversation().get(detail.ticket.conversationId) ?? null,
+        }
+        setSelectedTicket(ticket)
+        setArticles(detail.articles)
+        setArticlesLoading(false)
+        replaceTicketInPages(ticket)
+      }).catch((reason) => {
+        if (requestedConversationId() !== conversationId || requestOrgId !== orgId()) return
+        setNotice(translateApiError(reason, i18n.tr, { no: 'Samtalen fra gjennomgangskøen kunne ikke lastes.', en: 'The review-queue conversation could not be loaded.' }))
+      })
+    },
+  )
 
   const replaceTicket = (updated: LiveTicket) => {
     // A local mutation must win over any list refresh that was launched before
@@ -588,7 +606,15 @@ export default function InboxPage() {
     })
   }
 
-  onMount(() => {
+  createEffect(
+    () => undefined,
+    // Two-phase effects run their effect function outside any owner context
+    // (it fires from the queue drain, not the tracked compute), so onCleanup()
+    // here would silently no-op (NO_OWNER_CLEANUP) and leak these listeners
+    // across every mount. Returning the cleanup function is the mechanism v2
+    // actually wires up: runEffect stores the return value and invokes it
+    // before the next run / at disposal.
+    () => {
     const interval = window.setInterval(refreshInbox, 15_000)
     const handleFocus = () => refreshInbox()
     const handleVisibility = () => {
@@ -619,13 +645,14 @@ export default function InboxPage() {
     window.addEventListener('focus', handleFocus)
     document.addEventListener('visibilitychange', handleVisibility)
 		window.addEventListener('keydown', handleQueueNavigation)
-    onCleanup(() => {
+    return () => {
       window.clearInterval(interval)
       window.removeEventListener('focus', handleFocus)
       document.removeEventListener('visibilitychange', handleVisibility)
 		window.removeEventListener('keydown', handleQueueNavigation)
-    })
-  })
+    }
+    },
+  )
 
   // Other conversations from the same contact (within the loaded window).
   const recentConversations = createMemo<RecentConversationRef[]>(() => {

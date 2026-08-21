@@ -1,3 +1,4 @@
+import { type Component, For, Show, createEffect, createMemo, createSignal } from 'solid-js'
 import { useLocation, useNavigate } from '@solidjs/router'
 import {
   AlertTriangle,
@@ -19,10 +20,10 @@ import {
   UserRound,
   UsersRound,
   Zap,
-} from 'lucide-solid'
-import type { LucideProps } from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Show, type Component, type JSX } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import type { LucideProps } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import { Dynamic } from '@solidjs/web'
 import { formatRelativeTime } from '@/features/inbox/lib/inbox-model'
 import type { AssistMessage } from '@/features/inbox/lib/inbox-ai'
 import { SupportVerevonComposer } from '@/features/support/components/SupportVerevonComposer'
@@ -84,6 +85,7 @@ import {
 import { executeAction } from '@/shared/actions/action-client'
 import { buildModelContextPack, type SupportAssistantContext } from '@/shared/context-packs/context-pack'
 import { cn } from '@/shared/lib/cn'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { handleTabKeyDown } from '@/shared/ui/tab-keyboard'
 
@@ -307,18 +309,22 @@ export default function TicketingPage() {
 	)
 	const ticketActivity = () => ticketActivityRes() ?? []
 
-  createEffect(() => {
-    void selectedTicket()?.id
-    setActiveTicketTab('ticket')
-  })
+  createEffect(
+    () => selectedTicket()?.id,
+    () => {
+      setActiveTicketTab('ticket')
+    },
+  )
 
-  createEffect(() => {
-    const visibleIDs = new Set(filteredTickets().map((ticket) => ticket.id))
-    setBulkSelectedIds((previous) => {
-      const retained = new Set([...previous].filter((id) => visibleIDs.has(id)))
-      return retained.size === previous.size ? previous : retained
-    })
-  })
+  createEffect(
+    () => new Set(filteredTickets().map((ticket) => ticket.id)),
+    (visibleIDs) => {
+      setBulkSelectedIds((previous) => {
+        const retained = new Set([...previous].filter((id) => visibleIDs.has(id)))
+        return retained.size === previous.size ? previous : retained
+      })
+    },
+  )
 
   // Operational records are loaded only for an incident work item. This keeps
   // ordinary customer-case Ticketing fast while still putting incident and
@@ -334,16 +340,23 @@ export default function TicketingPage() {
   const incidents = () => incidentsRes() ?? []
   const problems = () => problemsRes() ?? []
 
-  createEffect(() => {
-    const requested = requestedTicketId()
-    if (requested && tickets().some((ticket) => ticket.id === requested)) {
-      setSelectedId(requested)
-      return
-    }
-    if (!selectedId() || !filteredTickets().some((ticket) => ticket.id === selectedId())) {
-      setSelectedId(filteredTickets()[0]?.id ?? null)
-    }
-  })
+  createEffect(
+    () => ({
+      requestedId: requestedTicketId(),
+      allTickets: tickets(),
+      currentSelectedId: selectedId(),
+      visibleTickets: filteredTickets(),
+    }),
+    ({ requestedId, allTickets, currentSelectedId, visibleTickets }) => {
+      if (requestedId && allTickets.some((ticket) => ticket.id === requestedId)) {
+        setSelectedId(requestedId)
+        return
+      }
+      if (!currentSelectedId || !visibleTickets.some((ticket) => ticket.id === currentSelectedId)) {
+        setSelectedId(visibleTickets[0]?.id ?? null)
+      }
+    },
+  )
 
   const replaceTicket = (updated: SupportTicket) => {
     mutate((current) => current && {
@@ -756,9 +769,9 @@ export default function TicketingPage() {
             />
           </label>
           <div class="verevon-ticketing-filter-strip" aria-label={i18n.tr('Sakfiltre', 'Ticket filters')}>
-            <a href={withTicketParam(location.pathname, location.search, 'sla_state', 'risk')}>{i18n.tr('SLA-risiko', 'SLA risk')}</a>
-            <a href={withTicketParam(location.pathname, location.search, 'priority', 'urgent')}>{i18n.tr('Haster', 'Urgent')}</a>
-            <a href={withTicketParam(location.pathname, location.search, 'label', 'refund')}>{i18n.tr('Refusjon', 'Refund')}</a>
+            <a href={withTicketParam(location.pathname, location.search, 'sla_state', 'risk')} link>{i18n.tr('SLA-risiko', 'SLA risk')}</a>
+            <a href={withTicketParam(location.pathname, location.search, 'priority', 'urgent')} link>{i18n.tr('Haster', 'Urgent')}</a>
+            <a href={withTicketParam(location.pathname, location.search, 'label', 'refund')} link>{i18n.tr('Refusjon', 'Refund')}</a>
           </div>
           <Show when={savedViews().length > 0}>
             <label class="verevon-ticketing-saved-view">
@@ -1251,8 +1264,8 @@ function TicketWorkspaceTab(props: {
       role="tab"
       id={`ticket-workspace-tab-${props.id}`}
       aria-controls={`ticket-workspace-panel-${props.id}`}
-      aria-selected={props.active}
-      tabIndex={props.active ? 0 : -1}
+      aria-selected={props.active ? 'true' : 'false'}
+      tabindex={props.active ? 0 : -1}
       onKeyDown={handleTabKeyDown}
       onClick={() => props.onSelect(props.id)}
     >
@@ -1377,10 +1390,12 @@ function TicketingContextPanel(props: {
     }] : []
   })
 
-  createEffect(() => {
-    void props.ticket?.id
-    setActiveTab('details')
-  })
+  createEffect(
+    () => props.ticket?.id,
+    () => {
+      setActiveTab('details')
+    },
+  )
 
   return (
     <div class="verevon-ticketing-context-shell">
@@ -1508,8 +1523,8 @@ function TicketContextTabButton(props: {
       role="tab"
       id={`ticket-context-tab-${props.id}`}
       aria-controls={`ticket-context-panel-${props.id}`}
-      aria-selected={props.active}
-      tabIndex={props.active ? 0 : -1}
+      aria-selected={props.active ? 'true' : 'false'}
+      tabindex={props.active ? 0 : -1}
       onKeyDown={handleTabKeyDown}
       onClick={() => props.onSelect(props.id)}
     >
@@ -1646,8 +1661,8 @@ function TicketSideConversationPanel(props: {
     <div class="verevon-ticketing-side-conversations">
       <p class="verevon-ticketing-panel-muted">{i18n.tr('Kun internt. Dette sender aldri en kundeoppdatering og erstatter ikke Verevon Chat.', 'Internal only. This never sends a customer update and does not replace Verevon Chat.')}</p>
       <form class="verevon-ticketing-side-conversation-form" onSubmit={(event) => { event.preventDefault(); void create() }}>
-        <input aria-label={i18n.tr('Emne for intern samtale', 'Internal conversation subject')} value={subject()} maxLength={160} onInput={(event) => setSubject(event.currentTarget.value)} placeholder={i18n.tr('Hva trenger du avklaring på?', 'What needs coordination?')} />
-        <textarea aria-label={i18n.tr('Første interne melding', 'First internal message')} value={body()} maxLength={4000} onInput={(event) => setBody(event.currentTarget.value)} placeholder={i18n.tr('Skriv kontekst og spørsmål for teamet.', 'Add context and a question for the team.')} />
+        <input aria-label={i18n.tr('Emne for intern samtale', 'Internal conversation subject')} value={subject()} maxlength={160} onInput={(event) => setSubject(event.currentTarget.value)} placeholder={i18n.tr('Hva trenger du avklaring på?', 'What needs coordination?')} />
+        <textarea aria-label={i18n.tr('Første interne melding', 'First internal message')} value={body()} maxlength={4000} onInput={(event) => setBody(event.currentTarget.value)} placeholder={i18n.tr('Skriv kontekst og spørsmål for teamet.', 'Add context and a question for the team.')} />
         <button type="submit" disabled={!subject().trim() || !body().trim()}>{i18n.tr('Start intern samtale', 'Start internal conversation')}</button>
       </form>
       <Show when={threads().length > 0} fallback={<p class="verevon-ticketing-panel-muted">{i18n.tr('Ingen interne samtaler på denne saken ennå.', 'No internal conversations on this ticket yet.')}</p>}>
@@ -1657,7 +1672,7 @@ function TicketSideConversationPanel(props: {
             <For each={thread.messages}>{(message) => <p>{message.body_text}</p>}</For>
             <Show when={thread.status === 'open'}>
               <form class="verevon-ticketing-side-reply" onSubmit={(event) => { event.preventDefault(); void reply(thread.id) }}>
-                <input aria-label={i18n.tr(`Svar på ${thread.subject}`, `Reply to ${thread.subject}`)} value={replies()[thread.id] ?? ''} maxLength={4000} onInput={(event) => setReplies((current) => ({ ...current, [thread.id]: event.currentTarget.value }))} placeholder={i18n.tr('Internt svar', 'Internal reply')} />
+                <input aria-label={i18n.tr(`Svar på ${thread.subject}`, `Reply to ${thread.subject}`)} value={replies()[thread.id] ?? ''} maxlength={4000} onInput={(event) => setReplies((current) => ({ ...current, [thread.id]: event.currentTarget.value }))} placeholder={i18n.tr('Internt svar', 'Internal reply')} />
                 <button type="submit" disabled={!replies()[thread.id]?.trim()}>{i18n.tr('Svar', 'Reply')}</button>
               </form>
             </Show>
@@ -1699,7 +1714,7 @@ function TicketTimeline(props: { activities: TicketActivity[] }) {
                 <TicketActivityIcon action={activity.action} />
                 <span>
                   {ticketActivityLabel(activity, i18n.tr)}
-                  <time dateTime={activity.created_at}>{i18n.tr(` · ${formatRelativeTime(activity.created_at)} siden`, ` · ${formatRelativeTime(activity.created_at)} ago`)}</time>
+                  <time datetime={activity.created_at}>{i18n.tr(` · ${formatRelativeTime(activity.created_at)} siden`, ` · ${formatRelativeTime(activity.created_at)} ago`)}</time>
                 </span>
               </li>
             )}

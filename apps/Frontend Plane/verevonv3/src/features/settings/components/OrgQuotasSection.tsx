@@ -1,5 +1,6 @@
-import { Coins, Loader2, ShieldCheck } from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { Coins, Loader2, ShieldCheck } from '@/shared/icons'
+import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   listOrgQuotas,
   microsToUsd,

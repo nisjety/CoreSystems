@@ -1,4 +1,4 @@
-import { ChevronDown, Globe } from 'lucide-solid'
+import { ChevronDown, Globe } from '@/shared/icons'
 import { cn } from '@/shared/lib/cn'
 
 type VerevonLanguageButtonProps = {
@@ -19,7 +19,7 @@ export function VerevonLanguageButton(props: VerevonLanguageButtonProps) {
       onClick={() => props.onClick?.()}
       aria-label={props.ariaLabel ?? 'Language'}
       aria-haspopup={props.hasMenu === false ? undefined : 'menu'}
-      aria-expanded={props.hasMenu === false ? undefined : props.ariaExpanded}
+      aria-expanded={props.hasMenu === false ? undefined : (props.ariaExpanded ? 'true' : 'false')}
       aria-controls={props.hasMenu === false ? undefined : props.ariaControls}
     >
       <Globe size={16} />

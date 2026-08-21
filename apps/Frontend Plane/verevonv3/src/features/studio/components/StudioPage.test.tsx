@@ -1,18 +1,19 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import { Route, Router } from '@solidjs/router'
-import type { JSX } from 'solid-js'
+import { createRouter, memoryHistory } from '@solidjs/router'
+import type { JSX } from '@solidjs/web'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import StudioPage from '@/features/studio/components/StudioPage'
 
 function renderWithRouter(component: () => JSX.Element, path = '/studio/canvas') {
-  window.history.pushState(null, '', path)
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={component} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component }],
+    history: memoryHistory(path),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 describe('StudioPage', () => {
@@ -32,30 +33,42 @@ describe('StudioPage', () => {
     expect(screen.getByText('Start et Studio-brett')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Legg til Tekst-blokk' }))
+    flush()
 
     expect(screen.getAllByText('Text note 1').length).toBeGreaterThanOrEqual(1)
     fireEvent.input(screen.getByDisplayValue('Text note 1'), {
       target: { value: 'Launch proof point' },
     })
+    flush()
     expect(screen.getAllByText('Launch proof point').length).toBeGreaterThanOrEqual(1)
   })
 
   it('duplicates, deletes, and recovers back to the empty canvas', () => {
     renderWithRouter(() => <StudioPage section="canvas" />)
 
-    // Build up from the empty canvas, then duplicate the added block.
+    // Build up from the empty canvas, then duplicate the added block. Each
+    // click's addBlock/duplicateSelected/deleteSelected handler stages a
+    // setBlocks + setSelectedBlockId write; the *next* click's handler reads
+    // selectedBlock()/blocks() fresh, so every click needs its own flush()
+    // before the next one fires — not just once at the end — or a later
+    // handler will act on the previous click's stale pre-write state.
     fireEvent.click(screen.getByRole('button', { name: 'Legg til Tekst-blokk' }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Dupliser valgt blokk' }))
+    flush()
 
     expect(screen.getByDisplayValue('Text note 1 copy')).toBeTruthy()
 
     // Delete both blocks; the empty-state affordance returns.
     fireEvent.click(screen.getByRole('button', { name: 'Slett valgt blokk' }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Slett valgt blokk' }))
+    flush()
 
     expect(screen.getByText('Start et Studio-brett')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Tekst' }))
+    flush()
 
     expect(screen.getByDisplayValue('Text note 1')).toBeTruthy()
   })
@@ -83,7 +96,16 @@ describe('StudioPage', () => {
       ))).toBe(true)
     })
 
-    expect(screen.getByText(/Sosialt utkast opprettet/)).toBeTruthy()
+    // The fetch mock records each call synchronously the instant it's invoked,
+    // before that call's own response/JSON-parsing promise chain resolves — so
+    // the PUT+POST assertion above can observe both calls made while
+    // `exportCurrentProject`'s trailing `setPersistenceMessage` (and its
+    // `finally` busy-state reset) are still a few microtask hops away from
+    // running. Poll for the persisted message rather than asserting
+    // synchronously right after the previous `waitFor` resolves.
+    await waitFor(() => {
+      expect(screen.getByText(/Sosialt utkast opprettet/)).toBeTruthy()
+    })
   })
 
   it('labels gateway-local Studio persistence as temporary', async () => {

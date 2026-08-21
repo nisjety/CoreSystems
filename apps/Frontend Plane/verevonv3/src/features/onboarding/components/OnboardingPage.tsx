@@ -1,6 +1,6 @@
 import { useNavigate } from '@solidjs/router'
 import { useQueryClient } from '@tanstack/solid-query'
-import { Show, batch, createEffect, createMemo, createSignal, onCleanup, onMount, untrack } from 'solid-js'
+import { Show, createEffect, createMemo, createSignal, flush, onCleanup, untrack } from 'solid-js'
 import { createOnboardingGatewayActions } from '@/features/onboarding/lib/actions'
 import {
   type BrregEnhet,
@@ -127,18 +127,21 @@ export default function OnboardingPage() {
     () => state.step === 'connect' && Boolean(state.organization.id),
   )
 
-  onMount(() => {
-    const updateViewportHeight = () => setViewportHeight(window.innerHeight)
-    updateViewportHeight()
-    window.addEventListener('resize', updateViewportHeight)
-    onCleanup(() => window.removeEventListener('resize', updateViewportHeight))
+  // Solid v2 has no onMount; a two-phase createEffect with a constant
+  // compute runs its effect function exactly once after mount.
+  createEffect(
+    () => undefined,
+    () => {
+      const updateViewportHeight = () => setViewportHeight(window.innerHeight)
+      updateViewportHeight()
+      window.addEventListener('resize', updateViewportHeight)
 
-    const checkoutParams = new URLSearchParams(window.location.search)
-    const checkoutState = checkoutParams.get('checkout')
-    void actions.loadOnboardingState<OnboardingState>()
-      .then((snapshot) => {
+      const checkoutParams = new URLSearchParams(window.location.search)
+      const checkoutState = checkoutParams.get('checkout')
+      void actions.loadOnboardingState<OnboardingState>()
+        .then((snapshot) => {
         if (snapshot?.state) {
-          setState(reconcileOnboardingState(snapshot))
+          setState(() => reconcileOnboardingState(snapshot))
         }
 
         if (checkoutState === 'success') {
@@ -155,21 +158,25 @@ export default function OnboardingPage() {
               plan: planFromSnapshot,
             })
           } else {
-            setState('step', 'paywall')
+            setState((s) => { s.step = 'paywall' })
             setError('Betalingen mangler referanse. Start betalingen på nytt.')
           }
         }
 
         if (checkoutState === 'cancel') {
-          setState('step', 'paywall')
+          setState((s) => { s.step = 'paywall' })
           setError('Betaling avbrutt.')
         }
 
         setHydratedFromServer(true)
       })
-      .catch(() => setHydratedFromServer(true))
+        .catch(() => setHydratedFromServer(true))
 
-  })
+      // An effect function runs with no owner, so onCleanup() inside it would
+      // silently never fire; the returned function is the real teardown.
+      return () => window.removeEventListener('resize', updateViewportHeight)
+    },
+  )
 
   createEffect(() => {
     if (typeof window === 'undefined') return
@@ -194,7 +201,7 @@ export default function OnboardingPage() {
 
     setOrgAutoInferred(true)
     if (!untrack(() => state.organization.name.trim())) {
-      setState('organization', 'name', inferred)
+      setState((s) => { s.organization.name = inferred })
     }
     void autoInferOrganizationFromWebsite(inferred)
   })
@@ -313,14 +320,14 @@ export default function OnboardingPage() {
     if (!recommendation) return
     const sources = sourceSummary()
     const locale = untrack(currentRecommendationLocale)
-    setState('recommendation', {
+    setState((s) => { s.recommendation = {
       ...recommendation,
       connectedSourceCount: sources.connectedSourceCount,
       contextHash: recommendationContextHash(),
       locale,
       sourceCount: sources.totalSourceCount,
-    })
-    if (!untrack(() => state.plan)) setState('plan', recommendation.planId)
+    } })
+    if (!untrack(() => state.plan)) setState((s) => { s.plan = recommendation.planId })
   })
 
   createEffect(() => {
@@ -339,10 +346,10 @@ export default function OnboardingPage() {
         targetLanguage,
       })
       .then((translation) => {
-        setState('recommendation', (current) => {
+        setState((s) => { s.recommendation = ((current) => {
           if (!current || current.contextHash !== recommendation.contextHash) return current
           return withRecommendationTranslation(current, targetLanguage, translation)
-        })
+        })(s.recommendation) })
       })
       .catch(() => undefined)
   })
@@ -351,9 +358,9 @@ export default function OnboardingPage() {
     const recommendation = state.recommendation
     if (!recommendation || recommendation.contextHash === recommendationContextHash()) return
 
-    batch(() => {
-      if (state.plan === recommendation.planId) setState('plan', undefined)
-      setState('recommendation', undefined)
+    flush(() => {
+      if (state.plan === recommendation.planId) setState((s) => { s.plan = undefined })
+      setState((s) => { s.recommendation = undefined })
     })
   })
 
@@ -364,8 +371,8 @@ export default function OnboardingPage() {
   })
 
   function advanceFromIntro() {
-    setState('introPlayed', true)
-    setState('step', 'website')
+    setState((s) => { s.introPlayed = true })
+    setState((s) => { s.step = 'website' })
   }
 
   function clearSearchResults() {
@@ -373,26 +380,26 @@ export default function OnboardingPage() {
   }
 
   function skipWebsite() {
-    setState('websiteSkipped', true)
-    setState('step', 'organization')
+    setState((s) => { s.websiteSkipped = true })
+    setState((s) => { s.step = 'organization' })
   }
 
   function selectOrganizationResult(item: BrregEnhet) {
-    setState('organization', 'name', item.navn)
-    setState('organization', 'orgNumber', item.organisasjonsnummer)
-    setState('organization', 'employeeCount', item.antallAnsatte)
-    setState('organization', 'size', sizeFromEmployees(item.antallAnsatte))
+    setState((s) => { s.organization.name = item.navn })
+    setState((s) => { s.organization.orgNumber = item.organisasjonsnummer })
+    setState((s) => { s.organization.employeeCount = item.antallAnsatte })
+    setState((s) => { s.organization.size = sizeFromEmployees(item.antallAnsatte) })
     // Capture industry + org form from the Brreg entry — strong, specific
     // signals the AI plan recommender uses to personalize its reasoning.
-    setState('organization', 'industry', item.naeringskode1?.beskrivelse)
-    setState('organization', 'orgForm', item.organisasjonsform?.beskrivelse)
+    setState((s) => { s.organization.industry = item.naeringskode1?.beskrivelse })
+    setState((s) => { s.organization.orgForm = item.organisasjonsform?.beskrivelse })
 
     // Pre-fill the website from the Brreg registry entry so a downstream ingest
     // has a URL to crawl — but never clobber a site the user already entered or
     // crawled in the website step. The website step stores the URL in
     // `https://`-prefixed form, so normalize to match.
     const site = (item.hjemmeside ?? '').trim().replace(/^https?:\/\//i, '').replace(/\s+/g, '')
-    if (site && !state.website.url.trim()) setState('website', 'url', `https://${site}`)
+    if (site && !state.website.url.trim()) setState((s) => { s.website.url = `https://${site}` })
   }
 
   async function runWebsitePreview() {
@@ -402,11 +409,11 @@ export default function OnboardingPage() {
     const orgId = state.organization.id
 
     setError(undefined)
-    setState('website', 'snippets', [])
-    setState('website', 'pages', 0)
-    setState('website', 'elements', 0)
-    setState('website', 'status', 'starting')
-    setState('website', 'warning', undefined)
+    setState((s) => { s.website.snippets = [] })
+    setState((s) => { s.website.pages = 0 })
+    setState((s) => { s.website.elements = 0 })
+    setState((s) => { s.website.status = 'starting' })
+    setState((s) => { s.website.warning = undefined })
 
     await crawlPreview.start(
       {
@@ -417,34 +424,34 @@ export default function OnboardingPage() {
       },
       {
         onStarted: (payload) => {
-          setState('website', 'crawlJobId', payload.jobId)
+          setState((s) => { s.website.crawlJobId = payload.jobId })
         },
         onSnippet: (payload) => {
-          setState('website', 'snippets', (current) => [...current, payload].slice(-12))
+          setState((s) => { s.website.snippets = ((current) => [...current, payload].slice(-12))(s.website.snippets) })
         },
         onProgress: (payload) => {
-          batch(() => {
-            setState('website', 'status', payload.status)
-            setState('website', 'pages', payload.pages)
-            setState('website', 'elements', payload.elements)
+          flush(() => {
+            setState((s) => { s.website.status = payload.status })
+            setState((s) => { s.website.pages = payload.pages })
+            setState((s) => { s.website.elements = payload.elements })
           })
         },
         onBranding: (payload) => {
-          setState('website', 'branding', payload)
+          setState((s) => { s.website.branding = payload })
         },
         onWarning: (payload) => {
-          setState('website', 'warning', payload.message || payload.code)
+          setState((s) => { s.website.warning = payload.message || payload.code })
         },
         onDone: (payload) => {
-          batch(() => {
-            setState('website', 'status', payload.status === 'failed' ? 'failed' : 'completed')
-            setState('website', 'pages', payload.pages || state.website.pages)
-            setState('website', 'elements', payload.elements || state.website.elements)
+          flush(() => {
+            setState((s) => { s.website.status = payload.status === 'failed' ? 'failed' : 'completed' })
+            setState((s) => { s.website.pages = payload.pages || state.website.pages })
+            setState((s) => { s.website.elements = payload.elements || state.website.elements })
           })
         },
       },
     ).catch((reason: unknown) => {
-      setState('website', 'status', 'failed')
+      setState((s) => { s.website.status = 'failed' })
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke forhåndsvise nettsiden.', en: 'Could not preview the website.' }))
     })
   }
@@ -513,8 +520,8 @@ export default function OnboardingPage() {
         },
       })
 
-      setState('organization', 'id', created.id)
-      setState('organization', 'name', created.name || state.organization.name)
+      setState((s) => { s.organization.id = created.id })
+      setState((s) => { s.organization.name = created.name || state.organization.name })
 
       if (websiteUrl) {
         await actions.startWebsiteIngest({
@@ -524,7 +531,7 @@ export default function OnboardingPage() {
         }).catch(() => undefined)
       }
 
-      setState('step', 'connect')
+      setState((s) => { s.step = 'connect' })
     } catch (reason) {
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke opprette organisasjonen.', en: 'Could not create the organization.' }))
     } finally {
@@ -551,7 +558,7 @@ export default function OnboardingPage() {
         if (carriers.length === 0) {
           throw new Error('Fraktaggregatoren svarte uten transportører. Sjekk shipping-core.')
         }
-        setState('connectors', (current) => [
+        setState((s) => { s.connectors = ((current) => [
           ...current.filter((item) => item.id !== option.id),
           {
             id: option.id,
@@ -559,7 +566,7 @@ export default function OnboardingPage() {
             status: 'connected',
             sources: option.sources,
           },
-        ])
+        ])(s.connectors) })
         return
       }
 
@@ -575,7 +582,7 @@ export default function OnboardingPage() {
       })
 
       // Show connector in-flight while discover/sync settle
-      setState('connectors', (current) => [
+      setState((s) => { s.connectors = ((current) => [
         ...current.filter((item) => item.id !== option.id),
         {
           id: option.id,
@@ -584,7 +591,7 @@ export default function OnboardingPage() {
           connectUrl: session.connectUrl,
           sources: option.sources,
         },
-      ])
+      ])(s.connectors) })
 
       const source = {
         connectorId: option.id,
@@ -604,7 +611,7 @@ export default function OnboardingPage() {
       const coresFailed =
         discoverResult.status === 'rejected' || syncResult.status === 'rejected'
 
-      setState('connectors', (current) => [
+      setState((s) => { s.connectors = ((current) => [
         ...current.filter((item) => item.id !== option.id),
         {
           id: option.id,
@@ -613,7 +620,7 @@ export default function OnboardingPage() {
           connectUrl: session.connectUrl,
           sources: option.sources,
         },
-      ])
+      ])(s.connectors) })
 
       if (coresFailed) {
         setError(`${option.label} tilkoblet, men synkronisering kan ha feilet. Sjekk innstillinger.`)
@@ -650,7 +657,7 @@ export default function OnboardingPage() {
             sourceCount: sourceSummary().totalSourceCount,
           },
         })
-        setState('step', 'assembly')
+        setState((s) => { s.step = 'assembly' })
         return
       }
 
@@ -694,8 +701,17 @@ export default function OnboardingPage() {
   async function continueToPaywall() {
     setError(undefined)
     try {
-      await actions.fetchOnboardingLifecycle()
-      setState('step', 'paywall')
+      const lifecycle = await actions.fetchOnboardingLifecycle()
+      // CREATED is now an honest 200 (no organization yet), not a 409 — the
+      // paywall still needs an active org, so keep the user on this step.
+      if (lifecycle.state === 'CREATED') {
+        setError(i18n.tr(
+          'Organisasjonen er ikke klar ennå. Prøv igjen før du velger plan.',
+          'The organization is not ready yet. Try again before choosing a plan.',
+        ))
+        return
+      }
+      setState((s) => { s.step = 'paywall' })
     } catch (reason) {
       setError(
         translateApiError(reason, i18n.tr, {
@@ -716,7 +732,7 @@ export default function OnboardingPage() {
     const selectedPlan = payment.plan ?? activePlan()
     if (!orgId || selectedPlan === 'trial') {
       setError('Betalingen kunne ikke knyttes til organisasjonen.')
-      setState('step', 'paywall')
+      setState((s) => { s.step = 'paywall' })
       return
     }
 
@@ -731,7 +747,7 @@ export default function OnboardingPage() {
         clientSecret: payment.clientSecret,
       })
       if (!isCheckoutActivatingStatus(status.status)) {
-        setState('step', 'paywall')
+        setState((s) => { s.step = 'paywall' })
         setError('Betalingen er ikke fullført ennå.')
         return
       }
@@ -745,12 +761,12 @@ export default function OnboardingPage() {
         },
       })
       setCheckoutSession(undefined)
-      setState('step', 'assembly')
+      setState((s) => { s.step = 'assembly' })
       if (typeof window !== 'undefined' && window.location.search.includes('checkout=')) {
         window.history.replaceState(null, '', '/onboarding')
       }
     } catch (reason) {
-      setState('step', 'paywall')
+      setState((s) => { s.step = 'paywall' })
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke bekrefte betalingen.', en: 'Could not confirm the payment.' }))
     } finally {
       setConfirmingCheckout(false)
@@ -859,7 +875,7 @@ export default function OnboardingPage() {
     // the first interactive step (website) — or post-signin itself — "back"
     // exits onboarding rather than landing on a screen that immediately skips.
     if (previous && previous !== 'post-signin') {
-      setState('step', previous)
+      setState((s) => { s.step = previous })
       return
     }
     if (!window.confirm(i18n.tr(
@@ -877,7 +893,7 @@ export default function OnboardingPage() {
     //      still valid), so onMount's loadOnboardingState resumes from zero.
     //   4. Sign out, clear the in-memory session, and return to login.
     setFinalizingOnboarding(true)
-    setState(createInitialOnboardingState())
+    setState(() => createInitialOnboardingState())
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(storageKey)
     }
@@ -901,10 +917,10 @@ export default function OnboardingPage() {
         return (
           <WebsiteStepContent
             website={state.website}
-            onUrlInput={(value) => setState('website', 'url', value)}
-            onBriefInput={(value) => setState('website', 'brief', value)}
+            onUrlInput={(value) => setState((s) => { s.website.url = value })}
+            onBriefInput={(value) => setState((s) => { s.website.brief = value })}
             onRunPreview={runWebsitePreview}
-            onContinue={() => setState('step', 'organization')}
+            onContinue={() => setState((s) => { s.step = 'organization' })}
             onSkip={skipWebsite}
           />
         )
@@ -917,13 +933,13 @@ export default function OnboardingPage() {
             submitting={submittingOrg()}
             websiteSkipped={state.websiteSkipped}
             onClearResults={clearSearchResults}
-            onNameInput={(value) => setState('organization', 'name', value)}
+            onNameInput={(value) => setState((s) => { s.organization.name = value })}
             onSearch={runBrregSearch}
             onSelectResult={selectOrganizationResult}
-            onSelectSize={(size) => setState('organization', 'size', size)}
-            onToggleZdr={(value) => setState('organization', 'zeroDataRetention', value)}
+            onSelectSize={(size) => setState((s) => { s.organization.size = size })}
+            onToggleZdr={(value) => setState((s) => { s.organization.zeroDataRetention = value })}
             onContinue={submitOrganization}
-            onSkipStep={() => setState('step', 'connect')}
+            onSkipStep={() => setState((s) => { s.step = 'connect' })}
           />
         )
       case 'connect':
@@ -932,8 +948,8 @@ export default function OnboardingPage() {
             connectedSources={state.connectors}
             connectingId={connectingId()}
             onConnect={connectSource}
-            onContinue={() => setState('step', 'social-proof')}
-            onSkip={() => setState('step', 'social-proof')}
+            onContinue={() => setState((s) => { s.step = 'social-proof' })}
+            onSkip={() => setState((s) => { s.step = 'social-proof' })}
             onPrefetch={() => {
               if (state.connectors.length > 0) setRecommendationPrefetch(true)
             }}
@@ -985,7 +1001,7 @@ export default function OnboardingPage() {
           />
         )
       case 'paywall':
-        return <div aria-hidden class="onboarding-right-blank" />
+        return <div aria-hidden="true" class="onboarding-right-blank" />
     }
   }
 
@@ -999,7 +1015,7 @@ export default function OnboardingPage() {
           currentStepIndex={currentStepIndex()}
           visibleStepNumber={visibleStepNumber()}
           onBack={back}
-          onSelectStep={(step) => setState('step', step)}
+          onSelectStep={(step) => setState((s) => { s.step = step })}
           backHref="/"
           screenStyle={{
             '--onboarding-accent': '#111111',
@@ -1041,7 +1057,7 @@ export default function OnboardingPage() {
         currentStepIndex={currentStepIndex()}
         visibleStepNumber={visibleStepNumber()}
         onBack={back}
-        onSelectStep={(step) => setState('step', step)}
+        onSelectStep={(step) => setState((s) => { s.step = step })}
         screenStyle={{
           '--onboarding-accent': '#111111',
           '--onboarding-rail': '#FF2E63',
@@ -1077,7 +1093,7 @@ export default function OnboardingPage() {
           }}
           onSelectPlan={(planId) => {
             setCheckoutSession(undefined)
-            setState('plan', planId)
+            setState((s) => { s.plan = planId })
           }}
           onConfirmCheckout={finalizePaidCheckout}
           onCommitPlan={commitPlan}

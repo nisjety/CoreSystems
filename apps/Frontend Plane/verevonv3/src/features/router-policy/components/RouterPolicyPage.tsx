@@ -1,4 +1,5 @@
-import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { getRouterPolicy, updateRouterPolicy } from '@/shared/api/router-policy-client'
 import { listModels, type ModelInfo } from '@/shared/api/chat-client'
 import { getSession } from '@/shared/session/session-store'
@@ -67,13 +68,15 @@ export default function RouterPolicyPage() {
   const [notice, setNotice] = createSignal<string | null>(null)
 
   // Seed the immutable draft from the loaded policy.
-  createEffect(() => {
-    const loaded = policyResource()
-    if (loaded) {
-      setDraft(loaded)
-      setKeywordsText(loaded.complexity.keywords.join(', '))
-    }
-  })
+  createEffect(
+    () => policyResource(),
+    (loaded) => {
+      if (loaded) {
+        setDraft(loaded)
+        setKeywordsText(loaded.complexity.keywords.join(', '))
+      }
+    },
+  )
 
   const modeRows = routerPolicyModeRows()
   const baseOptions = createMemo(() => modelOptions(models() ?? []))

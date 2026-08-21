@@ -3,12 +3,11 @@ import {
   createMemo,
   createSignal,
   onCleanup,
-  onMount,
 } from 'solid-js'
 import {
   createStore,
-  unwrap,
-} from 'solid-js/store'
+  snapshot,
+} from 'solid-js'
 import {
   beginNewVersion,
   lastUserIndex,
@@ -234,9 +233,12 @@ export function useChatController() {
     updatedAt?: string
   } | null = null
 
-  createEffect(() => {
-    writeBrowseWebPreference(browseWeb())
-  })
+  createEffect(
+    () => browseWeb(),
+    (value) => {
+      writeBrowseWebPreference(value)
+    },
+  )
 
   const flushServerThreadSnapshot = async () => {
     if (serverSnapshotTimer !== undefined) {
@@ -415,7 +417,11 @@ export function useChatController() {
     abortController = undefined
     const seq = ++threadLoadSequence
     hydratingThreadId = threadId
-    setState({ threadId, status: 'idle', error: null })
+    setState((s) => {
+      s.threadId = threadId
+      s.status = 'idle'
+      s.error = null
+    })
     // Versions are guarded by threadId anyway (chat-versions.ts), but clear
     // eagerly rather than leave stale siblings from the old thread reachable
     // until the next regenerate/edit happens to overwrite them.
@@ -452,7 +458,10 @@ export function useChatController() {
       // this thread's real content (it also self-heals entries the old bug
       // already overwrote).
       hydratingThreadId = null
-      setState({ turns, taskSteps: cachedTaskSteps })
+      setState((s) => {
+        s.turns = turns
+        s.taskSteps = cachedTaskSteps
+      })
       if (turns.length > 0) {
         writeThreadSnapshot(threadId, turns, {}, cachedTaskSteps, { persistServer: false })
       }
@@ -480,7 +489,10 @@ export function useChatController() {
       }
       const fallbackTurns = cachedTurns
       hydratingThreadId = null
-      setState({ turns: fallbackTurns, taskSteps: cachedTaskSteps })
+      setState((s) => {
+        s.turns = fallbackTurns
+        s.taskSteps = cachedTaskSteps
+      })
       if (fallbackTurns.length > 0) {
         writeThreadSnapshot(threadId, fallbackTurns, {}, cachedTaskSteps, { persistServer: false })
       }
@@ -536,18 +548,30 @@ export function useChatController() {
     // (below) to avoid duplication — but a resume that 404s (buffer expired)
     // or dies before any delta then settles with the partial text intact
     // instead of wiping a visible answer down to an empty stopped bubble.
-    setState('turns', (t) => t.id === assistantId, { streaming: true, status: 'waiting' })
+    setState((s) => {
+      const t = s.turns.find((t) => t.id === assistantId)
+      if (t) {
+        t.streaming = true
+        t.status = 'waiting'
+      }
+    })
 
     const controller = new AbortController()
     abortController = controller
-    setState('status', 'streaming')
+    setState((s) => { s.status = 'streaming' })
 
     let settled = false
     let replayStarted = false
     const stopStreaming = (status?: ChatTurn['status']) => {
       if (!isActiveThread()) return
-      setState('turns', (t) => t.id === assistantId, 'streaming', false)
-      setState('turns', (t) => t.id === assistantId, 'status', status)
+      setState((s) => {
+        const t = s.turns.find((t) => t.id === assistantId)
+        if (t) t.streaming = false
+      })
+      setState((s) => {
+        const t = s.turns.find((t) => t.id === assistantId)
+        if (t) t.status = status
+      })
     }
 
     await resumeStream(
@@ -559,19 +583,35 @@ export function useChatController() {
             // First replayed delta: the buffer replays from the start of the
             // answer, so drop the cached partial text now (and only now).
             replayStarted = true
-            setState('turns', (t) => t.id === assistantId, 'content', '')
+            setState((s) => {
+              const t = s.turns.find((t) => t.id === assistantId)
+              if (t) t.content = ''
+            })
           }
           upsertTaskStep(createTurnStep(assistantId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
-          setState('turns', (t) => t.id === assistantId, 'content', (prev) => prev + delta)
+          setState((s) => {
+            const t = s.turns.find((t) => t.id === assistantId)
+            if (t) t.content = t.content + delta
+          })
         },
         onDone: ({ modelUsed, outputTokens }) => {
           settled = true
           if (!isActiveThread()) return
-          if (modelUsed) setState('turns', (t) => t.id === assistantId, 'modelUsed', modelUsed)
-          if (outputTokens != null) setState('turns', (t) => t.id === assistantId, 'outputTokens', outputTokens)
+          if (modelUsed) {
+            setState((s) => {
+              const t = s.turns.find((t) => t.id === assistantId)
+              if (t) t.modelUsed = modelUsed
+            })
+          }
+          if (outputTokens != null) {
+            setState((s) => {
+              const t = s.turns.find((t) => t.id === assistantId)
+              if (t) t.outputTokens = outputTokens
+            })
+          }
           stopStreaming(undefined)
           markOpenSteps('done', 'Completed.', assistantId)
-          setState('status', 'idle')
+          setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(threadId, state.turns)
         },
         onError: () => {
@@ -579,7 +619,7 @@ export function useChatController() {
           if (!isActiveThread()) return
           stopStreaming('stopped')
           markOpenSteps('stopped', 'The connection was lost before this answer finished.', assistantId)
-          setState('status', 'idle')
+          setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(threadId, state.turns)
         },
       },
@@ -592,24 +632,27 @@ export function useChatController() {
       // spinning forever.
       stopStreaming('stopped')
       markOpenSteps('stopped', 'Connection closed before this answer finished.', assistantId)
-      setState('status', 'idle')
+      setState((s) => { s.status = 'idle' })
       writeThreadSnapshot(threadId, state.turns)
     }
   }
 
-  createEffect(() => {
-    if (!state.threadId || state.turns.length === 0) return
-    // While a thread switch is hydrating, `state.turns` still belongs to the
-    // PREVIOUS thread — persisting that pair is the overwrite bug loadThread's
-    // guard exists for. Live streaming is unaffected: hydratingThreadId is only
-    // non-null inside loadThread.
-    if (state.threadId === hydratingThreadId) return
-    writeThreadSnapshot(state.threadId, state.turns, {}, state.taskSteps, { persistServer: false })
-  })
+  createEffect(
+    () => ({ threadId: state.threadId, turns: state.turns, taskSteps: state.taskSteps }),
+    ({ threadId, turns, taskSteps }) => {
+      if (!threadId || turns.length === 0) return
+      // While a thread switch is hydrating, `state.turns` still belongs to the
+      // PREVIOUS thread — persisting that pair is the overwrite bug loadThread's
+      // guard exists for. Live streaming is unaffected: hydratingThreadId is only
+      // non-null inside loadThread.
+      if (threadId === hydratingThreadId) return
+      writeThreadSnapshot(threadId, turns, {}, taskSteps, { persistServer: false })
+    },
+  )
 
   const resetChatState = () => {
     abortController?.abort()
-    setState({
+    setState(() => ({
       turns: [],
       taskSteps: [],
       status: 'idle',
@@ -618,7 +661,7 @@ export function useChatController() {
       threadId: null,
       activeModel: state.activeModel,
       branchCount: 0,
-    })
+    }))
     setInput('')
     setActiveTab('chat')
     setVersionState(null)
@@ -627,78 +670,96 @@ export function useChatController() {
     setTemporaryChat(false)
   }
 
-  onMount(() => {
-    const handleActiveThreadChange = (event: Event) => {
-      const threadId = (event as CustomEvent<{ threadId: string | null }>).detail?.threadId
-      if (!threadId) {
-        resetChatState()
-        return
-      }
-      if (threadId && threadId !== state.threadId) void loadThread(threadId)
-    }
-    window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
-    onCleanup(() => window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange))
-
-    const initializeChat = async () => {
-      // A Space Activity link is URL-addressable across a browser restart. It
-      // may choose the requested view but never grants it: `loadThread` still
-      // goes through the owner-bound transcript endpoints, and a 404 clears
-      // the local selection rather than retaining a cross-user ghost thread.
-      const linkedThread = readThreadDeepLink(window.location.search)
-      if (linkedThread) setActiveChatThreadId(linkedThread)
-      const storedThread = linkedThread ?? readActiveChatThreadId()
-      if (storedThread) await loadThread(storedThread)
-
-      try {
-        const available = await listModels()
-        // Default to the Verevon Balance intent mode (cost-aware, resolved
-        // server-side), never the first (possibly expensive) catalog entry.
-        // cheapDefaultModelId is resilient: it always returns the balance mode id.
-        const cheapId = cheapDefaultModelId(available)
-        if (cheapId) setState('activeModel', cheapId)
-      } catch {
-        // The chat can still run with the gateway default model.
-      }
-
-      const pending = consumePendingChatLaunch()
-      if (pending) {
-        if (pending.startNewThread) {
-          // A contextual handoff is a new Chat conversation by contract. The
-          // selected support case becomes the first user turn, never an
-          // accidental append to the previously active global thread.
-          clearActiveChatThreadId()
+  createEffect(
+    () => undefined,
+    () => {
+      const handleActiveThreadChange = (event: Event) => {
+        const threadId = (event as CustomEvent<{ threadId: string | null }>).detail?.threadId
+        if (!threadId) {
           resetChatState()
+          return
         }
-        if (pending.model) setState('activeModel', pending.model)
-        setBrowseWeb(Boolean(pending.tools?.includes('search') || pending.tools?.includes('research')))
-        const attachments = await toStreamAttachments(pending.attachments ?? [])
-        triggerLaunchMotion()
-        await sendContent(pending.text, pending.model, {
-          attachments: attachments.length > 0 ? attachments : undefined,
-          browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
-          deepResearch: pending.tools?.includes('research'),
-          displayAttachments: pending.attachments ?? [],
-          generateImage: pending.tools?.includes('image'),
-          tools: pending.tools ?? [],
-          actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
-        })
-        if (pending.supportHandoff && state.threadId) {
-          bindSupportChatThread(pending.supportHandoff, state.threadId)
+        if (threadId && threadId !== state.threadId) void loadThread(threadId)
+      }
+      window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+
+      const initializeChat = async () => {
+        // A Space Activity link is URL-addressable across a browser restart. It
+        // may choose the requested view but never grants it: `loadThread` still
+        // goes through the owner-bound transcript endpoints, and a 404 clears
+        // the local selection rather than retaining a cross-user ghost thread.
+        const linkedThread = readThreadDeepLink(window.location.search)
+        if (linkedThread) setActiveChatThreadId(linkedThread)
+        const storedThread = linkedThread ?? readActiveChatThreadId()
+        if (storedThread) await loadThread(storedThread)
+
+        try {
+          const available = await listModels()
+          // Default to the Verevon Balance intent mode (cost-aware, resolved
+          // server-side), never the first (possibly expensive) catalog entry.
+          // cheapDefaultModelId is resilient: it always returns the balance mode id.
+          const cheapId = cheapDefaultModelId(available)
+          if (cheapId) setState((s) => { s.activeModel = cheapId })
+        } catch {
+          // The chat can still run with the gateway default model.
+        }
+
+        const pending = consumePendingChatLaunch()
+        if (pending) {
+          if (pending.startNewThread) {
+            // A contextual handoff is a new Chat conversation by contract. The
+            // selected support case becomes the first user turn, never an
+            // accidental append to the previously active global thread.
+            clearActiveChatThreadId()
+            resetChatState()
+          }
+          if (pending.model) {
+            const model = pending.model
+            setState((s) => { s.activeModel = model })
+          }
+          setBrowseWeb(Boolean(pending.tools?.includes('search') || pending.tools?.includes('research')))
+          const attachments = await toStreamAttachments(pending.attachments ?? [])
+          triggerLaunchMotion()
+          await sendContent(pending.text, pending.model, {
+            attachments: attachments.length > 0 ? attachments : undefined,
+            browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
+            deepResearch: pending.tools?.includes('research'),
+            displayAttachments: pending.attachments ?? [],
+            generateImage: pending.tools?.includes('image'),
+            tools: pending.tools ?? [],
+            actions: (pending.actions ?? []).map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
+          })
+          if (pending.supportHandoff && state.threadId) {
+            bindSupportChatThread(pending.supportHandoff, state.threadId)
+          }
         }
       }
-    }
 
-    void initializeChat()
-  })
+      void initializeChat()
 
-  createEffect(() => {
-    const lastTurn = state.turns[state.turns.length - 1]
-    const streamSignal = `${lastTurn?.content.length ?? 0}:${lastTurn?.reasoning?.length ?? 0}:${lastTurn?.artifacts?.length ?? 0}`
-    void streamSignal
-    if (autoFollow.current && messageListRef) {
-      messageListRef.scrollTo({ top: messageListRef.scrollHeight, behavior: isStreaming() ? 'auto' : 'smooth' })
-    }
-  })
+      return () => window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleActiveThreadChange)
+    },
+  )
+
+  createEffect(
+    () => {
+      const lastTurn = state.turns[state.turns.length - 1]
+      const streamSignal = `${lastTurn?.content.length ?? 0}:${lastTurn?.reasoning?.length ?? 0}:${lastTurn?.artifacts?.length ?? 0}`
+      // Judgment call: `streamSignal` itself is not read by the effect below —
+      // it exists only so the growing content/reasoning/artifacts of the last
+      // turn stay tracked dependencies here in `compute`, exactly as the old
+      // single-arg effect tracked them. `isStreaming()` is likewise read here
+      // (not in the effect) so a status flip also re-triggers the scroll, same
+      // as before the two-phase split.
+      void streamSignal
+      return isStreaming()
+    },
+    (streaming) => {
+      if (autoFollow.current && messageListRef) {
+        messageListRef.scrollTo({ top: messageListRef.scrollHeight, behavior: streaming ? 'auto' : 'smooth' })
+      }
+    },
+  )
 
   const triggerLaunchMotion = () => {
     requestAnimationFrame(() => {
@@ -727,19 +788,22 @@ export function useChatController() {
   // the assistant turn can render Approve/Reject; deciding + resuming unblocks
   // the still-open run stream so the agent continues.
   const setTurnRunId = (turnId: string, runId: string) => {
-    setState('turns', (turn) => turn.id === turnId, 'runId', runId)
+    setState((s) => {
+      const turn = s.turns.find((t) => t.id === turnId)
+      if (turn) turn.runId = runId
+    })
   }
   const refreshTurnApprovals = async (turnId: string) => {
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
     if (!runId) return
     try {
       const approvals = await listApprovals(runId)
-      setState(
-        'turns',
-        (turn) => turn.id === turnId,
-        'pendingApprovals',
-        approvals.filter((approval) => (approval.status ?? 'PENDING').toUpperCase() === 'PENDING'),
-      )
+      setState((s) => {
+        const turn = s.turns.find((t) => t.id === turnId)
+        if (turn) {
+          turn.pendingApprovals = approvals.filter((approval) => (approval.status ?? 'PENDING').toUpperCase() === 'PENDING')
+        }
+      })
     } catch {
       // Transient list failure — keep the existing pending state.
     }
@@ -751,9 +815,10 @@ export function useChatController() {
   ) => {
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
     // Optimistically drop the decided approval so the card resolves instantly.
-    setState('turns', (turn) => turn.id === turnId, 'pendingApprovals', (prev) =>
-      (prev ?? []).filter((approval) => approval.id !== approvalId),
-    )
+    setState((s) => {
+      const turn = s.turns.find((t) => t.id === turnId)
+      if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
+    })
     try {
       await decideApproval(approvalId, decision)
       // Recording the decision unblocks execution-core; resume advances the run
@@ -783,7 +848,7 @@ export function useChatController() {
       : undefined
     const requestedSpaceRef = selectedNewSpaceRef ?? scopedThreadRefs.get(activeThreadId)
     if (isNewThread) {
-      setState('threadId', activeThreadId)
+      setState((s) => { s.threadId = activeThreadId })
       if (options.zdr) markThreadTemporary(activeThreadId)
       // A temporary thread's id must never become the persisted "active
       // thread" pointer — that pointer is itself a form of persistence
@@ -830,19 +895,21 @@ export function useChatController() {
     ]
 
     setActiveTab('chat')
-    setState('turns', nextTurns)
+    setState((s) => { s.turns = nextTurns })
     writeThreadSnapshot(activeThreadId, nextTurns, { preview: content, updatedAt: submittedAt })
-    setState('taskSteps', (steps) => [
-      ...steps,
-      ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
-    ])
+    setState((s) => {
+      s.taskSteps = [
+        ...s.taskSteps,
+        ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
+      ]
+    })
     setInput('')
 
     const controller = new AbortController()
     abortController = controller
-    setState('requestId', null)
-    setState('status', 'streaming')
-    setState('error', null)
+    setState((s) => { s.requestId = null })
+    setState((s) => { s.status = 'streaming' })
+    setState((s) => { s.error = null })
 
     // Once the user switches to another thread mid-flight this send no longer
     // owns the shared status/error machine, so its terminal handlers must not
@@ -857,12 +924,21 @@ export function useChatController() {
     let settled = false
     const captureRequestId = (requestId?: string) => {
       if (!requestId) return
-      setState('requestId', requestId)
-      setState('turns', (turn) => turn.id === assistantId, 'requestId', requestId)
+      setState((s) => { s.requestId = requestId })
+      setState((s) => {
+        const turn = s.turns.find((t) => t.id === assistantId)
+        if (turn) turn.requestId = requestId
+      })
     }
     const stopStreaming = (status?: ChatTurn['status']) => {
-      setState('turns', (turn) => turn.id === assistantId, 'streaming', false)
-      setState('turns', (turn) => turn.id === assistantId, 'status', status)
+      setState((s) => {
+        const turn = s.turns.find((t) => t.id === assistantId)
+        if (turn) turn.streaming = false
+      })
+      setState((s) => {
+        const turn = s.turns.find((t) => t.id === assistantId)
+        if (turn) turn.status = status
+      })
     }
 
     try {
@@ -916,12 +992,15 @@ export function useChatController() {
                 scopedThreadRefs.delete(priorThreadId)
                 scopedThreadRefs.set(serverThreadId, requestedSpaceRef)
               }
-              setState('threadId', serverThreadId)
+              setState((s) => { s.threadId = serverThreadId })
               if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
               writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
             }
             if (connectedModel) {
-              setState('turns', (turn) => turn.id === assistantId, 'modelUsed', connectedModel)
+              setState((s) => {
+                const turn = s.turns.find((t) => t.id === assistantId)
+                if (turn) turn.modelUsed = connectedModel
+              })
             }
             markStepDone(stepId('connect'), 'Connected to the live agent stream.')
             if (connectedModel) {
@@ -931,7 +1010,10 @@ export function useChatController() {
           onMessage: ({ content: delta, requestId }) => {
             captureRequestId(requestId)
             upsertTaskStep(createTurnStep(assistantId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
-            setState('turns', (turn) => turn.id === assistantId, 'content', (prev) => prev + delta)
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.content = turn.content + delta
+            })
           },
           onArtifact: (event) => {
             const artifact = normalizeArtifact(event)
@@ -941,14 +1023,18 @@ export function useChatController() {
             // carrier's revisions along so the version history survives the
             // move to this turn instead of restarting at one entry.
             const carried = findArtifactById(state.turns.map((turn) => turn.artifacts), artifact.id)
-            setState('turns', (turn) => turn.id === assistantId, 'artifacts', (prev) => (
-              upsertArtifact(prev ?? [], artifact, carried)
-            ))
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.artifacts = upsertArtifact(turn.artifacts ?? [], artifact, carried)
+            })
           },
           onAttachment: (event) => {
             const file = normalizeGeneratedFile(event)
             if (!file) return
-            setState('turns', (turn) => turn.id === assistantId, 'files', (prev) => upsertGeneratedFile(prev ?? [], file))
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.files = upsertGeneratedFile(turn.files ?? [], file)
+            })
           },
           onCitation: (event) => {
             const citation = normalizeCitation(event)
@@ -958,13 +1044,19 @@ export function useChatController() {
           onGrounding: ({ value }) => {
             const grounding = normalizeGrounding(value)
             if (!grounding) return
-            setState('turns', (turn) => turn.id === assistantId, 'grounding', grounding)
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.grounding = grounding
+            })
             upsertTaskStep(createTurnStep(assistantId, turnTitle, 'grounding', 'Knowledge grounding', summarizeGrounding(grounding), 'done'))
           },
           onReasoning: ({ delta }) => {
             if (!delta) return
             upsertTaskStep(createTurnStep(assistantId, turnTitle, 'reasoning', 'Reasoning trace', 'Received model reasoning tokens.', 'active'))
-            setState('turns', (turn) => turn.id === assistantId, 'reasoning', (prev = '') => prev + delta)
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.reasoning = (turn.reasoning ?? '') + delta
+            })
           },
           onStep: (event) => {
             const step = normalizeStep(event, assistantId, turnTitle)
@@ -983,7 +1075,10 @@ export function useChatController() {
           onToolCall: (event) => {
             const call = normalizeToolCall(event)
             if (!call) return
-            setState('turns', (turn) => turn.id === assistantId, 'toolCalls', (prev) => upsertToolCall(prev ?? [], call))
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.toolCalls = upsertToolCall(turn.toolCalls ?? [], call)
+            })
             markComposerToolStarted(assistantId, call.name, call.args)
             upsertTaskStep({
               id: stepId(`tool-${call.id}`),
@@ -998,7 +1093,10 @@ export function useChatController() {
           onToolResult: (event) => {
             if (!event.id) return
             const toolName = toolNameForResult(state.turns.find((turn) => turn.id === assistantId)?.toolCalls ?? [], event.id)
-            setState('turns', (turn) => turn.id === assistantId, 'toolCalls', (prev) => applyToolResult(prev ?? [], event))
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.toolCalls = applyToolResult(turn.toolCalls ?? [], event)
+            })
             const citations = extractCitationsFromToolOutput(event.output ?? '')
             for (const citation of citations) {
               addAssistantCitation(assistantId, turnTitle, citation)
@@ -1015,12 +1113,15 @@ export function useChatController() {
             })
           },
           onUsage: (usage) => {
-            setState('turns', (turn) => turn.id === assistantId, {
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-              latencyMs: usage.latencyMs,
-              costUsd: usage.costUsd,
-              confidence: usage.confidence,
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) {
+                turn.inputTokens = usage.inputTokens
+                turn.outputTokens = usage.outputTokens
+                turn.latencyMs = usage.latencyMs
+                turn.costUsd = usage.costUsd
+                turn.confidence = usage.confidence
+              }
             })
             upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
           },
@@ -1040,13 +1141,26 @@ export function useChatController() {
             // defensive here too — a temporary chat must never RECEIVE
             // follow-up chips either, not just never persist them.
             if (suggestions.length === 0 || isTemporaryThread(state.threadId ?? activeThreadId)) return
-            setState('turns', (turn) => turn.id === assistantId, 'followUps', suggestions.slice(0, 3))
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.followUps = suggestions.slice(0, 3)
+            })
           },
           onDone: ({ requestId, modelUsed, outputTokens }) => {
             settled = true
             captureRequestId(requestId)
-            if (modelUsed) setState('turns', (turn) => turn.id === assistantId, 'modelUsed', modelUsed)
-            if (outputTokens != null) setState('turns', (turn) => turn.id === assistantId, 'outputTokens', outputTokens)
+            if (modelUsed) {
+              setState((s) => {
+                const turn = s.turns.find((t) => t.id === assistantId)
+                if (turn) turn.modelUsed = modelUsed
+              })
+            }
+            if (outputTokens != null) {
+              setState((s) => {
+                const turn = s.turns.find((t) => t.id === assistantId)
+                if (turn) turn.outputTokens = outputTokens
+              })
+            }
             stopStreaming(undefined)
             markOpenSteps('done', 'Completed.', assistantId)
             addAnswerVerificationStep(assistantId, turnTitle, tools.includes('search') || tools.includes('research'))
@@ -1055,7 +1169,7 @@ export function useChatController() {
             // here would write the wrong turns and the status flip would clobber
             // the visible thread.
             if (ownsMachine()) {
-              setState('status', 'idle')
+              setState((s) => { s.status = 'idle' })
               writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
             }
           },
@@ -1077,15 +1191,20 @@ export function useChatController() {
             if (model && !controller.signal.aborted) {
               settled = true
               markOpenSteps('stopped', 'Provider unavailable. Retrying with fallback model.', assistantId)
-              setState('turns', (turns) => turns.filter((turn) => turn.id !== assistantId))
-              setState('status', 'idle')
+              setState((s) => {
+                s.turns = s.turns.filter((turn) => turn.id !== assistantId)
+              })
+              setState((s) => { s.status = 'idle' })
               void sendContent(content, '', { ...options, appendUser: false })
               return
             }
             settled = true
-            setState('error', message)
-            setState('status', 'error')
-            setState('turns', (turn) => turn.id === assistantId, 'content', (prev) => prev || message)
+            setState((s) => { s.error = message })
+            setState((s) => { s.status = 'error' })
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.content = turn.content || message
+            })
             stopStreaming('error')
             markOpenSteps('error', message, assistantId)
             writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
@@ -1102,7 +1221,7 @@ export function useChatController() {
         // switch) lands here with `!settled`, and must not flip the visible
         // thread's status or snapshot the wrong turns.
         if (ownsMachine()) {
-          setState('status', 'idle')
+          setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
         }
       }
@@ -1114,12 +1233,12 @@ export function useChatController() {
       if (!ownsMachine()) return
       if (controller.signal.aborted) {
         markOpenSteps('stopped', 'Stopped by the user.', assistantId)
-        setState('status', 'idle')
+        setState((s) => { s.status = 'idle' })
         writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
         return
       }
-      setState('status', 'error')
-      setState('error', 'Stream interrupted')
+      setState((s) => { s.status = 'error' })
+      setState((s) => { s.error = 'Stream interrupted' })
       markOpenSteps('error', 'Stream interrupted', assistantId)
       writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
     }
@@ -1133,7 +1252,7 @@ export function useChatController() {
       payload.actions.map((a) => ({ id: a.id, name: a.name, kind: a.kind })),
       payload.text,
     )
-    setState('activeModel', model)
+    setState((s) => { s.activeModel = model })
     void sendContent(payload.text, model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: payload.tools.includes('search') || payload.tools.includes('research'),
@@ -1151,15 +1270,26 @@ export function useChatController() {
     if (state.requestId) {
       void cancelInvocation(state.requestId).catch(() => undefined)
     }
-    setState('turns', (turn) => turn.streaming, 'streaming', false)
-    setState('turns', (turn) => turn.status === 'waiting', 'status', 'stopped')
+    setState((s) => {
+      for (const turn of s.turns) {
+        if (turn.streaming) turn.streaming = false
+      }
+    })
+    setState((s) => {
+      for (const turn of s.turns) {
+        if (turn.status === 'waiting') turn.status = 'stopped'
+      }
+    })
     markOpenSteps('stopped', 'Stopped by the user.')
-    setState('status', 'idle')
+    setState((s) => { s.status = 'idle' })
     if (state.threadId) writeThreadSnapshot(state.threadId, state.turns)
   }
 
   const addAssistantCitation = (turnId: string, turnTitle: string, citation: Citation) => {
-    setState('turns', (turn) => turn.id === turnId, 'citations', (prev) => upsertCitation(prev ?? [], citation))
+    setState((s) => {
+      const turn = s.turns.find((t) => t.id === turnId)
+      if (turn) turn.citations = upsertCitation(turn.citations ?? [], citation)
+    })
     appendSearchEvidence(turnId, citation)
     upsertTaskStep(createTurnStep(
       turnId,
@@ -1298,9 +1428,9 @@ export function useChatController() {
     // `appendUser: false` only ever APPENDS the new assistant turn, so
     // without this truncation the old answer stayed visible forever and a
     // second, separate answer piled up underneath it.
-    setVersionState((prev) => beginNewVersion(prev, unwrap(state.turns), state.threadId))
-    setState('turns', (turns) => turns.slice(0, anchorIndex + 1))
-    setState('branchCount', (count) => count + 1)
+    setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
+    setState((s) => { s.turns = s.turns.slice(0, anchorIndex + 1) })
+    setState((s) => { s.branchCount = s.branchCount + 1 })
     void sendContent(lastUser.content, lastUser.model, {
       appendUser: false,
       browseWeb: lastUser.tools.includes('search') || lastUser.tools.includes('research'),
@@ -1332,12 +1462,12 @@ export function useChatController() {
       // truncates everything after it (below) and replaces it wholesale —
       // that path is deliberately NOT versioned (chat-versions.ts: nesting
       // would be possible past this point, which the design rules out).
-      setVersionState((prev) => beginNewVersion(prev, unwrap(state.turns), state.threadId))
+      setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
     } else {
       setVersionState(null)
     }
-    setState('turns', (turns) => turns.slice(0, index))
-    setState('status', 'idle')
+    setState((s) => { s.turns = s.turns.slice(0, index) })
+    setState((s) => { s.status = 'idle' })
     await sendContent(next, original.model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: original.tools.includes('search') || original.tools.includes('research'),
@@ -1361,12 +1491,12 @@ export function useChatController() {
     const sourceWasTemporary = isTemporaryThread(state.threadId)
     const nextThreadId = createId('thread')
     const branchTurns = state.turns.slice(0, index + 1).map((turn) => ({ ...turn, id: createId(turn.role) }))
-    setState('turns', branchTurns)
-    setState('threadId', nextThreadId)
-    setState('status', 'idle')
-    setState('requestId', null)
-    setState('branchCount', 0)
-    setState('taskSteps', [])
+    setState((s) => { s.turns = branchTurns })
+    setState((s) => { s.threadId = nextThreadId })
+    setState((s) => { s.status = 'idle' })
+    setState((s) => { s.requestId = null })
+    setState((s) => { s.branchCount = 0 })
+    setState((s) => { s.taskSteps = [] })
     setVersionState(null)
     if (sourceWasTemporary) {
       // The branch copies a temporary thread's own content into a new thread
@@ -1386,10 +1516,10 @@ export function useChatController() {
 
   /** Swap the displayed version of the final exchange to logical position `target` (0-based). */
   const selectExchangeVersion = (target: number) => {
-    const result = selectVersion(versionState(), unwrap(state.turns), state.threadId, target)
+    const result = selectVersion(versionState(), snapshot(state.turns), state.threadId, target)
     if (!result) return
     setVersionState(result.state)
-    setState('turns', result.turns)
+    setState((s) => { s.turns = result.turns })
   }
 
   const startNewChat = () => {
@@ -1398,9 +1528,11 @@ export function useChatController() {
   }
 
   const updateTaskStep = (id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
-    setState('taskSteps', (steps) => steps.map((step) => (
-      step.id === id ? update(step) : step
-    )))
+    setState((s) => {
+      s.taskSteps = s.taskSteps.map((step) => (
+        step.id === id ? update(step) : step
+      ))
+    })
   }
 
   const markStepDone = (id: string, detail: string) => {
@@ -1408,19 +1540,24 @@ export function useChatController() {
   }
 
   const upsertTaskStep = (step: AgentTaskStep) => {
-    setState('taskSteps', (steps) => {
-      const index = steps.findIndex((item) => item.id === step.id)
-      if (index < 0) return [...steps, step]
-      return steps.map((item, itemIndex) => itemIndex === index ? { ...item, ...step } : item)
+    setState((s) => {
+      const index = s.taskSteps.findIndex((item) => item.id === step.id)
+      if (index < 0) {
+        s.taskSteps = [...s.taskSteps, step]
+        return
+      }
+      s.taskSteps = s.taskSteps.map((item, itemIndex) => itemIndex === index ? { ...item, ...step } : item)
     })
   }
 
   const markOpenSteps = (status: TaskStepStatus, detail: string, turnId?: string) => {
-    setState('taskSteps', (steps) => steps.map((step) => (
-      (!turnId || step.turnId === turnId) && (step.status === 'active' || step.status === 'waiting')
-        ? missingSearchResultStep(step, status) ?? { ...step, status, detail }
-        : step
-    )))
+    setState((s) => {
+      s.taskSteps = s.taskSteps.map((step) => (
+        (!turnId || step.turnId === turnId) && (step.status === 'active' || step.status === 'waiting')
+          ? missingSearchResultStep(step, status) ?? { ...step, status, detail }
+          : step
+      ))
+    })
   }
 
   return {

@@ -8,14 +8,14 @@ import {
   RefreshCw,
   Sparkles,
   Square,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   For,
   Show,
   createMemo,
   createSignal,
-  type JSX,
 } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import {
   TaskStep,
 } from './ChatMessages'
@@ -88,8 +88,8 @@ export function ChatTabs(props: {
             <button
               type="button"
               role="tab"
-              aria-selected={selected()}
-              classList={{ 'verevon-chat-tab': true, 'verevon-chat-tab--active': selected() }}
+              aria-selected={selected() ? 'true' : 'false'}
+              class={{ 'verevon-chat-tab': true, 'verevon-chat-tab--active': selected() }}
               onClick={() => props.onChange(item.id)}
             >
               <Icon size={14} />
@@ -179,7 +179,7 @@ export function Metric(props: { label: string; value: string }) {
 
 export function GroundingGraphSummary(props: { compact?: boolean; graph: ChatGroundingGraph; traceId?: string }) {
   return (
-    <div classList={{ 'verevon-chat-graph-summary': true, 'verevon-chat-graph-summary--compact': props.compact }}>
+    <div class={{ 'verevon-chat-graph-summary': true, 'verevon-chat-graph-summary--compact': Boolean(props.compact) }}>
       <div>
         <strong>Graph evidence</strong>
         <Show when={props.traceId}><span>Trace {props.traceId}</span></Show>
@@ -274,15 +274,15 @@ export function StepsPanel(props: { steps: AgentTaskStep[]; screen?: ChatArtifac
           <div class="verevon-chat-step-groups">
             <For each={sections()}>
               {(section) => (
-                <section classList={{ 'verevon-chat-step-group': true, 'is-collapsed': isCollapsed(section.id) }}>
+                <section class={{ 'verevon-chat-step-group': true, 'is-collapsed': isCollapsed(section.id) }}>
                   <button
                     type="button"
                     class="verevon-chat-step-group__header"
-                    aria-expanded={!isCollapsed(section.id)}
+                    aria-expanded={!isCollapsed(section.id) ? 'true' : 'false'}
                     onClick={() => toggleSection(section.id)}
                   >
                     <span class="verevon-chat-step-group__title">
-                      <ChevronRight size={14} classList={{ 'verevon-chat-rotate': !isCollapsed(section.id) }} />
+                      <ChevronRight size={14} class={{ 'verevon-chat-rotate': !isCollapsed(section.id) }} />
                       <h3>{section.title}</h3>
                     </span>
                     <span class="verevon-chat-step-group__meta">

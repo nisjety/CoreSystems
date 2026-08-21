@@ -1,5 +1,6 @@
-import { Route, Router, useNavigate } from '@solidjs/router'
-import { createEffect, lazy, Show, type JSX } from 'solid-js'
+import { Show, createEffect, lazy } from 'solid-js'
+import { createRouter, useNavigate } from '@solidjs/router'
+import type { JSX } from '@solidjs/web'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
@@ -47,15 +48,18 @@ function RequireAuth(props: { children: JSX.Element }) {
   const navigate = useNavigate()
   const session = getSession()
 
-  createEffect(() => {
-    if (session.status === 'unauthenticated') {
-      navigate('/login', { replace: true })
-      return
-    }
-    if (session.status === 'authenticated' && session.onboardingStatus !== 'COMPLETED') {
-      navigate('/onboarding', { replace: true })
-    }
-  })
+  createEffectRedirect(
+    () => ({ status: session.status, onboardingStatus: session.onboardingStatus }),
+    (curr) => {
+      if (curr.status === 'unauthenticated') {
+        navigate('/login', { replace: true })
+        return
+      }
+      if (curr.status === 'authenticated' && curr.onboardingStatus !== 'COMPLETED') {
+        navigate('/onboarding', { replace: true })
+      }
+    },
+  )
 
   return (
     <Show
@@ -73,15 +77,18 @@ function RequireOnboarding(props: { children: JSX.Element }) {
   const navigate = useNavigate()
   const session = getSession()
 
-  createEffect(() => {
-    if (session.status === 'unauthenticated') {
-      navigate('/login', { replace: true })
-      return
-    }
-    if (session.status === 'authenticated' && session.onboardingStatus === 'COMPLETED') {
-      navigate('/dashboard', { replace: true })
-    }
-  })
+  createEffectRedirect(
+    () => ({ status: session.status, onboardingStatus: session.onboardingStatus }),
+    (curr) => {
+      if (curr.status === 'unauthenticated') {
+        navigate('/login', { replace: true })
+        return
+      }
+      if (curr.status === 'authenticated' && curr.onboardingStatus === 'COMPLETED') {
+        navigate('/dashboard', { replace: true })
+      }
+    },
+  )
 
   return (
     <Show
@@ -97,19 +104,22 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
   const navigate = useNavigate()
   const session = getSession()
 
-  createEffect(() => {
-    if (session.status === 'unauthenticated') {
-      navigate('/login', { replace: true })
-      return
-    }
-    if (session.status === 'authenticated' && session.onboardingStatus !== 'COMPLETED') {
-      navigate('/onboarding', { replace: true })
-      return
-    }
-    if (session.status === 'authenticated' && !hasWorkspaceAdminAccess(session)) {
-      navigate('/dashboard', { replace: true })
-    }
-  })
+  createEffectRedirect(
+    () => ({ status: session.status, onboardingStatus: session.onboardingStatus, session }),
+    (curr) => {
+      if (curr.status === 'unauthenticated') {
+        navigate('/login', { replace: true })
+        return
+      }
+      if (curr.status === 'authenticated' && curr.onboardingStatus !== 'COMPLETED') {
+        navigate('/onboarding', { replace: true })
+        return
+      }
+      if (curr.status === 'authenticated' && !hasWorkspaceAdminAccess(curr.session)) {
+        navigate('/dashboard', { replace: true })
+      }
+    },
+  )
 
   return (
     <Show
@@ -125,72 +135,99 @@ function RequireWorkspaceAdmin(props: { children: JSX.Element }) {
   )
 }
 
+/// Solid 2's createEffect requires two separate functions: `compute` (tracked
+/// reads only) and `effect` (untracked imperative work, e.g. navigate()).
+/// Mixing a tracked read with an imperative write in one callback — the
+/// Solid 1 pattern this file used — is a compile error in v2
+/// (MISSING_EFFECT_FN), since the single-argument overload types to `never`.
+function createEffectRedirect<T>(compute: () => T, effect: (value: T) => void): void {
+  createEffect(compute, effect)
+}
+
+export const Router = createRouter({
+  routes: [
+    { path: '/auth', component: AuthPage },
+    { path: '/login', component: AuthPage },
+    { path: '/reset-password', component: AuthPage },
+    { path: '/accept-invitation/:invitationId', component: AcceptInvitationPage },
+    {
+      path: '/onboarding',
+      component: () => (
+        <RequireOnboarding>
+          <OnboardingPage />
+        </RequireOnboarding>
+      ),
+    },
+    {
+      path: '/',
+      component: (props: { children?: JSX.Element }) => <RequireAuth>{props.children}</RequireAuth>,
+      children: [
+        { path: '/', component: DashboardPage },
+        { path: '/dashboard', component: DashboardPage },
+        { path: '/chat', component: ChatPage },
+        { path: '/spaces', component: SpacesIndexPage },
+        { path: '/spaces/:spaceId', component: SpacePage },
+        { path: '/studio', component: () => <StudioPage section="canvas" /> },
+        { path: '/studio/canvas', component: () => <StudioPage section="canvas" /> },
+        { path: '/studio/campaigns', component: () => <StudioPage section="campaigns" /> },
+        { path: '/studio/templates', component: () => <StudioPage section="templates" /> },
+        { path: '/inbox', component: InboxPage },
+        { path: '/tickets', component: TicketingPage },
+        { path: '/support', component: SupportPage },
+        { path: '/social', component: SocialCalendarPage },
+        { path: '/social/accounts', component: () => <SocialOperationsPage section="accounts" /> },
+        { path: '/social/calendar', component: SocialCalendarPage },
+        { path: '/social/drafts', component: () => <SocialOperationsPage section="drafts" /> },
+        { path: '/social/approvals', component: () => <SocialOperationsPage section="approvals" /> },
+        { path: '/social/campaigns', component: () => <SocialOperationsPage section="campaigns" /> },
+        { path: '/social/competitors', component: () => <SocialOperationsPage section="competitors" /> },
+        { path: '/social/trends', component: () => <SocialOperationsPage section="trends" /> },
+        { path: '/social/evergreen', component: () => <SocialOperationsPage section="evergreen" /> },
+        { path: '/social/commerce', component: SocialCommercePage },
+        { path: '/insights', component: () => <InsightsPage section="overview" /> },
+        { path: '/insights/overview', component: () => <InsightsPage section="overview" /> },
+        { path: '/insights/social', component: () => <InsightsPage section="social" /> },
+        { path: '/insights/inbox', component: () => <InsightsPage section="inbox" /> },
+        { path: '/insights/agents', component: () => <InsightsPage section="agents" /> },
+        { path: '/insights/chat', component: () => <InsightsPage section="chat" /> },
+        { path: '/insights/knowledge', component: () => <InsightsPage section="knowledge" /> },
+        { path: '/insights/ingestion', component: () => <InsightsPage section="ingestion" /> },
+        { path: '/insights/campaigns', component: () => <InsightsPage section="campaigns" /> },
+        { path: '/insights/external', component: () => <InsightsPage section="external_analytics" /> },
+        { path: '/insights/external_analytics', component: () => <InsightsPage section="external_analytics" /> },
+        { path: '/insights/experiments', component: () => <InsightsPage section="experiments" /> },
+        { path: '/agents', component: AgentsPage },
+        { path: '/agents/runs', component: AgentRunConsole },
+        { path: '/agents/cost', component: CostDashboardPage },
+        { path: '/agents/quality', component: OpsQualityPage },
+        { path: '/ingestions', component: VerevonIngestionsPage },
+        { path: '/knowledge', component: KnowledgePage },
+        { path: '/knowledge/shared', component: SharedWithMePage },
+        { path: '/leads', component: LeadsPage },
+        { path: '/account', component: AccountSettingsPage },
+        {
+          path: '/settings',
+          component: () => (
+            <RequireWorkspaceAdmin>
+              <SettingsPage />
+            </RequireWorkspaceAdmin>
+          ),
+        },
+        {
+          path: '/settings/:section',
+          component: () => (
+            <RequireWorkspaceAdmin>
+              <SettingsPage />
+            </RequireWorkspaceAdmin>
+          ),
+        },
+      ],
+    },
+    { path: '*404', component: NotFoundPage },
+  ],
+  explicitLinks: true,
+})
+
 export default function App() {
-  return (
-    <Router root={AppShell}>
-      <Route path="/auth" component={AuthPage} />
-      <Route path="/login" component={AuthPage} />
-      <Route path="/reset-password" component={AuthPage} />
-      <Route path="/accept-invitation/:invitationId" component={AcceptInvitationPage} />
-      <Route
-        path="/onboarding"
-        component={() => (
-          <RequireOnboarding>
-            <OnboardingPage />
-          </RequireOnboarding>
-        )}
-      />
-      <Route
-        path="/"
-        component={(props) => <RequireAuth>{props.children}</RequireAuth>}
-      >
-        <Route path="/" component={DashboardPage} />
-        <Route path="/dashboard" component={DashboardPage} />
-        <Route path="/chat" component={ChatPage} />
-        <Route path="/spaces" component={SpacesIndexPage} />
-        <Route path="/spaces/:spaceId" component={SpacePage} />
-        <Route path="/studio" component={() => <StudioPage section="canvas" />} />
-        <Route path="/studio/canvas" component={() => <StudioPage section="canvas" />} />
-        <Route path="/studio/campaigns" component={() => <StudioPage section="campaigns" />} />
-        <Route path="/studio/templates" component={() => <StudioPage section="templates" />} />
-        <Route path="/inbox" component={InboxPage} />
-        <Route path="/tickets" component={TicketingPage} />
-        <Route path="/support" component={SupportPage} />
-        <Route path="/social" component={SocialCalendarPage} />
-        <Route path="/social/accounts" component={() => <SocialOperationsPage section="accounts" />} />
-        <Route path="/social/calendar" component={SocialCalendarPage} />
-        <Route path="/social/drafts" component={() => <SocialOperationsPage section="drafts" />} />
-        <Route path="/social/approvals" component={() => <SocialOperationsPage section="approvals" />} />
-        <Route path="/social/campaigns" component={() => <SocialOperationsPage section="campaigns" />} />
-        <Route path="/social/competitors" component={() => <SocialOperationsPage section="competitors" />} />
-        <Route path="/social/trends" component={() => <SocialOperationsPage section="trends" />} />
-        <Route path="/social/evergreen" component={() => <SocialOperationsPage section="evergreen" />} />
-        <Route path="/social/commerce" component={SocialCommercePage} />
-        <Route path="/insights" component={() => <InsightsPage section="overview" />} />
-        <Route path="/insights/overview" component={() => <InsightsPage section="overview" />} />
-        <Route path="/insights/social" component={() => <InsightsPage section="social" />} />
-        <Route path="/insights/inbox" component={() => <InsightsPage section="inbox" />} />
-        <Route path="/insights/agents" component={() => <InsightsPage section="agents" />} />
-        <Route path="/insights/chat" component={() => <InsightsPage section="chat" />} />
-        <Route path="/insights/knowledge" component={() => <InsightsPage section="knowledge" />} />
-        <Route path="/insights/ingestion" component={() => <InsightsPage section="ingestion" />} />
-        <Route path="/insights/campaigns" component={() => <InsightsPage section="campaigns" />} />
-        <Route path="/insights/external" component={() => <InsightsPage section="external_analytics" />} />
-        <Route path="/insights/external_analytics" component={() => <InsightsPage section="external_analytics" />} />
-        <Route path="/insights/experiments" component={() => <InsightsPage section="experiments" />} />
-        <Route path="/agents" component={AgentsPage} />
-        <Route path="/agents/runs" component={AgentRunConsole} />
-        <Route path="/agents/cost" component={CostDashboardPage} />
-        <Route path="/agents/quality" component={OpsQualityPage} />
-        <Route path="/ingestions" component={VerevonIngestionsPage} />
-        <Route path="/knowledge" component={KnowledgePage} />
-        <Route path="/knowledge/shared" component={SharedWithMePage} />
-        <Route path="/leads" component={LeadsPage} />
-        <Route path="/account" component={AccountSettingsPage} />
-        <Route path="/settings" component={() => <RequireWorkspaceAdmin><SettingsPage /></RequireWorkspaceAdmin>} />
-        <Route path="/settings/:section" component={() => <RequireWorkspaceAdmin><SettingsPage /></RequireWorkspaceAdmin>} />
-      </Route>
-      <Route path="*404" component={NotFoundPage} />
-    </Router>
-  )
+  return <Router>{(props) => <AppShell {...props} />}</Router>
 }

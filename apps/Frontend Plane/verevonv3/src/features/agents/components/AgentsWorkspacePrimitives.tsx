@@ -1,11 +1,12 @@
+import { For, Show, createMemo } from 'solid-js'
 import {
   CheckCircle2,
   ChevronRight,
   PanelRight,
   Zap,
-} from 'lucide-solid'
-import { For, Show, createMemo, type JSX } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import { Dynamic } from '@solidjs/web'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
 import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
@@ -260,7 +261,7 @@ export function RoleCard(props: {
     <button
       type="button"
       aria-label={props.role.title}
-      aria-pressed={props.active}
+      aria-pressed={props.active ? 'true' : 'false'}
       onClick={() => props.onSelect()}
       class={cn(
         'agent-role-card',

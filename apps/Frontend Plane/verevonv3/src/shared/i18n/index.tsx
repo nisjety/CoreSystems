@@ -1,4 +1,5 @@
-import { createContext, createEffect, createSignal, useContext, type Accessor, type JSX } from 'solid-js'
+import { createContext, createEffect, createSignal, useContext, type Accessor } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import {
   defaultLocale,
   isLocale,
@@ -31,7 +32,7 @@ const fallbackI18n: I18nContextValue = {
   tr: (noText, enText) => pickLocaleText(defaultLocale, noText, enText),
 }
 
-const I18nContext = createContext<I18nContextValue>()
+const I18nContext = createContext<I18nContextValue>(fallbackI18n)
 
 export function I18nProvider(props: { children: JSX.Element }) {
   const [locale, setLocaleSignal] = createSignal<Locale>(readInitialLocale())
@@ -39,15 +40,17 @@ export function I18nProvider(props: { children: JSX.Element }) {
     setLocaleSignal(nextLocale)
   }
 
-  createEffect(() => {
-    const currentLocale = locale()
-    document.documentElement.lang = localeHtmlLang(currentLocale)
-    try {
-      window.localStorage.setItem(localeStorageKey, currentLocale)
-    } catch {
-      // Storage may be unavailable in private mode or isolated test contexts.
-    }
-  })
+  createEffect(
+    () => locale(),
+    (currentLocale) => {
+      document.documentElement.lang = localeHtmlLang(currentLocale)
+      try {
+        window.localStorage.setItem(localeStorageKey, currentLocale)
+      } catch {
+        // Storage may be unavailable in private mode or isolated test contexts.
+      }
+    },
+  )
 
   const value: I18nContextValue = {
     locale,
@@ -60,14 +63,14 @@ export function I18nProvider(props: { children: JSX.Element }) {
   }
 
   return (
-    <I18nContext.Provider value={value}>
+    <I18nContext value={value}>
       {props.children}
-    </I18nContext.Provider>
+    </I18nContext>
   )
 }
 
 export function useI18n(): I18nContextValue {
-  return useContext(I18nContext) ?? fallbackI18n
+  return useContext(I18nContext)
 }
 
 export function localeDateTime(locale: Locale): string {

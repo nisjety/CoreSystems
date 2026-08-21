@@ -1,4 +1,5 @@
-import { createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
+import { createEffect, createSignal, For, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 
 /**
  * The Space cockpit shell: the six tabs the adoption plan specifies
@@ -113,15 +114,18 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
   const [active, setActive] = createSignal<SpaceTabId>(props.initialTab ?? DEFAULT_TAB)
   const tabButtons: Partial<Record<SpaceTabId, HTMLButtonElement>> = {}
 
-  onMount(() => {
-    if (typeof window === 'undefined') return
-    // Adopt an incoming deep link, but never override an explicit initialTab
-    // with the default when the hash carries nothing meaningful.
-    if (window.location.hash) setActive(tabFromHash(window.location.hash))
-    const onHashChange = () => setActive(tabFromHash(window.location.hash))
-    window.addEventListener('hashchange', onHashChange)
-    onCleanup(() => window.removeEventListener('hashchange', onHashChange))
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      if (typeof window === 'undefined') return undefined
+      // Adopt an incoming deep link, but never override an explicit initialTab
+      // with the default when the hash carries nothing meaningful.
+      if (window.location.hash) setActive(tabFromHash(window.location.hash))
+      const onHashChange = () => setActive(tabFromHash(window.location.hash))
+      window.addEventListener('hashchange', onHashChange)
+      return () => window.removeEventListener('hashchange', onHashChange)
+    },
+  )
 
   const select = (id: SpaceTabId, options?: { focus?: boolean }) => {
     setActive(id)
@@ -156,9 +160,9 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
               type="button"
               role="tab"
               id={`space-tab-${tab.id}`}
-              aria-selected={active() === tab.id}
+              aria-selected={active() === tab.id ? 'true' : 'false'}
               aria-controls={`space-panel-${tab.id}`}
-              tabIndex={active() === tab.id ? 0 : -1}
+              tabindex={active() === tab.id ? 0 : -1}
               class={`verevon-space-tab${active() === tab.id ? ' verevon-space-tab--active' : ''}`}
               onClick={() => select(tab.id)}
               ref={(element) => { tabButtons[tab.id] = element }}
@@ -178,7 +182,7 @@ export function SpaceCockpit(props: SpaceCockpitProps) {
               id={`space-panel-${tab.id}`}
               aria-labelledby={`space-tab-${tab.id}`}
               class="verevon-space-panel"
-              tabIndex={active() === tab.id ? 0 : -1}
+              tabindex={active() === tab.id ? 0 : -1}
               hidden={active() !== tab.id}
             >
               <Show

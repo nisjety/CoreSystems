@@ -7,6 +7,7 @@
     "types": ["vite/client"],
     "skipLibCheck": true,
     "strict": true,
+    "rootDir": "./src",
     "paths": {
       "@/*": ["./src/*"]
     },
@@ -18,7 +19,7 @@
     "moduleDetection": "force",
     "noEmit": true,
     "jsx": "preserve",
-    "jsxImportSource": "solid-js",
+    "jsxImportSource": "@solidjs/web",
 
     /* Linting */
     "noUnusedLocals": true,

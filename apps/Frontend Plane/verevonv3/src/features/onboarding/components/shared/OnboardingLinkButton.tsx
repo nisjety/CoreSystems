@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { VerevonTextButton } from '@/shared/ui/verevon/VerevonTextButton'
 
 type OnboardingLinkButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -6,14 +7,14 @@ type OnboardingLinkButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
 }
 
 export function OnboardingLinkButton(allProps: OnboardingLinkButtonProps) {
-  const [local, props] = splitProps(allProps, ['class', 'emphasis', 'type'])
+  const props = omit(allProps, 'class', 'emphasis', 'type')
 
   return (
     <VerevonTextButton
       {...props}
-      class={local.class}
-      emphasis={local.emphasis === 'large' ? 'large' : 'default'}
-      type={local.type ?? 'button'}
+      class={allProps.class}
+      emphasis={allProps.emphasis === 'large' ? 'large' : 'default'}
+      type={allProps.type ?? 'button'}
     />
   )
 }

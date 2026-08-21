@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { flush } from 'solid-js'
 import {
   clearSession,
   getSession,
@@ -52,7 +53,9 @@ describe('session store organization transitions', () => {
 
   it('preserves a local completion only for the same user and organization', async () => {
     setSessionUser({ id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_a', name: 'Alpha', role: 'owner' })
+    flush()
     expect(isOnboardingComplete()).toBe(true)
 
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {

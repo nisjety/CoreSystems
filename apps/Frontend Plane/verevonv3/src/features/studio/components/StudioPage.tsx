@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   BringToFront,
   Copy,
@@ -20,9 +19,9 @@ import {
   Type,
   Undo2,
   Video,
-} from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
 import {
   buildSocialDraftBody,
   CANVAS_HEIGHT,
@@ -57,6 +56,7 @@ import {
   saveStudioProject,
 } from '@/shared/api/studio-client'
 import { cn } from '@/shared/lib/cn'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { useI18n } from '@/shared/i18n'
 
 type StudioSection = 'canvas' | 'campaigns' | 'templates'
@@ -152,35 +152,37 @@ function StudioCanvasPage() {
     }
   })
 
-  createEffect(() => {
-    const nextWorkspace = workspace()
-    if (!nextWorkspace) {
-      setPersistenceMessage(i18n.tr('Laster inn prosjekt', 'Loading project'))
-      return
-    }
+  createEffect(
+    () => workspace(),
+    (nextWorkspace) => {
+      if (!nextWorkspace) {
+        setPersistenceMessage(i18n.tr('Laster inn prosjekt', 'Loading project'))
+        return
+      }
 
-    setOrgId(nextWorkspace.orgId)
-    setPersistenceSource(nextWorkspace.source)
+      setOrgId(nextWorkspace.orgId)
+      setPersistenceSource(nextWorkspace.source)
 
-    if (!nextWorkspace.project) {
-      setPersistenceMessage(nextWorkspace.orgId ? i18n.tr('Klar til å lagre', 'Ready to save') : localCanvasMessage)
-      return
-    }
+      if (!nextWorkspace.project) {
+        setPersistenceMessage(nextWorkspace.orgId ? i18n.tr('Klar til å lagre', 'Ready to save') : localCanvasMessage)
+        return
+      }
 
-    if (nextWorkspace.project.id === loadedProjectId) return
-    loadedProjectId = nextWorkspace.project.id
-    const nextBlocks = nextWorkspace.project.blocks.length
-      ? nextWorkspace.project.blocks.map(normalizeStudioBlock)
-      : cloneBlocks(initialBlocks)
+      if (nextWorkspace.project.id === loadedProjectId) return
+      loadedProjectId = nextWorkspace.project.id
+      const nextBlocks = nextWorkspace.project.blocks.length
+        ? nextWorkspace.project.blocks.map(normalizeStudioBlock)
+        : cloneBlocks(initialBlocks)
 
-    setProjectId(nextWorkspace.project.id)
-    setProjectTitle(nextWorkspace.project.title || launchCanvasTitle)
-    setBlocks(nextBlocks)
-    setSelectedBlockId(nextWorkspace.project.selectedBlockId ?? nextBlocks[0]?.id ?? '')
-    setHistory([])
-    setFuture([])
-    setPersistenceMessage(ephemeralProjectMessage)
-  })
+      setProjectId(nextWorkspace.project.id)
+      setProjectTitle(nextWorkspace.project.title || launchCanvasTitle)
+      setBlocks(nextBlocks)
+      setSelectedBlockId(nextWorkspace.project.selectedBlockId ?? nextBlocks[0]?.id ?? '')
+      setHistory([])
+      setFuture([])
+      setPersistenceMessage(ephemeralProjectMessage)
+    },
+  )
 
   const pushHistory = (snapshot: StudioBlock[]) => {
     setHistory((current) => [...current.slice(-19), cloneBlocks(snapshot)])
@@ -438,16 +440,19 @@ function StudioCanvasPage() {
     }
   }
 
-  onMount(() => {
-    window.addEventListener('pointermove', moveDrag)
-    window.addEventListener('pointerup', stopDrag)
-    document.addEventListener('keydown', handleCanvasKeyDown)
-    onCleanup(() => {
-      window.removeEventListener('pointermove', moveDrag)
-      window.removeEventListener('pointerup', stopDrag)
-      document.removeEventListener('keydown', handleCanvasKeyDown)
-    })
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      window.addEventListener('pointermove', moveDrag)
+      window.addEventListener('pointerup', stopDrag)
+      document.addEventListener('keydown', handleCanvasKeyDown)
+      return () => {
+        window.removeEventListener('pointermove', moveDrag)
+        window.removeEventListener('pointerup', stopDrag)
+        document.removeEventListener('keydown', handleCanvasKeyDown)
+      }
+    },
+  )
 
   return (
     <div class="verevon-studio-page">
@@ -595,7 +600,7 @@ function StudioCanvasPage() {
             class={cn(previewDevice() === 'desktop' && 'is-active')}
             onClick={() => setPreviewDevice('desktop')}
             aria-label={i18n.tr('Skrivebordsforhåndsvisning', 'Desktop preview')}
-            aria-pressed={previewDevice() === 'desktop'}
+            aria-pressed={previewDevice() === 'desktop' ? 'true' : 'false'}
           >
             <Monitor size={17} />
           </button>
@@ -604,7 +609,7 @@ function StudioCanvasPage() {
             class={cn(previewDevice() === 'mobile' && 'is-active')}
             onClick={() => setPreviewDevice('mobile')}
             aria-label={i18n.tr('Mobilforhåndsvisning', 'Mobile preview')}
-            aria-pressed={previewDevice() === 'mobile'}
+            aria-pressed={previewDevice() === 'mobile' ? 'true' : 'false'}
           >
             <Smartphone size={17} />
           </button>
@@ -652,8 +657,8 @@ function StudioCanvasPage() {
                   </label>
                 </div>
                 <div class="verevon-studio-inspector__links">
-                  <A href="/social/calendar">{i18n.tr('Åpne kalender', 'Open calendar')}</A>
-                  <A href="/knowledge">{i18n.tr('Legg ved ressurser', 'Attach assets')}</A>
+                  <a href="/social/calendar" link>{i18n.tr('Åpne kalender', 'Open calendar')}</a>
+                  <a href="/knowledge" link>{i18n.tr('Legg ved ressurser', 'Attach assets')}</a>
                 </div>
               </>
             )}
@@ -691,7 +696,7 @@ function StudioCanvasBlock(props: {
       onClick={() => props.onSelect()}
       onPointerDown={(event) => props.onPointerDown(event)}
       onFocus={() => props.onSelect()}
-      tabIndex={0}
+      tabindex={0}
     >
       <div class="verevon-studio-block__surface">
         <Switch>
@@ -769,7 +774,7 @@ function StudioLibraryPage(props: {
         <span>{props.eyebrow}</span>
         <h1>{props.title}</h1>
         <p>{props.description}</p>
-        <A href="/studio/canvas">{i18n.tr('Åpne lerret', 'Open canvas')}</A>
+        <a href="/studio/canvas" link>{i18n.tr('Åpne lerret', 'Open canvas')}</a>
       </section>
       <div class="verevon-studio-library-grid">
         <For each={cards()}>

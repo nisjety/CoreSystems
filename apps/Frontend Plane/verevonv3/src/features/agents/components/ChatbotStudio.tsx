@@ -26,7 +26,7 @@ import {
   UserRound,
   Webhook,
   Wrench,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { useNavigate } from '@solidjs/router'
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { Button } from '@/shared/ui/Button'
@@ -160,11 +160,14 @@ export function ChatbotStudio() {
     setAddOnCanvas((state) => addOnCanvasReducer(state, action))
   }
 
-  createEffect(() => {
-    if (agentSelection() !== 'chatbot') {
-      setAgentSelection('chatbot')
-    }
-  })
+  createEffect(
+    () => agentSelection(),
+    (selection) => {
+      if (selection !== 'chatbot') {
+        setAgentSelection('chatbot')
+      }
+    },
+  )
 
   const addSelectedAddOn = () => {
     dispatchAddOnCanvas({ type: 'add', addOn: selectedAddOn() })

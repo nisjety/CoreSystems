@@ -123,6 +123,30 @@ random_value() {
   openssl rand -hex 32
 }
 
+# Convex-Auth JWT/JWKS signing key (RS256). docker-compose.yml volume-mounts
+# ./auth-core/keys read-only into the container at /app/keys; without a real
+# keypair there, convex-token.service.ts's readKeyFile() throws "Configured
+# signing key file is not readable" — the compose default (${..:-/app/keys/...})
+# is a non-empty path, so the code's own graceful ephemeral-key fallback (which
+# only triggers when the env var is entirely unset) never runs, and auth-core
+# crash-loops on every start. Generated once and reused, matching
+# bootstrap_runtime_environment.sh's ensure_event_keypair pattern for this
+# plane's other signing keys.
+convex_auth_keys_dir="$root/auth-core/keys"
+convex_auth_private_key="$convex_auth_keys_dir/convex-auth.key"
+convex_auth_public_key="$convex_auth_keys_dir/convex-auth.pub"
+if [[ ! -s "$convex_auth_private_key" || ! -s "$convex_auth_public_key" ]]; then
+  mkdir -p "$convex_auth_keys_dir"
+  # A bind-mount attempted before this ever ran can leave Docker's
+  # auto-vivified directory placeholder here instead of a file; clear it.
+  [[ -d "$convex_auth_private_key" ]] && rmdir "$convex_auth_private_key" 2>/dev/null
+  [[ -d "$convex_auth_public_key" ]] && rmdir "$convex_auth_public_key" 2>/dev/null
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$convex_auth_private_key" >/dev/null 2>&1
+  openssl pkey -in "$convex_auth_private_key" -pubout -out "$convex_auth_public_key" >/dev/null 2>&1
+  chmod 600 "$convex_auth_private_key"
+  chmod 644 "$convex_auth_public_key"
+fi
+
 # Keep local database URLs internally consistent with the generated database
 # password. Existing non-empty service-local values always win.
 db_user=$(lookup_value DB_USER || database_value_from_urls user || printf 'coresystem')
@@ -135,7 +159,11 @@ set_if_missing SOURCE_REVISION local
 set_if_missing BUILD_DATE "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 set_if_missing GRAFANA_ADMIN_USER admin
 persist_if_missing GRAFANA_ADMIN_PASSWORD "$(random_value)"
-set_if_missing PLANE_SERVICE_PRINCIPALS_JSON '{}'
+# PERSISTED, not set_if_missing: auth-core's docker-compose.yml requires this
+# (${..:?}), and build-verevon-services.sh interpolates Compose directly rather
+# than through this script's $tmp_env — an ephemeral default here is invisible
+# to that entry point and its compose config validation fails.
+persist_if_missing PLANE_SERVICE_PRINCIPALS_JSON '{}'
 
 # Session-signing and token-at-rest keys MUST be stable: rotating them logs
 # every user out and renders stored encrypted OAuth tokens undecryptable.
@@ -147,7 +175,10 @@ set_if_missing VEREVON_PUBLIC_ORIGIN http://localhost:5173
 # Plane-token issuer. Some service definitions require it (${..:?}) while others
 # document the same default (${..:-...}); supply that default so a bring-up or a
 # single-service recreate resolves without an operator-exported value.
-set_if_missing AUTH_CORE_ISSUER http://localhost:3011/api/convex-auth
+# PERSISTED (see PLANE_SERVICE_PRINCIPALS_JSON above): required with ${..:?} by
+# name in docker-compose.yml, so an ephemeral-only default is invisible to
+# build-verevon-services.sh's direct `docker compose config` interpolation.
+persist_if_missing AUTH_CORE_ISSUER http://localhost:3011/api/convex-auth
 set_if_missing BETTER_AUTH_TRUSTED_ORIGINS 'http://localhost:3185,http://127.0.0.1:3185,http://localhost:5173,http://127.0.0.1:5173'
 
 # Compose's development overlay requires pairwise-distinct values for these
@@ -156,7 +187,9 @@ set_if_missing BETTER_AUTH_TRUSTED_ORIGINS 'http://localhost:3185,http://127.0.0
 # credentials stay consistent and single-service recreates do not mismatch the
 # running stack.
 required_credentials=(
-  APPLICATION_CONVEX_CONTROL_NATS_PASSWORD APPLICATION_NATS_PROVISIONER_PASSWORD
+  APPLICATION_CONVEX_CONTROL_NATS_PASSWORD APPLICATION_CONVEX_CONTROL_PROJECTION_KEY
+  APPLICATION_CONVEX_MODEL_NATS_PASSWORD APPLICATION_INSIGHT_MODEL_NATS_PASSWORD
+  APPLICATION_NATS_PROVISIONER_PASSWORD
   APPLICATION_RECONCILER_AUTH_TOKEN APPLICATION_SPACE_LIFECYCLE_TOKEN
   AUDIT_APPLICATION_NATS_PASSWORD
   AUDIT_CONTROL_NATS_PASSWORD AUDIT_MODEL_NATS_PASSWORD AUTH_BILLING_CORE_SERVICE_TOKEN
@@ -167,6 +200,7 @@ required_credentials=(
   CONVERSATION_CORE_GDPR_NATS_PASSWORD COST_CORE_GDPR_NATS_PASSWORD
   DATA_ORCHESTRATOR_GDPR_NATS_PASSWORD DATA_QUALITY_GDPR_NATS_PASSWORD
   EMBEDDING_ENGINE_GDPR_NATS_PASSWORD EXECUTION_ORG_CORE_SERVICE_TOKEN
+  EXECUTION_CORE_USER_CORE_GRPC_TOKEN
   GRAPH_INDEX_GDPR_NATS_PASSWORD INDEX_ENGINE_GDPR_NATS_PASSWORD
   NOTIFICATION_CORE_GDPR_NATS_PASSWORD QUARRY_CONTROL_GDPR_NATS_PASSWORD
   QUICKWIT_ADAPTER_GDPR_NATS_PASSWORD RETRIEVAL_ENGINE_GDPR_NATS_PASSWORD

@@ -1,5 +1,6 @@
 import { useLocation } from '@solidjs/router'
-import { onMount, Show, type JSX } from 'solid-js'
+import { createEffect, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { QueryProvider } from '@/app/providers/QueryProvider'
 import { CoreShell } from '@/features/core/components/CoreShell'
 import { SESSION_EXPIRED_EVENT } from '@/shared/api/http'
@@ -15,12 +16,15 @@ export function AppShell(props: { children?: JSX.Element }) {
     location.pathname.startsWith('/auth')
 
   // Load the session once for the whole app; route guards read the store.
-  onMount(() => {
-    void loadSession()
-    const handleSessionExpired = () => clearSession()
-    window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      void loadSession()
+      const handleSessionExpired = () => clearSession()
+      window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
+      return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
+    },
+  )
 
   return (
     <I18nProvider>

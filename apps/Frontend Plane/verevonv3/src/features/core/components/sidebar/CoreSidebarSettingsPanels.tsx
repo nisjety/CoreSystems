@@ -1,4 +1,4 @@
-import { A, useLocation } from '@solidjs/router'
+import { useLocation } from '@solidjs/router'
 import {
   Brain,
   Building2,
@@ -18,10 +18,10 @@ import {
   TestTubeDiagonal,
   User,
   UsersRound,
-} from 'lucide-solid'
-import { createSignal, For, onCleanup, onMount, Show, type Component } from 'solid-js'
-import type { LucideProps } from 'lucide-solid'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createEffect, createSignal, For, Show, type Component } from 'solid-js'
+import type { LucideProps } from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import { SidebarPanelTitle } from '@/features/core/components/sidebar/CoreSidebarPrimitives'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
@@ -132,9 +132,9 @@ function SettingsSectionLink(props: {
     <Show
       when={props.section.href.startsWith('#')}
       fallback={
-        <A href={props.section.href} class={className()} aria-current={props.active ? 'page' : undefined}>
+        <a href={props.section.href} link class={className()} aria-current={props.active ? 'page' : undefined}>
           {content}
-        </A>
+        </a>
       }
     >
       <a href={props.section.href} class={className()} aria-current={props.active ? 'location' : undefined}>
@@ -154,44 +154,47 @@ function getSettingsActiveSectionId(pathname: string) {
 function useActiveAccountSection() {
   const [activeSectionId, setActiveSectionId] = createSignal(getActiveAccountSectionId())
 
-  onMount(() => {
-    const ids = accountSidebarSections.map((section) => section.id)
-    let frame = 0
+  createEffect(
+    () => undefined,
+    () => {
+      const ids = accountSidebarSections.map((section) => section.id)
+      let frame = 0
 
-    const updateActiveSection = () => {
-      window.cancelAnimationFrame(frame)
-      frame = window.requestAnimationFrame(() => {
-        const scrollRoot = document.querySelector<HTMLElement>('[data-account-settings-scroll]')
-        if (scrollRoot && scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 24) {
-          setActiveSectionId(ids[ids.length - 1] ?? defaultAccountSectionId)
-          return
-        }
-
-        const rootTop = scrollRoot?.getBoundingClientRect().top ?? 0
-        const activationLine = rootTop + 180
-        let nextActiveSectionId = ids[0] ?? defaultAccountSectionId
-
-        for (const id of ids) {
-          const section = document.getElementById(id)
-          if (section && section.getBoundingClientRect().top <= activationLine) {
-            nextActiveSectionId = id
+      const updateActiveSection = () => {
+        window.cancelAnimationFrame(frame)
+        frame = window.requestAnimationFrame(() => {
+          const scrollRoot = document.querySelector<HTMLElement>('[data-account-settings-scroll]')
+          if (scrollRoot && scrollRoot.scrollTop + scrollRoot.clientHeight >= scrollRoot.scrollHeight - 24) {
+            setActiveSectionId(ids[ids.length - 1] ?? defaultAccountSectionId)
+            return
           }
-        }
 
-        setActiveSectionId(nextActiveSectionId)
-      })
-    }
+          const rootTop = scrollRoot?.getBoundingClientRect().top ?? 0
+          const activationLine = rootTop + 180
+          let nextActiveSectionId = ids[0] ?? defaultAccountSectionId
 
-    const scrollRoot = document.querySelector<HTMLElement>('[data-account-settings-scroll]')
-    scrollRoot?.addEventListener('scroll', updateActiveSection, { passive: true })
-    window.addEventListener('resize', updateActiveSection)
+          for (const id of ids) {
+            const section = document.getElementById(id)
+            if (section && section.getBoundingClientRect().top <= activationLine) {
+              nextActiveSectionId = id
+            }
+          }
 
-    onCleanup(() => {
-      window.cancelAnimationFrame(frame)
-      scrollRoot?.removeEventListener('scroll', updateActiveSection)
-      window.removeEventListener('resize', updateActiveSection)
-    })
-  })
+          setActiveSectionId(nextActiveSectionId)
+        })
+      }
+
+      const scrollRoot = document.querySelector<HTMLElement>('[data-account-settings-scroll]')
+      scrollRoot?.addEventListener('scroll', updateActiveSection, { passive: true })
+      window.addEventListener('resize', updateActiveSection)
+
+      return () => {
+        window.cancelAnimationFrame(frame)
+        scrollRoot?.removeEventListener('scroll', updateActiveSection)
+        window.removeEventListener('resize', updateActiveSection)
+      }
+    },
+  )
 
   return activeSectionId
 }

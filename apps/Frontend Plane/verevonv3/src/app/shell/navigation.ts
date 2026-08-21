@@ -11,7 +11,7 @@ import {
   PanelsTopLeft,
   Settings,
   Sparkles,
-} from 'lucide-solid'
+} from '@/shared/icons'
 
 type SurfaceId =
   | 'dashboard'

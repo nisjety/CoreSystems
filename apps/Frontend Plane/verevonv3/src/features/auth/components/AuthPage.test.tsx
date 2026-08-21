@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import AuthPage from './AuthPage'
 
@@ -13,15 +14,21 @@ function jsonResponse(data: unknown, status = 200): Response {
 }
 
 function renderAuthPage() {
+  // AuthPage reads window.location.search/pathname directly (not via a router
+  // hook) for its returnTo/reset-token handling, so the real browser URL must
+  // still be set here in addition to the router's own memoryHistory below.
   window.history.pushState(null, '', '/login')
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/login" component={AuthPage} />
-      <Route path="/reset-password" component={AuthPage} />
-      <Route path="/onboarding" component={() => <div>Onboarding</div>} />
-      <Route path="/dashboard" component={() => <div>Dashboard</div>} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [
+      { path: '/login', component: AuthPage },
+      { path: '/reset-password', component: AuthPage },
+      { path: '/onboarding', component: () => <div>Onboarding</div> },
+      { path: '/dashboard', component: () => <div>Dashboard</div> },
+    ],
+    history: memoryHistory('/login'),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 function deferredResponse() {
@@ -80,10 +87,15 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.click(screen.getByRole('button', { name: 'Registrer' }))
+    flush()
     fireEvent.input(screen.getByLabelText('Fullt navn *'), { target: { value: 'Ima' } })
+    flush()
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Telefonnummer *'), { target: { value: '+47 123 45 678' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Passord *'), { target: { value: 'correct horse' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett konto' }))
 
     expect(await screen.findByText(/Velg hvordan/)).toBeTruthy()
@@ -101,6 +113,7 @@ describe('AuthPage email verification OTP flow', () => {
     })
 
     fireEvent.input(screen.getByLabelText('Engangskode'), { target: { value: '313117' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Bekreft kode' }))
 
     await waitFor(() => {
@@ -155,13 +168,19 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.click(screen.getByRole('button', { name: 'Registrer' }))
+    flush()
     fireEvent.input(screen.getByLabelText('Fullt navn *'), { target: { value: 'Ima' } })
+    flush()
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Telefonnummer *'), { target: { value: '+47 123 45 678' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Passord *'), { target: { value: 'correct horse' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett konto' }))
 
     fireEvent.input(await screen.findByLabelText('Engangskode'), { target: { value: '313117' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Bekreft kode' }))
 
     const status = await screen.findByRole('status')
@@ -185,12 +204,19 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.click(screen.getByRole('button', { name: 'Registrer' }))
+    flush()
     fireEvent.input(screen.getByLabelText('Fullt navn *'), { target: { value: 'Ima' } })
+    flush()
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Landskode' }))
+    flush()
     fireEvent.click(screen.getByRole('menuitemradio', { name: /USA.*\+1/ }))
+    flush()
     fireEvent.input(screen.getByLabelText('Telefonnummer *'), { target: { value: '555 010 1234' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Passord *'), { target: { value: 'correct horse' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett konto' }))
 
     await waitFor(() => {
@@ -235,7 +261,9 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Passord *'), { target: { value: 'correct horse' } })
+    flush()
     const submitButton = screen
       .getAllByRole('button', { name: 'Logg inn' })
       .find((button) => (button as HTMLButtonElement).type === 'submit')
@@ -268,7 +296,9 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Passord *'), { target: { value: 'correct horse' } })
+    flush()
     const submitButton = screen
       .getAllByRole('button', { name: 'Logg inn' })
       .find((button) => (button as HTMLButtonElement).type === 'submit')
@@ -302,6 +332,7 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Glemt passord?' }))
 
     await screen.findByRole('status')
@@ -324,19 +355,29 @@ describe('AuthPage email verification OTP flow', () => {
       throw new Error(`Unexpected request: ${path}`)
     })
     vi.stubGlobal('fetch', fetchMock)
+    // Same dual-source-of-truth as renderAuthPage() above: AuthPage strips the
+    // token from the real address bar itself via a direct
+    // window.history.replaceState call (not through the router), so the real
+    // pushState here must stay alongside the router's own memoryHistory.
     window.history.pushState(null, '', '/reset-password?token=reset-token')
 
-    render(() => (
-      <Router root={(props) => <>{props.children}</>}>
-        <Route path="/login" component={AuthPage} />
-        <Route path="/reset-password" component={AuthPage} />
-      </Router>
-    ))
+    const TestRouter = createRouter({
+      routes: [
+        { path: '/login', component: AuthPage },
+        { path: '/reset-password', component: AuthPage },
+      ],
+      history: memoryHistory('/reset-password?token=reset-token'),
+      explicitLinks: true,
+    })
+
+    render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 
     await waitFor(() => expect(window.location.search).toBe(''))
 
     fireEvent.input(screen.getByLabelText('Nytt passord'), { target: { value: 'NewPassword!2026' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Bekreft nytt passord'), { target: { value: 'NewPassword!2026' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Oppdater passord' }))
 
     await screen.findByRole('status')
@@ -387,13 +428,19 @@ describe('AuthPage email verification OTP flow', () => {
     renderAuthPage()
 
     fireEvent.click(screen.getByRole('button', { name: 'Registrer' }))
+    flush()
     fireEvent.input(screen.getByLabelText('Fullt navn *'), { target: { value: 'Ima' } })
+    flush()
     fireEvent.input(screen.getByLabelText('E-postadresse *'), { target: { value: 'ima@example.com' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Telefonnummer *'), { target: { value: '+47 123 45 678' } })
+    flush()
     fireEvent.input(screen.getByLabelText('Passord *'), { target: { value: 'correct horse' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett konto' }))
 
     fireEvent.click(await screen.findByRole('button', { name: 'SMS' }))
+    flush()
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
@@ -403,6 +450,7 @@ describe('AuthPage email verification OTP flow', () => {
     })
 
     fireEvent.input(screen.getByLabelText('SMS-kode'), { target: { value: '313117' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Bekreft kode' }))
 
     await waitFor(() => {

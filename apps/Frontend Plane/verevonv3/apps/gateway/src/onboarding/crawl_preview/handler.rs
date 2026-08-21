@@ -61,8 +61,10 @@ pub(crate) async fn crawl_preview(
             Ok(job_id) => {
                 yield Ok::<Event, std::convert::Infallible>(sse_json("started", json!({ "jobId": job_id, "url": url, "target": max_pages })));
                 yield Ok(sse_json("progress", json!({ "status": "starting", "pages": 0, "elements": 0, "target": max_pages, "jobId": job_id })));
+                let mut seed_yielded = false;
                 match forward_seed_scrape(&state_clone, token.as_deref(), &url).await {
                     Ok(events) => {
+                        seed_yielded = !events.is_empty();
                         for event in events {
                             yield Ok::<Event, std::convert::Infallible>(event);
                         }
@@ -118,8 +120,17 @@ pub(crate) async fn crawl_preview(
 
                 match poll_handle.await {
                     Ok(Ok(())) => {
+                        // A run that fetched nothing and seeded nothing looks
+                        // "completed" to the workflow but collected zero
+                        // content — say so instead of a bare empty result.
+                        if pages == 0 && !seed_yielded {
+                            yield Ok::<Event, std::convert::Infallible>(sse_json("warning", json!({
+                                "code": "empty_crawl",
+                                "message": "Vi fikk ikke hentet innhold fra nettsiden. Prøv på nytt, eller fortsett uten forhåndsvisning."
+                            })));
+                        }
                         yield Ok::<Event, std::convert::Infallible>(sse_json("done", json!({
-                            "count": pages.max(1),
+                            "count": pages,
                             "pages": pages,
                             "elements": elements,
                             "status": "completed"

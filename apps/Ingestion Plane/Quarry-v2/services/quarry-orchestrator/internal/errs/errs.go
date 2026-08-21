@@ -97,16 +97,29 @@ func (e *Error) Error() string {
 	if e == nil {
 		return ""
 	}
+	msg := ""
 	switch {
 	case e.Err != nil && e.Status > 0:
-		return fmt.Sprintf("%s: %s (status=%d): %v", e.Op, e.Category, e.Status, e.Err)
+		msg = fmt.Sprintf("%s: %s (status=%d): %v", e.Op, e.Category, e.Status, e.Err)
 	case e.Err != nil:
-		return fmt.Sprintf("%s: %s: %v", e.Op, e.Category, e.Err)
+		msg = fmt.Sprintf("%s: %s: %v", e.Op, e.Category, e.Err)
 	case e.Status > 0:
-		return fmt.Sprintf("%s: %s (status=%d)", e.Op, e.Category, e.Status)
+		msg = fmt.Sprintf("%s: %s (status=%d)", e.Op, e.Category, e.Status)
 	default:
-		return fmt.Sprintf("%s: %s", e.Op, e.Category)
+		msg = fmt.Sprintf("%s: %s", e.Op, e.Category)
 	}
+	// Surface the upstream response body: a bare "unauthorized (403)" hides
+	// what the upstream actually said (a 403 can be a security-policy block,
+	// not an auth failure), which turns a one-line diagnosis into a hunt.
+	if e.Body != "" {
+		body := e.Body
+		const maxInline = 256
+		if len(body) > maxInline {
+			body = body[:maxInline]
+		}
+		msg = fmt.Sprintf("%s; upstream body: %s", msg, body)
+	}
+	return msg
 }
 
 func (e *Error) Unwrap() error { return e.Err }

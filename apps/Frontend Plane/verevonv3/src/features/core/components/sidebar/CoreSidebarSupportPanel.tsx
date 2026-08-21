@@ -1,3 +1,5 @@
+import { type Component, For, Show, createMemo, createSignal } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { useLocation, useNavigate } from '@solidjs/router'
 import {
   AlertTriangle,
@@ -17,10 +19,10 @@ import {
   TicketCheck,
   UserRound,
   UsersRound,
-} from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show, type Component, type JSX } from 'solid-js'
-import type { LucideProps } from 'lucide-solid'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import type { LucideProps } from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import {
   SidebarPanelTitle,
   SidebarSearchField,
@@ -300,7 +302,7 @@ function EmailAccountFilter(props: {
   return (
     <section class="core-sidebar-group core-sidebar-email-group">
       <div class="core-sidebar-group__header">
-        <button type="button" aria-expanded={expanded()} onClick={() => setOpen((value) => !value)}>
+        <button type="button" aria-expanded={expanded() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
           <span class="verevon-sidebar-group-title">{i18n.tr('E-post', 'Email')}</span>
           <ChevronDown class={cn('size-3.5', !expanded() && '-rotate-90')} strokeWidth={1.8} />
         </button>
@@ -438,7 +440,7 @@ function SupportFilterGroup(props: { activeHref: (href: string) => boolean; defa
     <Show when={props.items.length > 0}>
       <section class="core-sidebar-group">
         <div class="core-sidebar-group__header">
-          <button type="button" aria-expanded={expanded()} onClick={() => setOpen((value) => !value)}>
+          <button type="button" aria-expanded={expanded() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
             <span class="verevon-sidebar-group-title">{props.label}</span>
             <ChevronDown class={cn('size-3.5', !expanded() && '-rotate-90')} strokeWidth={1.8} />
           </button>

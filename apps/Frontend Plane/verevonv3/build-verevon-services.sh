@@ -491,6 +491,20 @@ plane_env_files() {
   local owner core_env
 
   case "$(basename "$plane_dir")" in
+    "Data Plane v2")
+      # Every GDPR-erasure NATS identity Data Plane's Go/Rust services present
+      # (documents-api, index-engine, embedding-engine, graph-index, wiki-store,
+      # retrieval-engine, data-quality, data-orchestrator, quickwit-adapter) is
+      # validated by Control Plane's control-shared-nats broker, which reads the
+      # SAME variable names from its own persisted secrets store. This plane had
+      # no owner-file entry at all, so its plane-level .env carried an
+      # independently-drifted copy of all nine passwords (traced to a stale
+      # snapshot predating this machine's Control Plane secrets) — every one of
+      # them an Authorization Violation waiting to happen. Load Control's store
+      # first so it wins unless this plane's own .env still shadows it.
+      owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
+      [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      ;;
     "Application Plane")
       # The Space registration worker presents a Control-issued service
       # credential (principal `application-space-lifecycle`, scope
@@ -530,9 +544,18 @@ plane_env_files() {
       # had already moved past, and Convex answered "Unauthorized" — the two
       # files had drifted, and mirroring one of them is not the same as
       # mirroring the owner.
+      # conversation-core/notification-core issue their OWN
+      # CONVERSATION_GATEWAY_SERVICE_TOKEN / NOTIFICATION_GATEWAY_SERVICE_TOKEN
+      # (validated on their side, presented by this plane's gateway) — same
+      # single-owner reasoning as convex-core above. A frontend-local copy of
+      # these had drifted to a stale bootstrap-orphan snapshot value while the
+      # real per-core files moved on, breaking every gateway call these cores
+      # authenticate.
       for owner in "$CORE_ROOT/apps/Control Plane/.env.generated-secrets" \
                    "$CORE_ROOT/apps/Application Plane/convex-core/.env" \
-                   "$CORE_ROOT/apps/Application Plane/convex-core/.env.local"; do
+                   "$CORE_ROOT/apps/Application Plane/convex-core/.env.local" \
+                   "$CORE_ROOT/apps/Application Plane/conversation-core/.env" \
+                   "$CORE_ROOT/apps/Application Plane/notification-core/.env"; do
         [[ -f "$owner" ]] && printf '%s\n' "$owner"
       done
       ;;
@@ -1113,10 +1136,16 @@ ensure_external_volumes() {
       log "Creating missing external volume: $volume_name (${STACK_NAMES[$index]})"
       run docker volume create "$volume_name" >/dev/null
     done < <(
+      # `tr -d '\r'`: the native Windows jq.exe writes stdout in text mode, so
+      # every line here comes back CRLF-terminated even through a pipe. Left
+      # unstripped, `docker volume create "verevon-nats-data\r"` fails Docker's
+      # own name-charset validation with the \r rendered as a literal control
+      # character in the error text — confirmed the hard way on this host.
       compose -f "$compose_file" config --format json 2>/dev/null \
         | jq -r '(.volumes // {}) | to_entries[]
                  | select(.value.external == true)
-                 | (.value.name // .key)' 2>/dev/null || true
+                 | (.value.name // .key)' 2>/dev/null \
+        | tr -d '\r' || true
     )
   done
 }
@@ -1216,19 +1245,23 @@ services_ready_snapshot() {
 
   snapshot="$(compose -f "$compose_file" ps --all --format json 2>/dev/null || true)"
   [[ -n "$snapshot" ]] || return 1
+  # `tr -d '\r'` throughout this function: see ensure_external_volumes — the
+  # native Windows jq.exe CRLF-terminates every line, and `xargs` does not
+  # strip embedded \r either, so a service name would come out "foo\r" and
+  # silently fail every service_in_list comparison below.
   health_required_services="$(compose -f "$compose_file" config --format json 2>/dev/null \
     | jq -r '.services | to_entries[] | select(.value.healthcheck != null and .value.healthcheck.disable != true) | .key' \
-    | xargs || true)"
+    | tr -d '\r' | xargs || true)"
   running_services="$(jq -r '
     (if type == "array" then .[] else . end)
     | select((.State // "") == "running")
     | .Service
-  ' <<<"$snapshot" 2>/dev/null | xargs || true)"
+  ' <<<"$snapshot" 2>/dev/null | tr -d '\r' | xargs || true)"
   healthy_services="$(jq -r '
     (if type == "array" then .[] else . end)
     | select((.State // "") == "running" and (.Health // "") == "healthy")
     | .Service
-  ' <<<"$snapshot" 2>/dev/null | xargs || true)"
+  ' <<<"$snapshot" 2>/dev/null | tr -d '\r' | xargs || true)"
 
   for service in $services; do
     service_in_list "$service" "$running_services" || return 1
@@ -1472,7 +1505,7 @@ preflight_skip_build_images() {
       | to_entries[]
       | select(.value.build != null)
       | (.value.image // (($project // "") + "-" + .key))
-    ' <<<"$config_json")
+    ' <<<"$config_json" | tr -d '\r')
   done
 
   if (( ${#missing[@]} > 0 )); then
@@ -1738,7 +1771,7 @@ seed_dev_account() {
     return 1
   fi
   signup_payload="$(jq -nc --arg email "$email" --arg password "$password" --arg name "$name" \
-    '{email: $email, password: $password, name: $name}')"
+    '{email: $email, password: $password, name: $name}' | tr -d '\r')"
 
   if [[ "$DRY_RUN" == "true" ]]; then
     printf '[seed] dry-run: would seed %s via %s\n' "$email" "$auth_url"

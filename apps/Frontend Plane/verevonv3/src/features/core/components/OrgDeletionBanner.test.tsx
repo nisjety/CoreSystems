@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrgDeletionBanner } from '@/features/core/components/OrgDeletionBanner'
 import type { DeletionStatus } from '@/shared/api/org-deletion-client'
@@ -50,7 +51,9 @@ describe('OrgDeletionBanner', () => {
 
   it('shows the org name and days remaining, with no cancel control for a plain member', () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const status: DeletionStatus = {
       pending: true,
       deadline: futureDeadline(7),
@@ -69,7 +72,9 @@ describe('OrgDeletionBanner', () => {
 
   it('shows the owner-only cancel-deletion control and restores the org on click', async () => {
     setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     const onRefetch = vi.fn()
@@ -87,7 +92,9 @@ describe('OrgDeletionBanner', () => {
 
   it('reconciles a false-failure 502 by checking whether the deletion was actually cancelled', async () => {
     setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/gdpr/restore') {
@@ -113,7 +120,9 @@ describe('OrgDeletionBanner', () => {
 
   it('shows a real failure when cancelling deletion genuinely did not go through', async () => {
     setSessionUser({ id: 'owner_1', email: 'owner@example.com', name: 'Owner', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/gdpr/restore') {
@@ -138,7 +147,9 @@ describe('OrgDeletionBanner', () => {
 
   it('downloads the DSAR export then marks it received', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/privacy/export') {
@@ -175,7 +186,9 @@ describe('OrgDeletionBanner', () => {
 
   it('reconciles a false-failure 502 by checking whether the export checkpoint was actually recorded', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/privacy/export') {
@@ -210,7 +223,9 @@ describe('OrgDeletionBanner', () => {
 
   it('shows a real failure when the export checkpoint genuinely was not recorded', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/privacy/export') {
@@ -244,7 +259,9 @@ describe('OrgDeletionBanner', () => {
 
   it('acknowledges the pending-deletion notice for the calling member', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async () => jsonResponse({ ok: true }))
     vi.stubGlobal('fetch', fetchMock)
     const onRefetch = vi.fn()
@@ -262,7 +279,9 @@ describe('OrgDeletionBanner', () => {
 
   it('reconciles a false-failure 502 by checking whether the acknowledgement was actually recorded', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/gdpr/deletion/acknowledge') {
@@ -289,7 +308,9 @@ describe('OrgDeletionBanner', () => {
 
   it('shows a real failure when acknowledging genuinely did not go through', async () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input)
       if (path === '/api/v1/orgs/org_1/gdpr/deletion/acknowledge') {
@@ -317,7 +338,9 @@ describe('OrgDeletionBanner', () => {
 
   it('shows the already-exported / already-acknowledged checkpoint state', () => {
     setSessionUser({ id: 'user_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role: 'member' })
+    flush()
     const status: DeletionStatus = {
       pending: true,
       deadline: futureDeadline(5),

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import KnowledgePage from '@/features/knowledge/components/KnowledgePage'
 
@@ -352,12 +353,12 @@ function acceptedOperatingMapPayload(suggested = false) {
 }
 
 function renderKnowledgePage() {
-  window.history.pushState(null, '', '/knowledge')
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={KnowledgePage} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component: KnowledgePage }],
+    history: memoryHistory('/knowledge'),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 describe('KnowledgePage', () => {
@@ -398,6 +399,7 @@ describe('KnowledgePage', () => {
     expect(listView.getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(listView)
+    flush()
 
     expect(listView.getAttribute('aria-pressed')).toBe('true')
     expect(gridView.getAttribute('aria-pressed')).toBe('false')
@@ -409,6 +411,7 @@ describe('KnowledgePage', () => {
 
     await screen.findByRole('heading', { name: /^mapper$/i })
     fireEvent.click(screen.getByRole('button', { name: /graf/i }))
+    flush()
 
     expect(screen.getByRole('region', { name: /raggraph-relasjonskart/i })).toBeTruthy()
     // The Graf tab opens on the workspace root — the top level of the tree —
@@ -417,18 +420,25 @@ describe('KnowledgePage', () => {
     expect(screen.getByRole('heading', { name: /^kunnskapsbase$/i, level: 2 })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /utdrag/i }))
+    flush()
 
     expect(screen.getByRole('heading', { name: /^kilder$/i })).toBeTruthy()
     expect(screen.getByRole('button', { name: /returns policy/i })).toBeTruthy()
   })
 
   it('opens a navbar knowledge result on its exact chunk-backed source', async () => {
+    // KnowledgePage reads the deep-link `source` param straight off
+    // `window.location.search` (not the router's own location — see
+    // AuthPage.test.tsx for the same convention), so the real jsdom URL must
+    // carry the query string; @solidjs/router's memoryHistory keeps its own
+    // in-memory location and never touches `window.location`.
     window.history.pushState(null, '', '/knowledge?source=doc-returns')
-    render(() => (
-      <Router root={(props) => <>{props.children}</>}>
-        <Route path="/*all" component={KnowledgePage} />
-      </Router>
-    ))
+    const TestRouter = createRouter({
+      routes: [{ path: '/*all', component: KnowledgePage }],
+      history: memoryHistory('/knowledge?source=doc-returns'),
+      explicitLinks: true,
+    })
+    render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 
     const source = await screen.findByRole('button', { name: /returns policy/i })
     expect(source.getAttribute('aria-pressed')).toBe('true')
@@ -475,6 +485,7 @@ describe('KnowledgePage', () => {
 
     await screen.findByRole('heading', { name: /^mapper$/i })
     fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
+    flush()
 
     expect(screen.getByRole('heading', { name: /evidence-grounded ai rollout map/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /no operating map yet/i })).toBeTruthy()
@@ -485,6 +496,7 @@ describe('KnowledgePage', () => {
     expect(screen.getByRole('heading', { name: /support triage/i })).toBeTruthy()
     expect(screen.getByText(/returns policy/i)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /view evidence/i }))
+    flush()
     expect(screen.getByRole('region', { name: /evidence for support triage/i })).toBeTruthy()
     expect(screen.getByText(/graph: support workspace/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: /accept/i })).toBeTruthy()
@@ -543,6 +555,7 @@ describe('KnowledgePage', () => {
 
     await screen.findByRole('heading', { name: /^mapper$/i })
     fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /generate map/i }))
     await waitFor(() => expect(screen.getByRole('heading', { name: /proposal awaiting review/i })).toBeTruthy())
 
@@ -597,6 +610,7 @@ describe('KnowledgePage', () => {
 
     await screen.findByRole('heading', { name: /^mapper$/i })
     fireEvent.click(screen.getByRole('button', { name: /ai-kart/i }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /generate map/i }))
     await waitFor(() => expect(screen.getByRole('heading', { name: /proposal awaiting review/i })).toBeTruthy())
 
@@ -657,6 +671,7 @@ describe('KnowledgePage', () => {
 
     await screen.findByRole('heading', { name: /^mapper$/i })
     fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
+    flush()
 
     expect(screen.getByRole('dialog', { name: /legg til kunnskapskilde/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /last opp filer/i })).toBeTruthy()
@@ -671,6 +686,7 @@ describe('KnowledgePage', () => {
     fireEvent.change(screen.getByRole('combobox', { name: /velg kunnskapssamling/i }), {
       target: { value: 'provider:microsoft' },
     })
+    flush()
 
     expect(screen.getByRole('heading', { name: /support knowledge/i })).toBeTruthy()
     expect(screen.queryByText(/verevon docs/i)).toBeNull()
@@ -679,6 +695,7 @@ describe('KnowledgePage', () => {
 
     const search = screen.getByRole('textbox', { name: /søk i filer og kilder/i })
     fireEvent.input(search, { target: { value: 'returns' } })
+    flush()
 
     expect(screen.getAllByText(/returns policy/i)[0]).toBeTruthy()
     expect(screen.queryAllByText(/shipping faq/i)).toHaveLength(0)
@@ -736,12 +753,15 @@ describe('KnowledgePage', () => {
 
     await screen.findByRole('heading', { name: /^mapper$/i })
     fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
+    flush()
     fireEvent.input(screen.getByLabelText(/nettadresse/i), {
       target: { value: 'https://docs.verevon.ai' },
     })
+    flush()
     fireEvent.input(screen.getByLabelText(/maks antall sider/i), {
       target: { value: '16' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /start gjennomsøking/i }))
 
     // The typed URL must reach the request payload sent to the backend, and the
@@ -813,9 +833,11 @@ describe('KnowledgePage', () => {
     const callsBeforeCrawl = sourcesCallCount
 
     fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
+    flush()
     fireEvent.input(screen.getByLabelText(/nettadresse/i), {
       target: { value: 'https://docs.verevon.ai' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /start gjennomsøking/i }))
 
     await waitFor(() => expect(screen.getByText(/startet en gjennomsøking av nettstedet for https:\/\/docs\.verevon\.ai/i)).toBeTruthy())

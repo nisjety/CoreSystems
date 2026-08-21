@@ -291,7 +291,7 @@ export default function FinetuneJobsPage() {
               <button
                 type="button"
                 role="radio"
-                aria-checked={tier() === 'developer'}
+                aria-checked={tier() === 'developer' ? 'true' : 'false'}
                 class="verevon-finetune-tier__option"
                 data-active={tier() === 'developer'}
                 onClick={() => setTier('developer')}
@@ -302,7 +302,7 @@ export default function FinetuneJobsPage() {
               <button
                 type="button"
                 role="radio"
-                aria-checked={tier() === 'production'}
+                aria-checked={tier() === 'production' ? 'true' : 'false'}
                 class="verevon-finetune-tier__option"
                 data-active={tier() === 'production'}
                 onClick={() => setTier('production')}

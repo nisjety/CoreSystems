@@ -1,5 +1,6 @@
-import { ArrowUpRight, FileUp, FolderPlus, FolderTree, Globe2, HardDriveUpload, RefreshCw } from 'lucide-solid'
-import { createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
+import { ArrowUpRight, FileUp, FolderPlus, FolderTree, Globe2, HardDriveUpload, RefreshCw } from '@/shared/icons'
+import { createEffect, createSignal, For, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { useI18n } from '@/shared/i18n'
@@ -219,13 +220,16 @@ export function KnowledgeAddSourceModal(props: {
     maxPages: '12',
   })
 
-  onMount(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') props.onClose()
-    }
-    window.addEventListener('keydown', closeOnEscape)
-    onCleanup(() => window.removeEventListener('keydown', closeOnEscape))
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') props.onClose()
+      }
+      window.addEventListener('keydown', closeOnEscape)
+      return () => window.removeEventListener('keydown', closeOnEscape)
+    },
+  )
 
   async function submitUpload() {
     if (selectedFiles().length === 0) return

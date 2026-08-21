@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   ArrowUpRight,
   CalendarClock,
@@ -15,18 +14,16 @@ import {
   TimerReset,
   Trash2,
   type LucideProps,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   createEffect,
   createMemo,
-  createResource,
   createSignal,
   For,
-  onCleanup,
-  onMount,
   Show,
   type Component,
 } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   createIngestionRun,
   createIngestionSchedule,
@@ -172,31 +169,36 @@ export default function VerevonIngestionsPage() {
     }
   }
 
-  onMount(() => {
-    const controller = new AbortController()
-    void loadWorkspace(controller.signal)
-    onCleanup(() => controller.abort())
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      const controller = new AbortController()
+      void loadWorkspace(controller.signal)
+      return () => controller.abort()
+    },
+  )
 
-  createEffect(() => {
-    const runId = selectedRunId()
-    if (!runId) {
-      setRunEvidence(null)
-      return
-    }
-    // The evidence endpoint only accepts Temporal run ids (`run_…`); the list
-    // rows are keyed by durable job id (`job_…`), which 400s there. Prefer the
-    // row's runId and fall back to the selection id (scrape runs' id IS a run id).
-    const evidenceId = selectedRun()?.runId ?? runId
+  createEffect(
+    () => ({ runId: selectedRunId(), run: selectedRun() }),
+    ({ runId, run }) => {
+      if (!runId) {
+        setRunEvidence(null)
+        return
+      }
+      // The evidence endpoint only accepts Temporal run ids (`run_…`); the list
+      // rows are keyed by durable job id (`job_…`), which 400s there. Prefer the
+      // row's runId and fall back to the selection id (scrape runs' id IS a run id).
+      const evidenceId = run?.runId ?? runId
 
-    const controller = new AbortController()
-    getIngestionEvidence(evidenceId, controller.signal)
-      .then(setRunEvidence)
-      .catch(() => {
-        if (!controller.signal.aborted) setRunEvidence(null)
-      })
-    onCleanup(() => controller.abort())
-  })
+      const controller = new AbortController()
+      getIngestionEvidence(evidenceId, controller.signal)
+        .then(setRunEvidence)
+        .catch(() => {
+          if (!controller.signal.aborted) setRunEvidence(null)
+        })
+      return () => controller.abort()
+    },
+  )
 
   async function submitRun() {
     setError(null)
@@ -564,10 +566,10 @@ function RunsPanel(props: {
           <h2>{i18n.tr('Nylige kjøringer', 'Recent runs')}</h2>
           <p>{i18n.tr('Varige crawl-, uttrekk-, batch-, søk- og agentjobber fra Quarry.', 'Durable crawl, extract, batch, search, and agent jobs from Quarry.')}</p>
         </div>
-        <A href="/knowledge" class="ingestions-inline-link">
+        <a href="/knowledge" link class="ingestions-inline-link">
           {i18n.tr('Åpne Kunnskap', 'Open Knowledge')}
           <ArrowUpRight class="size-4" strokeWidth={1.9} />
-        </A>
+        </a>
       </div>
       <div class="ingestions-table-wrap">
         <table class="ingestions-table">
@@ -948,10 +950,10 @@ function SourcesPanel(props: {
             <h2>{i18n.tr('Tilkoblede kilder', 'Connected sources')}</h2>
             <p>{i18n.tr('Integrasjonsbasert kunnskap og nettsted-mål for innhenting synlige for Verevon.', 'Integration-backed knowledge and website ingestion targets visible to Verevon.')}</p>
           </div>
-          <A href="/knowledge" class="ingestions-inline-link">
+          <a href="/knowledge" link class="ingestions-inline-link">
             {i18n.tr('Åpne Kunnskap', 'Open Knowledge')}
             <ArrowUpRight class="size-4" strokeWidth={1.9} />
-          </A>
+          </a>
         </div>
         <div class="ingestions-card-list">
           <For
@@ -1133,10 +1135,10 @@ function EvidencePanel(props: {
               </Show>
             </p>
           </div>
-          <A href="/knowledge" class="ingestions-inline-link">
+          <a href="/knowledge" link class="ingestions-inline-link">
             {i18n.tr('Send til Kunnskap', 'Send to Knowledge')}
             <ArrowUpRight class="size-4" strokeWidth={1.9} />
-          </A>
+          </a>
         </div>
 
         <Show when={props.manualEvidence}>

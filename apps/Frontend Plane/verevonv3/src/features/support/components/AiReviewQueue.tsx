@@ -1,6 +1,6 @@
-import { A } from '@solidjs/router'
-import { BarChart3, Bot, ExternalLink, Sparkles } from 'lucide-solid'
-import { createMemo, createResource, For, Show } from 'solid-js'
+import { BarChart3, Bot, ExternalLink, Sparkles } from '@/shared/icons'
+import { createMemo, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { listAiActions, type AiAction } from '@/shared/api/inbox-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { deriveReviewDecisionTiming, formatReviewTiming } from '@/features/support/lib/ai-review-outcomes'
@@ -165,9 +165,9 @@ export function AiReviewQueue() {
                       <Show when={proposalPreview(action)}>{(preview) => <p>{preview()}</p>}</Show>
                       <small>{i18n.tr('Samtale', 'Conversation')} · {action.conversation_id}</small>
                     </div>
-                    <A href={`/support?view=all&conversation_id=${encodeURIComponent(action.conversation_id)}`} class="verevon-ai-review-queue__open-link">
+                    <a href={`/support?view=all&conversation_id=${encodeURIComponent(action.conversation_id)}`} link class="verevon-ai-review-queue__open-link">
                       {i18n.tr('Gjennomgå i kontekst', 'Review in context')} <ExternalLink class="size-4" />
-                    </A>
+                    </a>
                   </li>
                 )}
               </For>

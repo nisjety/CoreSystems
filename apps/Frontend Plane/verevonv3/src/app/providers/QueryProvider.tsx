@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 
 // One shared query client keeps server-state caching consistent across every
 // route surface. `gcTime` is deliberately long so a query's data survives the

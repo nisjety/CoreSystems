@@ -1,4 +1,4 @@
-import { Check, Copy, Loader2, Search, Sparkles, X } from 'lucide-solid'
+import { Check, Copy, Loader2, Search, Sparkles, X } from '@/shared/icons'
 import { createMemo, createSignal, For, Show, untrack } from 'solid-js'
 import type { Product, ProductExtraction } from '@/shared/api/knowledge-client'
 import { hostnameOf } from './knowledge-preview'
@@ -140,11 +140,10 @@ export function ProductPicker(props: {
               const isSelected = () => selected().has(index)
               return (
                 <div
-                  class="product-card"
-                  classList={{ 'product-card--selected': isSelected() }}
+                  class={['product-card', { 'product-card--selected': isSelected() }]}
                   role="button"
                   tabindex="0"
-                  aria-pressed={isSelected()}
+                  aria-pressed={isSelected() ? 'true' : 'false'}
                   onClick={() => toggle(index)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' || event.key === ' ') {

@@ -271,6 +271,31 @@ pub(crate) async fn resolve_active_membership(
     active_membership_from_authority_body(user, status, &body)
 }
 
+/// Re-prime the per-(user, active-org) session-context cache from a live
+/// user-core read, returning the fetched context (`Value::Null` on failure —
+/// the stale entry was already deleted, so the next read stays a live fetch).
+///
+/// Deletion alone is not enough after a mutation the caller must observe
+/// immediately (onboarding completion): a concurrent request can hold a
+/// pre-mutation fetch in flight and re-store the stale context right after the
+/// delete. Fetching after the mutation commits and storing that result makes
+/// the very next `/session/current` read answer the new state.
+pub(crate) async fn refresh_session_context_cache(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Value {
+    let scope_org = scope_org_id(user);
+    let key = crate::cache::cache_key(
+        "session-context",
+        &[user.user_id.as_str(), scope_org.unwrap_or("")],
+    );
+    let context = fetch_session_context(state, user).await;
+    if !context.is_null() {
+        state.cache.store(&key, &context).await;
+    }
+    context
+}
+
 pub(crate) async fn invalidate_session_context_cache(
     state: &AppState,
     user_id: &str,

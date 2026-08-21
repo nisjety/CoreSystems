@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 
 type VerevonIconButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -8,21 +9,21 @@ type VerevonIconButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
 }
 
 export function VerevonIconButton(allProps: VerevonIconButtonProps) {
-  const [local, props] = splitProps(allProps, ['class', 'type', 'tone', 'size', 'shape'])
-  const tone = () => local.tone ?? 'surface'
-  const size = () => local.size ?? 'md'
-  const shape = () => local.shape ?? 'circle'
+  const props = omit(allProps, 'class', 'type', 'tone', 'size', 'shape')
+  const tone = () => allProps.tone ?? 'surface'
+  const size = () => allProps.size ?? 'md'
+  const shape = () => allProps.shape ?? 'circle'
 
   return (
     <button
       {...props}
-      type={local.type ?? 'button'}
+      type={allProps.type ?? 'button'}
       class={cn(
         'verevon-icon-button',
         `verevon-icon-button--${tone()}`,
         `verevon-icon-button--${size()}`,
         `verevon-icon-button--${shape()}`,
-        local.class,
+        allProps.class,
       )}
     />
   )

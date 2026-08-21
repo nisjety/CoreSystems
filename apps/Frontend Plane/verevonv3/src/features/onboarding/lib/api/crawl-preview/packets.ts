@@ -6,6 +6,17 @@ import type {
 } from '@/features/onboarding/lib/api/contracts'
 import { z } from 'zod'
 
+// The gateway serializes an undetected/absent optional field as an
+// Option<&str> through serde_json, which renders it as JSON `null` (a
+// present key), not an omitted key — so every such field must accept `null`
+// here, not just `undefined`, or the whole packet is dropped as invalid.
+// Normalized back to `undefined` so the parsed shape still matches this
+// module's TS contracts (BrandingSignals, CrawlSnippet) for every consumer.
+const nullishString = z
+  .string()
+  .nullish()
+  .transform((value) => value ?? undefined)
+
 const startedPacket = z.object({
   jobId: z.string().trim().min(1).optional(),
   url: z.string().trim().min(1).optional(),
@@ -16,7 +27,9 @@ const snippetPacket = z.object({
   id: z.string().trim().min(1),
   kind: z.enum(['text', 'image', 'file', 'link']),
   title: z.string().trim().min(1),
-  excerpt: z.string().optional(),
+  // normalize.rs's to_snippet falls back to `None` (-> null) whenever a page
+  // has neither a `text` nor `excerpt` field, common for link/file snippets.
+  excerpt: nullishString,
   url: z.string().trim().min(1),
   contentType: z.string().optional(),
   source: z.enum(['seed', 'live']).optional(),
@@ -34,10 +47,10 @@ const progressPacket = z.object({
 })
 
 const brandingPacket = z.object({
-  siteName: z.string().optional(),
-  favicon: z.string().optional(),
-  themeColor: z.string().optional(),
-  logoCandidate: z.string().optional(),
+  siteName: nullishString,
+  favicon: nullishString,
+  themeColor: nullishString,
+  logoCandidate: nullishString,
   palette: z.array(z.string()).optional(),
 })
 

@@ -1,17 +1,17 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SocialCommercePage from '@/features/social/components/SocialCommercePage'
 
 function renderCommerce() {
-  window.history.pushState(null, '', '/social/commerce')
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={() => <SocialCommercePage />} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component: () => <SocialCommercePage /> }],
+    history: memoryHistory('/social/commerce'),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 function waitForCommerce(assertion: () => void) {

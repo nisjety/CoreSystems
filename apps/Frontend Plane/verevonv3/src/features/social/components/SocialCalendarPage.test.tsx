@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SocialCalendarPage from '@/features/social/components/SocialCalendarPage'
@@ -13,12 +13,12 @@ function jsonResponse(data: unknown, status = 200) {
 }
 
 function renderCalendar() {
-  window.history.pushState(null, '', '/social/calendar')
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/*all" component={() => <SocialCalendarPage />} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component: () => <SocialCalendarPage /> }],
+    history: memoryHistory('/social/calendar'),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 afterEach(() => {

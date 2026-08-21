@@ -15,8 +15,7 @@ export function VerevonStepDots<TStep extends string>(props: VerevonStepDotsProp
         {(step, index) => (
           <button
             type="button"
-            class="onboarding-dots__dot"
-            classList={{ 'onboarding-dots__dot--active': props.currentStep === step }}
+            class={['onboarding-dots__dot', { 'onboarding-dots__dot--active': props.currentStep === step }]}
             aria-current={props.currentStep === step ? 'step' : undefined}
             aria-label={`${props.stepLabel ?? 'Step'} ${index() + 1}`}
             onClick={() => props.onSelectStep(step)}

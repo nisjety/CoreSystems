@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { vi } from 'vitest'
 import type { RunEventHandlers } from '@/shared/api/run-console-client'
@@ -53,6 +53,7 @@ describe('ChatLiveRunPanel', () => {
     expect(container.querySelector('.verevon-chat-run-panel')).toBeNull()
 
     setRunId('run_abc123')
+    flush()
 
     expect(container.querySelector('.verevon-chat-run-panel')).not.toBeNull()
     expect(hoisted.subscriptions).toHaveLength(1)
@@ -79,12 +80,14 @@ describe('ChatLiveRunPanel', () => {
     expect(container.querySelector('.verevon-chat-run-panel__body')).not.toBeNull()
 
     fireEvent.click(screen.getByLabelText('Skjul live-panelet'))
+    flush()
 
     expect(toggles).toEqual([true])
     expect(container.querySelector('.verevon-chat-run-panel--collapsed')).not.toBeNull()
     expect(container.querySelector('.verevon-chat-run-panel__body')).toBeNull()
 
     fireEvent.click(screen.getByLabelText('Vis live-panelet'))
+    flush()
 
     expect(toggles).toEqual([true, false])
     expect(container.querySelector('.verevon-chat-run-panel--collapsed')).toBeNull()
@@ -99,6 +102,7 @@ describe('ChatLiveRunPanel', () => {
     ))
 
     handlers().onBrowserAction?.({ actionId: 'act_0001', actionType: 'goto', url: 'https://example.com' })
+    flush()
     handlers().onBrowserObservation?.({
       actionId: 'act_0001',
       pageTitle: 'Example Domain',
@@ -106,11 +110,13 @@ describe('ChatLiveRunPanel', () => {
       screenshotRef: 'art_shot_1',
       status: 'success',
     })
+    flush()
 
     const thumbnail = railImage(container)
     expect(thumbnail?.getAttribute('src')).toBe(SHOT_URL)
 
     fireEvent.click(container.querySelector('.verevon-chat-run-shot') as HTMLElement)
+    flush()
 
     const expandedImage = container.querySelector('.verevon-chat-run-shot-expanded img')
     expect(expandedImage?.getAttribute('src')).toBe(SHOT_URL)
@@ -129,6 +135,7 @@ describe('ChatLiveRunPanel', () => {
       screenshotRef: 'art_shot_1',
       status: 'success',
     })
+    flush()
 
     const chrome = container.querySelector('.knowledge-browser-chrome')
     expect(chrome).not.toBeNull()
@@ -147,11 +154,13 @@ describe('ChatLiveRunPanel', () => {
       screenshotRef: 'art_shot_1',
       status: 'success',
     })
+    flush()
 
     const thumbnail = railImage(container)
     expect(thumbnail).not.toBeNull()
 
     fireEvent.error(thumbnail as HTMLImageElement)
+    flush()
 
     expect(railImage(container)).toBeNull()
     expect(container.querySelector('.knowledge-browser-chrome')).toBeNull()
@@ -173,6 +182,7 @@ describe('ChatLiveRunPanel', () => {
       pageUrl: 'https://example.com/rapport',
       status: 'success',
     })
+    flush()
 
     expect(railImage(container)).toBeNull()
     expect(screen.getByText('Midlertidig samtale – skjermbilder lagres ikke.')).toBeTruthy()
@@ -188,6 +198,7 @@ describe('ChatLiveRunPanel', () => {
     expect(screen.getByText('Venter på agenten')).toBeTruthy()
 
     handlers().onDone?.()
+    flush()
 
     expect(screen.queryByText('Venter på agenten')).toBeNull()
     expect(screen.getByText('Ingen nettleseraktivitet')).toBeTruthy()
@@ -199,6 +210,7 @@ describe('ChatLiveRunPanel', () => {
     ))
 
     handlers().onError?.(new Error('boom'))
+    flush()
 
     expect(screen.getByText('Kunne ikke lese hendelsesstrømmen for denne kjøringen.')).toBeTruthy()
   })
@@ -215,16 +227,19 @@ describe('ChatLiveRunPanel', () => {
       screenshotRef: 'art_shot_1',
       status: 'success',
     })
+    flush()
     expect(railImage(container)).not.toBeNull()
 
     const stale = handlers()
     setRunId('run_def456')
+    flush()
 
     expect(hoisted.subscriptions).toHaveLength(2)
     expect(container.querySelectorAll('.verevon-chat-run-shot')).toHaveLength(0)
 
     // A late callback from the aborted stream must not write into the new run.
     stale.onBrowserObservation?.({ actionId: 'act_0009', screenshotRef: 'art_shot_9', status: 'success' })
+    flush()
     expect(container.querySelectorAll('.verevon-chat-run-shot')).toHaveLength(0)
   })
 })

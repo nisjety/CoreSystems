@@ -62,10 +62,22 @@ describe('ticket chat launch', () => {
     expect(payload.text).toContain('TCK-001')
     expect(payload.startNewThread).toBe(true)
     expect(payload.supportHandoff).toEqual({ conversationId: 'conv-1', orgId: 'org-1', userId: 'user-1' })
-    expect(vi.mocked(fetch)).toHaveBeenCalledWith('/api/v1/actions/execute', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ actionId: 'tickets.record_chat_handoff', input: { ticketId: 'ticket-1' } }),
-    }))
+
+    // action-client.ts now stamps every execute call with a generated
+    // idempotencyKey (server-owned replay/conflict decision), so the request
+    // body can no longer be compared as a fixed JSON string; assert on the
+    // parsed shape instead and confirm a key was attached.
+    const executeCall = vi.mocked(fetch).mock.calls.find(([url]) => url === '/api/v1/actions/execute')
+    expect(executeCall).toBeDefined()
+    const [, init] = executeCall!
+    expect(init).toMatchObject({ method: 'POST' })
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body).toMatchObject({
+      actionId: 'tickets.record_chat_handoff',
+      input: { ticketId: 'ticket-1' },
+    })
+    expect(typeof body.idempotencyKey).toBe('string')
+    expect(body.idempotencyKey.length).toBeGreaterThan(0)
   })
 
   it('includes only the bounded permission-aware conversation evidence when supplied', () => {

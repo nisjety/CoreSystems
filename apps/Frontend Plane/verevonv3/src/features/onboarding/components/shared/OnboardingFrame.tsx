@@ -1,4 +1,4 @@
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import type { StepTransitionPhase } from '@/features/onboarding/lib/model'
 import { VerevonSplitFrame } from '@/shared/ui/verevon/VerevonSplitFrame'
 

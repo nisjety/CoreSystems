@@ -1,3 +1,4 @@
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'soft' | 'dark' | 'outline'
@@ -5,7 +6,7 @@ export type ButtonSize = 'xs' | 'sm' | 'md' | 'lg'
 export type ButtonShape = 'rounded' | 'pill'
 
 export type ButtonClassOptions = {
-  class?: string
+  class?: JSX.ClassValue
   fullWidth?: boolean
   shape?: ButtonShape
   size?: ButtonSize

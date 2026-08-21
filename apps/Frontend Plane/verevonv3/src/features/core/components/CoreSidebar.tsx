@@ -1,4 +1,4 @@
-import { A, useLocation } from '@solidjs/router'
+import { useLocation } from '@solidjs/router'
 import {
   ChevronDown,
   ChevronRight,
@@ -9,9 +9,10 @@ import {
   Pin,
   PinOff,
   Trash2,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, type JSX } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import { Dynamic } from '@solidjs/web'
+import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from 'solid-js'
 import {
   CHAT_ACTIVE_THREAD_CHANGED_EVENT,
   CHAT_ACTIVE_THREAD_KEY,
@@ -178,10 +179,13 @@ function ExpandedSidebarPanel(props: {
     return 'generic'
   })
 
-  createEffect(() => {
-    setActiveTabId(firstPanelTabId())
-    setSearchQuery('')
-  })
+  createEffect(
+    () => firstPanelTabId(),
+    (nextTabId) => {
+      setActiveTabId(nextTabId)
+      setSearchQuery('')
+    },
+  )
 
   return (
     <Switch
@@ -249,7 +253,7 @@ function GenericSidebarPanel(props: {
                 type="button"
                 onClick={() => props.onActiveTabChange(tab.id)}
                 title={tab.label}
-                classList={{ 'verevon-sidebar-tab-active core-sidebar-tabs__tab--active': props.activeTabId === tab.id }}
+                class={{ 'verevon-sidebar-tab-active core-sidebar-tabs__tab--active': props.activeTabId === tab.id }}
               >
                 {tab.label}
               </button>
@@ -323,32 +327,35 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
     }
   }
 
-  onMount(() => {
-    refreshLocalSessions()
-    void refreshServerSessions()
-
-    const handleHistoryChange = () => {
+  createEffect(
+    () => undefined,
+    () => {
       refreshLocalSessions()
-    }
-    const handleStorageChange = (event: StorageEvent) => {
-      if (
-        event.key === CHAT_ACTIVE_THREAD_KEY ||
-        event.key === CHAT_THREAD_HISTORY_KEY ||
-        event.key === null
-      ) {
+      void refreshServerSessions()
+
+      const handleHistoryChange = () => {
         refreshLocalSessions()
       }
-    }
+      const handleStorageChange = (event: StorageEvent) => {
+        if (
+          event.key === CHAT_ACTIVE_THREAD_KEY ||
+          event.key === CHAT_THREAD_HISTORY_KEY ||
+          event.key === null
+        ) {
+          refreshLocalSessions()
+        }
+      }
 
-    window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
-    window.addEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
-    window.addEventListener('storage', handleStorageChange)
-    onCleanup(() => {
-      window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
-      window.removeEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
-      window.removeEventListener('storage', handleStorageChange)
-    })
-  })
+      window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
+      window.addEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
+      window.addEventListener('storage', handleStorageChange)
+      return () => {
+        window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
+        window.removeEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
+        window.removeEventListener('storage', handleStorageChange)
+      }
+    },
+  )
 
   const clearHistory = () => {
     clearChatThreadHistory()
@@ -401,8 +408,7 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
     <div class="core-chat-session-row">
       <button
         type="button"
-        class="core-chat-session"
-        classList={{ 'core-chat-session--active': item.threadId === activeThreadId() }}
+        class={['core-chat-session', { 'core-chat-session--active': item.threadId === activeThreadId() }]}
         onClick={() => openThread(item.threadId)}
         aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
       >
@@ -411,8 +417,7 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
       </button>
       <button
         type="button"
-        class="core-chat-session__pin"
-        classList={{ 'core-chat-session__pin--active': Boolean(item.pinned) }}
+        class={['core-chat-session__pin', { 'core-chat-session__pin--active': Boolean(item.pinned) }]}
         aria-label={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
         title={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
         onClick={(event) => togglePin(event, item.threadId)}
@@ -426,12 +431,12 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
 
   return (
     <div class="core-chat-sidebar">
-      <A href="/chat" class="core-chat-sidebar__new" onClick={startNewChat}>
+      <a href="/chat" link class="core-chat-sidebar__new" onClick={startNewChat}>
         <span>
           <MessageSquarePlus class="size-[15px]" strokeWidth={1.75} />
         </span>
         Ny samtale
-      </A>
+      </a>
 
       <nav class="core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
         <Show when={!loading()} fallback={<div class="core-sidebar-empty verevon-sidebar-row-normal">{i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</div>}>
@@ -503,10 +508,16 @@ function SidebarPanelNavigation(props: {
   const topGroups = () => visibleGroups().filter((group) => !group.alignBottom)
   const bottomGroups = () => visibleGroups().filter((group) => group.alignBottom)
 
-  createEffect(() => {
-    setExpandedGroups(new Set(getDefaultExpandedGroups(props.section)))
-    setExpandedItems(new Set(getActiveItemIds(props.section, props.pathname)))
-  })
+  createEffect(
+    () => ({
+      expandedGroups: new Set(getDefaultExpandedGroups(props.section)),
+      expandedItems: new Set(getActiveItemIds(props.section, props.pathname)),
+    }),
+    (next) => {
+      setExpandedGroups(next.expandedGroups)
+      setExpandedItems(next.expandedItems)
+    },
+  )
 
   const toggleGroup = (groupId: string) => {
     setExpandedGroups((current) => {
@@ -593,7 +604,7 @@ function SidebarGroup(props: {
             <button
               type="button"
               onClick={() => props.onToggleGroup(props.group.id)}
-              aria-expanded={groupExpanded()}
+              aria-expanded={groupExpanded() ? 'true' : 'false'}
               aria-label={groupExpanded() ? i18n.tr(`Slå sammen ${props.group.label}`, `Collapse ${props.group.label}`) : i18n.tr(`Utvid ${props.group.label}`, `Expand ${props.group.label}`)}
               title={groupExpanded() ? i18n.tr(`Slå sammen ${props.group.label}`, `Collapse ${props.group.label}`) : i18n.tr(`Utvid ${props.group.label}`, `Expand ${props.group.label}`)}
             >
@@ -641,7 +652,7 @@ function SidebarPanelLink(props: {
             type="button"
             onClick={props.onToggle}
             class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}
-            aria-expanded={props.expanded}
+            aria-expanded={props.expanded ? 'true' : 'false'}
             title={props.item.label}
           >
             <PanelItemIcon icon={props.item.icon} active={active()} />
@@ -653,10 +664,10 @@ function SidebarPanelLink(props: {
         </div>
       }
     >
-      <A href={props.item.href} aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
+      <a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
         <PanelItemIcon icon={props.item.icon} active={active()} />
         <span class={cn('core-sidebar-panel-link__label', active() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
-      </A>
+      </a>
     </Show>
   )
 }
@@ -667,8 +678,9 @@ function PanelItemIcon(props: { icon: SidebarPanelItem['icon']; active: boolean 
 
 function MiniSectionLink(props: { section: SidebarSection; active: boolean; onOpen: () => void }) {
   return (
-    <A
+    <a
       href={props.section.href}
+      link
       onClick={() => props.onOpen()}
       aria-current={props.active ? 'page' : undefined}
       aria-label={props.section.label}
@@ -676,14 +688,15 @@ function MiniSectionLink(props: { section: SidebarSection; active: boolean; onOp
       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
     >
       <Dynamic component={props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />
-    </A>
+    </a>
   )
 }
 
 function MiniAccountLink(props: { active: boolean; children: JSX.Element; i18n: ReturnType<typeof useI18n>; onOpen: () => void }) {
   return (
-    <A
+    <a
       href="/account"
+      link
       onClick={props.onOpen}
       aria-current={props.active ? 'page' : undefined}
       aria-label={props.i18n.tr('Konto', 'Account')}
@@ -691,7 +704,7 @@ function MiniAccountLink(props: { active: boolean; children: JSX.Element; i18n: 
       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
     >
       {props.children}
-    </A>
+    </a>
   )
 }
 

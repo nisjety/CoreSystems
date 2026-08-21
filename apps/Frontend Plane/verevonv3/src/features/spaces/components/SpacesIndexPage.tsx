@@ -1,7 +1,8 @@
-import { createResource, createSignal, Show, For } from 'solid-js'
-import { Navigate } from '@solidjs/router'
+import { createSignal, Show, For } from 'solid-js'
 
 import { createPersonalSpace, listSpaces, type SpaceSummary } from '@/shared/api/spaces-client'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { Redirect } from '@/shared/ui/Redirect'
 
 /**
  * Entry point for `/spaces`, so the sidebar has something to link to.
@@ -107,7 +108,7 @@ export default function SpacesIndexPage() {
               <>
                 {/* replace, not push: /spaces is a resolver, and leaving it on the
                     back stack would bounce the user forward again on every Back. */}
-                <Navigate href={`/spaces/${encodeURIComponent(target().space_ref)}`} />
+                <Redirect href={`/spaces/${encodeURIComponent(target().space_ref)}`} />
                 {/* Rendered only if navigation is blocked, so the resolution is
                     never a blank screen. */}
                 <noscript>
@@ -115,7 +116,7 @@ export default function SpacesIndexPage() {
                     <For each={resolved()}>
                       {(space) => (
                         <li>
-                          <a href={`/spaces/${encodeURIComponent(space.space_ref)}`}>
+                          <a href={`/spaces/${encodeURIComponent(space.space_ref)}`} link>
                             {space.name}
                           </a>
                         </li>

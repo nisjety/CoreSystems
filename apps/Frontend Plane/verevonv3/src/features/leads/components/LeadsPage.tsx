@@ -1,4 +1,5 @@
-import { createResource, createSignal, For, Show } from 'solid-js'
+import { createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { no } from '@/shared/i18n/no'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import {

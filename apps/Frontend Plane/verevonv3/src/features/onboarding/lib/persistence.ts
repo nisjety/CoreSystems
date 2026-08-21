@@ -18,35 +18,47 @@ export function createOnboardingPersistence(options: OnboardingPersistenceOption
   let localTimer: number | undefined
   let remoteTimer: number | undefined
 
-  createEffect(() => {
-    if (options.paused?.()) {
+  createEffect(
+    () => {
+      if (options.paused?.()) {
+        return { paused: true as const }
+      }
+
+      const snapshot = createPersistedOnboardingState(options.state)
+      const hydrated = options.hydratedFromServer()
+
+      return { paused: false as const, snapshot, hydrated }
+    },
+    (result) => {
+      if (result.paused) {
+        if (typeof window !== 'undefined') {
+          window.clearTimeout(localTimer)
+          window.clearTimeout(remoteTimer)
+        }
+        return
+      }
+
+      const { snapshot, hydrated } = result
+
       if (typeof window !== 'undefined') {
         window.clearTimeout(localTimer)
-        window.clearTimeout(remoteTimer)
+        localTimer = window.setTimeout(() => {
+          window.localStorage.setItem(options.storageKey, JSON.stringify(snapshot))
+        }, options.localDebounceMs ?? 120)
       }
-      return
-    }
 
-    const snapshot = createPersistedOnboardingState(options.state)
+      if (!hydrated) return
 
-    if (typeof window !== 'undefined') {
-      window.clearTimeout(localTimer)
-      localTimer = window.setTimeout(() => {
-        window.localStorage.setItem(options.storageKey, JSON.stringify(snapshot))
-      }, options.localDebounceMs ?? 120)
-    }
-
-    if (!options.hydratedFromServer()) return
-
-    window.clearTimeout(remoteTimer)
-    remoteTimer = window.setTimeout(() => {
-      void saveOnboardingState({
-        actor: options.actor,
-        step: snapshot.step,
-        state: snapshot,
-      }).catch(() => undefined)
-    }, options.remoteDebounceMs ?? 500)
-  })
+      window.clearTimeout(remoteTimer)
+      remoteTimer = window.setTimeout(() => {
+        void saveOnboardingState({
+          actor: options.actor,
+          step: snapshot.step,
+          state: snapshot,
+        }).catch(() => undefined)
+      }, options.remoteDebounceMs ?? 500)
+    },
+  )
 
   onCleanup(() => {
     if (typeof window === 'undefined') return

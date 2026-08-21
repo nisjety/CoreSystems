@@ -3,8 +3,8 @@ import {
   Smartphone,
   Sparkles,
   Zap,
-} from 'lucide-solid'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { VerevonSwitch } from '@/shared/ui/verevon/VerevonSwitch'

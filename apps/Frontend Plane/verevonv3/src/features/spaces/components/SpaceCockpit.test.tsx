@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { SpaceCockpit } from './SpaceCockpit'
@@ -66,6 +67,7 @@ describe('SpaceCockpit', () => {
       render(() => <SpaceCockpit initialTab="chat" />)
       const list = screen.getByRole('tablist')
       fireEvent.keyDown(list, { key: 'ArrowRight' })
+      flush()
       expect(screen.getByRole('tab', { name: 'Arbeid' }).getAttribute('aria-selected')).toBe('true')
     })
 
@@ -81,6 +83,7 @@ describe('SpaceCockpit', () => {
       render(() => <SpaceCockpit initialTab="chat" />)
       const list = screen.getByRole('tablist')
       fireEvent.keyDown(list, { key: 'ArrowLeft' })
+      flush()
       expect(screen.getByRole('tab', { name: 'Medlemmer' }).getAttribute('aria-selected')).toBe('true')
     })
   })

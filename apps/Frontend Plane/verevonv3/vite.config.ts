@@ -1,7 +1,7 @@
 import { fileURLToPath, URL } from 'node:url'
 import { configDefaults, defineConfig } from 'vitest/config'
 import { ViteMcp } from 'vite-plugin-mcp'
-import solid from 'vite-plugin-solid'
+import solid from '@solidjs/vite-plugin'
 
 // Server-only proxy target (NOT VITE_-prefixed, so it never leaks to the client
 // bundle). VITE_VEREVON_GATEWAY_URL is kept as a fallback for backward compat.
@@ -39,6 +39,16 @@ export default defineConfig({
   // Docker service name directly and fail (ERR_NAME_NOT_RESOLVED). In-container
   // it must be the gateway service name; host-run `pnpm dev` falls back to
   // 127.0.0.1:3185 (the host-mapped gateway port).
+  //
+  // Known limitation on Docker Desktop for Windows: host filesystem change
+  // events don't always reach the container's inotify watcher through the
+  // bind mount — an edit lands on disk but Vite keeps serving the pre-edit
+  // module. `server.watch.usePolling` "fixes" this but pegs the event loop
+  // hard enough to make the dev server stop answering requests entirely
+  // (this tree's `.claude/worktrees/` holds several full extra monorepo
+  // checkouts, and scoping `ignored` to exclude them wasn't enough either).
+  // If an edit isn't reflected, `docker restart frontend-plane-verevonv3-frontend-1`
+  // rather than reaching for polling again.
   server: {
     proxy: {
       '/api': {

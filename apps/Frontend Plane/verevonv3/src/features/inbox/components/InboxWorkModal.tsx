@@ -1,5 +1,5 @@
-import { X } from 'lucide-solid'
-import { createEffect, createSignal, For, onCleanup, Show } from 'solid-js'
+import { X } from '@/shared/icons'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 import { customerName, type ZammadTicket } from '@/features/inbox/lib/inbox-model'
 import type { SupportTicket } from '@/shared/api/tickets-client'
 import { useI18n } from '@/shared/i18n'
@@ -30,18 +30,21 @@ export function InboxWorkModal(props: {
   const workModal = () => props.modal as InboxModalRequest
   const linkRequest = () => props.modal as InboxTicketLinkRequest
 
-  createEffect(() => {
-    if (!props.modal) return
+  createEffect(
+    () => props.modal,
+    (modal) => {
+      if (!modal) return
 
-    setSelectedTargetID('')
+      setSelectedTargetID('')
 
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') props.onClose()
-    }
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') props.onClose()
+      }
 
-    document.addEventListener('keydown', closeOnEscape)
-    onCleanup(() => document.removeEventListener('keydown', closeOnEscape))
-  })
+      document.addEventListener('keydown', closeOnEscape)
+      return () => document.removeEventListener('keydown', closeOnEscape)
+    },
+  )
 
   return (
     <Show when={props.modal}>

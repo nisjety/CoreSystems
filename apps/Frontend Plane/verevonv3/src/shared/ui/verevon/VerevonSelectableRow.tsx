@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 
 type VerevonSelectableRowProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -10,7 +11,7 @@ type VerevonSelectableRowProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> & {
 }
 
 export function VerevonSelectableRow(allProps: VerevonSelectableRowProps) {
-  const [local, props] = splitProps(allProps, [
+  const props = omit(allProps,
     'class',
     'compact',
     'description',
@@ -18,20 +19,20 @@ export function VerevonSelectableRow(allProps: VerevonSelectableRowProps) {
     'selected',
     'title',
     'type',
-  ])
+  )
 
   return (
     <button
       {...props}
-      aria-pressed={local.selected}
-      class={cn('verevon-selectable-row', local.compact && 'verevon-selectable-row--compact', local.class)}
-      type={local.type ?? 'button'}
+      aria-pressed={allProps.selected ? 'true' : 'false'}
+      class={cn('verevon-selectable-row', allProps.compact && 'verevon-selectable-row--compact', allProps.class)}
+      type={allProps.type ?? 'button'}
     >
       <span>
-        <strong>{local.title}</strong>
-        {local.description ? <small>{local.description}</small> : null}
+        <strong>{allProps.title}</strong>
+        {allProps.description ? <small>{allProps.description}</small> : null}
       </span>
-      {local.meta}
+      {allProps.meta}
     </button>
   )
 }

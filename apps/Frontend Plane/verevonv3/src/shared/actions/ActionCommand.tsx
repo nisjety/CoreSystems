@@ -1,4 +1,5 @@
-import { createSignal, Show, type JSX } from 'solid-js'
+import { Show, createSignal } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { previewAction, executeAction } from '@/shared/actions/action-client'
 import { actionExecutionSummary } from '@/shared/actions/action-execution-summary'
 import type { ActionId } from '@/shared/actions/action-registry'

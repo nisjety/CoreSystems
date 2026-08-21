@@ -3,7 +3,7 @@ import {
   Database,
   Split,
   type LucideProps,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import type { Component } from 'solid-js'
 import type { WorkflowBuilderToolId } from '@/features/agents/lib/agent-roles'
 

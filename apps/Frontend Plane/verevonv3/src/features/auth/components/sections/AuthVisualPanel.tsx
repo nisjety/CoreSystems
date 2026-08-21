@@ -1,4 +1,4 @@
-import { Fingerprint, Lock, ShieldCheck } from 'lucide-solid'
+import { Fingerprint, Lock, ShieldCheck } from '@/shared/icons'
 import { Show } from 'solid-js'
 import type { Accessor } from 'solid-js'
 import type { AuthCopy } from '@/features/auth/lib/model'

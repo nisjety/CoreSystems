@@ -1,4 +1,4 @@
-import { Check, Copy, Download, ShieldCheck } from 'lucide-solid'
+import { Check, Copy, Download, ShieldCheck } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import {
   enableTwoFactor,

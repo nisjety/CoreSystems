@@ -1,5 +1,7 @@
 import { useLocation } from '@solidjs/router'
-import { createEffect, createMemo, createResource, createSignal, onCleanup, Show, type JSX } from 'solid-js'
+import { createEffect, createMemo, createSignal, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
@@ -41,32 +43,42 @@ export function CoreShell(props: { children?: JSX.Element }) {
   const sidebarWidth = () => (sidebarExpanded() ? expandedSidebarWidth() : SIDEBAR_MINIMIZED_WIDTH)
   const workspace = createMemo(() => resolveWorkspaceIdentity(session, navbarData.latest ?? navbarData()))
 
-  createEffect(() => {
-    if (navbarData.latest?.theme?.configured === false) return
-    const theme = navbarData.latest?.theme?.theme
-    if (theme) applyThemePreference(theme)
-  })
+  createEffect(
+    () => {
+      if (navbarData.latest?.theme?.configured === false) return undefined
+      return navbarData.latest?.theme?.theme
+    },
+    (theme) => {
+      if (theme) applyThemePreference(theme)
+    },
+  )
 
-  createEffect(() => {
-    let refreshTimer: number | undefined
-    const scheduleRefresh = () => {
-      window.clearTimeout(refreshTimer)
-      refreshTimer = window.setTimeout(() => {
-        void refetchNavbar()
-        scheduleRefresh()
-      }, document.hidden ? 180_000 : 60_000)
-    }
-    const handleVisibilityChange = () => {
-      if (!document.hidden) void refetchNavbar()
-    }
+  // No tracked reads here — this effect only sets up an imperative interval/
+  // visibility listener once on mount, so compute is a constant and all the
+  // side-effect work lives in the effect function.
+  createEffect(
+    () => undefined,
+    () => {
+      let refreshTimer: number | undefined
+      const scheduleRefresh = () => {
+        window.clearTimeout(refreshTimer)
+        refreshTimer = window.setTimeout(() => {
+          void refetchNavbar()
+          scheduleRefresh()
+        }, document.hidden ? 180_000 : 60_000)
+      }
+      const handleVisibilityChange = () => {
+        if (!document.hidden) void refetchNavbar()
+      }
 
-    scheduleRefresh()
-    document.addEventListener('visibilitychange', handleVisibilityChange)
-    onCleanup(() => {
-      window.clearTimeout(refreshTimer)
-      document.removeEventListener('visibilitychange', handleVisibilityChange)
-    })
-  })
+      scheduleRefresh()
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+      return () => {
+        window.clearTimeout(refreshTimer)
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
+    },
+  )
 
   return (
     <AgentsProvider routeLocation={location}>
@@ -105,9 +117,9 @@ export function CoreShell(props: { children?: JSX.Element }) {
         />
         <main class="core-main">
           <div class="verevon-workspace-panel dashboard-main-panel core-main__panel">
-            <CoreWorkspaceContext.Provider value={workspace}>
+            <CoreWorkspaceContext value={workspace}>
               {props.children}
-            </CoreWorkspaceContext.Provider>
+            </CoreWorkspaceContext>
           </div>
         </main>
         <FeedbackWidget />

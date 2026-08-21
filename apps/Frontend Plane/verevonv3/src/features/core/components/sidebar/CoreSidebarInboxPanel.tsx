@@ -1,4 +1,4 @@
-import { A, useLocation } from '@solidjs/router'
+import { useLocation } from '@solidjs/router'
 import {
   CheckCheck,
   ChevronDown,
@@ -18,10 +18,10 @@ import {
   SlidersHorizontal,
   ShieldAlert,
   UserRound,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
-import type { LucideProps } from 'lucide-solid'
-import { Dynamic } from 'solid-js/web'
+import type { LucideProps } from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import {
   SidebarEmptyState,
   SidebarPanelTitle,
@@ -244,7 +244,7 @@ function InboxSidebarGroup(props: {
   return (
     <section>
       <div class="core-sidebar-dedicated-group-header">
-        <button type="button" onClick={() => props.onToggle()} aria-expanded={props.expanded}>
+        <button type="button" onClick={() => props.onToggle()} aria-expanded={props.expanded ? 'true' : 'false'}>
           <h2 class="verevon-sidebar-group-title">{props.group.label}</h2>
           <ChevronDown class={cn('size-4 core-sidebar-chevron', !props.expanded && '-rotate-90')} strokeWidth={2.1} />
         </button>
@@ -303,20 +303,21 @@ function InboxSidebarItem(props: {
       fallback={
         <div>
           <div class={cn('core-sidebar-inbox-dropdown', props.active && 'core-sidebar-inbox-dropdown--active')}>
-            <A
+            <a
               href={props.item.href}
+              link
               aria-current={props.active ? 'page' : undefined}
               class="core-sidebar-inbox-dropdown__link"
             >
               <Dynamic component={props.item.icon} class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
               <span>{props.item.label}</span>
               <InboxBadge value={props.item.badge} />
-            </A>
+            </a>
             <button
               type="button"
               onClick={props.onToggle}
               aria-controls={subNavigationId()}
-              aria-expanded={props.expanded}
+              aria-expanded={props.expanded ? 'true' : 'false'}
               aria-label={props.expanded ? i18n.tr(`Skjul ${props.item.label}`, `Hide ${props.item.label}`) : i18n.tr(`Vis ${props.item.label}`, `Show ${props.item.label}`)}
               title={props.expanded ? i18n.tr(`Skjul ${props.item.label}`, `Hide ${props.item.label}`) : i18n.tr(`Vis ${props.item.label}`, `Show ${props.item.label}`)}
             >
@@ -339,8 +340,9 @@ function InboxSidebarItem(props: {
         </div>
       }
     >
-      <A
+      <a
         href={props.item.href}
+        link
         aria-current={props.active ? 'page' : undefined}
         class={cn('core-sidebar-section-link', props.active && 'core-sidebar-section-link--active')}
       >
@@ -350,19 +352,20 @@ function InboxSidebarItem(props: {
         <Show when={props.item.trailing}>
           <ChevronRight class="size-4 core-sidebar-muted-chevron" strokeWidth={1.9} />
         </Show>
-      </A>
+      </a>
     </Show>
   )
 }
 
 function InboxSidebarSubItem(props: { active: boolean; item: InboxSidebarSubItem }) {
   return (
-    <A
+    <a
       href={props.item.href}
+      link
       class={cn('core-sidebar-subnav-link', props.active && 'core-sidebar-subnav-link--active')}
     >
       {props.item.label}
-    </A>
+    </a>
   )
 }
 

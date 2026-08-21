@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { render, screen } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { describe, expect, it, vi } from 'vitest'
 import { ArtifactsPanel } from './ChatArtifactPanel'
 import { mergeArtifactVersion } from './chat-artifacts'
@@ -91,10 +92,12 @@ describe('ArtifactsPanel', () => {
     const { container } = render(() => <ArtifactsPanel items={[item(page)]} />)
 
     screen.getByText('Vis kode').click()
+    flush()
     expect(container.querySelector('iframe')).toBeNull()
     expect(container.querySelector('.verevon-chat-artifact-code')).toBeTruthy()
 
     screen.getByText('Vis forhåndsvisning').click()
+    flush()
     expect(container.querySelector('iframe')).toBeTruthy()
   })
 
@@ -110,10 +113,12 @@ describe('ArtifactsPanel', () => {
     expect(screen.getByText('Tredje utkast')).toBeTruthy()
 
     screen.getByLabelText('Forrige versjon').click()
+    flush()
     expect(screen.getByText('v2 · 2/3')).toBeTruthy()
     expect(screen.getByText('Andre utkast')).toBeTruthy()
 
     screen.getByLabelText('Neste versjon').click()
+    flush()
     expect(screen.getByText('v3 · 3/3')).toBeTruthy()
   })
 
@@ -212,6 +217,7 @@ describe('ArtifactsPanel', () => {
     expect(container.querySelector('.verevon-chat-artifact-document')).toBeTruthy()
 
     screen.getByText('query.sql').click()
+    flush()
     expect(container.querySelector('.verevon-chat-artifact-code')).toBeTruthy()
     expect(container.querySelector('.verevon-chat-artifact-document')).toBeNull()
   })

@@ -253,6 +253,7 @@ fn requires_active_membership(path: &str) -> bool {
         || path == "/api/v1/admin/users"
         || path == "/api/v1/orgs"
         || path == "/api/v1/orgs/switch-active"
+        || path == "/api/v1/onboarding/lifecycle"
         || path.starts_with("/api/v1/auth/2fa/")
         || is_pre_org_onboarding_route(path)
     {
@@ -286,10 +287,15 @@ fn is_pre_org_onboarding_route(path: &str) -> bool {
 
 /// Session bootstrap is usable without an organization, but an active scope—if
 /// present—must be checked live before it can influence returned org data.
+/// The onboarding lifecycle probe is in the same class: without an org it
+/// honestly reports CREATED, and with one the live membership decision (plus
+/// the handler's own canonical checks) gates the org-scoped answer.
 fn optionally_resolves_active_membership(path: &str) -> bool {
     matches!(
         path,
-        "/api/v1/session/current" | "/api/v1/me/session-context"
+        "/api/v1/session/current"
+            | "/api/v1/me/session-context"
+            | "/api/v1/onboarding/lifecycle"
     )
 }
 
@@ -582,6 +588,7 @@ mod tests {
             "/api/v1/orgs/switch-active",
             "/api/v1/orgs",
             "/api/v1/orgs/invitations/inv_123/accept",
+            "/api/v1/onboarding/lifecycle",
         ] {
             assert!(!requires_active_membership(path), "{path}");
         }
@@ -590,6 +597,9 @@ mod tests {
         ));
         assert!(optionally_resolves_active_membership(
             "/api/v1/me/session-context"
+        ));
+        assert!(optionally_resolves_active_membership(
+            "/api/v1/onboarding/lifecycle"
         ));
         assert!(!optionally_resolves_active_membership(
             "/api/v1/onboarding/status"
@@ -602,7 +612,6 @@ mod tests {
             "/api/v1/leads/search",
             "/api/v1/inbox/conversations",
             "/api/v1/orgs/org-victim/members",
-            "/api/v1/onboarding/lifecycle",
             "/api/v1/onboarding/complete",
             "/api/v1/onboarding/graph-preview",
             "/api/v1/onboarding/actions/set-plan",

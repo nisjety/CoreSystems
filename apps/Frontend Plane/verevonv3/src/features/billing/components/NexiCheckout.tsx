@@ -81,45 +81,49 @@ export function NexiCheckout(props: NexiCheckoutProps) {
   let instance: NexiCheckoutInstance | undefined
   let mountedPayment: string | undefined
 
-  createEffect(() => {
-    const paymentId = props.session.payment_id || props.session.id
-    const checkoutKey = props.session.publishable_key
-    const clientURL = props.session.client_url
-    // Capture the confirm callback in this tracked scope so the SDK event
-    // handler (a non-tracked callback) closes over a stable reference.
-    const onConfirmed = props.onConfirmed
-    if (!paymentId || !checkoutKey || !clientURL || mountedPayment === paymentId) return
+  createEffect(
+    () => ({
+      paymentId: props.session.payment_id || props.session.id,
+      checkoutKey: props.session.publishable_key,
+      clientURL: props.session.client_url,
+      // Capture the confirm callback in this tracked scope so the SDK event
+      // handler (a non-tracked callback) closes over a stable reference.
+      onConfirmed: props.onConfirmed,
+    }),
+    ({ paymentId, checkoutKey, clientURL, onConfirmed }) => {
+      if (!paymentId || !checkoutKey || !clientURL || mountedPayment === paymentId) return
 
-    mountedPayment = paymentId
-    setLoading(true)
-    setMessage(undefined)
+      mountedPayment = paymentId
+      setLoading(true)
+      setMessage(undefined)
 
-    void loadNexiScript(clientURL)
-      .then(() => {
-        if (!window.Dibs) throw new Error('Payment checkout is unavailable.')
+      void loadNexiScript(clientURL)
+        .then(() => {
+          if (!window.Dibs) throw new Error('Payment checkout is unavailable.')
 
-        instance = window.Dibs.Checkout({
-          checkoutKey,
-          paymentId,
-          containerId,
-          language: 'nb-NO',
-          theme: { primaryColor: '#ff2e63' },
+          instance = window.Dibs.Checkout({
+            checkoutKey,
+            paymentId,
+            containerId,
+            language: 'nb-NO',
+            theme: { primaryColor: '#ff2e63' },
+          })
+          instance.on('pay-initialized', () => setLoading(false))
+          instance.on('payment-completed', (payload) => {
+            const completedId =
+              (payload && typeof payload === 'object' && 'paymentId' in payload
+                ? String((payload as { paymentId?: unknown }).paymentId ?? '')
+                : '') || paymentId
+            void onConfirmed({ paymentId: completedId, status: 'completed' })
+          })
+          setLoading(false)
         })
-        instance.on('pay-initialized', () => setLoading(false))
-        instance.on('payment-completed', (payload) => {
-          const completedId =
-            (payload && typeof payload === 'object' && 'paymentId' in payload
-              ? String((payload as { paymentId?: unknown }).paymentId ?? '')
-              : '') || paymentId
-          void onConfirmed({ paymentId: completedId, status: 'completed' })
+        .catch((reason: unknown) => {
+          setLoading(false)
+          setMessage(reason instanceof Error ? reason.message : 'Could not load payment checkout.')
         })
-        setLoading(false)
-      })
-      .catch((reason: unknown) => {
-        setLoading(false)
-        setMessage(reason instanceof Error ? reason.message : 'Could not load payment checkout.')
-      })
-  })
+    },
+  )
 
   onCleanup(() => {
     instance?.cleanup?.()
@@ -136,7 +140,7 @@ export function NexiCheckout(props: NexiCheckoutProps) {
           <small>Bekrefter...</small>
         </Show>
       </div>
-      <div id={containerId} class="verevon-billing-checkout__mount" aria-busy={loading()} />
+      <div id={containerId} class="verevon-billing-checkout__mount" aria-busy={loading() ? 'true' : 'false'} />
       <Show when={loading()}>
         <p class="verevon-billing-checkout__status">Laster betaling...</p>
       </Show>

@@ -1,5 +1,5 @@
-import { Minus, Plus, RotateCcw } from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
+import { Minus, Plus, RotateCcw } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { OnboardingLinkButton } from '@/features/onboarding/components/shared/OnboardingLinkButton'
 import {
   type ConnectorCategory,
@@ -71,9 +71,8 @@ export function ConnectStepContent(props: ConnectStepContentProps) {
             <button
               type="button"
               role="tab"
-              aria-selected={activeTab() === tab.id}
-              class="onboarding-connector-tab"
-              classList={{ 'onboarding-connector-tab--active': activeTab() === tab.id }}
+              aria-selected={activeTab() === tab.id ? 'true' : 'false'}
+              class={['onboarding-connector-tab', { 'onboarding-connector-tab--active': activeTab() === tab.id }]}
               onClick={() => setActiveTab(tab.id)}
             >
               <span>{tab.label}</span>
@@ -168,76 +167,79 @@ export function ConnectStepVisual(props: ConnectStepVisualProps) {
   )
   const hasGraphNodes = createMemo(() => graphModel().nodes.length > 0)
 
-  onMount(() => {
-    const reducedMotionQuery = getReducedMotionQuery()
-    let startAttempts = 0
-    let startFrame: number | undefined
-    const startScene = () => {
-      if (!graphRef || !hostRef) {
-        if (startAttempts < 6) {
-          startAttempts += 1
-          startFrame = window.requestAnimationFrame(startScene)
-        } else {
-          setGraphReady(false)
+  createEffect(
+    () => undefined,
+    () => {
+      const reducedMotionQuery = getReducedMotionQuery()
+      let startAttempts = 0
+      let startFrame: number | undefined
+      const startScene = () => {
+        if (!graphRef || !hostRef) {
+          if (startAttempts < 6) {
+            startAttempts += 1
+            startFrame = window.requestAnimationFrame(startScene)
+          } else {
+            setGraphReady(false)
+          }
+          return
         }
-        return
+        startAttempts = 0
+        sceneController?.dispose()
+        sceneController = createConnectGraphScene(graphRef, hostRef, {
+          reducedMotion: reducedMotionQuery?.matches ?? false,
+          onHoverNode: (node) => setHoveringNode(Boolean(node)),
+          onSelectNode: (pick) => setSelectedNode(pick?.node),
+          onZoomChange: setZoomPercent,
+        })
+        setGraphReady(Boolean(sceneController))
+        if (!sceneController) return
+
+        const model = graphModel()
+        sceneController.setData(model.nodes, model.edges)
+        setZoomPercent(sceneController.zoomPercent())
       }
-      startAttempts = 0
-      sceneController?.dispose()
-      sceneController = createConnectGraphScene(graphRef, hostRef, {
-        reducedMotion: reducedMotionQuery?.matches ?? false,
-        onHoverNode: (node) => setHoveringNode(Boolean(node)),
-        onSelectNode: (pick) => setSelectedNode(pick?.node),
-        onZoomChange: setZoomPercent,
-      })
-      setGraphReady(Boolean(sceneController))
-      if (!sceneController) return
+      const handleReducedMotionChange = () => startScene()
 
-      const model = graphModel()
-      sceneController.setData(model.nodes, model.edges)
-      setZoomPercent(sceneController.zoomPercent())
-    }
-    const handleReducedMotionChange = () => startScene()
+      startScene()
 
-    startScene()
+      if (!reducedMotionQuery) {
+        return () => {
+          if (startFrame !== undefined) window.cancelAnimationFrame(startFrame)
+          sceneController?.dispose()
+          sceneController = undefined
+        }
+      }
 
-    if (!reducedMotionQuery) {
-      onCleanup(() => {
+      if (typeof reducedMotionQuery.addEventListener === 'function') {
+        reducedMotionQuery.addEventListener('change', handleReducedMotionChange)
+      } else {
+        reducedMotionQuery.addListener(handleReducedMotionChange)
+      }
+
+      return () => {
         if (startFrame !== undefined) window.cancelAnimationFrame(startFrame)
+        if (typeof reducedMotionQuery.removeEventListener === 'function') {
+          reducedMotionQuery.removeEventListener('change', handleReducedMotionChange)
+        } else {
+          reducedMotionQuery.removeListener(handleReducedMotionChange)
+        }
         sceneController?.dispose()
         sceneController = undefined
-      })
-      return
-    }
-
-    if (typeof reducedMotionQuery.addEventListener === 'function') {
-      reducedMotionQuery.addEventListener('change', handleReducedMotionChange)
-    } else {
-      reducedMotionQuery.addListener(handleReducedMotionChange)
-    }
-
-    onCleanup(() => {
-      if (startFrame !== undefined) window.cancelAnimationFrame(startFrame)
-      if (typeof reducedMotionQuery.removeEventListener === 'function') {
-        reducedMotionQuery.removeEventListener('change', handleReducedMotionChange)
-      } else {
-        reducedMotionQuery.removeListener(handleReducedMotionChange)
       }
-      sceneController?.dispose()
-      sceneController = undefined
-    })
-  })
-
-  createEffect(
-    on(graphModel, (model) => {
-      sceneController?.setData(model.nodes, model.edges)
-      const activeNode = selectedNode()
-      if (activeNode && !model.nodes.some((node) => node.id === activeNode.id)) {
-        setSelectedNode(undefined)
-        sceneController?.setActiveNode(undefined)
-      }
-    }),
+    },
   )
+
+  // `on(graphModel, ...)` combined tracking + side effects into one function under
+  // the old single-arg createEffect; the two-phase form separates them naturally,
+  // with graphModel itself serving as the tracked-read compute function.
+  createEffect(graphModel, (model) => {
+    sceneController?.setData(model.nodes, model.edges)
+    const activeNode = selectedNode()
+    if (activeNode && !model.nodes.some((node) => node.id === activeNode.id)) {
+      setSelectedNode(undefined)
+      sceneController?.setActiveNode(undefined)
+    }
+  })
 
   const zoom = (direction: 1 | -1) => {
     const nextZoom = sceneController?.zoom(direction)
@@ -291,11 +293,13 @@ export function ConnectStepVisual(props: ConnectStepVisualProps) {
   return (
     <div
       ref={hostRef}
-      class="onboarding-source-graph"
-      classList={{
-        'onboarding-source-graph--empty': !hasGraphNodes(),
-        'onboarding-source-graph--fallback': !graphReady(),
-      }}
+      class={[
+        'onboarding-source-graph',
+        {
+          'onboarding-source-graph--empty': !hasGraphNodes(),
+          'onboarding-source-graph--fallback': !graphReady(),
+        },
+      ]}
       aria-label="Integration knowledge graph"
       role="region"
     >
@@ -304,13 +308,12 @@ export function ConnectStepVisual(props: ConnectStepVisualProps) {
       </p>
       <div
         ref={graphRef}
-        class="onboarding-source-graph__engine"
-        classList={{ 'onboarding-source-graph__engine--hovering': hoveringNode() }}
+        class={['onboarding-source-graph__engine', { 'onboarding-source-graph__engine--hovering': hoveringNode() }]}
         aria-describedby="integration-graph-instructions"
         aria-label={hasGraphNodes() ? 'Interactive 3D integration graph' : 'Integration graph with no connected sources'}
         onKeyDown={handleGraphKeyDown}
         role="group"
-        tabIndex={hasGraphNodes() ? 0 : -1}
+        tabindex={hasGraphNodes() ? 0 : -1}
       />
       <p class="sr-only" role="status" aria-live="polite">
         {selectedNode()
@@ -341,13 +344,15 @@ export function ConnectStepVisual(props: ConnectStepVisualProps) {
         <For each={graphModel().nodes.filter((node) => node.kind !== 'core').slice(0, 10)}>
           {(node) => (
             <div
-              class="onboarding-source-graph__node"
-              classList={{
-                'onboarding-source-graph__node--integration': node.kind === 'integration',
-                'onboarding-source-graph__node--service': node.kind === 'service',
-                'onboarding-source-graph__node--knowledge': node.kind === 'knowledge',
-                'onboarding-source-graph__node--signal': node.kind === 'signal',
-              }}
+              class={[
+                'onboarding-source-graph__node',
+                {
+                  'onboarding-source-graph__node--integration': node.kind === 'integration',
+                  'onboarding-source-graph__node--service': node.kind === 'service',
+                  'onboarding-source-graph__node--knowledge': node.kind === 'knowledge',
+                  'onboarding-source-graph__node--signal': node.kind === 'signal',
+                },
+              ]}
             >
               <span />
               <small>{truncateGraphLabel(node.label)}</small>

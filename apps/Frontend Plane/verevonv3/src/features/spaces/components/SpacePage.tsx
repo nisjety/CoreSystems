@@ -1,7 +1,8 @@
 import { useParams } from '@solidjs/router'
-import { ArrowUpRight, Bot, Circle, Clock3, MessageCircle, Sparkles, Users } from 'lucide-solid'
-import { createResource, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { ArrowUpRight, Bot, Circle, Clock3, MessageCircle, Sparkles, Users } from '@/shared/icons'
+import { createEffect, createSignal, For, Show } from 'solid-js'
 
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   getPersonalSpaceDeletionReceipt,
   getSpaceContext,
@@ -60,17 +61,20 @@ export default function SpacePage() {
     }
   }
 
-  onMount(() => {
-    const interval = window.setInterval(() => {
-      const refreshedContext = refetchContext()
-      void Promise.resolve(refreshedContext).then((current) => {
-        // A failed authority check leaves the page fail-closed. Only refresh
-        // the derived thread projection after a new current context resolves.
-        if (current) void refetchThreads()
-      })
-    }, SPACE_CONTEXT_RECHECK_MS)
-    onCleanup(() => window.clearInterval(interval))
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      const interval = window.setInterval(() => {
+        const refreshedContext = refetchContext()
+        void Promise.resolve(refreshedContext).then((current) => {
+          // A failed authority check leaves the page fail-closed. Only refresh
+          // the derived thread projection after a new current context resolves.
+          if (current) void refetchThreads()
+        })
+      }, SPACE_CONTEXT_RECHECK_MS)
+      return () => window.clearInterval(interval)
+    },
+  )
 
   return (
     <section class="space-page verevon-space" aria-labelledby="space-title">
@@ -105,7 +109,7 @@ export default function SpacePage() {
                     <span>Your role: {formatLabel(current().membership.role)}</span>
                   </div>
                 </div>
-                <a class="verevon-space-primary-action" href={spaceChatHref(current().space.space_ref)}>
+                <a class="verevon-space-primary-action" href={spaceChatHref(current().space.space_ref)} link>
                   <MessageCircle size={16} aria-hidden="true" />
                   <span>Chat</span>
                   <ArrowUpRight size={15} aria-hidden="true" />
@@ -205,7 +209,7 @@ function SpaceRoomRail(props: {
             <For each={props.threads().slice(0, 8)}>
               {(thread) => (
                 <li>
-                  <a href={threadHref(thread.thread_id)} aria-label={`Open ${threadTitle(thread)}`}>
+                  <a href={threadHref(thread.thread_id)} link aria-label={`Open ${threadTitle(thread)}`}>
                     <span class="verevon-space-thread-rail-list__title">{threadTitle(thread)}</span>
                     <span class="verevon-space-thread-rail-list__detail">{threadStatus(thread)}</span>
                   </a>
@@ -232,7 +236,7 @@ function SpaceConversationPanel(props: {
           <h2 id="space-conversations-title">Samtaler</h2>
           <p>The people and agent work that belong to this Space.</p>
         </div>
-        <a class="verevon-space-secondary-action" href={spaceChatHref(props.spaceRef)}>
+        <a class="verevon-space-secondary-action" href={spaceChatHref(props.spaceRef)} link>
           <Sparkles size={15} aria-hidden="true" />
           Start a conversation
         </a>
@@ -269,7 +273,7 @@ function SpaceConversationRow(props: { readonly thread: SpaceThread }) {
 
   return (
     <li class="verevon-space-conversation-row" data-active={isActive() || undefined}>
-      <a href={threadHref(props.thread.thread_id)}>
+      <a href={threadHref(props.thread.thread_id)} link>
         <span class="verevon-space-conversation-row__icon" aria-hidden="true">
           <MessageCircle size={16} />
         </span>
@@ -278,7 +282,7 @@ function SpaceConversationRow(props: { readonly thread: SpaceThread }) {
           <span>{props.thread.preview || 'Open conversation'}</span>
         </span>
         <span class="verevon-space-conversation-row__meta">
-          <span classList={{ 'verevon-space-status': true, 'verevon-space-status--active': isActive() }}>
+          <span class={{ 'verevon-space-status': true, 'verevon-space-status--active': isActive() }}>
             {threadStatus(props.thread)}
           </span>
           <Show when={props.thread.updated_at ?? props.thread.latest_run_updated_at}>
@@ -407,7 +411,7 @@ function SpacePulse(props: {
         }
       >
         {(run) => (
-          <a class="verevon-space-pulse-card verevon-space-pulse-card--active" href={threadHref(run().thread_id)}>
+          <a class="verevon-space-pulse-card verevon-space-pulse-card--active" href={threadHref(run().thread_id)} link>
             <span class="verevon-space-pulse-card__icon" aria-hidden="true"><Bot size={17} /></span>
             <span>
               <strong>Verevon is working</strong>

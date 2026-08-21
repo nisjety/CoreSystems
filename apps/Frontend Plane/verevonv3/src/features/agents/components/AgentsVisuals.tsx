@@ -13,8 +13,9 @@ import {
   Sparkles,
   Split,
   TicketCheck,
-} from 'lucide-solid'
-import { For, Index, type JSX } from 'solid-js'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import { For } from 'solid-js'
 import { cn } from '@/shared/lib/cn'
 import { useI18n } from '@/shared/i18n'
 
@@ -64,22 +65,22 @@ export function SalesVisual(props: AgentVisualProps) {
           <span>{i18n.tr('Tilgjengelighet', 'Availability')}</span>
         </div>
         <div class="agent-visual__calendar-grid">
-          <Index each={Array.from({ length: 21 })}>
+          <For each={Array.from({ length: 21 })} keyed={false}>
             {(_, index) => (
               <span class={cn('agent-visual__calendar-day', index === 10 && 'agent-visual__calendar-day--active')}>
                 {index + 1}
               </span>
             )}
-          </Index>
+          </For>
         </div>
         <div class="agent-visual__calendar-slots">
-          <Index each={[i18n.tr('Eier', 'Owner'), i18n.tr('Team', 'Team'), i18n.tr('Reserve', 'Fallback')]}>
+          <For each={[i18n.tr('Eier', 'Owner'), i18n.tr('Team', 'Team'), i18n.tr('Reserve', 'Fallback')]} keyed={false}>
             {(slot, index) => (
               <span class={cn('agent-visual__calendar-slot', index === 1 && 'agent-visual__calendar-slot--active')}>
                 {slot()}
               </span>
             )}
-          </Index>
+          </For>
         </div>
       </div>
       <div class="agent-visual__sales-pill">
@@ -97,7 +98,7 @@ export function EcommerceVisual(props: AgentVisualProps) {
       <div class="agent-visual__product-window">
         <div class="agent-visual__product-query">{i18n.tr('Leter du etter løpesko?', 'Looking for running shoes?')}</div>
         <div class="agent-visual__product-grid">
-          <Index each={['#ECEFF3', '#D9D0BE', '#1F2428']}>
+          <For each={['#ECEFF3', '#D9D0BE', '#1F2428']} keyed={false}>
             {(color, index) => (
               <div class="agent-visual__product-card">
                 <div class="agent-visual__product-swatch" style={{ 'background-color': color() }}>
@@ -108,7 +109,7 @@ export function EcommerceVisual(props: AgentVisualProps) {
                 <div class="agent-visual__product-label">{index === 0 ? i18n.tr('Data', 'Data') : i18n.tr('Regel', 'Rule')}</div>
               </div>
             )}
-          </Index>
+          </For>
         </div>
       </div>
       <div class="agent-visual__floating-action">
@@ -198,13 +199,13 @@ export function WorkflowVisual(props: AgentVisualProps) {
             {i18n.tr('Generer bildetekst', 'Generate caption')}
             <CircleDashed class="agent-visual__muted-icon" />
           </div>
-          <Index each={[i18n.tr('Leverandør', 'Provider'), i18n.tr('Modell', 'Model'), i18n.tr('Prompt', 'Prompt')]}>
+          <For each={[i18n.tr('Leverandør', 'Provider'), i18n.tr('Modell', 'Model'), i18n.tr('Prompt', 'Prompt')]} keyed={false}>
             {(item, index) => (
               <div class={cn('agent-visual__workflow-field', index === 2 && 'agent-visual__workflow-field--large')}>
                 {item()}
               </div>
             )}
-          </Index>
+          </For>
         </div>
       ) : null}
     </div>

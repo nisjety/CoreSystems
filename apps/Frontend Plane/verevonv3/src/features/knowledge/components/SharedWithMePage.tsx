@@ -1,4 +1,5 @@
-import { createResource, For, Show } from 'solid-js'
+import { For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 
 import { isGateOpen } from '@/shared/context/ownership-gate'
 import { listSharedWithMe } from '@/shared/api/ownership-client'

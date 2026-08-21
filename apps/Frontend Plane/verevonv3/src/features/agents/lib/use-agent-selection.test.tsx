@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { describe, expect, it } from 'vitest'
 import { AgentsProvider, useAgentSelection } from '@/features/agents/lib/use-agent-selection'
 
@@ -28,10 +28,12 @@ describe('AgentsProvider', () => {
     }
 
     render(() => <Harness />)
+    flush()
 
     expect(screen.getByTestId('agent-selection').textContent).toBe('service')
 
     fireEvent.click(screen.getByRole('button', { name: 'Open Support' }))
+    flush()
 
     expect(screen.getByTestId('agent-selection').textContent).toBe('all')
   })

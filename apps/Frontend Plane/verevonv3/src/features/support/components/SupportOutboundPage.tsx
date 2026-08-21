@@ -1,6 +1,7 @@
-import { A, useLocation } from '@solidjs/router'
-import { AlertTriangle, CheckCircle2, Mail, MessageSquareText, Send, ShieldCheck, UsersRound } from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { useLocation } from '@solidjs/router'
+import { AlertTriangle, CheckCircle2, Mail, MessageSquareText, Send, ShieldCheck, UsersRound } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { listOrganizationOutboundIntents, type OrganizationOutboundIntentFilter, type OutboundIntent } from '@/shared/api/inbox-client'
 import { useI18n } from '@/shared/i18n'
 import { getSession } from '@/shared/session/session-store'
@@ -57,17 +58,19 @@ export default function SupportOutboundPage() {
   // redundant first selection. Do not change selection while a refresh or an
   // unavailable response is in flight; that would turn a transient read fault
   // into a misleading empty detail pane.
-  createEffect(() => {
-    if (intents.loading || intents.error) return
-    const available = intents()
-    if (!available?.length) {
-      setSelectedID(null)
-      return
-    }
-    if (!available.some((intent) => intent.id === selectedID())) {
-      setSelectedID(available[0]!.id)
-    }
-  })
+  createEffect(
+    () => ({ loading: intents.loading, error: intents.error, available: intents(), selectedId: selectedID() }),
+    (state) => {
+      if (state.loading || state.error) return
+      if (!state.available?.length) {
+        setSelectedID(null)
+        return
+      }
+      if (!state.available.some((intent) => intent.id === state.selectedId)) {
+        setSelectedID(state.available[0]!.id)
+      }
+    },
+  )
   const selected = createMemo(() => intents()?.find((intent) => intent.id === selectedID()) ?? null)
   const queueTitle = createMemo(() => {
     const current = filter()
@@ -87,7 +90,7 @@ export default function SupportOutboundPage() {
           <Show when={intents.loading}><p class="verevon-support-outbound__availability">{i18n.tr('Laster kvitteringer …', 'Loading receipts…')}</p></Show>
           <Show when={intents.error}><p class="verevon-support-outbound__availability" role="alert">{i18n.tr('Utgående kvitteringer er midlertidig utilgjengelige.', 'Outbound receipts are temporarily unavailable.')} <button type="button" onClick={() => void refetch()}>{i18n.tr('Prøv igjen', 'Retry')}</button></p></Show>
           <For each={intents() ?? []}>{(intent) => (
-            <button type="button" classList={{ 'is-active': selectedID() === intent.id }} onClick={() => setSelectedID(intent.id)}>
+            <button type="button" class={{ 'is-active': selectedID() === intent.id }} onClick={() => setSelectedID(intent.id)}>
               <span>{i18n.tr(...statusLabels[intent.status])}</span>
               <small>{intent.provider || i18n.tr('Ukjent kanal', 'Unknown channel')}</small>
             </button>
@@ -128,7 +131,7 @@ export default function SupportOutboundPage() {
 function ReceiptPanel(props: { intent: OutboundIntent | null; queueTitle: string }) {
   const i18n = useI18n()
   return <Show when={props.intent} fallback={<OutboundEmptyPanel id="message" icon={Mail} title={props.queueTitle} body={i18n.tr('Velg en utgående kvittering fra listen. Denne arbeidsflaten viser bare kanoniske resultatdata, ikke kampanjeinnhold.', 'Select an outbound receipt from the list. This workspace shows canonical outcome data only, not campaign content.')} />}>
-    {(intent) => <section id="outbound-center-panel-message" class="verevon-support-outbound__empty" role="tabpanel" aria-labelledby="outbound-center-tab-message"><Mail class="size-6" /><h2>{i18n.tr(...statusLabels[intent().status])}</h2><p>{i18n.tr('Kanal', 'Channel')}: {intent().provider || i18n.tr('Ukjent', 'Unknown')}</p><p>{i18n.tr('Samtale', 'Conversation')}: {intent().conversation_id}</p><p>{i18n.tr('Oppdatert', 'Updated')}: {new Date(intent().updated_at).toLocaleString()}</p><Show when={intent().status === 'unknown'}><p>{i18n.tr('Utfallet krever avstemming i kildesamtalen. Ikke prøv automatisk på nytt.', 'The outcome requires reconciliation in the source conversation. Do not retry automatically.')}</p></Show><div><A href={`/support?view=all&conversation_id=${encodeURIComponent(intent().conversation_id)}`}>{i18n.tr('Åpne kildesamtale', 'Open source conversation')}</A></div></section>}
+    {(intent) => <section id="outbound-center-panel-message" class="verevon-support-outbound__empty" role="tabpanel" aria-labelledby="outbound-center-tab-message"><Mail class="size-6" /><h2>{i18n.tr(...statusLabels[intent().status])}</h2><p>{i18n.tr('Kanal', 'Channel')}: {intent().provider || i18n.tr('Ukjent', 'Unknown')}</p><p>{i18n.tr('Samtale', 'Conversation')}: {intent().conversation_id}</p><p>{i18n.tr('Oppdatert', 'Updated')}: {new Date(intent().updated_at).toLocaleString()}</p><Show when={intent().status === 'unknown'}><p>{i18n.tr('Utfallet krever avstemming i kildesamtalen. Ikke prøv automatisk på nytt.', 'The outcome requires reconciliation in the source conversation. Do not retry automatically.')}</p></Show><div><a href={`/support?view=all&conversation_id=${encodeURIComponent(intent().conversation_id)}`} link>{i18n.tr('Åpne kildesamtale', 'Open source conversation')}</a></div></section>}
   </Show>
 }
 
@@ -169,7 +172,7 @@ function OutboundActionsRail(props: { intent: OutboundIntent | null }) {
         <span><Send class="size-5" />{i18n.tr('Trygt neste steg', 'Safe next step')}</span>
         <h2>{actionTitle(intent(), i18n.tr)}</h2>
         <p>{actionBoundary(intent(), i18n.tr)}</p>
-        <A class="verevon-support-outbound__rail-link" href={sourceConversationHref(intent())}>{i18n.tr('Åpne kildesamtale', 'Open source conversation')}</A>
+        <a class="verevon-support-outbound__rail-link" href={sourceConversationHref(intent())} link>{i18n.tr('Åpne kildesamtale', 'Open source conversation')}</a>
         <p class="verevon-support-outbound__rail-note">{i18n.tr('Ingen ny utsending eller automatisk nytt forsøk kan startes fra leveringsloggen.', 'No new send or automatic retry can be started from the delivery ledger.')}</p>
       </section>
     )}
@@ -233,6 +236,6 @@ function actionBoundary(intent: OutboundIntent, tr: (norwegian: string, english:
   return tr('Koordiner eventuelt videre arbeid i kildesamtalen. Godtatt innsending er ikke bevis på levering eller lesing.', 'Coordinate any further work in the source conversation. Accepted submission is not proof of delivery or read.')
 }
 
-function OutboundCenterTabButton(props: { active: boolean; id: OutboundCenterTab; label: string; onSelect: (tab: OutboundCenterTab) => void }) { return <button type="button" role="tab" id={`outbound-center-tab-${props.id}`} aria-controls={`outbound-center-panel-${props.id}`} aria-selected={props.active} tabIndex={props.active ? 0 : -1} onKeyDown={handleTabKeyDown} onClick={() => props.onSelect(props.id)}>{props.label}</button> }
-function OutboundRailTabButton(props: { active: boolean; id: OutboundRailTab; label: string; onSelect: (tab: OutboundRailTab) => void }) { return <button type="button" role="tab" id={`outbound-rail-tab-${props.id}`} aria-controls={`outbound-rail-panel-${props.id}`} aria-selected={props.active} tabIndex={props.active ? 0 : -1} onKeyDown={handleTabKeyDown} onClick={() => props.onSelect(props.id)}>{props.label}</button> }
+function OutboundCenterTabButton(props: { active: boolean; id: OutboundCenterTab; label: string; onSelect: (tab: OutboundCenterTab) => void }) { return <button type="button" role="tab" id={`outbound-center-tab-${props.id}`} aria-controls={`outbound-center-panel-${props.id}`} aria-selected={props.active ? 'true' : 'false'} tabindex={props.active ? 0 : -1} onKeyDown={handleTabKeyDown} onClick={() => props.onSelect(props.id)}>{props.label}</button> }
+function OutboundRailTabButton(props: { active: boolean; id: OutboundRailTab; label: string; onSelect: (tab: OutboundRailTab) => void }) { return <button type="button" role="tab" id={`outbound-rail-tab-${props.id}`} aria-controls={`outbound-rail-panel-${props.id}`} aria-selected={props.active ? 'true' : 'false'} tabindex={props.active ? 0 : -1} onKeyDown={handleTabKeyDown} onClick={() => props.onSelect(props.id)}>{props.label}</button> }
 function OutboundEmptyPanel(props: { id: OutboundCenterTab; icon: typeof Mail; title: string; body: string }) { return <section id={`outbound-center-panel-${props.id}`} class="verevon-support-outbound__empty" role="tabpanel" aria-labelledby={`outbound-center-tab-${props.id}`}><props.icon class="size-6" /><h2>{props.title}</h2><p>{props.body}</p></section> }

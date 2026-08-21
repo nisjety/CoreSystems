@@ -21,10 +21,10 @@ import {
   TicketCheck,
   UsersRound,
   Wrench,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
-import type { LucideProps } from 'lucide-solid'
-import { Dynamic } from 'solid-js/web'
+import type { LucideProps } from '@/shared/icons'
+import { Dynamic } from '@solidjs/web'
 import {
   agentFeatureOptionsByRole,
   agentRoleOptions,
@@ -263,7 +263,7 @@ function AgentSelector(props: {
         type="button"
         aria-label={i18n.tr('Velg agenttype', 'Select agent type')}
         aria-haspopup="menu"
-        aria-expanded={open()}
+        aria-expanded={open() ? 'true' : 'false'}
         onClick={() => setOpen((current) => !current)}
         class="core-sidebar-select__button"
       >
@@ -280,7 +280,7 @@ function AgentSelector(props: {
                   <button
                     type="button"
                     role="menuitemradio"
-                    aria-checked={selected()}
+                    aria-checked={selected() ? 'true' : 'false'}
                     class={cn('core-sidebar-select__option', selected() && 'core-sidebar-select__option--selected')}
                     onClick={() => {
                       props.onChange(option.id)
@@ -324,7 +324,7 @@ function AgentFeatureSidebarNav(props: {
           return (
             <button
               type="button"
-              aria-pressed={active()}
+              aria-pressed={active() ? 'true' : 'false'}
               disabled={props.disabled}
               onClick={() => props.onFeatureChange(tab.id)}
               class={cn('core-sidebar-agent-feature', active() && 'core-sidebar-agent-feature--active')}
@@ -355,7 +355,7 @@ function ChatbotBuilderSidebarNav(props: {
           return (
             <button
               type="button"
-              aria-pressed={active()}
+              aria-pressed={active() ? 'true' : 'false'}
               onClick={() => props.onSectionChange(tab.id)}
               class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
             >

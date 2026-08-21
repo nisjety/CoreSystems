@@ -1,5 +1,5 @@
-import { ChevronDown, ChevronUp } from 'lucide-solid'
-import { createEffect, createMemo, createSignal, onMount, Show } from 'solid-js'
+import { ChevronDown, ChevronUp } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, Show } from 'solid-js'
 import { DashboardCardsRail } from '@/features/dashboard/home/DashboardCards'
 import { DashboardComposerPanel, DashboardHomeHeader, DashboardTabs } from '@/features/dashboard/home/DashboardHomeChrome'
 import { dashboardCards, type DashboardCard } from '@/features/dashboard/home/dashboard-cards'
@@ -28,7 +28,12 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   const [cardsRevealed, setCardsRevealed] = createSignal(false)
   // Warm the chat route chunk so the first composer→chat View Transition morph
   // finds its target already mounted (no lazy/Suspense gap on the first launch).
-  onMount(() => void import('@/features/chat/components/ChatPage'))
+  createEffect(
+    () => undefined,
+    () => {
+      void import('@/features/chat/components/ChatPage')
+    },
+  )
   const workspace = () => props.workspace ?? shellWorkspace() ?? fallbackWorkspaceIdentity
   const displayName = () => firstName(workspace().userName ?? workspace().userEmail)
   const planLabel = () => formatPlanLabel(workspace().plan)
@@ -61,9 +66,12 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
 
   // Once the result clears, drop any manual card reveal so the next result
   // starts from the default (results shown).
-  createEffect(() => {
-    if (!resultPresent()) setCardsRevealed(false)
-  })
+  createEffect(
+    () => resultPresent(),
+    (present) => {
+      if (!present) setCardsRevealed(false)
+    },
+  )
 
   const bandsClass = () => {
     if (searchExpanded()) return 'verevon-home-bands verevon-home-bands--expanded min-h-0 flex-1'

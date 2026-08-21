@@ -1,4 +1,4 @@
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -33,12 +33,12 @@ const personalContext = {
 }
 
 function renderSpacePage() {
-  window.history.replaceState({}, '', '/spaces/space_personal_1')
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/spaces/:spaceId" component={SpacePage} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/spaces/:spaceId', component: SpacePage }],
+    history: memoryHistory('/spaces/space_personal_1'),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 describe('SpacePage', () => {

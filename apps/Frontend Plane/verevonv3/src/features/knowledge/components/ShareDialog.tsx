@@ -1,4 +1,5 @@
-import { createResource, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { createEffect, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 
 import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
@@ -29,13 +30,16 @@ export function ShareDialog(props: {
   const [errorMessage, setErrorMessage] = createSignal('')
   const [shares, { refetch }] = createResource(() => props.docId, listDocumentShares)
 
-  onMount(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') props.onClose()
-    }
-    window.addEventListener('keydown', closeOnEscape)
-    onCleanup(() => window.removeEventListener('keydown', closeOnEscape))
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') props.onClose()
+      }
+      window.addEventListener('keydown', closeOnEscape)
+      return () => window.removeEventListener('keydown', closeOnEscape)
+    },
+  )
 
   async function addShare() {
     const target = subject().trim()

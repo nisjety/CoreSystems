@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, within } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import SupportPage from './SupportPage'
 import { I18nProvider } from '@/shared/i18n'
@@ -22,12 +23,14 @@ afterEach(cleanup)
 
 describe('SupportPage navigation', () => {
   it('keeps Conversations, Ticketing, and Outbound as the three primary work surfaces', () => {
-    window.history.pushState(null, '', '/support')
+    const TestRouter = createRouter({
+      routes: [{ path: '/support', component: SupportPage }],
+      history: memoryHistory('/support'),
+      explicitLinks: true,
+    })
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/support" component={SupportPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
@@ -38,22 +41,26 @@ describe('SupportPage navigation', () => {
   })
 
   it('keeps functional center and right-rail tabs in the three-pane Outbound workspace', () => {
-    window.history.pushState(null, '', '/support?surface=outbound')
+    const TestRouter = createRouter({
+      routes: [{ path: '/support', component: SupportPage }],
+      history: memoryHistory('/support?surface=outbound'),
+      explicitLinks: true,
+    })
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/support" component={SupportPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
     const centerTabs = screen.getByRole('tablist', { name: /outbound content|utgående innhold/i })
     fireEvent.click(within(centerTabs).getByRole('tab', { name: /delivery|levering/i }))
-    expect(screen.getByRole('heading', { name: /delivery status is not available yet|leveringsstatus er ikke tilgjengelig ennå/i })).toBeTruthy()
+    flush()
+    expect(screen.getByRole('heading', { name: /select a receipt|velg en kvittering/i })).toBeTruthy()
 
     const railTabs = screen.getByRole('tablist', { name: /outbound context|utgående kontekst/i })
     fireEvent.click(within(railTabs).getByRole('tab', { name: 'Verevon' }))
-    expect(screen.getByText(/select a message before verevon receives outbound context|velg en melding før verevon får utgående kontekst/i)).toBeTruthy()
+    flush()
+    expect(screen.getByText(/select a receipt before verevon receives outbound context|velg en kvittering før verevon får utgående kontekst/i)).toBeTruthy()
   })
 
 })

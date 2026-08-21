@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { describe, expect, it } from 'vitest'
 import { WorkflowBuilder } from '@/features/agents/components/WorkflowBuilder'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
@@ -20,6 +21,7 @@ describe('WorkflowBuilder', () => {
     expect(screen.getByRole('heading', { name: 'Generate Caption' })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Velg arbeidsflytnoden Update Status to DONE' }))
+    flush()
 
     expect(screen.getByRole('heading', { name: 'Update Status' })).toBeTruthy()
     expect(screen.getAllByText('Google Sheets').length).toBeGreaterThan(0)

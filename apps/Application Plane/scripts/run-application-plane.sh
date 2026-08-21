@@ -71,6 +71,12 @@ required_generated=(
   CONVERSATION_CORE_INGEST_SERVICE_TOKEN CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN
   CONVERSATION_GATEWAY_SERVICE_TOKEN CONVERSATION_INTEGRATION_SERVICE_API_KEY
   NOTIFICATION_GATEWAY_SERVICE_TOKEN
+  # Ingestion's integration-corev2 publishes to this plane's NATS account with a
+  # password Application owns. Ingestion's own run-ingestion-plane.sh reads it
+  # back from this plane's .env.generated-secrets rather than keeping its own
+  # copy (see plane_env_files() in build-verevon-services.sh), so generating it
+  # here is the only place it needs to exist.
+  APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD
 )
 for key in "${required_generated[@]}"; do persist_if_missing "$key" "$(random_value)"; done
 

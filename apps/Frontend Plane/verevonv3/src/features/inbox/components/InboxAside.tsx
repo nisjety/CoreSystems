@@ -14,8 +14,9 @@ import {
   Send,
   Sparkles,
   UserRound,
-} from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   AccordionSection,
   ActivityItem,
@@ -334,29 +335,32 @@ function VerevonPanel(props: {
   ])
   const isCurrentSelection = (scopeKey: string) => selectionScopeKey() === scopeKey
 
-  createEffect(() => {
-    const selectedScopeKey = selectionScopeKey()
-    void selectedScopeKey
-    draftRequestID += 1
-    summaryRequestID += 1
-    answerRequestID += 1
-    cardRequestID += 1
-    setDraftLoading(false)
-    setSummaryLoading(false)
-    setAnswerLoading(false)
-    setRunningCard(null)
-    setDraft(null)
-    setSummary(null)
-    setAnswer(null)
-    setSources([])
-    setResolutionPlan(null)
-    setResolutionPlanGroupId(undefined)
-    setDraftProposalGroupId(undefined)
-    setError(null)
-    setQuestion('')
-    const scope = supportThreadScope()
-    setSharedThreadId(scope ? readSupportChatThread(scope) : null)
-  })
+  createEffect(
+    // compute: track the selection scope key (its value is unused downstream,
+    // it only needs to trigger a re-run) plus the support-thread scope, which
+    // the effect consults to look up the shared thread id.
+    () => ({ scopeKey: selectionScopeKey(), scope: supportThreadScope() }),
+    ({ scope }) => {
+      draftRequestID += 1
+      summaryRequestID += 1
+      answerRequestID += 1
+      cardRequestID += 1
+      setDraftLoading(false)
+      setSummaryLoading(false)
+      setAnswerLoading(false)
+      setRunningCard(null)
+      setDraft(null)
+      setSummary(null)
+      setAnswer(null)
+      setSources([])
+      setResolutionPlan(null)
+      setResolutionPlanGroupId(undefined)
+      setDraftProposalGroupId(undefined)
+      setError(null)
+      setQuestion('')
+      setSharedThreadId(scope ? readSupportChatThread(scope) : null)
+    },
+  )
 
   const generateDraft = async (instruction?: string, kind: 'reply' | 'note' = 'reply') => {
     if (!ready() || draftLoading()) return
@@ -918,7 +922,7 @@ function VerevonPanel(props: {
             fallback={<em>{i18n.tr('Spør for å starte delt tråd', 'Ask to start a shared thread')}</em>}
           >
             {(threadId) => (
-              <a href="/chat" onClick={() => setActiveChatThreadId(threadId())}>
+              <a href="/chat" link onClick={() => setActiveChatThreadId(threadId())}>
                 {i18n.tr('Åpne i Chat', 'Open in Chat')}
                 <ArrowUpRight class="size-3.5" />
               </a>
@@ -1393,7 +1397,7 @@ function ActivityPanel(props: { orgId: string; selectedTicket: ZammadTicket | nu
                   <Show when={isTerminalSupportTicket() && csatPreference()?.state === 'opted-in' && csatOutcome()?.state !== 'unavailable'}>
                     <div class="verevon-inbox-csat-score-picker" role="group" aria-label={i18n.tr('Registrer kundevurdering', 'Record customer rating')}>
                       <For each={[1, 2, 3, 4, 5]}>
-                        {(score) => <button type="button" class={cn('verevon-inbox-button verevon-inbox-button--secondary verevon-inbox-button--xs', selectedCSATScore() === score && 'is-active')} aria-pressed={selectedCSATScore() === score} onClick={() => setSelectedCSATScore(score)}>{score}</button>}
+                        {(score) => <button type="button" class={cn('verevon-inbox-button verevon-inbox-button--secondary verevon-inbox-button--xs', selectedCSATScore() === score && 'is-active')} aria-pressed={selectedCSATScore() === score ? 'true' : 'false'} onClick={() => setSelectedCSATScore(score)}>{score}</button>}
                       </For>
                     </div>
                     <button type="button" class="verevon-inbox-button verevon-inbox-button--secondary verevon-inbox-button--xs" disabled={selectedCSATScore() === 0 || savingCSATOutcome()} onClick={() => void recordCSATOutcome()}>
@@ -1463,7 +1467,7 @@ function MacrosPanel(props: {
 
   return (
     <section class="verevon-inbox-macros">
-      <button type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded()}>
+      <button type="button" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded() ? 'true' : 'false'}>
         <span>{i18n.tr('Makroer', 'Macros')}</span>
         <ChevronDown class={cn('size-4', expanded() && 'rotate-180')} />
       </button>

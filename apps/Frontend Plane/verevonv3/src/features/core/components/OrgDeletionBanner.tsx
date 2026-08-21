@@ -1,4 +1,4 @@
-import { Loader2, ShieldAlert } from 'lucide-solid'
+import { Loader2, ShieldAlert } from '@/shared/icons'
 import { createMemo, createSignal, Show } from 'solid-js'
 import { useI18n } from '@/shared/i18n'
 import { ApiError } from '@/shared/api/http'

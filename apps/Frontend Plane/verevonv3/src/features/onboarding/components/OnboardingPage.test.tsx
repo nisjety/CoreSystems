@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import OnboardingPage from '@/features/onboarding/components/OnboardingPage'
 import type { OnboardingState } from '@/features/onboarding/lib/model'
@@ -21,21 +21,22 @@ function seedOnboardingState(overrides: Partial<OnboardingState>) {
 }
 
 function renderWithProviders(component: () => JSX.Element, path = '/onboarding') {
-  window.history.pushState(null, '', path)
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route
-        path="/*all"
-        component={() => (
-          <QueryClientProvider client={queryClient}>
-            {component()}
-          </QueryClientProvider>
-        )}
-      />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    explicitLinks: true,
+    routes: [{
+      path: '/*all',
+      component: () => (
+        <QueryClientProvider client={queryClient}>
+          {component()}
+        </QueryClientProvider>
+      ),
+    }],
+    history: memoryHistory(path),
+  })
+
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 afterEach(() => {

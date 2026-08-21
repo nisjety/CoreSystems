@@ -1,4 +1,4 @@
-import { A, useLocation } from '@solidjs/router'
+import { useLocation } from '@solidjs/router'
 import {
   AlertCircle,
   CheckCircle2,
@@ -10,8 +10,9 @@ import {
   Sparkles,
   UploadCloud,
   Users,
-} from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   buildCalendarDays,
   currentCalendarMonth,
@@ -64,22 +65,24 @@ export default function SocialCalendarPage() {
   const [publishResult, setPublishResult] = createSignal<SocialPublishResult | null>(null)
   const [busy, setBusy] = createSignal(false)
 
-  createEffect(() => {
-    const nextCalendar = calendar()
-    if (!nextCalendar) return
+  createEffect(
+    () => calendar(),
+    (nextCalendar) => {
+      if (!nextCalendar) return
 
-    const imported = readPendingDraft()
-    const nextPosts = imported && !nextCalendar.posts.some((post) => post.id === imported.id)
-      ? [imported, ...nextCalendar.posts]
-      : nextCalendar.posts
+      const imported = readPendingDraft()
+      const nextPosts = imported && !nextCalendar.posts.some((post) => post.id === imported.id)
+        ? [imported, ...nextCalendar.posts]
+        : nextCalendar.posts
 
-    setPosts(nextPosts)
-    setSelectedPostId((current) => current ?? nextPosts[0]?.id ?? null)
-    if (imported) {
-      setFeedback(i18n.tr('Innbokssamtale konvertert til et sosialt utkast.', 'Inbox conversation converted into a social draft.'))
-      clearPendingDraft()
-    }
-  })
+      setPosts(nextPosts)
+      setSelectedPostId((current) => current ?? nextPosts[0]?.id ?? null)
+      if (imported) {
+        setFeedback(i18n.tr('Innbokssamtale konvertert til et sosialt utkast.', 'Inbox conversation converted into a social draft.'))
+        clearPendingDraft()
+      }
+    },
+  )
 
   const accounts = createMemo(() => calendar().accounts)
   const windows = createMemo(() => calendar().recommendedWindows)
@@ -201,7 +204,7 @@ export default function SocialCalendarPage() {
         <div class="verevon-social-inbox-banner">
           <MessageSquareReply class="size-4" />
           <span>{i18n.tr('Innbokskontekst er aktiv. Bruk det importerte utkastet eller opprett et oppfølgingsinnlegg fra den valgte samtalen.', 'Inbox context is active. Use the imported draft or create a follow-up post from the selected conversation.')}</span>
-          <A href="/inbox?view=social">{i18n.tr('Tilbake til sosial innboks', 'Back to social inbox')}</A>
+          <a href="/inbox?view=social" link>{i18n.tr('Tilbake til sosial innboks', 'Back to social inbox')}</a>
         </div>
       </Show>
 
@@ -213,7 +216,7 @@ export default function SocialCalendarPage() {
         <div class="verevon-social-unavailable-banner">
           <AlertCircle class="size-4" />
           <span>{i18n.tr('Sosial kalender bruker reservedata fordi den org-scopede sosiale gatewayen er utilgjengelig, eller ingen organisasjonsscope ble løst.', 'Social calendar is using fallback data because the org-scoped social gateway is unavailable or no organization scope was resolved.')}</span>
-          <A href="/social/accounts">{i18n.tr('Sjekk kontoer', 'Check accounts')}</A>
+          <a href="/social/accounts" link>{i18n.tr('Sjekk kontoer', 'Check accounts')}</a>
         </div>
       </Show>
 
@@ -312,7 +315,7 @@ export default function SocialCalendarPage() {
               {(platform) => (
                 <button
                   type="button"
-                  classList={{ 'is-active': draftPlatforms().includes(platform) }}
+                  class={{ 'is-active': draftPlatforms().includes(platform) }}
                   onClick={() => togglePlatform(platform)}
                 >
                   {platformLabels[platform]}
@@ -393,10 +396,10 @@ export default function SocialCalendarPage() {
                     </button>
                   )}
                 >
-                  <A href="/social/approvals" class="verevon-social-publish-button">
+                  <a href="/social/approvals" link class="verevon-social-publish-button">
                     <CheckCircle2 class="size-4" />
                     {i18n.tr('Gjennomgå godkjenning', 'Review approval')}
-                  </A>
+                  </a>
                 </Show>
                 <Show when={publishResult()}>
                   {(result) => (

@@ -1,4 +1,4 @@
-import { A, useNavigate } from '@solidjs/router'
+import { useNavigate } from '@solidjs/router'
 import {
   Bell,
   Building2,
@@ -13,8 +13,9 @@ import {
   Slash,
   Sparkles,
   Sun,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, type JSX } from 'solid-js'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { CoreNavbarPanel, type CoreNavbarPanelKind } from '@/features/core/components/CoreNavbarPanels'
 import {
   readChatThreadHistory,
@@ -84,45 +85,53 @@ export function CoreNavbar(props: {
     setSearchOpen(false)
   }
 
-  createEffect(() => {
-    const remoteTheme = props.navbarData?.theme
-    if (remoteTheme?.configured !== false && remoteTheme?.theme) {
-      setTheme(remoteTheme.theme)
-    }
-  })
+  createEffect(
+    () => props.navbarData?.theme,
+    (remoteTheme) => {
+      if (remoteTheme?.configured !== false && remoteTheme?.theme) {
+        setTheme(remoteTheme.theme)
+      }
+    },
+  )
 
-  onMount(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null
-      const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
+  createEffect(
+    () => undefined,
+    () => {
+      const handleKeyDown = (event: KeyboardEvent) => {
+        const target = event.target as HTMLElement | null
+        const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault()
-        setSearchOpen(true)
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+          event.preventDefault()
+          setSearchOpen(true)
+        }
+
+        if (!isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
+          event.preventDefault()
+          setSearchOpen(true)
+        }
+
+        if (event.key === 'Escape') closeShellOverlays()
       }
 
-      if (!isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
-        event.preventDefault()
-        setSearchOpen(true)
+      window.addEventListener('keydown', handleKeyDown)
+      return () => window.removeEventListener('keydown', handleKeyDown)
+    },
+  )
+
+  createEffect(
+    () => undefined,
+    () => {
+      const closePanelOnOutsidePointer = (event: PointerEvent) => {
+        const target = event.target as Node | null
+        if (!openPanel() || (target && headerRef?.contains(target))) return
+        setOpenPanel(null)
       }
 
-      if (event.key === 'Escape') closeShellOverlays()
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    onCleanup(() => window.removeEventListener('keydown', handleKeyDown))
-  })
-
-  onMount(() => {
-    const closePanelOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (!openPanel() || (target && headerRef?.contains(target))) return
-      setOpenPanel(null)
-    }
-
-    document.addEventListener('pointerdown', closePanelOnOutsidePointer, true)
-    onCleanup(() => document.removeEventListener('pointerdown', closePanelOnOutsidePointer, true))
-  })
+      document.addEventListener('pointerdown', closePanelOnOutsidePointer, true)
+      return () => document.removeEventListener('pointerdown', closePanelOnOutsidePointer, true)
+    },
+  )
 
   const openExclusivePanel = (panel: OpenPanel) => {
     setOpenPanel((current) => (current === panel ? null : panel))
@@ -143,8 +152,9 @@ export function CoreNavbar(props: {
       <header ref={headerRef} class="dashboard-navbar-bg core-navbar">
         <div class="core-navbar__inner">
           <div class="core-navbar__left">
-            <A
+            <a
               href="/dashboard"
+              link
               aria-label={i18n.tr('Gå til hjem', 'Go to home')}
               title={i18n.tr('Gå til hjem', 'Go to home')}
               class="core-navbar__home-mark"
@@ -155,7 +165,7 @@ export function CoreNavbar(props: {
                 aria-hidden="true"
                 class="core-navbar__home-logo"
               />
-            </A>
+            </a>
 
             <HistoryNav
               onBack={() => window.history.back()}
@@ -353,41 +363,46 @@ function GlobalSearchDialog(props: {
     props.onNavigate('/chat')
   }
 
-  createEffect(() => {
-    const trimmed = query().trim()
-    window.clearTimeout(searchTimer)
-    searchController?.abort()
+  createEffect(
+    () => query().trim(),
+    (trimmed) => {
+      window.clearTimeout(searchTimer)
+      searchController?.abort()
 
-    if (trimmed.length < 2) {
-      setError(null)
-      setLoading(false)
-      setResults([])
-      return
-    }
+      if (trimmed.length < 2) {
+        setError(null)
+        setLoading(false)
+        setResults([])
+        return
+      }
 
-    const controller = new AbortController()
-    searchController = controller
-    searchTimer = window.setTimeout(() => {
-      setLoading(true)
-      setError(null)
-      searchNavbar(trimmed, controller.signal)
-        .then((payload) => {
-          setResults(payload.results)
-        })
-        .catch((searchError: unknown) => {
-          if (controller.signal.aborted) return
-          setError(searchError instanceof Error ? searchError.message : i18n.tr('Søk feilet.', 'Search failed.'))
-          setResults([])
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setLoading(false)
-        })
-    }, 220)
-  })
+      const controller = new AbortController()
+      searchController = controller
+      searchTimer = window.setTimeout(() => {
+        setLoading(true)
+        setError(null)
+        searchNavbar(trimmed, controller.signal)
+          .then((payload) => {
+            setResults(payload.results)
+          })
+          .catch((searchError: unknown) => {
+            if (controller.signal.aborted) return
+            setError(searchError instanceof Error ? searchError.message : i18n.tr('Søk feilet.', 'Search failed.'))
+            setResults([])
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setLoading(false)
+          })
+      }, 220)
+    },
+  )
 
-  onMount(() => {
-    inputRef?.focus()
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      inputRef?.focus()
+    },
+  )
 
   onCleanup(() => {
     window.clearTimeout(searchTimer)
@@ -516,12 +531,12 @@ function Breadcrumb(props: {
       <button
         type="button"
         onClick={() => props.onWorkspaceClick?.()}
-        aria-expanded={props.workspaceActive}
+        aria-expanded={props.workspaceActive ? 'true' : 'false'}
         class="core-breadcrumb__workspace"
       >
         <span>{props.workspace.name}</span>
         <strong
-          classList={{
+          class={{
             'core-breadcrumb__plan--paid': props.workspace.plan.trim().toLowerCase() !== 'trial',
           }}
         >
@@ -529,9 +544,9 @@ function Breadcrumb(props: {
         </strong>
       </button>
       <BreadcrumbSeparator />
-      <A href={props.moduleHref}>{props.moduleLabel}</A>
+      <a href={props.moduleHref} link>{props.moduleLabel}</a>
       <BreadcrumbSeparator />
-      <A href={props.tabHref} class="core-breadcrumb__muted">{props.tabLabel}</A>
+      <a href={props.tabHref} link class="core-breadcrumb__muted">{props.tabLabel}</a>
     </div>
   )
 }
@@ -609,12 +624,15 @@ function WorkspaceSwitcher(props: {
   const [error, setError] = createSignal<string | null>(null)
   const [switchingId, setSwitchingId] = createSignal<string | null>(null)
 
-  onMount(() => {
-    listOrganizations()
-      .then(setOrganizations)
-      .catch(() => setError(i18n.tr('Kunne ikke laste arbeidsområder.', 'Could not load workspaces.')))
-      .finally(() => setLoading(false))
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      listOrganizations()
+        .then(setOrganizations)
+        .catch(() => setError(i18n.tr('Kunne ikke laste arbeidsområder.', 'Could not load workspaces.')))
+        .finally(() => setLoading(false))
+    },
+  )
 
   const switchOrganization = async (organizationId: string) => {
     if (switchingId()) return
@@ -648,10 +666,10 @@ function WorkspaceSwitcher(props: {
             return (
               <button
                 type="button"
-                aria-pressed={active()}
+                aria-pressed={active() ? 'true' : 'false'}
                 disabled={Boolean(switchingId())}
                 onClick={() => void switchOrganization(organization.id)}
-                classList={{
+                class={{
                   'core-workspace-switcher__row': true,
                   'core-workspace-switcher__row--active': active(),
                 }}
@@ -677,10 +695,10 @@ function WorkspaceSwitcher(props: {
       </Show>
 
       <Show when={props.canManageWorkspace}>
-        <A href="/settings/workspace" onClick={props.onClose} class="core-workspace-switcher__manage">
+        <a href="/settings/workspace" link onClick={props.onClose} class="core-workspace-switcher__manage">
           <Building2 class="size-3.5" />
           {i18n.tr('Administrer arbeidsområder og medlemmer', 'Manage workspaces and members')}
-        </A>
+        </a>
       </Show>
     </div>
   )

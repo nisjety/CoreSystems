@@ -24,7 +24,7 @@ import {
   UsersRound,
   Workflow,
   Zap,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   ChatbotVisual,
   EcommerceVisual,

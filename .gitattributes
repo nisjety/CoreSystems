@@ -1,0 +1,8 @@
+# Shell scripts are checked out on Windows machines with core.autocrlf=true
+# and get silently rewritten to CRLF, which then get COPY'd verbatim into
+# Linux Docker images as docker-entrypoint.sh. The container's shell chokes
+# on the trailing \r (e.g. `set -e` becomes `set -e\r`, producing
+# "illegal option --" or "bad interpreter" and a crash-loop) — found the hard
+# way across every plane's entrypoint scripts. Force LF regardless of local
+# autocrlf settings so this cannot recur on a fresh Windows checkout.
+*.sh text eol=lf

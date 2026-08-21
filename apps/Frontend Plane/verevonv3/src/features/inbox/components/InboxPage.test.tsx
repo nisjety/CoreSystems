@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import InboxPage from '@/features/inbox/components/InboxPage'
 import {
@@ -366,13 +367,17 @@ function mockInboxGateway() {
 }
 
 function renderInbox(path = '/inbox') {
-  window.history.pushState(null, '', path)
-
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/inbox" component={InboxPage} />
-    </Router>
-  ))
+  // memoryHistory is isolated from window.location by design (unlike the old
+  // Router's default browser-history integration) — a test that needs to
+  // observe where navigate() sent the app must read this history handle
+  // instead of the (untouched) global location.
+  const history = memoryHistory(path)
+  const TestRouter = createRouter({
+    routes: [{ path: '/inbox', component: InboxPage }],
+    history,
+    explicitLinks: true,
+  })
+  return { ...render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>), history }
 }
 
 afterEach(() => {
@@ -881,6 +886,11 @@ describe('InboxPage', () => {
       expect(actionCall).toBeTruthy()
       expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
         actionId: 'tickets.create',
+        // executeAction() always stamps a client-generated idempotency key
+        // onto every /api/v1/actions/execute request (action-client.ts) —
+        // the same contract InboxAside.test.tsx already asserts for its
+        // actions.
+        idempotencyKey: expect.any(String),
         input: {
           conversationId: conversationSummary.id,
           priority: 'high',
@@ -898,7 +908,7 @@ describe('InboxPage', () => {
   })
 
   it('creates a social follow-up draft from the selected conversation and opens the calendar', async () => {
-    renderInbox()
+    const { history } = renderInbox()
 
     const ticketList = await screen.findByRole('list', { name: /saker/i })
     fireEvent.click(within(ticketList).getByRole('button', { name: /order marked delivered but missing/i }))
@@ -909,8 +919,13 @@ describe('InboxPage', () => {
     await waitFor(() => {
       const storedDraft = window.sessionStorage.getItem('verevon.social.pendingDraft')
       expect(storedDraft).toContain('social_inbox_conv_order_missing')
-      expect(window.location.pathname).toBe('/social/calendar')
-      expect(window.location.search).toContain('source=inbox')
+      // The test router's memoryHistory is isolated from window.location by
+      // design (unlike the old Router's default browser-history
+      // integration), so the navigated-to path is read off the history
+      // handle instead of the untouched global location.
+      const destination = history.get()
+      expect(destination).toContain('/social/calendar')
+      expect(destination).toContain('source=inbox')
     })
 
     const socialCall = vi.mocked(fetch).mock.calls.find(([input]) =>
@@ -932,7 +947,10 @@ describe('InboxPage', () => {
     // outbound receipt.
     await screen.findByText(/my package says it was delivered yesterday/i)
     const composer = await screen.findByRole('textbox', { name: /svar til maya solberg/i })
+    // send() reads props.replyText synchronously — flush the input's signal
+    // write before the click or send() sees the stale, empty text and bails.
     fireEvent.input(composer, { target: { value: submittedReply.body_text } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
 
     expect(await screen.findByText('Svar sendt.')).toBeTruthy()
@@ -940,6 +958,7 @@ describe('InboxPage', () => {
     expect(await screen.findByText(/sendt til microsoft; leverandøren har akseptert forespørselen/i)).toBeTruthy()
     expect(screen.queryByText(/levering er bekreftet/i)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: /more conversation actions|flere samtalehandlinger/i }))
+    flush()
     fireEvent.click(screen.getByRole('menuitem', { name: /show delivery activity|vis leveringsaktivitet/i }))
     expect(await screen.findByText(/sendt til microsoft; leverandøren godtok forespørselen/i)).toBeTruthy()
     expect(screen.queryByText(/delivery is confirmed/i)).toBeNull()
@@ -1014,8 +1033,15 @@ describe('InboxPage', () => {
 
     const composer = await screen.findByRole('textbox', { name: /svar til maya solberg/i })
     fireEvent.focus(composer)
+    flush()
+    // The composer's replyText is a Solid signal — its onBlur handler reads
+    // props.replyText synchronously, so the input's write must be committed
+    // (flush()) before blur fires or persistDraft() sees the stale, empty
+    // text and takes the "remove draft" branch instead of saving.
     fireEvent.input(composer, { target: { value: 'Hold this draft while the claim resolves.' } })
+    flush()
     fireEvent.blur(composer)
+    flush()
 
     expect(vi.mocked(fetch).mock.calls.some(([input, init]) =>
       String(input).endsWith(`/api/v1/inbox/conversations/${conversationSummary.id}/draft-lease`)
@@ -1135,7 +1161,10 @@ describe('InboxPage', () => {
     fireEvent.click(within(ticketList).getByRole('button', { name: /order marked delivered but missing/i }))
 
     const composer = await screen.findByRole('textbox', { name: /svar til maya solberg/i })
+    // send() reads props.replyText synchronously — flush the input's signal
+    // write before the click or send() sees the stale, empty text and bails.
     fireEvent.input(composer, { target: { value: submittedReply.body_text } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /^send$/i }))
 
     expect(await screen.findByText(/vi kan ikke bekrefte om svaret ble sendt.*ikke send på nytt automatisk/i)).toBeTruthy()

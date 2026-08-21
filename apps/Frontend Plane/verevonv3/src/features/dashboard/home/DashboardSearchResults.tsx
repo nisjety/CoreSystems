@@ -1,6 +1,5 @@
 
-import { A } from '@solidjs/router'
-import { ExternalLink, Layers, Loader2, X } from 'lucide-solid'
+import { ExternalLink, Layers, Loader2, X } from '@/shared/icons'
 import { createSignal, For, Match, Show, Switch } from 'solid-js'
 import type { NavbarSearchResult } from '@/shared/api/navbar-client'
 import { safeHostname, type ImageHit, type PreviewResult, type VideoHit } from '@/shared/api/search-client'
@@ -25,7 +24,7 @@ export function SearchResultCard(props: {
   const highlights = () => (props.result.highlights ?? []).filter((passage) => passage.trim().length > 0).slice(0, 2)
 
   return (
-    <article classList={{ 'dashboard-xresult': true, 'dashboard-xresult--selected': props.selected }}>
+    <article class={{ 'dashboard-xresult': true, 'dashboard-xresult--selected': Boolean(props.selected) }}>
       <div class="dashboard-xresult__grid">
         <div class="dashboard-xresult__main">
           <span class="dashboard-xresult__num">{props.index + 1}</span>
@@ -338,7 +337,7 @@ export function VerevonResultsSection(props: { loading: boolean; results: Navbar
           <div class="dashboard-xsearch-verevon__list">
             <For each={props.results}>
               {(result) => (
-                <A href={result.href || '/knowledge'} class="dashboard-xsearch-verevon__item">
+                <a href={result.href || '/knowledge'} link class="dashboard-xsearch-verevon__item">
                   <span class="dashboard-xsearch-verevon__badge" aria-hidden="true">V</span>
                   <span class="dashboard-xsearch-verevon__body">
                     <span class="dashboard-xsearch-verevon__title">{result.label}</span>
@@ -349,7 +348,7 @@ export function VerevonResultsSection(props: { loading: boolean; results: Navbar
                   <Show when={result.source}>
                     <span class="dashboard-xsearch-verevon__source">{result.source}</span>
                   </Show>
-                </A>
+                </a>
               )}
             </For>
           </div>

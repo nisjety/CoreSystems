@@ -14,14 +14,17 @@ describe('action registry', () => {
     }
   })
 
-  it('includes actions in compact model context packs', () => {
+  it('reports view and redaction policy in compact model context packs', () => {
     const pack = buildModelContextPack({
       route: '/knowledge',
       visibleItems: [{ type: 'source', id: 'src_website', label: 'Website crawl', status: 'stale' }],
     })
 
     expect(pack.currentView).toBe('knowledge')
-    expect(pack.availableActions).toContain('knowledge.recrawl_source')
+    // Model eligibility is fail-closed (see model-eligibility.ts) until
+    // Capability Core binds a governed operation to the agent runtime, so no
+    // registry action -- knowledge.recrawl_source included -- is exposed yet.
+    expect(pack.availableActions).toEqual([])
     expect(pack.redactionPolicy).toBe('ids-and-summaries-only')
   })
 

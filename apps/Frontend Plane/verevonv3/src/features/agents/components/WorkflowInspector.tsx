@@ -6,9 +6,9 @@ import {
   Pencil,
   Plus,
   X,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { For } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+import { Dynamic } from '@solidjs/web'
 import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { WorkflowBrandMark } from '@/features/agents/components/WorkflowBrandMark'

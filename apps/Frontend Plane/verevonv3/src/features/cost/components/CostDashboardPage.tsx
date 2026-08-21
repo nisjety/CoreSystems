@@ -1,6 +1,7 @@
-import { createResource, For, Show, type JSX } from 'solid-js'
-import { A } from '@solidjs/router'
-import { ArrowLeft, Coins, Receipt, Activity, Tags } from 'lucide-solid'
+import { For, Show } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { ArrowLeft, Coins, Receipt, Activity, Tags } from '@/shared/icons'
 import {
   getCostSummary,
   listCostEntries,
@@ -39,9 +40,9 @@ export default function CostDashboardPage() {
     <div class="verevon-cost">
       <style>{COST_CSS}</style>
       <header class="verevon-cost__topbar">
-        <A href="/agents" class="verevon-cost__back" aria-label="Back to agents">
+        <a href="/agents" link class="verevon-cost__back" aria-label="Back to agents">
           <ArrowLeft size={16} />
-        </A>
+        </a>
         <div>
           <p class="verevon-cost__eyebrow">
             <Coins size={13} strokeWidth={2.1} /> Cost &amp; usage
@@ -167,7 +168,7 @@ function Stat(props: { icon: JSX.Element; label: string; value: string; loading:
       <span class="verevon-cost__stat-label">
         {props.icon} {props.label}
       </span>
-      <strong class="verevon-cost__stat-value" classList={{ 'verevon-cost__stat-value--loading': props.loading }}>
+      <strong class={['verevon-cost__stat-value', { 'verevon-cost__stat-value--loading': props.loading }]}>
         {props.value}
       </strong>
     </div>

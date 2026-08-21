@@ -17,10 +17,8 @@ import {
   Presentation,
   WandSparkles,
   type LucideProps,
-} from 'lucide-solid'
-import {
-  type JSX,
-} from 'solid-js'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 
 export type ComposerToolId = DashboardComposerSubmitPayload['tools'][number]
 export type ComposerAttachment = DashboardComposerSubmitPayload['attachments'][number]

@@ -1,4 +1,4 @@
-import { createMemo, createSignal, For, onMount, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
@@ -128,9 +128,12 @@ export default function AccountSettingsPage() {
     }
   }
 
-  onMount(() => {
-    void loadAccount()
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      void loadAccount()
+    },
+  )
 
   const updateField = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }))

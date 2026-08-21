@@ -1,4 +1,4 @@
-import { A, useNavigate } from "@solidjs/router";
+import { useNavigate } from "@solidjs/router";
 import {
 	AlignCenter,
 	AlignJustify,
@@ -39,13 +39,12 @@ import {
 	X,
 	Zap,
 	type LucideProps,
-} from "lucide-solid";
+} from "@/shared/icons";
 import {
-	batch,
 	createEffect,
 	createMemo,
-	createResource,
 	createSignal,
+	flush,
 	For,
 	Match,
 	onCleanup,
@@ -53,9 +52,9 @@ import {
 	Switch,
 	untrack,
 	type Component,
-	type JSX,
 } from "solid-js";
-import { Dynamic, Portal } from "solid-js/web";
+import { Dynamic, Portal, type JSX } from "@solidjs/web";
+import { createResource } from "@/shared/lib/create-resource-compat";
 import { dictateAudioBlob } from "@/shared/api/audio-client";
 import {
 	actionKey,
@@ -719,73 +718,89 @@ export function DashboardComposer(props: {
 		);
 	};
 
-	createEffect(() => {
-		const element = textareaRef;
-		const message = props.message;
-		if (!element) return;
-		element.style.height = "auto";
-		const naturalH = element.scrollHeight;
-		const overflows = naturalH > TEXTAREA_AUTO_MAX_PX;
-		setHasOverflow(overflows);
-		if (textareaExpanded()) {
-			const maxH = Math.floor(window.innerHeight * 0.5);
-			element.style.height = `${Math.min(naturalH, maxH)}px`;
-			element.style.overflowY = naturalH > maxH ? "auto" : "hidden";
-		} else {
-			element.style.height = `${overflows ? TEXTAREA_AUTO_MAX_PX : naturalH}px`;
-			element.style.overflowY = overflows ? "auto" : "hidden";
-		}
-		void message;
-	});
+	// Judgment call: the DOM measurement (scrollHeight) is only meaningful right
+	// after the "auto" height write below it, so the read/write sequence can't be
+	// cleanly split into a side-effect-free compute. Compute instead captures the
+	// two tracked dependencies (props.message — to re-run on every keystroke —
+	// and textareaExpanded()), and the effect keeps the original read-then-write
+	// DOM sequence untouched.
+	createEffect(
+		() => ({ message: props.message, expanded: textareaExpanded() }),
+		({ expanded }) => {
+			const element = textareaRef;
+			if (!element) return;
+			element.style.height = "auto";
+			const naturalH = element.scrollHeight;
+			const overflows = naturalH > TEXTAREA_AUTO_MAX_PX;
+			setHasOverflow(overflows);
+			if (expanded) {
+				const maxH = Math.floor(window.innerHeight * 0.5);
+				element.style.height = `${Math.min(naturalH, maxH)}px`;
+				element.style.overflowY = naturalH > maxH ? "auto" : "hidden";
+			} else {
+				element.style.height = `${overflows ? TEXTAREA_AUTO_MAX_PX : naturalH}px`;
+				element.style.overflowY = overflows ? "auto" : "hidden";
+			}
+		},
+	);
 
-	createEffect(() => {
-		if (
-			!modelOpen() &&
-			!historyOpen() &&
-			!settingsOpen() &&
-			!suggestionsOpen() &&
-			!autocomplete()
-		)
-			return;
-
-		const closePanels = () => {
-			setModelOpen(false);
-			setHistoryOpen(false);
-			setSettingsOpen(false);
-			setSuggestionsOpen(false);
-			setAutocomplete(null);
-		};
-		const handlePointerDown = (event: PointerEvent) => {
-			const target = event.target;
-			if (!(target instanceof Node)) return;
-			if (composerRootRef?.contains(target)) return;
+	createEffect(
+		() => ({
+			modelOpen: modelOpen(),
+			historyOpen: historyOpen(),
+			settingsOpen: settingsOpen(),
+			suggestionsOpen: suggestionsOpen(),
+			autocomplete: autocomplete(),
+		}),
+		(state) => {
 			if (
-				target instanceof Element &&
-				target.closest('[data-composer-floating-panel="true"]')
+				!state.modelOpen &&
+				!state.historyOpen &&
+				!state.settingsOpen &&
+				!state.suggestionsOpen &&
+				!state.autocomplete
 			)
 				return;
-			if (
-				target instanceof Element &&
-				target.closest('[data-dashboard-modal="true"]')
-			)
-				return;
-			closePanels();
-		};
-		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.key === "Escape") closePanels();
-		};
 
-		document.addEventListener("pointerdown", handlePointerDown, true);
-		document.addEventListener("keydown", handleKeyDown);
-		onCleanup(() => {
-			document.removeEventListener(
-				"pointerdown",
-				handlePointerDown,
-				true,
-			);
-			document.removeEventListener("keydown", handleKeyDown);
-		});
-	});
+			const closePanels = () => {
+				setModelOpen(false);
+				setHistoryOpen(false);
+				setSettingsOpen(false);
+				setSuggestionsOpen(false);
+				setAutocomplete(null);
+			};
+			const handlePointerDown = (event: PointerEvent) => {
+				const target = event.target;
+				if (!(target instanceof Node)) return;
+				if (composerRootRef?.contains(target)) return;
+				if (
+					target instanceof Element &&
+					target.closest('[data-composer-floating-panel="true"]')
+				)
+					return;
+				if (
+					target instanceof Element &&
+					target.closest('[data-dashboard-modal="true"]')
+				)
+					return;
+				closePanels();
+			};
+			const handleKeyDown = (event: KeyboardEvent) => {
+				if (event.key === "Escape") closePanels();
+			};
+
+			document.addEventListener("pointerdown", handlePointerDown, true);
+			document.addEventListener("keydown", handleKeyDown);
+			return () => {
+				document.removeEventListener(
+					"pointerdown",
+					handlePointerDown,
+					true,
+				);
+				document.removeEventListener("keydown", handleKeyDown);
+			};
+		},
+	);
 
 	const addFiles = (nextFiles: FileList | File[]) => {
 		const incoming = Array.from(nextFiles);
@@ -972,7 +987,7 @@ export function DashboardComposer(props: {
 	};
 
 	const closeSecondaryPanels = () => {
-		batch(() => {
+		flush(() => {
 			setHistoryOpen(false);
 			setSettingsOpen(false);
 			setSuggestionsOpen(false);
@@ -1030,7 +1045,7 @@ export function DashboardComposer(props: {
 	};
 
 	const resetComposerDraft = () => {
-		batch(() => {
+		flush(() => {
 			props.onMessageChange("");
 			clearFiles();
 			setActiveActions([]);
@@ -1464,7 +1479,7 @@ export function DashboardComposer(props: {
 					<div class="dashboard-composer-model-wrap">
 						<button
 							type="button"
-							aria-expanded={modelOpen()}
+							aria-expanded={modelOpen() ? "true" : "false"}
 							aria-label={i18n.tr(
 								"Velg AI-modell",
 								"Choose AI model",
@@ -1497,7 +1512,7 @@ export function DashboardComposer(props: {
 												onClick={() =>
 													selectModel(mode.id)
 												}
-												classList={{
+												class={{
 													"dashboard-composer-model-menu__item--active":
 														selectedModel() ===
 														mode.id,
@@ -1567,7 +1582,7 @@ export function DashboardComposer(props: {
 																model.id,
 															)
 														}
-														classList={{
+														class={{
 															"dashboard-composer-model-menu__item--active":
 																selectedModel() ===
 																model.id,
@@ -1616,7 +1631,7 @@ export function DashboardComposer(props: {
 						</Show>
 					</div>
 
-					<A
+					<a
 						href="/agents"
 						title={i18n.tr("Opprett agent", "Create agent")}
 						class="dashboard-composer-agent-button verevon-composer-control"
@@ -1633,7 +1648,7 @@ export function DashboardComposer(props: {
 					>
 						<Sparkles class="dashboard-composer-agent-button__icon" />
 						<span>{i18n.tr("Opprett agent", "Create agent")}</span>
-					</A>
+					</a>
 				</div>
 
 				<div class="dashboard-composer-controls__right">
@@ -1877,7 +1892,7 @@ export function DashboardComposer(props: {
 								"Message Verevon",
 							)}
 							class="verevon-dashboard-textarea"
-							aria-busy={voiceRecording()}
+							aria-busy={voiceRecording() ? "true" : "false"}
 							placeholder={textareaPlaceholder(
 								modeAnnouncement(),
 								i18n,
@@ -1970,7 +1985,7 @@ export function DashboardComposer(props: {
 							</ComposerIconButton>
 							<button
 								type="button"
-								aria-pressed={browseWeb()}
+								aria-pressed={browseWeb() ? "true" : "false"}
 								aria-label={i18n.tr(
 									"Søk på nett",
 									"Browse web",
@@ -1987,7 +2002,7 @@ export function DashboardComposer(props: {
 							<Show when={props.onImageModeChange}>
 								<button
 									type="button"
-									aria-pressed={imageMode()}
+									aria-pressed={imageMode() ? "true" : "false"}
 									aria-label={i18n.tr(
 										"Generer bilde",
 										"Generate image",
@@ -2405,7 +2420,7 @@ function AutocompleteDropdown(props: {
 							props.onSelect(item);
 						}}
 						onMouseEnter={() => props.onHover(index())}
-						classList={{
+						class={{
 							"dashboard-composer-autocomplete-menu__item--active":
 								index() === props.selectedIndex,
 						}}
@@ -2550,7 +2565,7 @@ function RealtimeVoiceModal(props: {
 			class="realtime-voice-modal"
 			aria-label={props.i18n.tr("Stemmemodus", "Voice mode")}
 			data-dashboard-modal="true"
-			on:cancel={(event) => {
+			onCancel={(event: Event) => {
 				event.preventDefault();
 				close();
 			}}
@@ -3037,6 +3052,8 @@ function HistoryPanel(props: {
 															aria-pressed={
 																item.pinned ===
 																true
+																	? "true"
+																	: "false"
 															}
 															title={
 																item.pinned
@@ -3099,7 +3116,7 @@ function HistoryPanel(props: {
 				</Show>
 
 				<div class="dashboard-composer-menu-divider" />
-				<A href="/chat" onClick={props.onClose} class="verevon-menu-row">
+				<a href="/chat" link onClick={props.onClose} class="verevon-menu-row">
 					<LayoutGrid class="size-4 shrink-0" strokeWidth={1.7} />
 					<span class="verevon-menu-label">
 						{props.i18n.tr(
@@ -3107,7 +3124,7 @@ function HistoryPanel(props: {
 							"View all conversations",
 						)}
 					</span>
-				</A>
+				</a>
 			</div>
 		</div>
 	);
@@ -3435,8 +3452,9 @@ function RemoteSettingsList(props: {
 				{(manage) => (
 					<>
 						<div class="dashboard-composer-menu-divider" />
-						<A
+						<a
 							href={manage().href}
+							link
 							class="verevon-menu-row dashboard-composer-settings-link"
 						>
 							<span class="dashboard-composer-settings-item-icon">
@@ -3445,7 +3463,7 @@ function RemoteSettingsList(props: {
 							<span class="verevon-menu-label">
 								{manage().label}
 							</span>
-						</A>
+						</a>
 					</>
 				)}
 			</Show>
@@ -3517,7 +3535,7 @@ function ComposerIconButton(props: {
 		<button
 			type="button"
 			aria-label={props.label}
-			aria-pressed={props.active}
+			aria-pressed={props.active ? "true" : "false"}
 			disabled={props.disabled}
 			title={props.label}
 			onClick={() => {

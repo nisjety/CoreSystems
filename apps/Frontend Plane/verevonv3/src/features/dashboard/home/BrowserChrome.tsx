@@ -33,7 +33,7 @@ import {
   Timer,
   Trash2,
   X,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   createEffect,
   createSignal,
@@ -44,8 +44,8 @@ import {
   Show,
   Switch,
   untrack,
-  type JSX,
 } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import type {
   BrowserAction,
   BrowserActionSuggestionResponse,
@@ -328,18 +328,16 @@ function BrowserApprovalCard(props: {
   const isPending = () => approval().status === 'pending'
   return (
     <div
-      class="verevon-run-approval"
-      classList={{
+      class={['verevon-run-approval', {
         [`verevon-run-approval--${approval().status}`]: !isPending(),
-      }}
+      }]}
     >
       <div class="verevon-run-approval__head">
         <span
-          class="verevon-run-approval__badge"
-          classList={{
+          class={['verevon-run-approval__badge', {
             'verevon-run-approval__badge--granted': approval().status === 'granted',
             'verevon-run-approval__badge--denied': approval().status === 'denied' || approval().status === 'timed_out',
-          }}
+          }]}
         >
           <Show when={isPending()} fallback={approval().status === 'granted' ? <ShieldCheck class="size-3" /> : <AlertCircle class="size-3" />}>
             <Pause class="size-3" />
@@ -883,20 +881,24 @@ export function BrowserChrome(props: {
     window.setTimeout(() => setCopyState('idle'), 1800)
   }
 
-  createEffect(() => {
-    const url = session().url
-    if (url && lastObservedUrl() !== url) {
-      setAddressInput(url)
-      setLastObservedUrl(url)
-    }
-  })
+  createEffect(
+    () => ({ url: session().url, lastObserved: lastObservedUrl() }),
+    ({ url, lastObserved }) => {
+      if (url && lastObserved !== url) {
+        setAddressInput(url)
+        setLastObservedUrl(url)
+      }
+    },
+  )
 
-  createEffect(() => {
-    const sessionId = session().sessionId ?? ''
-    if (sessionId === lastDevtoolsSessionId) return
-    lastDevtoolsSessionId = sessionId
-    setDevtoolsEvents(session().devtoolsEvents)
-  })
+  createEffect(
+    () => ({ sessionId: session().sessionId ?? '', devtoolsEvents: session().devtoolsEvents }),
+    ({ sessionId, devtoolsEvents }) => {
+      if (sessionId === lastDevtoolsSessionId) return
+      lastDevtoolsSessionId = sessionId
+      setDevtoolsEvents(devtoolsEvents)
+    },
+  )
 
   // Phase 5 HITL gate: a pending browser-action approval is the highest-
   // priority surface in the whole chrome — a blocked run needs a decision
@@ -904,142 +906,165 @@ export function BrowserChrome(props: {
   // per approval key, so a user who deliberately closes the drawer again
   // isn't fought on every re-render), mirroring how AgentRunConsole's
   // approval deck scrolls itself into view.
-  createEffect(() => {
-    const approval = pendingApproval()
-    if (!approval || approval.key === lastAutoOpenedApprovalKey) return
-    lastAutoOpenedApprovalKey = approval.key
-    setChrome((state) => (state.evidenceOpen ? state : { ...state, evidenceOpen: true, popover: null }))
-  })
+  createEffect(
+    () => pendingApproval(),
+    (approval) => {
+      if (!approval || approval.key === lastAutoOpenedApprovalKey) return
+      lastAutoOpenedApprovalKey = approval.key
+      setChrome((state) => (state.evidenceOpen ? state : { ...state, evidenceOpen: true, popover: null }))
+    },
+  )
 
-  createEffect(() => {
-    const cachedEvents = session().devtoolsEvents
-    if (cachedEvents.length === 0) return
-    setDevtoolsEvents((current) => {
-      const bySequence = new Map<number, BrowserDevtoolsEvent>()
-      for (const event of current) bySequence.set(event.sequence, event)
-      for (const event of cachedEvents) bySequence.set(event.sequence, event)
-      return [...bySequence.values()]
-        .sort((a, b) => a.sequence - b.sequence)
-        .slice(-512)
-    })
-  })
+  createEffect(
+    () => session().devtoolsEvents,
+    (cachedEvents) => {
+      if (cachedEvents.length === 0) return
+      setDevtoolsEvents((current) => {
+        const bySequence = new Map<number, BrowserDevtoolsEvent>()
+        for (const event of current) bySequence.set(event.sequence, event)
+        for (const event of cachedEvents) bySequence.set(event.sequence, event)
+        return [...bySequence.values()]
+          .sort((a, b) => a.sequence - b.sequence)
+          .slice(-512)
+      })
+    },
+  )
 
-  createEffect(() => {
-    const transportKey = `${session().liveFrameWsUrl ?? ''}|${session().liveFrameStreamUrl ?? ''}`
-    if (transportKey === lastLiveFrameTransportKey) return
-    lastLiveFrameTransportKey = transportKey
-    setLiveFrameWsFailed(false)
-    setLiveFrameSseFailed(false)
-  })
+  createEffect(
+    () => `${session().liveFrameWsUrl ?? ''}|${session().liveFrameStreamUrl ?? ''}`,
+    (transportKey) => {
+      if (transportKey === lastLiveFrameTransportKey) return
+      lastLiveFrameTransportKey = transportKey
+      setLiveFrameWsFailed(false)
+      setLiveFrameSseFailed(false)
+    },
+  )
 
-  createEffect(() => {
-    const selected = selectedTimelineStep()
-    if (selected === null) return
-    if (!session().timeline.some((entry) => entry.step === selected)) {
-      setSelectedTimelineStep(null)
-    }
-  })
-
-  createEffect(() => {
-    if (devtoolsTab() === 'vision' && !session().visualObservationArtifactId) {
-      setDevtoolsTab('dom')
-    }
-  })
-
-  createEffect(() => {
-    if (controlsDisabled() || !queuedWheelAction) return
-    clearQueuedWheelTimer()
-    flushQueuedWheelAction()
-  })
-
-  createEffect(() => {
-    if (!pollingLiveFrameAvailable()) {
-      clearLiveFrameTimer()
-      return
-    }
-    setLiveFrameTick((tick) => tick + 1)
-  })
-
-  createEffect(() => {
-    const src = liveFrameWsSrc()
-    closeLiveFrameSocket()
-    setStreamFrameSrc(null)
-    if (!src) return
-
-    const generation = liveFrameSocketGeneration
-    const socket = new WebSocket(src)
-    liveFrameSocket = socket
-    setLiveFrameWsConnected(false)
-    setLiveFrameWsFailed(false)
-    setLiveFrameSseFailed(false)
-
-    socket.onopen = () => setLiveFrameWsConnected(true)
-    socket.onmessage = (event) => {
-      try {
-        handleBrowserWsMessage(JSON.parse(String(event.data)) as BrowserWsServerMessage)
-      } catch {
-        // Ignore malformed socket frames; the transport fallback remains available.
+  createEffect(
+    () => ({ selected: selectedTimelineStep(), timeline: session().timeline }),
+    ({ selected, timeline }) => {
+      if (selected === null) return
+      if (!timeline.some((entry) => entry.step === selected)) {
+        setSelectedTimelineStep(null)
       }
-    }
-    socket.onerror = () => {
-      if (generation !== liveFrameSocketGeneration) return
-      setLiveFrameWsFailed(true)
-      clearWsActionPending()
-    }
-    socket.onclose = () => {
-      if (generation !== liveFrameSocketGeneration) return
+    },
+  )
+
+  createEffect(
+    () => ({ tab: devtoolsTab(), hasVisual: Boolean(session().visualObservationArtifactId) }),
+    ({ tab, hasVisual }) => {
+      if (tab === 'vision' && !hasVisual) {
+        setDevtoolsTab('dom')
+      }
+    },
+  )
+
+  createEffect(
+    () => controlsDisabled(),
+    (disabled) => {
+      if (disabled || !queuedWheelAction) return
+      clearQueuedWheelTimer()
+      flushQueuedWheelAction()
+    },
+  )
+
+  createEffect(
+    () => pollingLiveFrameAvailable(),
+    (available) => {
+      if (!available) {
+        clearLiveFrameTimer()
+        return
+      }
+      setLiveFrameTick((tick) => tick + 1)
+    },
+  )
+
+  createEffect(
+    () => liveFrameWsSrc(),
+    (src) => {
+      closeLiveFrameSocket()
+      setStreamFrameSrc(null)
+      if (!src) return
+
+      const generation = liveFrameSocketGeneration
+      const socket = new WebSocket(src)
+      liveFrameSocket = socket
       setLiveFrameWsConnected(false)
-      clearWsActionPending()
-      setLiveFrameWsFailed(true)
-    }
+      setLiveFrameWsFailed(false)
+      setLiveFrameSseFailed(false)
 
-    onCleanup(closeLiveFrameSocket)
-  })
-
-  createEffect(() => {
-    const src = liveFrameStreamSrc()
-    closeLiveFrameSource()
-    setStreamFrameSrc(null)
-    if (!src) return
-
-    const source = new EventSource(src)
-    liveFrameSource = source
-    setLiveFrameSseFailed(false)
-    source.addEventListener('frame', (event) => {
-      try {
-        const payload = JSON.parse((event as MessageEvent<string>).data) as LiveFrameStreamPayload
-        const dataUrl = frameDataUrl(payload)
-        if (dataUrl) setStreamFrameSrc(dataUrl)
-      } catch {
-        // Ignore malformed stream frames; the fallback artifact frame remains visible.
+      socket.onopen = () => setLiveFrameWsConnected(true)
+      socket.onmessage = (event) => {
+        try {
+          handleBrowserWsMessage(JSON.parse(String(event.data)) as BrowserWsServerMessage)
+        } catch {
+          // Ignore malformed socket frames; the transport fallback remains available.
+        }
       }
-    })
-    source.addEventListener('done', () => closeLiveFrameSource())
-    source.addEventListener('error', () => {
-      setLiveFrameSseFailed(true)
+      socket.onerror = () => {
+        if (generation !== liveFrameSocketGeneration) return
+        setLiveFrameWsFailed(true)
+        clearWsActionPending()
+      }
+      socket.onclose = () => {
+        if (generation !== liveFrameSocketGeneration) return
+        setLiveFrameWsConnected(false)
+        clearWsActionPending()
+        setLiveFrameWsFailed(true)
+      }
+
+      return closeLiveFrameSocket
+    },
+  )
+
+  createEffect(
+    () => liveFrameStreamSrc(),
+    (src) => {
       closeLiveFrameSource()
-    })
-    onCleanup(closeLiveFrameSource)
-  })
+      setStreamFrameSrc(null)
+      if (!src) return
+
+      const source = new EventSource(src)
+      liveFrameSource = source
+      setLiveFrameSseFailed(false)
+      source.addEventListener('frame', (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent<string>).data) as LiveFrameStreamPayload
+          const dataUrl = frameDataUrl(payload)
+          if (dataUrl) setStreamFrameSrc(dataUrl)
+        } catch {
+          // Ignore malformed stream frames; the fallback artifact frame remains visible.
+        }
+      })
+      source.addEventListener('done', () => closeLiveFrameSource())
+      source.addEventListener('error', () => {
+        setLiveFrameSseFailed(true)
+        closeLiveFrameSource()
+      })
+      return closeLiveFrameSource
+    },
+  )
 
   onCleanup(clearQueuedWheelTimer)
   onCleanup(clearLiveFrameTimer)
   onCleanup(closeLiveFrameSource)
   onCleanup(closeLiveFrameSocket)
 
-  createEffect(() => {
-    if (!chrome().popover) return
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') closePopover()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    onCleanup(() => document.removeEventListener('keydown', onKeyDown))
-  })
+  createEffect(
+    () => chrome().popover,
+    (popover) => {
+      if (!popover) return
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') closePopover()
+      }
+      document.addEventListener('keydown', onKeyDown)
+      return () => document.removeEventListener('keydown', onKeyDown)
+    },
+  )
 
   return (
     <div
-      class="knowledge-browser-chrome"
-      classList={{ 'knowledge-browser-chrome--compact': props.compact }}
+      class={['knowledge-browser-chrome', { 'knowledge-browser-chrome--compact': Boolean(props.compact) }]}
     >
       <div class="knowledge-browser-frame__topbar knowledge-browser-frame__topbar--minimal">
         <div class="knowledge-browser-frame__window">
@@ -1062,9 +1087,8 @@ export function BrowserChrome(props: {
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={selectedTimelineStep() === null && tab.active}
-                    class="knowledge-browser-tab"
-                    classList={{ 'knowledge-browser-tab--active': selectedTimelineStep() === null && tab.active }}
+                    aria-selected={selectedTimelineStep() === null && tab.active ? 'true' : 'false'}
+                    class={['knowledge-browser-tab', { 'knowledge-browser-tab--active': selectedTimelineStep() === null && tab.active }]}
                     title={`Live · ${liveTabLabel(tab)}`}
                     onClick={() => {
                       setSelectedTimelineStep(null)
@@ -1082,9 +1106,8 @@ export function BrowserChrome(props: {
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={selectedTimelineStep() === entry.step}
-                    class="knowledge-browser-tab"
-                    classList={{ 'knowledge-browser-tab--active': selectedTimelineStep() === entry.step }}
+                    aria-selected={selectedTimelineStep() === entry.step ? 'true' : 'false'}
+                    class={['knowledge-browser-tab', { 'knowledge-browser-tab--active': selectedTimelineStep() === entry.step }]}
                     title={`Snapshot fra steg ${entry.step} — ${snapshotTabLabel(entry)}`}
                     onClick={() => setSelectedTimelineStep((current) => (current === entry.step ? null : entry.step))}
                   >
@@ -1157,7 +1180,7 @@ export function BrowserChrome(props: {
             class="knowledge-browser-chrome__lock"
             aria-label="Profil, cookies og personvern for økten"
             aria-haspopup="dialog"
-            aria-expanded={chrome().popover === 'profile'}
+            aria-expanded={chrome().popover === 'profile' ? 'true' : 'false'}
             aria-controls={profilePopoverId}
             title="Profil, cookies og personvern"
             onClick={() => togglePopover('profile')}
@@ -1202,9 +1225,8 @@ export function BrowserChrome(props: {
           </span>
           <button
             type="button"
-            class="knowledge-browser-control-chip"
-            classList={{ 'knowledge-browser-control-chip--human': humanTakeoverActive() }}
-            aria-pressed={humanTakeoverActive()}
+            class={['knowledge-browser-control-chip', { 'knowledge-browser-control-chip--human': humanTakeoverActive() }]}
+            aria-pressed={humanTakeoverActive() ? 'true' : 'false'}
             aria-label={humanTakeoverActive() ? 'Gi nettleserkontroll tilbake til AI-agenten' : 'Ta over nettleserkontrollen manuelt'}
             title={humanTakeoverActive() ? 'Gi kontroll til AI-agenten' : 'Ta over nettleseren'}
             disabled={browserControlModeDisabled()}
@@ -1296,8 +1318,7 @@ export function BrowserChrome(props: {
           </Show>
           <Show when={loopStatus() !== 'idle'}>
             <span
-              class={`knowledge-browser-loop-chip knowledge-browser-loop-chip--${loopStatus()}`}
-              classList={{ 'knowledge-browser-loop-chip--error': Boolean(props.browserLoop?.error) }}
+              class={[`knowledge-browser-loop-chip knowledge-browser-loop-chip--${loopStatus()}`, { 'knowledge-browser-loop-chip--error': Boolean(props.browserLoop?.error) }]}
               role="status"
               aria-label="AI-loopstatus"
               title={loopTitle()}
@@ -1314,10 +1335,9 @@ export function BrowserChrome(props: {
           <i class="knowledge-browser-chrome__divider" aria-hidden="true" />
           <button
             type="button"
-            class="knowledge-browser-toolbtn"
-            classList={{ 'knowledge-browser-toolbtn--on': chrome().actionsOpen }}
+            class={['knowledge-browser-toolbtn', { 'knowledge-browser-toolbtn--on': chrome().actionsOpen }]}
             aria-label="Vis eller skjul manuelle nettleserhandlinger"
-            aria-expanded={chrome().actionsOpen}
+            aria-expanded={chrome().actionsOpen ? 'true' : 'false'}
             aria-controls={actionbarId}
             title="Manuelle handlinger"
             disabled={!isLive()}
@@ -1327,10 +1347,9 @@ export function BrowserChrome(props: {
           </button>
           <button
             type="button"
-            class="knowledge-browser-toolbtn"
-            classList={{ 'knowledge-browser-toolbtn--on': chrome().devtoolsOpen }}
+            class={['knowledge-browser-toolbtn', { 'knowledge-browser-toolbtn--on': chrome().devtoolsOpen }]}
             aria-label="Vis eller skjul DevTools-panelet"
-            aria-expanded={chrome().devtoolsOpen}
+            aria-expanded={chrome().devtoolsOpen ? 'true' : 'false'}
             aria-controls={devtoolsId}
             title="DevTools — DOM, console, network"
             disabled={!isLive()}
@@ -1345,10 +1364,9 @@ export function BrowserChrome(props: {
           </button>
           <button
             type="button"
-            class="knowledge-browser-toolbtn"
-            classList={{ 'knowledge-browser-toolbtn--on': chrome().evidenceOpen }}
+            class={['knowledge-browser-toolbtn', { 'knowledge-browser-toolbtn--on': chrome().evidenceOpen }]}
             aria-label="Vis eller skjul tidslinje og evidens"
-            aria-expanded={chrome().evidenceOpen}
+            aria-expanded={chrome().evidenceOpen ? 'true' : 'false'}
             aria-controls={evidenceId}
             title="Tidslinje og evidens"
             disabled={!isLive()}
@@ -1364,7 +1382,7 @@ export function BrowserChrome(props: {
             class="knowledge-browser-toolbtn"
             aria-label="Flere valg"
             aria-haspopup="menu"
-            aria-expanded={chrome().popover === 'overflow'}
+            aria-expanded={chrome().popover === 'overflow' ? 'true' : 'false'}
             aria-controls={overflowPopoverId}
             title="Flere valg"
             onClick={() => togglePopover('overflow')}
@@ -1416,7 +1434,7 @@ export function BrowserChrome(props: {
               <div class="knowledge-browser-popover__row">
                 <span>Cookies</span>
                 <strong
-                  classList={{ 'knowledge-browser-popover__value--persistent': session().profileStorage === 'persistent' }}
+                  class={{ 'knowledge-browser-popover__value--persistent': session().profileStorage === 'persistent' }}
                 >
                   {session().profileStorage === 'persistent' ? 'Lagres i profilen' : 'Lagres ikke'}
                 </strong>
@@ -1478,7 +1496,7 @@ export function BrowserChrome(props: {
                     <ul class="knowledge-browser-profile-list">
                       <For each={manager().profiles} fallback={<li class="knowledge-browser-empty">Ingen lagrede profiler ennå.</li>}>
                         {(item) => (
-                          <li classList={{ 'knowledge-browser-profile-list__item--active': item.profile_id === manager().selectedProfileId }}>
+                          <li class={{ 'knowledge-browser-profile-list__item--active': item.profile_id === manager().selectedProfileId }}>
                             <button
                               type="button"
                               class="knowledge-browser-profile-list__select"
@@ -1749,8 +1767,7 @@ export function BrowserChrome(props: {
       </Show>
 
       <div
-        class="knowledge-browser-chrome__body"
-        classList={{ 'knowledge-browser-chrome__body--devtools': isLive() && chrome().devtoolsOpen }}
+        class={['knowledge-browser-chrome__body', { 'knowledge-browser-chrome__body--devtools': isLive() && chrome().devtoolsOpen }]}
       >
         <Show when={isLive()} fallback={props.children}>
           <div class="knowledge-browser-chrome__page" aria-label="Gjengitt nettleserside">
@@ -1852,7 +1869,7 @@ export function BrowserChrome(props: {
                   class="knowledge-browser-screenshot knowledge-browser-screenshot--interactive"
                   aria-label="Interaktiv Chromium-side. Klikk, scroll eller fokuser for tastatur."
                   role="application"
-                  tabIndex={0}
+                  tabindex={0}
                   onClick={runViewportClick}
                   onKeyDown={runViewportKey}
                   onWheel={runViewportWheel}
@@ -1891,9 +1908,8 @@ export function BrowserChrome(props: {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={devtoolsTab() === 'dom'}
-                  class="knowledge-browser-devtools__tab"
-                  classList={{ 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'dom' }}
+                  aria-selected={devtoolsTab() === 'dom' ? 'true' : 'false'}
+                  class={['knowledge-browser-devtools__tab', { 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'dom' }]}
                   onClick={() => setDevtoolsTab('dom')}
                 >
                   <Code2 class="size-3.5" /> DOM <em>{session().nodeCount ?? session().domNodes.length}</em>
@@ -1901,9 +1917,8 @@ export function BrowserChrome(props: {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={devtoolsTab() === 'console'}
-                  class="knowledge-browser-devtools__tab"
-                  classList={{ 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'console' }}
+                  aria-selected={devtoolsTab() === 'console' ? 'true' : 'false'}
+                  class={['knowledge-browser-devtools__tab', { 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'console' }]}
                   onClick={() => setDevtoolsTab('console')}
                 >
                   <Terminal class="size-3.5" /> Console <em>{liveConsoleEntries().length}</em>
@@ -1911,9 +1926,8 @@ export function BrowserChrome(props: {
                 <button
                   type="button"
                   role="tab"
-                  aria-selected={devtoolsTab() === 'network'}
-                  class="knowledge-browser-devtools__tab"
-                  classList={{ 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'network' }}
+                  aria-selected={devtoolsTab() === 'network' ? 'true' : 'false'}
+                  class={['knowledge-browser-devtools__tab', { 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'network' }]}
                   onClick={() => setDevtoolsTab('network')}
                 >
                   <Network class="size-3.5" /> Network <em>{liveNetworkEntries().length}</em>
@@ -1922,9 +1936,8 @@ export function BrowserChrome(props: {
                   <button
                     type="button"
                     role="tab"
-                    aria-selected={devtoolsTab() === 'vision'}
-                    class="knowledge-browser-devtools__tab"
-                    classList={{ 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'vision' }}
+                    aria-selected={devtoolsTab() === 'vision' ? 'true' : 'false'}
+                    class={['knowledge-browser-devtools__tab', { 'knowledge-browser-devtools__tab--active': devtoolsTab() === 'vision' }]}
                     onClick={() => setDevtoolsTab('vision')}
                   >
                     <Eye class="size-3.5" /> Vision
@@ -2108,7 +2121,7 @@ export function BrowserChrome(props: {
             <div class="knowledge-browser-timeline" aria-label="Nettleserhistorikk">
               <button
                 type="button"
-                classList={{ 'knowledge-browser-timeline__step--active': selectedTimelineStep() === null }}
+                class={{ 'knowledge-browser-timeline__step--active': selectedTimelineStep() === null }}
                 onClick={() => setSelectedTimelineStep(null)}
               >
                 <span>live</span>
@@ -2118,7 +2131,7 @@ export function BrowserChrome(props: {
                 {(entry) => (
                   <button
                     type="button"
-                    classList={{ 'knowledge-browser-timeline__step--active': selectedTimelineStep() === entry.step }}
+                    class={{ 'knowledge-browser-timeline__step--active': selectedTimelineStep() === entry.step }}
                     title="Vis stegdetaljer med evidens"
                     onClick={() => setSelectedTimelineStep((current) => (current === entry.step ? null : entry.step))}
                   >

@@ -10,7 +10,7 @@ import {
   Target,
   XCircle,
   type LucideProps,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
 import type { LiveKnowledgePayload, LiveKnowledgeSource } from '@/shared/api/knowledge-live-client'
 import type {

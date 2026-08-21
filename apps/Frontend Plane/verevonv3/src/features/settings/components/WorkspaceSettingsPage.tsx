@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import RouterPolicyPage from '@/features/router-policy/components/RouterPolicyPage'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { OrgDeletionDangerZone } from '@/features/settings/components/OrgDeletionDangerZone'
@@ -299,13 +299,16 @@ export function VerevonWorkspaceSettingsPage(props: {
     }
   }
 
-  createEffect(() => {
-    if (section() !== 'billing') return
+  createEffect(
+    () => section(),
+    (currentSection) => {
+      if (currentSection !== 'billing') return
 
-    const controller = new AbortController()
-    void refreshBillingAccount(controller.signal)
-    onCleanup(() => controller.abort())
-  })
+      const controller = new AbortController()
+      void refreshBillingAccount(controller.signal)
+      return () => controller.abort()
+    },
+  )
 
   const billingStatusCards = (): StatusCard[] => [
     {
@@ -559,31 +562,33 @@ function MembersSection(props: { orgId: string | null }) {
     setMembers(normalizeMemberList(data))
   }
 
-  createEffect(() => {
-    const orgId = props.orgId
-    setMembers([])
-    setError(null)
+  createEffect(
+    () => props.orgId,
+    (orgId) => {
+      setMembers([])
+      setError(null)
 
-    if (!orgId) {
-      setLoading(false)
-      return
-    }
-
-    setLoading(true)
-    const controller = new AbortController()
-
-    loadMembers(orgId, controller.signal)
-      .then(() => {
+      if (!orgId) {
         setLoading(false)
-      })
-      .catch((reason: unknown) => {
-        if (reason instanceof Error && reason.name === 'AbortError') return
-        setError(i18n.tr('Kunne ikke laste medlemmer.', 'Could not load members.'))
-        setLoading(false)
-      })
+        return
+      }
 
-    onCleanup(() => controller.abort())
-  })
+      setLoading(true)
+      const controller = new AbortController()
+
+      loadMembers(orgId, controller.signal)
+        .then(() => {
+          setLoading(false)
+        })
+        .catch((reason: unknown) => {
+          if (reason instanceof Error && reason.name === 'AbortError') return
+          setError(i18n.tr('Kunne ikke laste medlemmer.', 'Could not load members.'))
+          setLoading(false)
+        })
+
+      return () => controller.abort()
+    },
+  )
 
   const invite = async () => {
     const orgId = props.orgId
@@ -821,25 +826,31 @@ function PlatformUsersSection() {
   const [loading, setLoading] = createSignal(true)
   const [error, setError] = createSignal<string | null>(null)
 
-  createEffect(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    requestJson<ListUsersResponse | PlatformUser[]>(
-      '/api/v1/admin/users?limit=500',
-      { signal: controller.signal },
-    )
-      .then((data) => {
-        setUsers(normalizePlatformUsers(data))
-        setLoading(false)
-      })
-      .catch((reason: unknown) => {
-        if (reason instanceof Error && reason.name === 'AbortError') return
-        setError(i18n.tr('Kunne ikke laste brukere. Denne visningen krever plattform-superadministrator.', 'Could not load users. This view requires a platform super-admin.'))
-        setLoading(false)
-      })
-    onCleanup(() => controller.abort())
-  })
+  // No tracked reads here — this effect only ever runs once (mount-equivalent),
+  // so compute has nothing to read; the fetch + subscription work all lives in
+  // the effect phase.
+  createEffect(
+    () => undefined,
+    () => {
+      const controller = new AbortController()
+      setLoading(true)
+      setError(null)
+      requestJson<ListUsersResponse | PlatformUser[]>(
+        '/api/v1/admin/users?limit=500',
+        { signal: controller.signal },
+      )
+        .then((data) => {
+          setUsers(normalizePlatformUsers(data))
+          setLoading(false)
+        })
+        .catch((reason: unknown) => {
+          if (reason instanceof Error && reason.name === 'AbortError') return
+          setError(i18n.tr('Kunne ikke laste brukere. Denne visningen krever plattform-superadministrator.', 'Could not load users. This view requires a platform super-admin.'))
+          setLoading(false)
+        })
+      return () => controller.abort()
+    },
+  )
 
   return (
     <>
@@ -926,45 +937,50 @@ function BillingSection(props: {
   const apiCallLimit = () => quotaValue(props.account, 'api_calls')
   const storageLimit = () => quotaValue(props.account, 'storage_mb')
 
-  createEffect(() => {
-    const current = currentPaidPlan()
-    if (current) setSelectedPlan(current)
-  })
+  createEffect(
+    () => currentPaidPlan(),
+    (current) => {
+      if (current) setSelectedPlan(current)
+    },
+  )
 
-  onMount(() => {
-    if (typeof window === 'undefined') return
+  createEffect(
+    () => undefined,
+    () => {
+      if (typeof window === 'undefined') return
 
-    const params = new URLSearchParams(window.location.search)
-    const checkoutState = params.get('checkout')
-    const planParam = paidBillingPlan(params.get('plan')) ?? selectedPlan()
+      const params = new URLSearchParams(window.location.search)
+      const checkoutState = params.get('checkout')
+      const planParam = paidBillingPlan(params.get('plan')) ?? selectedPlan()
 
-    if (checkoutState === 'cancel') {
+      if (checkoutState === 'cancel') {
+        setSelectedPlan(planParam)
+        setMessage(i18n.tr('Betalingen ble avbrutt.', 'Payment was cancelled.'))
+        clearCheckoutParams()
+        return
+      }
+
+      if (checkoutState !== 'success') return
+
+      const paymentId = params.get('payment_id') || undefined
+      const clientSecret = params.get('payment_intent_client_secret') || undefined
+      const providerStatus = params.get('status') || 'processing'
       setSelectedPlan(planParam)
-      setMessage(i18n.tr('Betalingen ble avbrutt.', 'Payment was cancelled.'))
-      clearCheckoutParams()
-      return
-    }
 
-    if (checkoutState !== 'success') return
+      if (!paymentId && !clientSecret) {
+        setCheckoutError(i18n.tr('Betalingsreferanse mangler. Start kassen på nytt.', 'Payment reference is missing. Start checkout again.'))
+        clearCheckoutParams()
+        return
+      }
 
-    const paymentId = params.get('payment_id') || undefined
-    const clientSecret = params.get('payment_intent_client_secret') || undefined
-    const providerStatus = params.get('status') || 'processing'
-    setSelectedPlan(planParam)
-
-    if (!paymentId && !clientSecret) {
-      setCheckoutError(i18n.tr('Betalingsreferanse mangler. Start kassen på nytt.', 'Payment reference is missing. Start checkout again.'))
-      clearCheckoutParams()
-      return
-    }
-
-    void finalizeCheckout({
-      paymentId,
-      clientSecret,
-      status: providerStatus,
-      plan: planParam,
-    })
-  })
+      void finalizeCheckout({
+        paymentId,
+        clientSecret,
+        status: providerStatus,
+        plan: planParam,
+      })
+    },
+  )
 
   async function startPlanCheckout(planId: BillingPlanId) {
     const planOption = billingPlans.find((item) => item.id === planId)
@@ -1067,11 +1083,13 @@ function BillingSection(props: {
               const selected = () => selectedPlan() === billingPlan.id
               return (
                 <article
-                  class="verevon-settings-plan-row"
-                  classList={{
-                    'verevon-settings-plan-row--active': active(),
-                    'verevon-settings-plan-row--selected': selected(),
-                  }}
+                  class={[
+                    'verevon-settings-plan-row',
+                    {
+                      'verevon-settings-plan-row--active': active(),
+                      'verevon-settings-plan-row--selected': selected(),
+                    },
+                  ]}
                 >
                   <div class="verevon-settings-plan-row__copy">
                     <div>
@@ -1217,23 +1235,26 @@ function RecentSecurityEvents() {
   const [loading, setLoading] = createSignal(true)
   const [loadFailed, setLoadFailed] = createSignal(false)
 
-  onMount(() => {
-    const controller = new AbortController()
+  createEffect(
+    () => undefined,
+    () => {
+      const controller = new AbortController()
 
-    listAuditEvents({ limit: 25 }, controller.signal)
-      .then((rows) => {
-        setEvents(rows)
-        setLoading(false)
-      })
-      .catch((reason: unknown) => {
-        if (reason instanceof Error && reason.name === 'AbortError') return
-        setEvents([])
-        setLoadFailed(true)
-        setLoading(false)
-      })
+      listAuditEvents({ limit: 25 }, controller.signal)
+        .then((rows) => {
+          setEvents(rows)
+          setLoading(false)
+        })
+        .catch((reason: unknown) => {
+          if (reason instanceof Error && reason.name === 'AbortError') return
+          setEvents([])
+          setLoadFailed(true)
+          setLoading(false)
+        })
 
-    onCleanup(() => controller.abort())
-  })
+      return () => controller.abort()
+    },
+  )
 
   return (
     <Show when={!loading()} fallback={<p class="verevon-settings-panel-note">{i18n.tr('Laster sikkerhetshendelser …', 'Loading security events...')}</p>}>
@@ -1290,30 +1311,35 @@ function OrgSecuritySection() {
   const [supportAiBusy, setSupportAiBusy] = createSignal(false)
   const [supportAiError, setSupportAiError] = createSignal<string | null>(null)
 
-  onMount(async () => {
-    const id = orgId()
-    if (!id) {
-      setZdrLoaded(true)
-      setSupportAiLoaded(true)
-      return
-    }
-    try {
-      const [posture, entitled, mode] = await Promise.all([
-        getOrganizationZdr(id),
-        getOrganizationZdrEntitled(id).catch(() => false),
-        getOrganizationSupportAIMode(id),
-      ])
-      setZdr(posture)
-      setZdrEntitled(entitled)
-      setSupportAiMode(mode)
-    } catch {
-      // Fall back to the product default (off) on read failure; live retention
-      // enforcement stays fail-closed server-side regardless of this toggle.
-    } finally {
-      setZdrLoaded(true)
-      setSupportAiLoaded(true)
-    }
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      void (async () => {
+        const id = orgId()
+        if (!id) {
+          setZdrLoaded(true)
+          setSupportAiLoaded(true)
+          return
+        }
+        try {
+          const [posture, entitled, mode] = await Promise.all([
+            getOrganizationZdr(id),
+            getOrganizationZdrEntitled(id).catch(() => false),
+            getOrganizationSupportAIMode(id),
+          ])
+          setZdr(posture)
+          setZdrEntitled(entitled)
+          setSupportAiMode(mode)
+        } catch {
+          // Fall back to the product default (off) on read failure; live retention
+          // enforcement stays fail-closed server-side regardless of this toggle.
+        } finally {
+          setZdrLoaded(true)
+          setSupportAiLoaded(true)
+        }
+      })()
+    },
+  )
 
   async function toggleZdr(next: boolean) {
     const id = orgId()
@@ -1478,19 +1504,21 @@ function IntegrationsSection() {
     }
   }
 
-  createEffect(() => {
-    const targetOrgId = orgId()
-    const generation = ++refreshGeneration
+  createEffect(
+    () => orgId(),
+    (targetOrgId) => {
+      const generation = ++refreshGeneration
 
-    for (const source of eventSources) source.close()
-    eventSources.splice(0, eventSources.length)
-    setSummary(null)
-    setSyncProgress({})
-    setNotice(null)
-    setLoadFailed(false)
+      for (const source of eventSources) source.close()
+      eventSources.splice(0, eventSources.length)
+      setSummary(null)
+      setSyncProgress({})
+      setNotice(null)
+      setLoadFailed(false)
 
-    void refresh(targetOrgId, generation)
-  })
+      void refresh(targetOrgId, generation)
+    },
+  )
 
   onCleanup(() => {
     for (const source of eventSources) source.close()
@@ -1628,7 +1656,7 @@ function IntegrationsSection() {
               )}
             </p>
           </div>
-          <a class="verevon-settings-button verevon-settings-button--sm" href="/social/calendar">{i18n.tr('Åpne kalender', 'Open calendar')}</a>
+          <a class="verevon-settings-button verevon-settings-button--sm" href="/social/calendar" link>{i18n.tr('Åpne kalender', 'Open calendar')}</a>
         </div>
         <div class="verevon-settings-social-summary">
           <div>

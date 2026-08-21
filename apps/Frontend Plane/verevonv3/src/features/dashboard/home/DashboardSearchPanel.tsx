@@ -1,8 +1,8 @@
 
 import { useNavigate } from '@solidjs/router'
 import { useQueryClient } from '@tanstack/solid-query'
-import { ArrowRight, CirclePlus, ExternalLink, Loader2, Search } from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch, untrack } from 'solid-js'
+import { ArrowRight, CirclePlus, ExternalLink, Loader2, Search } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
 import { FOUR_HOURS_MS } from '@/app/providers/QueryProvider'
 import { writePendingChatLaunch } from '@/features/chat/lib/pending-chat-launch'
 import { searchNavbar, type NavbarSearchResult } from '@/shared/api/navbar-client'
@@ -145,35 +145,43 @@ export function SearchPanel(props: {
       staleTime: FOUR_HOURS_MS,
     })
 
-  onMount(() => {
-    if (!restored?.query) return
-    setQuery(restored.query)
-    props.onExpandedChange(restored.expanded)
-    props.onPreviewActiveChange(!restored.expanded && restored.previewResults.length > 0)
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      if (!restored?.query) return
+      setQuery(restored.query)
+      props.onExpandedChange(restored.expanded)
+      props.onPreviewActiveChange(!restored.expanded && restored.previewResults.length > 0)
+    },
+  )
 
-  createEffect(() => {
-    const snapshot: SearchSnapshot = {
+  createEffect(
+    () => ({
       activeResultTab: activeResultTab(),
       expanded: props.expanded,
       filters: filters(),
       previewResults: previewResults(),
       query: query(),
-      savedAt: Date.now(),
       verevonResults: verevonResults(),
       webAnswer: webAnswer(),
       webCitations: webCitations(),
       webResults: webResults(),
-    }
-    if (
-      snapshot.query.trim()
-      || snapshot.previewResults.length > 0
-      || snapshot.webResults.length > 0
-      || snapshot.webAnswer
-    ) {
-      writeClientJson(searchSessionKey, snapshot)
-    }
-  })
+    }),
+    (state) => {
+      const snapshot: SearchSnapshot = {
+        ...state,
+        savedAt: Date.now(),
+      }
+      if (
+        snapshot.query.trim()
+        || snapshot.previewResults.length > 0
+        || snapshot.webResults.length > 0
+        || snapshot.webAnswer
+      ) {
+        writeClientJson(searchSessionKey, snapshot)
+      }
+    },
+  )
   const sourceItems = createMemo(() => {
     const map = new Map<string, SearchSourceItem>()
     for (const item of [...webCitations(), ...webResults()]) {
@@ -461,98 +469,104 @@ export function SearchPanel(props: {
   }
 
   // Lazy-load image results once the expanded panel is open and a query exists.
-  createEffect(() => {
-    const trimmed = activeQuery()
-    if (!props.expanded || trimmed.length < 3) return
-    untrack(() => {
-      if (imagesStatus() === 'idle' || imagesQuery() !== trimmed) {
-        fetchImages(trimmed)
-      }
-    })
-  })
+  createEffect(
+    () => ({ trimmed: activeQuery(), expanded: props.expanded }),
+    ({ trimmed, expanded }) => {
+      if (!expanded || trimmed.length < 3) return
+      untrack(() => {
+        if (imagesStatus() === 'idle' || imagesQuery() !== trimmed) {
+          fetchImages(trimmed)
+        }
+      })
+    },
+  )
 
   // Lazy-load real video results (SearXNG) the first time the Videos tab opens.
-  createEffect(() => {
-    const trimmed = activeQuery()
-    const onVideosTab = activeResultTab() === 'Videos'
-    if (!props.expanded || trimmed.length < 3 || !onVideosTab) return
-    untrack(() => {
-      if (videosStatus() === 'idle' || videosQuery() !== trimmed) {
-        fetchVideos(trimmed)
+  createEffect(
+    () => ({ trimmed: activeQuery(), onVideosTab: activeResultTab() === 'Videos', expanded: props.expanded }),
+    ({ trimmed, onVideosTab, expanded }) => {
+      if (!expanded || trimmed.length < 3 || !onVideosTab) return
+      untrack(() => {
+        if (videosStatus() === 'idle' || videosQuery() !== trimmed) {
+          fetchVideos(trimmed)
+        }
+      })
+    },
+  )
+
+  createEffect(
+    () => activeQuery(),
+    (trimmed) => {
+      window.clearTimeout(suggestionsTimer)
+      suggestionsController?.abort()
+
+      if (trimmed.length < 2) {
+        setSuggestions([])
+        return
       }
-    })
-  })
 
-  createEffect(() => {
-    const trimmed = activeQuery()
-    window.clearTimeout(suggestionsTimer)
-    suggestionsController?.abort()
+      const controller = new AbortController()
+      suggestionsController = controller
+      suggestionsTimer = window.setTimeout(() => {
+        loadSearchSuggestions(trimmed, controller.signal)
+          .then((payload) => {
+            const nextSuggestions = (payload.suggestions ?? [])
+              .filter((suggestion) => suggestion.text.trim().length > 0)
+              .slice(0, 6)
+            setSuggestions(nextSuggestions)
+          })
+          .catch(() => {
+            if (!controller.signal.aborted) setSuggestions([])
+          })
+      }, 120)
+    },
+  )
 
-    if (trimmed.length < 2) {
-      setSuggestions([])
-      return
-    }
-
-    const controller = new AbortController()
-    suggestionsController = controller
-    suggestionsTimer = window.setTimeout(() => {
-      loadSearchSuggestions(trimmed, controller.signal)
-        .then((payload) => {
-          const nextSuggestions = (payload.suggestions ?? [])
-            .filter((suggestion) => suggestion.text.trim().length > 0)
-            .slice(0, 6)
-          setSuggestions(nextSuggestions)
-        })
-        .catch(() => {
-          if (!controller.signal.aborted) setSuggestions([])
-        })
-    }, 120)
-  })
-
-  createEffect(() => {
-    const trimmed = activeQuery()
-    window.clearTimeout(previewTimer)
-
-    if (trimmed.length < 3 || props.expanded) {
-      setPreviewLoading(false)
-      setPreviewError(null)
-      setPreviewResults([])
-      props.onPreviewActiveChange(false)
-      return
-    }
-
-    props.onPreviewActiveChange(true)
-    // Read filters synchronously in the tracked effect scope; the deferred
+  createEffect(
+    // Read filters synchronously in the tracked compute scope; the deferred
     // fetch below uses this captured value, never the signal.
-    const currentFilters = filters()
-    searchController?.abort()
-    const controller = new AbortController()
-    searchController = controller
-    const cached = queryClient.getQueryData<WebSearchPayload>(webQueryKey(trimmed, currentFilters))
-    if (cached) {
-      setPreviewLoading(false)
-      setPreviewError(null)
-      setPreviewResults(buildPreviewResults(cached).slice(0, 6))
-      return
-    }
-    previewTimer = window.setTimeout(() => {
-      setPreviewLoading(true)
-      setPreviewError(null)
-      fetchWebSearch(trimmed, currentFilters)
-        .then((payload) => {
-          if (controller.signal.aborted) return
-          setPreviewResults(buildPreviewResults(payload).slice(0, 6))
-        })
-        .catch((reason) => {
-          if (controller.signal.aborted) return
-          setPreviewResults([])
-          setPreviewError(reason instanceof Error ? reason.message : 'Søket kunne ikke fullføres.')
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setPreviewLoading(false)
-        })
-    }, 220)
-  })
+    () => ({ trimmed: activeQuery(), expanded: props.expanded, currentFilters: filters() }),
+    ({ trimmed, expanded, currentFilters }) => {
+      window.clearTimeout(previewTimer)
+
+      if (trimmed.length < 3 || expanded) {
+        setPreviewLoading(false)
+        setPreviewError(null)
+        setPreviewResults([])
+        props.onPreviewActiveChange(false)
+        return
+      }
+
+      props.onPreviewActiveChange(true)
+      searchController?.abort()
+      const controller = new AbortController()
+      searchController = controller
+      const cached = queryClient.getQueryData<WebSearchPayload>(webQueryKey(trimmed, currentFilters))
+      if (cached) {
+        setPreviewLoading(false)
+        setPreviewError(null)
+        setPreviewResults(buildPreviewResults(cached).slice(0, 6))
+        return
+      }
+      previewTimer = window.setTimeout(() => {
+        setPreviewLoading(true)
+        setPreviewError(null)
+        fetchWebSearch(trimmed, currentFilters)
+          .then((payload) => {
+            if (controller.signal.aborted) return
+            setPreviewResults(buildPreviewResults(payload).slice(0, 6))
+          })
+          .catch((reason) => {
+            if (controller.signal.aborted) return
+            setPreviewResults([])
+            setPreviewError(reason instanceof Error ? reason.message : 'Søket kunne ikke fullføres.')
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) setPreviewLoading(false)
+          })
+      }, 220)
+    },
+  )
 
   onCleanup(() => {
     window.clearTimeout(suggestionsTimer)
@@ -596,8 +610,8 @@ export function SearchPanel(props: {
                     <button
                       type="button"
                       onClick={() => setActiveResultTab(tab)}
-                      classList={{ 'dashboard-xsearch-tab--active': activeResultTab() === tab }}
-                      aria-pressed={activeResultTab() === tab}
+                      class={{ 'dashboard-xsearch-tab--active': activeResultTab() === tab }}
+                      aria-pressed={activeResultTab() === tab ? 'true' : 'false'}
                     >
                       {searchResultTabLabel(tab, i18n)}
                     </button>
@@ -851,7 +865,7 @@ export function SearchPanel(props: {
                 id="dashboard-search"
                 role="combobox"
                 aria-label={i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}
-                aria-expanded={isDropdownOpen()}
+                aria-expanded={isDropdownOpen() ? 'true' : 'false'}
                 autocomplete="off"
                 value={query()}
                 onInput={(event) => updateQuery(event.currentTarget.value)}

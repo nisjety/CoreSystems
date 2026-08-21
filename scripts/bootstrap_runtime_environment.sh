@@ -265,6 +265,18 @@ ensure_event_keypair() {
       upsert_env "$DATA_ENV" WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
       upsert_env "$DATA_ENV" WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
       ;;
+    retrieval)
+      # Missing from this function's domain list until 2026-08-20 — retrieval
+      # was the one signed-event domain docker-compose.yml references
+      # (RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH / _VERIFYING_PUBLIC_KEY_PATH)
+      # that nothing ever generated, so the bind-mount source never existed
+      # and Docker auto-vivified an empty directory at both paths instead —
+      # crash-looping retrieval-engine itself (missing its own signing key)
+      # and data-orchestrator-go (missing retrieval's public verifying key
+      # for signed cost events) with an unrelated-looking "Is a directory".
+      upsert_env "$DATA_ENV" RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key"
+      upsert_env "$DATA_ENV" RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key"
+      ;;
   esac
 }
 
@@ -650,7 +662,7 @@ ensure_secret "$DATA_ENV" DATAPLANE_NATS_TOKEN >/dev/null
 ensure_secret "$DATA_ENV" QDRANT_API_KEY >/dev/null
 ensure_value "$DATA_ENV" MINIO_ROOT_USER "verevon-data" >/dev/null
 ensure_secret "$DATA_ENV" MINIO_ROOT_PASSWORD >/dev/null
-for event_domain in documents index embedding wiki; do
+for event_domain in documents index embedding wiki retrieval; do
   ensure_event_keypair "$event_domain"
 done
 

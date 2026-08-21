@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, Globe, Loader2 } from 'lucide-solid'
+import { CheckCircle2, Circle, Globe, Loader2, RefreshCw } from '@/shared/icons'
 import { For, Match, Show, Switch } from 'solid-js'
 import { Button } from '@/shared/ui/Button'
 import { type OnboardingState, onboardingCrawlPhases } from '@/features/onboarding/lib/model'
@@ -29,14 +29,29 @@ export function WebsiteStepContent(props: WebsiteStepContentProps) {
           </span>
           <input
             value={stripUrlProtocol(props.website.url)}
-            readOnly={props.website.status === 'starting' || props.website.status === 'running'}
+            readonly={props.website.status === 'starting' || props.website.status === 'running'}
             onInput={(event) => {
               const raw = event.currentTarget.value.replace(/^https?:\/\//, '').replace(/\s+/g, '')
               props.onUrlInput(raw ? `https://${raw}` : '')
             }}
             placeholder="coresystem.com"
-            inputMode="url"
+            inputmode="url"
           />
+          <button
+            type="button"
+            class="onboarding-url-recrawl"
+            disabled={!props.website.url || props.website.status === 'starting' || props.website.status === 'running'}
+            aria-label={props.website.status === 'idle' ? 'Analyser nettside' : 'Analyser nettside på nytt'}
+            title={props.website.status === 'idle' ? 'Analyser nettside' : 'Analyser nettside på nytt'}
+            onClick={() => void props.onRunPreview()}
+          >
+            <Show
+              when={props.website.status === 'starting' || props.website.status === 'running'}
+              fallback={<RefreshCw size={15} />}
+            >
+              <Loader2 size={15} class="onboarding-phase-spinner" />
+            </Show>
+          </button>
         </div>
       </OnboardingField>
 
@@ -61,11 +76,13 @@ export function WebsiteStepContent(props: WebsiteStepContentProps) {
 
               return (
                 <div
-                  class="onboarding-phase-row"
-                  classList={{
-                    'onboarding-phase-row--done': done(),
-                    'onboarding-phase-row--active': active(),
-                  }}
+                  class={[
+                    'onboarding-phase-row',
+                    {
+                      'onboarding-phase-row--done': done(),
+                      'onboarding-phase-row--active': active(),
+                    },
+                  ]}
                 >
                   <Show
                     when={done()}

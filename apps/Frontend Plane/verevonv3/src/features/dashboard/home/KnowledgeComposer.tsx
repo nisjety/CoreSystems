@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   AlertCircle,
   ArrowRight,
@@ -15,8 +14,9 @@ import {
   ShieldCheck,
   ShoppingBag,
   Trash2,
-} from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { executeAction } from '@/shared/actions/action-client'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
@@ -247,7 +247,10 @@ export function KnowledgeComposer(props: {
 
   // Tell the dashboard when a preview / page-picker / product-picker is on screen
   // so it can hide the info cards and surface the results/cards chevron toggle.
-  createEffect(() => props.onPreviewActiveChange?.(Boolean(preview() || discovery() || productExtraction())))
+  createEffect(
+    () => Boolean(preview() || discovery() || productExtraction()),
+    (active) => { props.onPreviewActiveChange?.(active) },
+  )
 
   const ready = createMemo(() => orgId().length > 0)
   const canSubmitUrl = createMemo(() => url().trim().length > 0 && !submitting() && !discovering() && ready() && (mode() !== 'crawl' || crawlMaxPages() > 0))
@@ -270,14 +273,17 @@ export function KnowledgeComposer(props: {
   // `reject_zdr_persistent_profile`): as soon as ZDR is requested, force the
   // picker back to isolated so no persistent-profile UI state can leak into
   // the next `createBrowserSession` call.
-  createEffect(() => {
-    if (!zdrRequested()) return
-    if (browserProfileChoice() === isolatedProfileChoice) return
-    setBrowserProfileChoice(isolatedProfileChoice)
-    setBrowserProfileProbe(null)
-    setBrowserProfileDeleteArmed(false)
-    setRenamingProfile(false)
-  })
+  createEffect(
+    () => ({ zdr: zdrRequested(), choice: browserProfileChoice() }),
+    ({ zdr, choice }) => {
+      if (!zdr) return
+      if (choice === isolatedProfileChoice) return
+      setBrowserProfileChoice(isolatedProfileChoice)
+      setBrowserProfileProbe(null)
+      setBrowserProfileDeleteArmed(false)
+      setRenamingProfile(false)
+    },
+  )
 
   const updateJob = (key: string, patch: Partial<IngestJob>) => {
     setJobs((current) => current.map((job) => (job.key === key ? { ...job, ...patch } : job)))
@@ -401,68 +407,77 @@ export function KnowledgeComposer(props: {
     })
   }
 
-  createEffect(() => {
-    const key = crawlJobsStorageKey()
-    if (!key || hydratedJobsKey === key) return
-    const restored = readClientJson(key, isPersistedJobs) ?? []
-    keySeq = restored.reduce((max, job) => Math.max(max, parseJobKey(job.key)), 0)
-    setJobs(restored)
-    hydratedJobsKey = key
-    for (const job of restored.filter(hasActiveJobId)) {
-      if (job.kind === 'crawl') startCrawlEventStream(job.key, job.id)
-    }
-    if (restored.some(hasActiveJobId)) ensurePolling()
-  })
+  createEffect(
+    () => crawlJobsStorageKey(),
+    (key) => {
+      if (!key || hydratedJobsKey === key) return
+      const restored = readClientJson(key, isPersistedJobs) ?? []
+      keySeq = restored.reduce((max, job) => Math.max(max, parseJobKey(job.key)), 0)
+      setJobs(restored)
+      hydratedJobsKey = key
+      for (const job of restored.filter(hasActiveJobId)) {
+        if (job.kind === 'crawl') startCrawlEventStream(job.key, job.id)
+      }
+      if (restored.some(hasActiveJobId)) ensurePolling()
+    },
+  )
 
-  createEffect(() => {
-    const id = orgId()
-    if (!id || hydratedProfilesOrg === id) return
-    hydratedProfilesOrg = id
-    void refreshBrowserProfiles()
-  })
+  createEffect(
+    () => orgId(),
+    (id) => {
+      if (!id || hydratedProfilesOrg === id) return
+      hydratedProfilesOrg = id
+      void refreshBrowserProfiles()
+    },
+  )
 
-  createEffect(() => {
-    const key = crawlJobsStorageKey()
-    if (!key || hydratedJobsKey !== key) return
-    writeClientJson(key, jobs())
-  })
+  createEffect(
+    () => ({ key: crawlJobsStorageKey(), jobsSnapshot: jobs() }),
+    ({ key, jobsSnapshot }) => {
+      if (!key || hydratedJobsKey !== key) return
+      writeClientJson(key, jobsSnapshot)
+    },
+  )
 
-  createEffect(() => {
-    const key = browserPreviewStorageKey()
-    if (!key || hydratedBrowserPreviewKey === key) return
-    hydratedBrowserPreviewKey = key
-    const restored = readClientJson(key, isPersistedBrowserPreview)
-    if (!restored) return
-    if (restored.preview.browserSession?.session.zdr) {
-      removeClientValue(key)
-      return
-    }
-    setMode('link')
-    setUrl(restored.preview.url)
-    setPreview(restored.preview)
-    setBrowserRationales(restored.browserRationales)
-    const sessionId = restored.preview.browserSession?.session.id
-    if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
-  })
+  createEffect(
+    () => browserPreviewStorageKey(),
+    (key) => {
+      if (!key || hydratedBrowserPreviewKey === key) return
+      hydratedBrowserPreviewKey = key
+      const restored = readClientJson(key, isPersistedBrowserPreview)
+      if (!restored) return
+      if (restored.preview.browserSession?.session.zdr) {
+        removeClientValue(key)
+        return
+      }
+      setMode('link')
+      setUrl(restored.preview.url)
+      setPreview(restored.preview)
+      setBrowserRationales(restored.browserRationales)
+      const sessionId = restored.preview.browserSession?.session.id
+      if (sessionId) void refreshBrowserOwnerTimeline(sessionId)
+    },
+  )
 
-  createEffect(() => {
-    const key = browserPreviewStorageKey()
-    if (!key || hydratedBrowserPreviewKey !== key) return
-    const current = preview()
-    if (!current) {
-      removeClientValue(key)
-      return
-    }
-    if (current.browserSession?.session.zdr) {
-      removeClientValue(key)
-      return
-    }
-    writeClientJson(key, {
-      browserRationales: browserRationales(),
-      preview: current,
-      savedAt: new Date().toISOString(),
-    } satisfies PersistedBrowserPreview)
-  })
+  createEffect(
+    () => ({ key: browserPreviewStorageKey(), current: preview(), rationales: browserRationales() }),
+    ({ key, current, rationales }) => {
+      if (!key || hydratedBrowserPreviewKey !== key) return
+      if (!current) {
+        removeClientValue(key)
+        return
+      }
+      if (current.browserSession?.session.zdr) {
+        removeClientValue(key)
+        return
+      }
+      writeClientJson(key, {
+        browserRationales: rationales,
+        preview: current,
+        savedAt: new Date().toISOString(),
+      } satisfies PersistedBrowserPreview)
+    },
+  )
 
   const startCrawlJob = async (target: string) => {
     setDiscovery(null)
@@ -1283,8 +1298,7 @@ export function KnowledgeComposer(props: {
     <div class="verevon-panel-in verevon-dashboard-composer-card dashboard-knowledge-composer">
       <form class="dashboard-knowledge-composer__url" onSubmit={submitUrl}>
         <div
-          class="dashboard-knowledge-composer__mode-row"
-          classList={{ 'dashboard-knowledge-composer__mode-row--inline': Boolean(props.inlinePlanLabel || props.inlineTitle) }}
+          class={['dashboard-knowledge-composer__mode-row', { 'dashboard-knowledge-composer__mode-row--inline': Boolean(props.inlinePlanLabel || props.inlineTitle) }]}
         >
           <Show when={props.inlinePlanLabel}>
             {(planLabel) => (
@@ -1296,25 +1310,25 @@ export function KnowledgeComposer(props: {
           <div class="dashboard-knowledge-composer__modes" role="group" aria-label={i18n.tr('Innhentingsmodus', 'Ingestion mode')}>
             <button
               type="button"
-              classList={{ 'dashboard-knowledge-composer__mode--active': mode() === 'link' }}
+              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'link' }}
               onClick={() => switchMode('link')}
-              aria-pressed={mode() === 'link'}
+              aria-pressed={mode() === 'link' ? 'true' : 'false'}
             >
               <Link2 class="size-3.5" /> {i18n.tr('Lenke', 'Link')}
             </button>
             <button
               type="button"
-              classList={{ 'dashboard-knowledge-composer__mode--active': mode() === 'crawl' }}
+              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'crawl' }}
               onClick={() => switchMode('crawl')}
-              aria-pressed={mode() === 'crawl'}
+              aria-pressed={mode() === 'crawl' ? 'true' : 'false'}
             >
               <Globe2 class="size-3.5" /> {i18n.tr('Crawl', 'Crawl')}
             </button>
             <button
               type="button"
-              classList={{ 'dashboard-knowledge-composer__mode--active': mode() === 'products' }}
+              class={{ 'dashboard-knowledge-composer__mode--active': mode() === 'products' }}
               onClick={() => switchMode('products')}
-              aria-pressed={mode() === 'products'}
+              aria-pressed={mode() === 'products' ? 'true' : 'false'}
             >
               <ShoppingBag class="size-3.5" /> {i18n.tr('Produkter', 'Products')}
             </button>
@@ -1629,10 +1643,10 @@ export function KnowledgeComposer(props: {
             event.currentTarget.value = ''
           }}
         />
-        <A href="/knowledge" class="dashboard-knowledge-composer__link">
+        <a href="/knowledge" link class="dashboard-knowledge-composer__link">
           {i18n.tr('Åpne kunnskapsbase', 'Open knowledge base')}
           <ArrowRight class="size-3.5" />
-        </A>
+        </a>
       </div>
 
       <Show when={!ready() && ctx.loading}>

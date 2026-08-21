@@ -1,5 +1,6 @@
-import { Loader2, Plug, Plus, ShieldCheck, Trash2, Users, X } from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, onMount, Show } from 'solid-js'
+import { Loader2, Plug, Plus, ShieldCheck, Trash2, Users, X } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   connectMcpServer,
   deleteMcpServer,
@@ -80,22 +81,25 @@ export function McpServersSection() {
   // a stale banner for a connection attempt that already resolved.
   const [connectionNotice, setConnectionNotice] = createSignal<'connected' | 'error' | null>(null)
 
-  onMount(() => {
-    if (typeof window === 'undefined') return
-    const params = new URLSearchParams(window.location.search)
-    const notice = params.get('mcp_oauth')
-    if (notice !== 'connected' && notice !== 'error') return
-    setConnectionNotice(notice)
-    params.delete('mcp_oauth')
-    params.delete('server_id')
-    const rest = params.toString()
-    window.history.replaceState(
-      null,
-      '',
-      window.location.pathname + (rest ? `?${rest}` : '') + window.location.hash,
-    )
-    if (notice === 'connected') void refetch()
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      if (typeof window === 'undefined') return
+      const params = new URLSearchParams(window.location.search)
+      const notice = params.get('mcp_oauth')
+      if (notice !== 'connected' && notice !== 'error') return
+      setConnectionNotice(notice)
+      params.delete('mcp_oauth')
+      params.delete('server_id')
+      const rest = params.toString()
+      window.history.replaceState(
+        null,
+        '',
+        window.location.pathname + (rest ? `?${rest}` : '') + window.location.hash,
+      )
+      if (notice === 'connected') void refetch()
+    },
+  )
 
   const list = createMemo(() => servers() ?? [])
 

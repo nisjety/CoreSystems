@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import TicketingPage from '@/features/tickets/components/TicketingPage'
 import type {
@@ -328,23 +329,33 @@ function mockTicketingGateway() {
 }
 
 function renderTicketing(path = '/tickets?queue=my') {
-  window.history.pushState(null, '', path)
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/tickets" component={TicketingPage} />
-      <Route path="/*all" component={() => <div />} />
-    </Router>
-  ))
+  // `memoryHistory` is an isolated in-memory router adapter: it never writes
+  // to `window.location`, by design (browserHistory is what syncs the real
+  // location in production). Tests that need to assert a navigation target
+  // must read the router's own history entry, not `window.location`.
+  const history = memoryHistory(path)
+  const TestRouter = createRouter({
+    routes: [
+      { path: '/tickets', component: TicketingPage },
+      { path: '/*all', component: () => <div /> },
+    ],
+    history,
+    explicitLinks: true,
+  })
+  render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
+  return { history }
 }
 
 function openTicketWorkspaceTab(name: RegExp) {
   const tabs = screen.getByRole('tablist', { name: /saksarbeidsområde|ticket workspace/i })
   fireEvent.click(within(tabs).getByRole('tab', { name }))
+  flush()
 }
 
 function openTicketContextTab(name: RegExp) {
   const tabs = screen.getByRole('tablist', { name: /sakkontekst|ticket context/i })
   fireEvent.click(within(tabs).getByRole('tab', { name }))
+  flush()
 }
 
 afterEach(() => {
@@ -390,6 +401,7 @@ describe('TicketingPage', () => {
 
     await screen.findAllByText('TCK-REFUND')
     fireEvent.click(screen.getByRole('checkbox', { name: 'Velg alle synlige saker' }))
+    flush()
     expect(screen.getByText('2 valgt')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Gjennomgå endring' }))
 
@@ -406,8 +418,8 @@ describe('TicketingPage', () => {
       .filter(([url, init]) => String(url).endsWith('/api/v1/actions/execute') && init?.method === 'POST')
       .map(([, init]) => JSON.parse(String(init?.body)))
     expect(statusUpdates).toEqual([
-      { actionId: 'tickets.update', input: { ticketId: ticketFixture.id, status: 'waiting_team' } },
-      { actionId: 'tickets.update', input: { ticketId: relatedTicketFixture.id, status: 'waiting_team' } },
+      { actionId: 'tickets.update', idempotencyKey: expect.any(String), input: { ticketId: ticketFixture.id, status: 'waiting_team' } },
+      { actionId: 'tickets.update', idempotencyKey: expect.any(String), input: { ticketId: relatedTicketFixture.id, status: 'waiting_team' } },
     ])
   })
 
@@ -446,6 +458,7 @@ describe('TicketingPage', () => {
     openTicketContextTab(/revisjon|audit/i)
     fireEvent.input(screen.getByRole('textbox', { name: 'Emne for intern samtale' }), { target: { value: 'Check billing decision' } })
     fireEvent.input(screen.getByRole('textbox', { name: 'Første interne melding' }), { target: { value: 'Is the manual refund approved?' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Start intern samtale' }))
 
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
@@ -464,6 +477,7 @@ describe('TicketingPage', () => {
     })
 
     fireEvent.input(screen.getByRole('textbox', { name: 'Svar på Confirm refund exception' }), { target: { value: 'Billing approved it.' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Svar' }))
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
       String(url).endsWith('/api/v1/actions/execute')
@@ -502,6 +516,7 @@ describe('TicketingPage', () => {
     await screen.findByText('Hendelser og problemer')
     expect(screen.getByText('Egne operative poster. Ingen status endres automatisk på den lenkede saken.')).toBeTruthy()
     fireEvent.input(screen.getByRole('textbox', { name: 'Hendelsestittel' }), { target: { value: 'Delivery outage' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Erklær hendelse' }))
 
     await waitFor(() => expect(screen.getByText('Hendelsen INC-TEST er erklært og saken er lenket.')).toBeTruthy())
@@ -527,7 +542,7 @@ describe('TicketingPage', () => {
   })
 
   it('requires review before running macros, then adds checklists, resolves tickets, and creates social follow-ups', async () => {
-    renderTicketing()
+    const { history } = renderTicketing()
 
     await screen.findAllByText('TCK-REFUND')
     openTicketContextTab(/handlinger|actions/i)
@@ -555,7 +570,7 @@ describe('TicketingPage', () => {
     await waitFor(() => expect(screen.getByText('Saken er løst.')).toBeTruthy())
 
     fireEvent.click(screen.getByRole('button', { name: 'Sosial oppfølging' }))
-    await waitFor(() => expect(window.location.pathname).toBe('/social/drafts'))
+    await waitFor(() => expect(history.get()).toBe('/social/drafts'))
 
     const fetchMock = vi.mocked(fetch)
     expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith('/api/v1/actions/execute') && init?.method === 'POST' && String(init.body).includes('tickets.run_macro'))).toBe(true)
@@ -615,6 +630,7 @@ describe('TicketingPage', () => {
     openTicketContextTab(/handlinger|actions/i)
     fireEvent.input(screen.getByRole('textbox', { name: 'Nytt Ticketing-teamnavn' }), { target: { value: 'Escalations' } })
     fireEvent.input(screen.getByRole('textbox', { name: 'Team-beskrivelse' }), { target: { value: 'Critical incident handoffs' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett team' }))
 
     await waitFor(() => expect(screen.getByText('Teamet Escalations er opprettet.')).toBeTruthy())
@@ -646,6 +662,7 @@ describe('TicketingPage', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'Makronavn' }), { target: { value: 'Delivery handoff' } })
     fireEvent.input(screen.getByRole('textbox', { name: 'Makrobeskrivelse' }), { target: { value: 'Queue carrier investigation' } })
     fireEvent.change(screen.getByRole('combobox', { name: 'Makrostatus' }), { target: { value: 'waiting_team' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett makro' }))
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).endsWith('/api/v1/actions/execute') && init?.method === 'POST' && String(init.body).includes('tickets.create_macro'))).toBe(true))
     const request = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith('/api/v1/actions/execute') && init?.method === 'POST' && String(init.body).includes('tickets.create_macro'))
@@ -678,6 +695,7 @@ describe('TicketingPage', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'Regelnavn' }), { target: { value: 'Prioritise refund cases' } })
     fireEvent.input(screen.getByRole('textbox', { name: 'Betingelsesverdi' }), { target: { value: 'refund' } })
     fireEvent.input(screen.getByRole('textbox', { name: 'Handlingsverdi' }), { target: { value: 'urgent' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett regel' }))
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
       String(url).endsWith('/api/v1/ticket-automation-rules') && init?.method === 'POST',
@@ -695,6 +713,7 @@ describe('TicketingPage', () => {
     renderTicketing('/tickets?queue=rules')
     await screen.findByRole('textbox', { name: 'Regelnavn' })
     fireEvent.change(screen.getByRole('combobox', { name: 'Regelbetingelse' }), { target: { value: 'work_type' } })
+    flush()
     fireEvent.change(screen.getByRole('combobox', { name: 'Arbeidstype' }), { target: { value: 'incident' } })
     expect(screen.queryByRole('textbox', { name: 'Betingelsesverdi' })).toBeNull()
     expect((screen.getByRole('combobox', { name: 'Arbeidstype' }) as HTMLSelectElement).value).toBe('incident')
@@ -721,7 +740,9 @@ describe('TicketingPage', () => {
     fireEvent.input(screen.getByRole('textbox', { name: 'Regelnavn' }), { target: { value: 'Tag urgent refunds' } })
     fireEvent.input(screen.getByRole('textbox', { name: 'Betingelsesverdi' }), { target: { value: 'refund' } })
     fireEvent.change(screen.getByRole('combobox', { name: 'Regelhandling' }), { target: { value: 'labels' } })
+    flush()
     fireEvent.input(screen.getByRole('textbox', { name: 'Handlingsverdi' }), { target: { value: 'refund, urgent' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Opprett regel' }))
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, init]) => String(url).endsWith('/api/v1/ticket-automation-rules') && init?.method === 'POST')).toBe(true))
     const request = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith('/api/v1/ticket-automation-rules') && init?.method === 'POST')
@@ -735,6 +756,7 @@ describe('TicketingPage', () => {
     openTicketWorkspaceTab(/relatert|related/i)
     fireEvent.change(screen.getByRole('combobox', { name: 'Sak som skal lenkes' }), { target: { value: relatedTicketFixture.id } })
     fireEvent.change(screen.getByRole('combobox', { name: 'Type saksforhold' }), { target: { value: 'child' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Koble sak' }))
 
     await waitFor(() => expect(screen.getByText(/saksforhold til tck-carrier ble lagt til/i)).toBeTruthy())
@@ -770,12 +792,12 @@ describe('TicketingPage', () => {
   })
 
   it('opens a case-aware Chat launch from a selected ticket', async () => {
-    renderTicketing('/tickets?queue=all')
+    const { history } = renderTicketing('/tickets?queue=all')
 
     await screen.findAllByText('TCK-REFUND')
     fireEvent.click(screen.getByRole('button', { name: /åpne i verevon chat|open in verevon chat/i }))
 
-    await waitFor(() => expect(window.location.pathname).toBe('/chat'))
+    await waitFor(() => expect(history.get()).toBe('/chat'))
     const launch = JSON.parse(window.sessionStorage.getItem('verevon.chat.pendingLaunch') ?? '{}') as { text?: string }
     expect(launch.text).toContain('TCK-REFUND')
     expect(launch.text).toContain('Refund blocked after delivery issue')

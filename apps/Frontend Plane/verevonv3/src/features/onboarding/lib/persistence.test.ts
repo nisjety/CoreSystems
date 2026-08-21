@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
 import { createRoot } from 'solid-js'
-import { createStore } from 'solid-js/store'
+import { createStore } from 'solid-js'
+import type { StoreSetter } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createOnboardingPersistence } from '@/features/onboarding/lib/persistence'
 import { createInitialOnboardingState } from '@/features/onboarding/lib/state'
+import type { OnboardingState } from '@/features/onboarding/lib/model'
 
 function createLocalStorageMock(): Storage {
   const entries = new Map<string, string>()
@@ -39,10 +41,16 @@ describe('createOnboardingPersistence', () => {
     vi.useFakeTimers()
     const setItem = vi.spyOn(window.localStorage, 'setItem')
     let disposeRoot: VoidFunction = () => undefined
+    // Solid v2 forbids writing to a store from inside the owned scope that
+    // created it (REACTIVE_WRITE_IN_OWNED_SCOPE) — capture the setter and
+    // call it after `createRoot` has returned, once that scope is no longer
+    // the active reactive context.
+    let setState!: StoreSetter<OnboardingState>
 
     createRoot((dispose) => {
       disposeRoot = dispose
-      const [state, setState] = createStore(createInitialOnboardingState())
+      const [state, setStateInner] = createStore(createInitialOnboardingState())
+      setState = setStateInner
       createOnboardingPersistence({
         actor: { userId: 'test-user' },
         hydratedFromServer: () => false,
@@ -50,18 +58,18 @@ describe('createOnboardingPersistence', () => {
         state,
         storageKey: 'verevonv3.test.onboarding',
       })
+    })
 
-      setState('website', 'url', 'https://example.com')
-      setState(
-        'website',
-        'snippets',
-        Array.from({ length: 8 }, (_, index) => ({
-          id: String(index),
-          kind: 'text',
-          title: `Snippet ${index}`,
-          url: `https://example.com/${index}`,
-        })),
-      )
+    setState((s) => {
+      s.website.url = 'https://example.com'
+    })
+    setState((s) => {
+      s.website.snippets = Array.from({ length: 8 }, (_, index) => ({
+        id: String(index),
+        kind: 'text',
+        title: `Snippet ${index}`,
+        url: `https://example.com/${index}`,
+      }))
     })
 
     await Promise.resolve()

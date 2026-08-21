@@ -1,5 +1,7 @@
-import { AlertCircle, ExternalLink, FileJson, Image as ImageIcon, Loader2, Network, Sparkles, Terminal, X } from 'lucide-solid'
-import { createResource, createSignal, For, Show, type JSX } from 'solid-js'
+import { For, Show, createSignal } from 'solid-js'
+import { AlertCircle, ExternalLink, FileJson, Image as ImageIcon, Loader2, Network, Sparkles, Terminal, X } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   artifactsForTimelineEntry,
   browserArtifactUrl,
@@ -224,7 +226,7 @@ export function BrowserTimelineDetailPanel(props: {
       </header>
 
       <div class="knowledge-browser-detail__compare">
-        <figure classList={{ 'knowledge-browser-detail__shot--missing': !previous()?.screenshotUrl }}>
+        <figure class={{ 'knowledge-browser-detail__shot--missing': !previous()?.screenshotUrl }}>
           <figcaption>Før {previous() ? `· #${previous()?.step}` : ''}</figcaption>
           <Show
             when={previous()?.screenshotUrl}
@@ -233,7 +235,7 @@ export function BrowserTimelineDetailPanel(props: {
             {(url) => <img src={url()} alt={`Skjermbilde før steg ${entry().step}`} loading="lazy" decoding="async" />}
           </Show>
         </figure>
-        <figure classList={{ 'knowledge-browser-detail__shot--missing': !entry().screenshotUrl }}>
+        <figure class={{ 'knowledge-browser-detail__shot--missing': !entry().screenshotUrl }}>
           <figcaption>Etter · #{entry().step}</figcaption>
           <Show
             when={entry().screenshotUrl}

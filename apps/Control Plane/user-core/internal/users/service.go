@@ -736,7 +736,20 @@ func (s *Service) MarkOnboardingComplete(ctx context.Context, email string) erro
 	if email == "" {
 		return fmt.Errorf("email is required")
 	}
-	return s.repo.MarkOnboardingComplete(ctx, email)
+	if err := s.repo.MarkOnboardingComplete(ctx, email); err != nil {
+		return err
+	}
+	// Evict the cached user record, which still carries onboarding_complete=false
+	// — the HTTP handler's GetOrCreateUser re-primed it moments before this
+	// write, so without eviction GetSessionContext keeps answering PROFILE_READY
+	// for up to userCacheTTL and bounces a freshly-completed user from the
+	// dashboard back into onboarding.
+	if s.cache != nil {
+		if user, lookupErr := s.repo.GetByEmail(ctx, email); lookupErr == nil {
+			_ = s.cache.Del(ctx, userIDKeyPrefix+user.ID)
+		}
+	}
+	return nil
 }
 
 // MarkOnboardingCompleteByID marks a user's onboarding as complete by ID
@@ -744,7 +757,15 @@ func (s *Service) MarkOnboardingCompleteByID(ctx context.Context, userID string)
 	if userID == "" {
 		return fmt.Errorf("user ID is required")
 	}
-	return s.repo.MarkOnboardingCompleteByID(ctx, userID)
+	if err := s.repo.MarkOnboardingCompleteByID(ctx, userID); err != nil {
+		return err
+	}
+	// See MarkOnboardingComplete: the cached record predates this write and must
+	// not outlive it.
+	if s.cache != nil {
+		_ = s.cache.Del(ctx, userIDKeyPrefix+userID)
+	}
+	return nil
 }
 
 // ============================================

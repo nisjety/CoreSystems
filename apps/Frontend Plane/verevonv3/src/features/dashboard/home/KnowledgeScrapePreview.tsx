@@ -1,3 +1,4 @@
+import { For, Match, Show, Switch, createMemo, createSignal, untrack } from 'solid-js'
 import {
   AlertCircle,
   Check,
@@ -5,8 +6,8 @@ import {
   Maximize2,
   ShieldCheck,
   X,
-} from 'lucide-solid'
-import { createMemo, createSignal, For, Match, Show, Switch, untrack, type JSX } from 'solid-js'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import type {
   BrowserAction,
   BrowserActionSuggestionResponse,
@@ -171,15 +172,14 @@ function ScrapeRegion(props: {
 }) {
   return (
     <div
-      class="knowledge-scrape-region"
-      classList={{
+      class={['knowledge-scrape-region', {
         'knowledge-scrape-region--selected': props.selected,
         'knowledge-scrape-region--deselected': !props.selected,
         'knowledge-scrape-region--hovered': props.hovered,
-      }}
+      }]}
       role="button"
       tabindex="0"
-      aria-pressed={props.selected}
+      aria-pressed={props.selected ? 'true' : 'false'}
       title={props.selected ? 'Klikk for å utelate denne seksjonen' : 'Klikk for å inkludere denne seksjonen'}
       onClick={() => props.onToggle()}
       onMouseEnter={() => props.onEnter()}
@@ -244,12 +244,11 @@ function BrowserSessionSurface(props: {
 
   return (
     <div
-      class="knowledge-browser-frame"
-      classList={{
+      class={['knowledge-browser-frame', {
         'knowledge-browser-frame--expanded': props.expanded,
         'knowledge-browser-frame--live': isLive(),
         'knowledge-browser-frame--fallback': !isLive(),
-      }}
+      }]}
     >
       <BrowserChrome
         browserApprovals={props.browserApprovals}
@@ -371,14 +370,13 @@ function BrowserSessionSurface(props: {
               return (
                 <button
                   type="button"
-                  class="knowledge-scrape-block"
-                  classList={{
+                  class={['knowledge-scrape-block', {
                     'knowledge-scrape-block--heading': block.heading,
                     'knowledge-scrape-block--selected': isSelected(),
                     'knowledge-scrape-block--deselected': !isSelected(),
                     'knowledge-scrape-block--hovered': props.hovered === index(),
-                  }}
-                  aria-pressed={isSelected()}
+                  }]}
+                  aria-pressed={isSelected() ? 'true' : 'false'}
                   onClick={() => props.onToggle(index())}
                   onMouseEnter={() => props.onEnter(index())}
                   onMouseLeave={() => props.onLeave(index())}
@@ -455,8 +453,7 @@ export function ScrapePreviewPanel(props: {
 
   return (
     <section
-      class="verevon-fade-up knowledge-scrape-preview knowledge-scrape-preview--browser-only"
-      classList={{ 'knowledge-scrape-preview--expanded': browserExpanded() }}
+      class={['verevon-fade-up knowledge-scrape-preview knowledge-scrape-preview--browser-only', { 'knowledge-scrape-preview--expanded': browserExpanded() }]}
       aria-label="Nettleser"
     >
       <BrowserSessionSurface

@@ -1,5 +1,5 @@
 
-import { X } from 'lucide-solid'
+import { X } from '@/shared/icons'
 import { createSignal, For, Show } from 'solid-js'
 import {
   emptyWebSearchFilters,
@@ -75,8 +75,8 @@ export function SearchFilterBar(props: {
             {(option) => (
               <button
                 type="button"
-                classList={{ 'dashboard-xfilter__segment--active': (props.filters.topic ?? null) === option.value }}
-                aria-pressed={(props.filters.topic ?? null) === option.value}
+                class={{ 'dashboard-xfilter__segment--active': (props.filters.topic ?? null) === option.value }}
+                aria-pressed={(props.filters.topic ?? null) === option.value ? 'true' : 'false'}
                 onClick={() => props.onChange({ ...props.filters, topic: option.value })}
               >
                 {option.label}
@@ -103,9 +103,8 @@ export function SearchFilterBar(props: {
 
       <button
         type="button"
-        class="dashboard-xfilter__toggle"
-        classList={{ 'dashboard-xfilter__toggle--active': Boolean(props.filters.exactMatch) }}
-        aria-pressed={Boolean(props.filters.exactMatch)}
+        class={['dashboard-xfilter__toggle', { 'dashboard-xfilter__toggle--active': Boolean(props.filters.exactMatch) }]}
+        aria-pressed={Boolean(props.filters.exactMatch) ? 'true' : 'false'}
         onClick={() => props.onChange({ ...props.filters, exactMatch: !props.filters.exactMatch })}
       >
         Eksakt treff
@@ -115,16 +114,16 @@ export function SearchFilterBar(props: {
         <div class="dashboard-xfilter__segment dashboard-xfilter__segment--mode">
           <button
             type="button"
-            classList={{ 'dashboard-xfilter__segment--active': domainMode() === 'include' }}
-            aria-pressed={domainMode() === 'include'}
+            class={{ 'dashboard-xfilter__segment--active': domainMode() === 'include' }}
+            aria-pressed={domainMode() === 'include' ? 'true' : 'false'}
             onClick={() => setDomainMode('include')}
           >
             Bare
           </button>
           <button
             type="button"
-            classList={{ 'dashboard-xfilter__segment--active': domainMode() === 'exclude' }}
-            aria-pressed={domainMode() === 'exclude'}
+            class={{ 'dashboard-xfilter__segment--active': domainMode() === 'exclude' }}
+            aria-pressed={domainMode() === 'exclude' ? 'true' : 'false'}
             onClick={() => setDomainMode('exclude')}
           >
             Utelat

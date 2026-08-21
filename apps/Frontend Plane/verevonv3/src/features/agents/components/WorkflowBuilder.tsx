@@ -13,11 +13,14 @@ export function WorkflowBuilder() {
   const selectedNodeId = createMemo(() => toolToCanvasNode[selectedTool()])
   const inspector = createMemo(() => inspectorByTool[selectedNodeId()])
 
-  createEffect(() => {
-    if (agentSelection() !== 'workflow') {
-      setAgentSelection('workflow')
-    }
-  })
+  createEffect(
+    () => agentSelection(),
+    (selection) => {
+      if (selection !== 'workflow') {
+        setAgentSelection('workflow')
+      }
+    },
+  )
 
   return (
     <div class="flex h-full min-h-0 min-w-0 bg-[#F5F1EC] p-2 text-[#2B2D31] dark:bg-[#101114] dark:text-[#F7F8F8]">

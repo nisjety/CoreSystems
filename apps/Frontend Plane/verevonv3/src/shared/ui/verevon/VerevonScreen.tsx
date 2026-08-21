@@ -1,4 +1,4 @@
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 import { VerevonFooterLinks } from '@/shared/ui/verevon/VerevonFooterLinks'
 

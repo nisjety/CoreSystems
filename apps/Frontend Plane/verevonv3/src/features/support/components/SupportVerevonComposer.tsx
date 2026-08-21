@@ -1,6 +1,6 @@
-import { A } from '@solidjs/router'
-import { ArrowUpRight, Send, Sparkles } from 'lucide-solid'
-import { createEffect, createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { ArrowUpRight, Send, Sparkles } from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { bindSupportChatThread, readSupportChatThread, type SupportChatThreadScope } from '@/shared/chat/support-chat-thread'
 import { runAssist, type AssistMessage, type AssistSource } from '@/features/inbox/lib/inbox-ai'
 import type { ModelContextPack } from '@/shared/context-packs/context-pack'
@@ -97,20 +97,22 @@ export function SupportVerevonComposer(props: {
     return `${i18n.tr('Foreslåtte felt', 'Proposed fields')}: ${details.join(' · ')}`
   }
 
-  createEffect(() => {
-    const current = scope()
-    requestId += 1
-    setLoading(false)
-    setQuestion('')
-    setAnswer(null)
-    setSources([])
-    setRunMetadata(null)
-    setError(null)
-    setThreadId(current ? readSupportChatThread(current) : null)
-    setNextAction(null)
-    setNextActionProposal(null)
-    setNextActionLoading(null)
-  })
+  createEffect(
+    () => scope(),
+    (current) => {
+      requestId += 1
+      setLoading(false)
+      setQuestion('')
+      setAnswer(null)
+      setSources([])
+      setRunMetadata(null)
+      setError(null)
+      setThreadId(current ? readSupportChatThread(current) : null)
+      setNextAction(null)
+      setNextActionProposal(null)
+      setNextActionLoading(null)
+    },
+  )
 
   const matchesScope = (expected: SupportChatThreadScope) => {
     const current = scope()
@@ -280,9 +282,9 @@ export function SupportVerevonComposer(props: {
         </div>
         <Show when={threadId()}>
           {(id) => (
-            <A href="/chat" onClick={() => setActiveChatThreadId(id())}>
+            <a href="/chat" link onClick={() => setActiveChatThreadId(id())}>
               {i18n.tr('Åpne i Chat', 'Open in Chat')}<ArrowUpRight class="size-3.5" />
-            </A>
+            </a>
           )}
         </Show>
       </div>

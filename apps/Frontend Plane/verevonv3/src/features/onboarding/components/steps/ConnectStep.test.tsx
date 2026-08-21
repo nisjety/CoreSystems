@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConnectStepContent, ConnectStepVisual } from '@/features/onboarding/components/steps/ConnectStep'
 
@@ -23,6 +24,7 @@ describe('ConnectStepContent', () => {
     expect(screen.queryByText('Meta')).toBeNull()
 
     fireEvent.click(screen.getByRole('tab', { name: /Social channels/i }))
+    flush()
 
     expect(screen.queryByText('Slack')).toBeNull()
     // Facebook/Instagram/WhatsApp/Meta Ads consolidate into ONE Meta card.
@@ -33,6 +35,7 @@ describe('ConnectStepContent', () => {
     expect(screen.getByText('Snapchat')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /^Meta/i }))
+    flush()
 
     expect(onConnect).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -1,19 +1,22 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
 import { I18nProvider } from '@/shared/i18n'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
 
 function renderWidget(path = '/inbox?view=mine') {
-  window.history.pushState(null, '', path)
+  const TestRouter = createRouter({
+    routes: [{ path: '*all', component: FeedbackWidget }],
+    history: memoryHistory(path),
+    explicitLinks: true,
+  })
 
   return render(() => (
-    <Router root={(props) => <I18nProvider>{props.children}</I18nProvider>}>
-      <Route path="*all" component={FeedbackWidget} />
-    </Router>
+    <TestRouter>{(props) => <I18nProvider>{props.children}</I18nProvider>}</TestRouter>
   ))
 }
 
@@ -32,7 +35,9 @@ describe('FeedbackWidget', () => {
 
   it('submits a one-line note to the feedback endpoint and shows a confirmation', async () => {
     setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'member' })
+    flush()
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: { id: 'conversation-feedback-1' } }), {
       headers: { 'Content-Type': 'application/json' },
       status: 201,
@@ -42,8 +47,10 @@ describe('FeedbackWidget', () => {
     renderWidget('/inbox?view=mine')
 
     fireEvent.click(screen.getByRole('button', { name: 'Tilbakemelding' }))
+    flush()
     const textarea = screen.getByRole('textbox', { name: 'Tilbakemeldingsnotat' })
     fireEvent.input(textarea, { target: { value: 'The knowledge tab spinner never resolves.' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
@@ -62,24 +69,31 @@ describe('FeedbackWidget', () => {
 
   it('disables sending until the note has non-whitespace content', () => {
     setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'member' })
+    flush()
 
     renderWidget()
     fireEvent.click(screen.getByRole('button', { name: 'Tilbakemelding' }))
+    flush()
 
     const sendButton = screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement
     expect(sendButton.disabled).toBe(true)
 
     fireEvent.input(screen.getByRole('textbox', { name: 'Tilbakemeldingsnotat' }), { target: { value: '   ' } })
+    flush()
     expect(sendButton.disabled).toBe(true)
 
     fireEvent.input(screen.getByRole('textbox', { name: 'Tilbakemeldingsnotat' }), { target: { value: 'Real note' } })
+    flush()
     expect(sendButton.disabled).toBe(false)
   })
 
   it('shows an inline error and keeps the note when the submission fails', async () => {
     setSessionUser({ id: 'user-1', email: 'ada@example.com', name: 'Ada', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'member' })
+    flush()
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 'internal_error', message: 'nope' } }), {
       headers: { 'Content-Type': 'application/json' },
       status: 500,
@@ -87,7 +101,9 @@ describe('FeedbackWidget', () => {
 
     renderWidget()
     fireEvent.click(screen.getByRole('button', { name: 'Tilbakemelding' }))
+    flush()
     fireEvent.input(screen.getByRole('textbox', { name: 'Tilbakemeldingsnotat' }), { target: { value: 'This will fail.' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(await screen.findByText('Kunne ikke sende tilbakemeldingen. Prøv igjen.')).toBeTruthy()

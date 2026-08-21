@@ -1,35 +1,44 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import AgentsPage from '@/features/agents/components/AgentsPage'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 
 function renderWithProviders(component: () => JSX.Element, path = '/agents') {
-  window.history.pushState(null, '', path)
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
     },
   })
 
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route
-        path="/*all"
-        component={() => (
-          <QueryClientProvider client={queryClient}>
-            <AgentsProvider>
-              {component()}
-            </AgentsProvider>
-          </QueryClientProvider>
-        )}
-      />
-    </Router>
-  ))
+  // AgentsProvider seeds its store from `window.location` on construction
+  // (readLocationState()), independent of the TestRouter's own in-memory
+  // history below — so the requested `path` must land on `window.location`
+  // itself before render, or the provider's initial agent/feature selection
+  // won't reflect it.
+  window.history.pushState(null, '', path)
+
+  const TestRouter = createRouter({
+    explicitLinks: true,
+    routes: [{
+      path: '/*all',
+      component: () => (
+        <QueryClientProvider client={queryClient}>
+          <AgentsProvider>
+            {component()}
+          </AgentsProvider>
+        </QueryClientProvider>
+      ),
+    }],
+    history: memoryHistory(path),
+  })
+
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 function stubRuntimeFetch() {
@@ -77,6 +86,7 @@ describe('AgentsPage', () => {
     renderWithProviders(() => <AgentsPage />)
 
     fireEvent.click(screen.getByRole('button', { name: /build your own chatbot/i }))
+    flush()
 
     expect(screen.getByRole('heading', { name: /^playground$/i, level: 1 })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /verevon support agent/i })).toBeTruthy()
@@ -92,6 +102,7 @@ describe('AgentsPage', () => {
     renderWithProviders(() => <AgentsPage />)
 
     fireEvent.click(screen.getByRole('button', { name: /workflow builder/i }))
+    flush()
 
     // WorkflowCanvas's top-bar heading and the canvas/prompt aria-labels are
     // i18n.tr(no, en) calls; the test environment's default 'no' locale renders
@@ -104,6 +115,7 @@ describe('AgentsPage', () => {
     expect(screen.getByRole('textbox', { name: /arbeidsflyt-prompt/i })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /velg arbeidsflytnoden post on instagram/i }))
+    flush()
 
     expect(screen.getByRole('heading', { name: /post on instagram/i })).toBeTruthy()
     // Phase 3 PR-1 removed the dead Test Run / Publish controls and labelled the

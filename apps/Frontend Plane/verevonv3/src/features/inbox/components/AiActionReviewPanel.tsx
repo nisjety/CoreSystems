@@ -1,4 +1,4 @@
-import { Check, Sparkles, X } from 'lucide-solid'
+import { Check, Sparkles, X } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import {
   listAiActions,
@@ -285,11 +285,12 @@ export function AiActionReviewPanel(props: {
     }
   }
 
-  createEffect(() => {
-    const conversationId = props.conversationId
-    void (props.refreshKey ?? 0)
-    void loadActions(conversationId)
-  })
+  createEffect(
+    () => ({ conversationId: props.conversationId, refreshKey: props.refreshKey ?? 0 }),
+    ({ conversationId }) => {
+      void loadActions(conversationId)
+    },
+  )
 
   const pendingActions = createMemo(() => actions().filter(isAwaitingReview))
   const proposalGroups = createMemo(() => {
@@ -398,7 +399,7 @@ export function AiActionReviewPanel(props: {
     <Show when={props.conversationId}>
       <section
         class="verevon-ai-review"
-        aria-busy={actionsLoading()}
+        aria-busy={actionsLoading() ? 'true' : 'false'}
         aria-label={i18n.tr('AI-forslag som venter på gjennomgang', 'AI suggestions awaiting review')}
       >
         <header class="verevon-ai-review__head">
@@ -594,7 +595,7 @@ export function AiActionReviewPanel(props: {
                                   ? i18n.tr('Internt notat (redigerbar)', 'Internal note (editable)')
                                   : i18n.tr('Svarutkast (redigerbar)', 'Reply draft (editable)')}
                                 value={fieldsFor(action).body_text ?? draftReplyBody(action) ?? ''}
-                                maxLength={8000}
+                                maxlength={8000}
                                 disabled={busyId() !== null}
                                 onInput={(event) => setReviewBody(action, event.currentTarget.value)}
                               />

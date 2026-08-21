@@ -38,6 +38,15 @@ pub(super) async fn forward_seed_scrape(
     .send()
     .await?;
 
+    // A non-2xx here is an error envelope, not an SSE stream — parsing it
+    // below would silently yield zero packets and hide the real failure.
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body: String = body.chars().take(300).collect();
+        anyhow::bail!("seed scrape upstream status {status}: {body}");
+    }
+
     let mut out = Vec::new();
     let text = response.text().await.unwrap_or_default();
     for packet in text.split("\n\n") {

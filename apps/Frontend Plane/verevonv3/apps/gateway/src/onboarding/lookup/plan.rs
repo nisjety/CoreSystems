@@ -65,6 +65,13 @@ pub(crate) async fn translate_recommendation(
     }
 
     let token = shared::model_token(&state, &user, &headers).await;
+    // /v1/ai/translate extracts a VerifiedInferenceBearer from
+    // `x-inference-authorization` (separate aud=inference-core user token,
+    // same as the chat path); without it model-gateway rejects the call.
+    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error_detail) => return shared::delegated_auth_unavailable(error_detail),
+    };
     let url = format!("{}/v1/ai/translate", state.model_gateway_url);
     let user_role = user
         .auth_role
@@ -78,6 +85,10 @@ pub(crate) async fn translate_recommendation(
         .post(url)
         .header("x-user-id", &user.user_id)
         .header("x-user-role", user_role)
+        .header(
+            "x-inference-authorization",
+            format!("Bearer {inference_token}"),
+        )
         .json(&json!({
             "operation": "batch",
             "source_language": input.source_language.as_deref().and_then(normalize_locale).unwrap_or_default(),

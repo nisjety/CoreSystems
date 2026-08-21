@@ -1,4 +1,4 @@
-import { Check, ExternalLink, Loader2, Search, X } from 'lucide-solid'
+import { Check, ExternalLink, Loader2, Search, X } from '@/shared/icons'
 import { createMemo, createSignal, For, Show, untrack } from 'solid-js'
 import type { CrawlDiscovery } from '@/shared/api/knowledge-client'
 import { hostnameOf } from './knowledge-preview'
@@ -90,8 +90,7 @@ export function CrawlPagePicker(props: {
           <span class="crawl-page-picker__found">{props.discovery.count} sider funnet</span>
         </div>
         <span
-          class="crawl-page-picker__stat"
-          classList={{ 'crawl-page-picker__stat--over': overCap() }}
+          class={['crawl-page-picker__stat', { 'crawl-page-picker__stat--over': overCap() }]}
         >
           {selectedCount()} valgt{overCap() ? ` · maks ${MAX_SELECTION}` : ''}
         </span>
@@ -127,14 +126,16 @@ export function CrawlPagePicker(props: {
               const isSelected = () => selected().has(page.url)
               return (
                 <div
-                  class="crawl-page-picker__row"
-                  classList={{
-                    'crawl-page-picker__row--selected': isSelected(),
-                    'crawl-page-picker__row--hovered': hovered() === page.url,
-                  }}
+                  class={[
+                    'crawl-page-picker__row',
+                    {
+                      'crawl-page-picker__row--selected': isSelected(),
+                      'crawl-page-picker__row--hovered': hovered() === page.url,
+                    },
+                  ]}
                   role="button"
                   tabindex="0"
-                  aria-pressed={isSelected()}
+                  aria-pressed={isSelected() ? 'true' : 'false'}
                   onClick={() => toggle(page.url)}
                   onMouseEnter={() => setHovered(page.url)}
                   onMouseLeave={() => setHovered((current) => (current === page.url ? null : current))}

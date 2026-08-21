@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AiActionReviewPanel } from './AiActionReviewPanel'
 
@@ -103,6 +104,7 @@ describe('AiActionReviewPanel', () => {
     expect(await screen.findByText(/foreslått hendelse/i)).toBeTruthy()
     const title = screen.getByRole('textbox', { name: /hendelsestittel.*redigerbar/i })
     fireEvent.input(title, { target: { value: 'Checkout failure across web' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
     await waitFor(() => {
       const approval = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/inbox/ai-actions/aiact_incident_1/approve'))
@@ -125,6 +127,7 @@ describe('AiActionReviewPanel', () => {
     expect(await screen.findByText(/foreslått problem/i)).toBeTruthy()
     const summary = screen.getByRole('textbox', { name: /sammendrag.*redigerbar/i })
     fireEvent.input(summary, { target: { value: 'Checkout failures share an upstream timeout.' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
     await waitFor(() => {
       const approval = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/inbox/ai-actions/aiact_problem_1/approve'))
@@ -149,9 +152,11 @@ describe('AiActionReviewPanel', () => {
     expect(screen.getByText(/Meldingsreferanser: 100/i)).toBeTruthy()
     const priority = screen.getByRole('textbox', { name: /prioritet.*redigerbar/i })
     fireEvent.input(priority, { target: { value: 'high' } })
+    flush()
 		const status = screen.getByRole('combobox', { name: /status.*redigerbar/i })
 		expect((status as HTMLSelectElement).value).toBe('waiting_customer')
 		fireEvent.change(status, { target: { value: 'waiting_team' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
     await waitFor(() => {
       const approval = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/inbox/ai-actions/aiact_update_1/approve'))
@@ -210,6 +215,7 @@ describe('AiActionReviewPanel', () => {
     expect(screen.getByText('The customer reports a missing delivery and needs carrier follow-up.')).toBeTruthy()
     expect(screen.getByText(/Meldingsreferanser: 100, 101/i)).toBeTruthy()
     fireEvent.input(severity, { target: { value: 'critical' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
 
     await waitFor(() => {
@@ -263,6 +269,7 @@ describe('AiActionReviewPanel', () => {
 
     const teamSelect = await screen.findByRole('combobox', { name: /team.*redigerbar/i })
     fireEvent.change(teamSelect, { target: { value: 'team_delivery' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
 
     await waitFor(() => {
@@ -307,6 +314,7 @@ describe('AiActionReviewPanel', () => {
 
     const teamSelect = await screen.findByRole('combobox', { name: /team.*redigerbar/i })
     fireEvent.change(teamSelect, { target: { value: 'team_delivery' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
 
     await waitFor(() => {
@@ -388,6 +396,7 @@ describe('AiActionReviewPanel', () => {
     expect(await screen.findByText(/foreslått team er ikke aktivt/i)).toBeTruthy()
     const teamSelect = screen.getByRole('combobox', { name: /team.*redigerbar/i })
     fireEvent.change(teamSelect, { target: { value: 'team_delivery' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
 
     await waitFor(() => {
@@ -496,6 +505,7 @@ describe('AiActionReviewPanel', () => {
     expect((editor as HTMLTextAreaElement).value).toBe('We have checked your delivery and will update you tomorrow.')
     expect(screen.getByText(/nøyaktig svarutkast/i)).toBeTruthy()
     fireEvent.input(editor, { target: { value: 'A human-reviewed reply.' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /godkjenn/i }))
     await waitFor(() => {
       const approval = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/inbox/ai-actions/aiact_reply_1/approve'))

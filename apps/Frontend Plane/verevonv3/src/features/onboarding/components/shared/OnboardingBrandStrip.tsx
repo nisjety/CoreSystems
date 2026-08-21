@@ -7,7 +7,7 @@ export function OnboardingBrandStrip(props: {
   websiteUrl?: string
 }) {
   return (
-    <Show when={hasBrandSignals(props.branding)} fallback={<div aria-hidden class="onboarding-brand-strip onboarding-brand-strip--empty" />}>
+    <Show when={hasBrandSignals(props.branding)} fallback={<div aria-hidden="true" class="onboarding-brand-strip onboarding-brand-strip--empty" />}>
       <div class="onboarding-brand-strip">
         <Show when={props.branding?.favicon}>
           <img src={props.branding?.favicon} alt="" class="onboarding-brand-strip__favicon" />

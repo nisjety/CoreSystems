@@ -22,7 +22,7 @@ import {
   FileText,
   Globe,
   Image as ImageIcon,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   For,
   Match,
@@ -31,7 +31,6 @@ import {
   createEffect,
   createMemo,
   createSignal,
-  on,
   onCleanup,
 } from 'solid-js'
 import {
@@ -128,8 +127,8 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; 
     <button
       type="button"
       role="tab"
-      aria-selected={props.selected}
-      classList={{
+      aria-selected={props.selected ? 'true' : 'false'}
+      class={{
         'verevon-chat-artifact-list__item': true,
         'verevon-chat-artifact-list__item--active': props.selected,
       }}
@@ -184,12 +183,15 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   // on the newest revision in preview mode. Keyed on the id alone so a version
   // streaming in for the artifact the user is already reading does NOT yank
   // their revision cursor forward.
-  createEffect(on(() => artifact().id, () => {
-    setVersionCursor(null)
-    setShowSource(false)
-    setImageFailed(false)
-    setCopyState('idle')
-  }))
+  createEffect(
+    () => artifact().id,
+    () => {
+      setVersionCursor(null)
+      setShowSource(false)
+      setImageFailed(false)
+      setCopyState('idle')
+    },
+  )
 
   let copyTimer: number | undefined
   onCleanup(() => window.clearTimeout(copyTimer))
@@ -276,7 +278,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
           <Show when={isCopyableRenderKind(renderKind()) && !missing()}>
             <button
               type="button"
-              classList={{
+              class={{
                 'verevon-chat-artifact-action': true,
                 'verevon-chat-artifact-action--failed': copyState() === 'failed',
               }}

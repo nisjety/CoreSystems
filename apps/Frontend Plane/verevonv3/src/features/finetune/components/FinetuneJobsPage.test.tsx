@@ -2,6 +2,7 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FinetuneJobsPage from '@/features/finetune/components/FinetuneJobsPage'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
@@ -52,7 +53,9 @@ afterEach(() => {
 describe('FinetuneJobsPage', () => {
   it('reconciles a false-failure 502 by checking whether the fine-tune job was actually cancelled', async () => {
     setSessionUser({ id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     let cancelled = false
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
@@ -81,7 +84,9 @@ describe('FinetuneJobsPage', () => {
 
   it('shows a real failure when cancelling a fine-tune job genuinely did not go through', async () => {
     setSessionUser({ id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
     markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'owner' })
+    flush()
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       if (url === '/api/v1/models') return jsonResponse({ models: [] })

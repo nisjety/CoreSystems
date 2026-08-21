@@ -7,6 +7,7 @@ import {
   Transport,
 } from '@nestjs/microservices';
 import * as dotenv from 'dotenv';
+import { installIpv4RescueDns } from './common/net/ipv4-rescue-dns';
 import { SecurityHeadersMiddleware } from './common/middleware/security-headers.middleware';
 import { join } from 'path';
 import { ReflectionService } from '@grpc/reflection';
@@ -20,6 +21,11 @@ import type { Express, Request, Response } from 'express';
 
 // Load environment variables
 dotenv.config();
+
+// Must run before any outbound fetch (OAuth token exchanges included): see the
+// module doc — musl+Docker DNS can return IPv6-only answers for Microsoft's
+// login host in a v4-only container, failing every sign-in with invalid_code.
+installIpv4RescueDns();
 
 function splitOrigins(value?: string): string[] {
   return (value ?? '')

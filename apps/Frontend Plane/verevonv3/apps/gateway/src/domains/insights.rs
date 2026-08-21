@@ -50,6 +50,36 @@ fn organization_required() -> impl IntoResponse {
     )
 }
 
+/// Insight Core authenticates the GATEWAY (internal key), not the browser
+/// session — its 401/403 means the gateway↔core trust is broken, never that
+/// the user's session expired. Passing that 401 through verbatim made the SPA
+/// dispatch its session-expired event and sign the user out of the whole app
+/// on a credential drift. Translate it to the upstream-fault it actually is.
+fn shield_upstream_credential_failure(
+    status: axum::http::StatusCode,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+    if matches!(
+        status,
+        axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN
+    ) {
+        tracing::error!(
+            upstream_status = %status,
+            "insight-core rejected the gateway's service credential"
+        );
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": {
+                    "code": "insights_upstream_unavailable",
+                    "message": "Insights is temporarily unavailable."
+                }
+            })),
+        );
+    }
+    (status, Json(body))
+}
+
 async fn list_connectors(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -71,7 +101,7 @@ async fn list_connectors(
     )
     .await;
 
-    (status, Json(body)).into_response()
+    shield_upstream_credential_failure(status, body).into_response()
 }
 
 async fn overview(
@@ -106,7 +136,7 @@ async fn overview(
     )
     .await;
 
-    (status, Json(body)).into_response()
+    shield_upstream_credential_failure(status, body).into_response()
 }
 
 // The browser may narrow an Insights read to a known reporting surface and

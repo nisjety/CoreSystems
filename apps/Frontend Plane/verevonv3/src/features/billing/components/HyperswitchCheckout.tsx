@@ -85,55 +85,59 @@ export function HyperswitchCheckout(props: HyperswitchCheckoutProps) {
   let checkout: HyperWidget | undefined
   let mountedSecret: string | undefined
 
-  createEffect(() => {
-    const clientSecret = props.session.client_secret
-    const publishableKey = props.session.publishable_key
-    const clientURL = props.session.client_url
-    const backendURL = props.session.backend_url
-    const returnURL = props.returnUrl
-    if (!clientSecret || !publishableKey || !clientURL || mountedSecret === clientSecret) return
+  createEffect(
+    () => ({
+      clientSecret: props.session.client_secret,
+      publishableKey: props.session.publishable_key,
+      clientURL: props.session.client_url,
+      backendURL: props.session.backend_url,
+      returnURL: props.returnUrl,
+    }),
+    ({ clientSecret, publishableKey, clientURL, backendURL, returnURL }) => {
+      if (!clientSecret || !publishableKey || !clientURL || mountedSecret === clientSecret) return
 
-    mountedSecret = clientSecret
-    setLoading(true)
-    setMessage(undefined)
+      mountedSecret = clientSecret
+      setLoading(true)
+      setMessage(undefined)
 
-    void loadHyperScript(clientURL)
-      .then(() => {
-        if (!window.Hyper) throw new Error('Payment checkout is unavailable.')
+      void loadHyperScript(clientURL)
+        .then(() => {
+          if (!window.Hyper) throw new Error('Payment checkout is unavailable.')
 
-        checkout?.destroy?.()
-        hyper = window.Hyper(publishableKey, {
-          customBackendUrl: backendURL,
-        })
-        widgets = hyper.widgets({
-          appearance: {
-            theme: 'midnight',
-            variables: {
-              colorPrimary: '#ff2e63',
-              borderRadius: '8px',
+          checkout?.destroy?.()
+          hyper = window.Hyper(publishableKey, {
+            customBackendUrl: backendURL,
+          })
+          widgets = hyper.widgets({
+            appearance: {
+              theme: 'midnight',
+              variables: {
+                colorPrimary: '#ff2e63',
+                borderRadius: '8px',
+              },
             },
-          },
-          clientSecret,
+            clientSecret,
+          })
+          checkout = widgets.create('payment', {
+            layout: 'tabs',
+            wallets: {
+              walletReturnUrl: returnURL,
+            },
+          })
+          checkout.mount(`#${containerId}`)
+          setLoading(false)
         })
-        checkout = widgets.create('payment', {
-          layout: 'tabs',
-          wallets: {
-            walletReturnUrl: returnURL,
-          },
+        .catch((reason: unknown) => {
+          setLoading(false)
+          setMessage(
+            translateApiError(reason, i18n.tr, {
+              no: 'Kunne ikke laste betalingsløsningen.',
+              en: 'Could not load payment checkout.',
+            }),
+          )
         })
-        checkout.mount(`#${containerId}`)
-        setLoading(false)
-      })
-      .catch((reason: unknown) => {
-        setLoading(false)
-        setMessage(
-          translateApiError(reason, i18n.tr, {
-            no: 'Kunne ikke laste betalingsløsningen.',
-            en: 'Could not load payment checkout.',
-          }),
-        )
-      })
-  })
+    },
+  )
 
   onCleanup(() => {
     checkout?.destroy?.()
@@ -193,7 +197,7 @@ export function HyperswitchCheckout(props: HyperswitchCheckoutProps) {
           {(status) => <small>{status()}</small>}
         </Show>
       </div>
-      <div id={containerId} class="verevon-billing-checkout__mount" aria-busy={loading()} />
+      <div id={containerId} class="verevon-billing-checkout__mount" aria-busy={loading() ? 'true' : 'false'} />
       <Show when={loading()}>
         <p class="verevon-billing-checkout__status">Laster betaling...</p>
       </Show>

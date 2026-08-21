@@ -1,4 +1,3 @@
-import { A } from '@solidjs/router'
 import {
   AlertCircle,
   CheckCircle2,
@@ -12,9 +11,10 @@ import {
   Telescope,
   TrendingUp,
   type LucideProps,
-} from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show, type Component } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   fallbackSocialWorkspace,
   loadSocialWorkspace,
@@ -201,7 +201,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
           <h1>{config().title}</h1>
           <p>{config().description}</p>
         </div>
-        <A href={config().actionHref}>{config().actionLabel}</A>
+        <a href={config().actionHref} link>{config().actionLabel}</a>
       </section>
 
       <Show when={!workspace()}>
@@ -278,7 +278,7 @@ export default function SocialOperationsPage(props: { section: SocialOperationsS
                   {(status) => <StatusPill status={status()} />}
                 </Show>
                 <Show when={card.actionHref}>
-                  {(href) => <A href={href()}>{card.actionLabel ?? i18n.tr('Åpne', 'Open')}</A>}
+                  {(href) => <a href={href()} link>{card.actionLabel ?? i18n.tr('Åpne', 'Open')}</a>}
                 </Show>
               </footer>
             </article>

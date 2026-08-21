@@ -1,5 +1,6 @@
-import { BookOpen, Loader2, Sparkles, Trash2 } from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { BookOpen, Loader2, Sparkles, Trash2 } from '@/shared/icons'
+import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   createSkill,
   deleteSkill,

@@ -10,7 +10,7 @@
 // reads it. FAIL CLOSED: while loading, on error, or anything other than an
 // explicit server `gate_open === true`, the gate is CLOSED.
 
-import { createResource } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 
 import { getOwnershipStatus, type OwnershipStatus } from '@/shared/api/ownership-client'
 

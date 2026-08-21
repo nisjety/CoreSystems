@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EmailAccountHealthBadge, SupportExpandedSidebarPanel } from './CoreSidebarSupportPanel'
@@ -38,12 +38,23 @@ afterEach(() => {
 })
 
 function renderSupportSidebar(path: string) {
-  window.history.pushState(null, '', path)
+  const TestRouter = createRouter({
+    routes: [{ path: '/support', component: () => <SupportExpandedSidebarPanel onCollapse={() => undefined} /> }],
+    history: memoryHistory(path),
+    // @solidjs/router v2 auto-claims every plain `<a href>` and stamps
+    // aria-current="page" on it whenever the anchor's PATHNAME (query string
+    // ignored) matches the current location — see setupLinkClaims in
+    // @solidjs/router/dist/claims.js. Every sidebar link here shares the same
+    // `/support` pathname and differs only by query string, so without this
+    // flag the router marks ALL of them "current", clobbering the panel's own
+    // hand-rolled `isActive`/aria-current logic. `explicitLinks: true` limits
+    // the router's auto-claim to anchors carrying a `link` attribute, which
+    // this panel's links never do, so its own active-state logic wins.
+    explicitLinks: true,
+  })
   return render(() => (
     <I18nProvider>
-      <Router root={(props) => <>{props.children}</>}>
-        <Route path="/support" component={() => <SupportExpandedSidebarPanel onCollapse={() => undefined} />} />
-      </Router>
+      <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
     </I18nProvider>
   ))
 }

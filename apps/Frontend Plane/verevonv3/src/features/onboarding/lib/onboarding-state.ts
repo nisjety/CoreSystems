@@ -1,4 +1,4 @@
-import { createStore } from 'solid-js/store'
+import { createStore } from 'solid-js'
 import type { OnboardingState } from '@/features/onboarding/lib/model'
 import { loadStoredOnboardingState } from '@/features/onboarding/lib/state'
 

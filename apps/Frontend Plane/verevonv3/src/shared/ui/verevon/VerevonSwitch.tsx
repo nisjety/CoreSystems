@@ -1,5 +1,4 @@
 import { Switch as KobalteSwitch } from '@kobalte/core/switch'
-import { splitProps } from 'solid-js'
 import { cn } from '@/shared/lib/cn'
 
 type VerevonSwitchProps = {
@@ -11,16 +10,14 @@ type VerevonSwitchProps = {
 }
 
 export function VerevonSwitch(allProps: VerevonSwitchProps) {
-  const [local] = splitProps(allProps, ['checked', 'class', 'disabled', 'label', 'onChange'])
-
   return (
     <KobalteSwitch
-      checked={local.checked}
-      class={cn('verevon-switch', local.class)}
-      disabled={local.disabled}
-      onChange={local.onChange}
+      checked={allProps.checked}
+      class={cn('verevon-switch', allProps.class)}
+      disabled={allProps.disabled}
+      onChange={allProps.onChange}
     >
-      <KobalteSwitch.Input aria-label={local.label} />
+      <KobalteSwitch.Input aria-label={allProps.label} />
       <KobalteSwitch.Control class="verevon-switch__control">
         <KobalteSwitch.Thumb class="verevon-switch__thumb" />
       </KobalteSwitch.Control>

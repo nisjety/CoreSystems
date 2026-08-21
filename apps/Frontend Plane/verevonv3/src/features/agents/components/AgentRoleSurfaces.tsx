@@ -15,7 +15,7 @@ import {
   Split,
   TicketCheck,
   Zap,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { For, Match, Show, Switch } from 'solid-js'
 import { Button } from '@/shared/ui/Button'
 import { cn } from '@/shared/lib/cn'
@@ -392,7 +392,7 @@ function SalesSdrSurface(props: {
                     size="md"
                     shape="pill"
                     disabled
-                    aria-pressed={index() === 1}
+                    aria-pressed={index() === 1 ? 'true' : 'false'}
                     class={cn('min-h-8 px-3 text-[12px] font-semibold', controlFocusClass)}
                   >
                     {slot}
@@ -497,7 +497,7 @@ function SalesSdrSurface(props: {
                       shape="pill"
                       size="md"
                       disabled
-                      aria-pressed={index() === 1}
+                      aria-pressed={index() === 1 ? 'true' : 'false'}
                       class={cn('min-h-8 px-3 text-[12px] font-semibold', controlFocusClass)}
                     >
                       {slot}

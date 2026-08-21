@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AiReviewQueue } from './AiReviewQueue'
@@ -13,7 +13,6 @@ afterEach(() => {
 
 describe('AiReviewQueue', () => {
   it('lists only the tenant review queue and opens each proposal in its source conversation', async () => {
-    window.history.pushState(null, '', '/support?surface=review')
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       if (String(input) === '/api/v1/inbox/ai-actions?status=review&limit=100') {
         return new Response(JSON.stringify({ data: [{
@@ -33,11 +32,15 @@ describe('AiReviewQueue', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
+    const TestRouter = createRouter({
+      routes: [{ path: '/support', component: AiReviewQueue }],
+      history: memoryHistory('/support?surface=review'),
+      explicitLinks: true,
+    })
+
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/support" component={AiReviewQueue} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 

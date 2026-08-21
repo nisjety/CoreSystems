@@ -16,9 +16,10 @@ import {
   TicketCheck,
   X,
   type LucideProps,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show, untrack, type Component, type JSX } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, untrack, type Component } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { Dynamic } from '@solidjs/web'
 import { AiActionReviewPanel } from '@/features/inbox/components/AiActionReviewPanel'
 import { ConversationActivityTimeline } from '@/features/inbox/components/ConversationActivityTimeline'
 import { EmailBody } from '@/features/inbox/components/EmailBody'
@@ -91,18 +92,20 @@ export function ConversationPanel(props: {
   const [activeCenterTab, setActiveCenterTab] = createSignal<ConversationCenterTab>('conversation')
   let scrollRef: HTMLDivElement | undefined
 
-  createEffect(() => {
-    void props.selectedTicket?.conversationId
-    setActiveCenterTab('conversation')
-  })
+  createEffect(
+    () => props.selectedTicket?.conversationId,
+    () => { setActiveCenterTab('conversation') },
+  )
 
-  createEffect(() => {
-    const shouldScroll = Boolean(props.selectedTicket && !props.articlesLoading && props.articles.length >= 0)
-    if (!shouldScroll) return
-    window.requestAnimationFrame(() => {
-      scrollRef?.scrollTo?.({ top: scrollRef.scrollHeight, behavior: 'smooth' })
-    })
-  })
+  createEffect(
+    () => Boolean(props.selectedTicket && !props.articlesLoading && props.articles.length >= 0),
+    (shouldScroll) => {
+      if (!shouldScroll) return
+      window.requestAnimationFrame(() => {
+        scrollRef?.scrollTo?.({ top: scrollRef.scrollHeight, behavior: 'smooth' })
+      })
+    },
+  )
 
   return (
     <Show when={props.selectedTicket?.conversationId} keyed fallback={<ConversationEmptyState />}>
@@ -218,8 +221,8 @@ function CenterTab(props: {
       role="tab"
       id={`conversation-center-tab-${props.id}`}
       aria-controls={`conversation-center-panel-${props.id}`}
-      aria-selected={props.active}
-      tabIndex={props.active ? 0 : -1}
+      aria-selected={props.active ? 'true' : 'false'}
+      tabindex={props.active ? 0 : -1}
       onKeyDown={handleTabKeyDown}
       onClick={() => props.onSelect(props.id)}
     >
@@ -712,24 +715,27 @@ function ConversationReplyComposer(props: {
       sendInFlight = false
     }
   }
-  onMount(() => {
-    // The keyed composer is recreated for a new conversation. Reset the mode
-    // before an owned recovery record can restore its saved internal/reply mode.
-    props.setIsInternal(false)
-    // eslint-disable-next-line solid/reactivity -- recovery is intentionally started once per keyed composer mount.
-    void getConversationDraft(activeOrgId, activeConversationId).then((draft) => {
-      if (hasLocalEdit || !draft?.body_text) return
-      props.setReplyText(draft.body_text)
-      props.setIsInternal(draft.internal)
-      setDraftState('recovered')
-    }).catch((reason) => {
-      if (reason instanceof ApiError && reason.status === 404) return
-      markRetentionResult(reason)
-    })
-    void refreshDraftPresence()
-    // eslint-disable-next-line solid/reactivity -- the current keyed composer owns this bounded presence poll.
-    presenceTimer = window.setInterval(() => { void refreshDraftPresence() }, 15_000)
-  })
+  createEffect(
+    () => undefined,
+    () => {
+      // The keyed composer is recreated for a new conversation. Reset the mode
+      // before an owned recovery record can restore its saved internal/reply mode.
+      props.setIsInternal(false)
+      // eslint-disable-next-line solid/reactivity -- recovery is intentionally started once per keyed composer mount.
+      void getConversationDraft(activeOrgId, activeConversationId).then((draft) => {
+        if (hasLocalEdit || !draft?.body_text) return
+        props.setReplyText(draft.body_text)
+        props.setIsInternal(draft.internal)
+        setDraftState('recovered')
+      }).catch((reason) => {
+        if (reason instanceof ApiError && reason.status === 404) return
+        markRetentionResult(reason)
+      })
+      void refreshDraftPresence()
+      // eslint-disable-next-line solid/reactivity -- the current keyed composer owns this bounded presence poll.
+      presenceTimer = window.setInterval(() => { void refreshDraftPresence() }, 15_000)
+    },
+  )
   onCleanup(() => {
     disposed = true
     stopDraftSave()
@@ -779,7 +785,7 @@ function ConversationReplyComposer(props: {
         <textarea
           rows={4}
           value={props.replyText}
-          maxLength={8000}
+          maxlength={8000}
           disabled={leaseState() === 'blocked' || foreignDraftLease()}
           onFocus={() => {
             composerFocused = true
@@ -894,7 +900,7 @@ function ArticleBubble(props: { article: ZammadArticle; ticket: ZammadTicket }) 
       </div>
       <div class="verevon-inbox-article__body">
         <div class="verevon-inbox-article__meta">
-          <span classList={{ 'verevon-inbox-article__agent-name': agentMessage() }}>{senderName()}</span>
+          <span class={{ 'verevon-inbox-article__agent-name': agentMessage() }}>{senderName()}</span>
           <Show when={senderEmail() && senderEmail() !== senderName()}>
             <span class="verevon-inbox-article__email">&lt;{senderEmail()}&gt;</span>
           </Show>
@@ -950,9 +956,12 @@ function TagEditor(props: { tags: string[]; onAdd: (tag: string) => void; onRemo
   const [draft, setDraft] = createSignal('')
   let inputRef: HTMLInputElement | undefined
 
-  createEffect(() => {
-    if (adding()) window.requestAnimationFrame(() => inputRef?.focus())
-  })
+  createEffect(
+    () => adding(),
+    (isAdding) => {
+      if (isAdding) window.requestAnimationFrame(() => inputRef?.focus())
+    },
+  )
 
   const submit = () => {
     props.onAdd(draft())

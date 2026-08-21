@@ -1,5 +1,5 @@
-import { Search, PanelLeftClose } from 'lucide-solid'
-import type { JSX } from 'solid-js'
+import { Search, PanelLeftClose } from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 

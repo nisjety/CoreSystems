@@ -36,7 +36,7 @@ import {
   LayoutTemplate,
   type IconNode,
   type LucideProps,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { createComponent, type Component } from 'solid-js'
 import type { VerevonRoute } from '@/features/core/lib/shell-data'
 

@@ -17,11 +17,14 @@ export default function AcceptInvitationPage() {
   const [error, setError] = createSignal<string | null>(null)
   const invitationId = () => params.invitationId?.trim() ?? ''
 
-  createEffect(() => {
-    if (session.status !== 'unauthenticated') return
-    const returnTo = `/accept-invitation/${encodeURIComponent(invitationId())}`
-    navigate(`/login?returnTo=${encodeURIComponent(returnTo)}`, { replace: true })
-  })
+  createEffect(
+    () => ({ status: session.status, invitationId: invitationId() }),
+    ({ status, invitationId: currentInvitationId }) => {
+      if (status !== 'unauthenticated') return
+      const returnTo = `/accept-invitation/${encodeURIComponent(currentInvitationId)}`
+      navigate(`/login?returnTo=${encodeURIComponent(returnTo)}`, { replace: true })
+    },
+  )
 
   const acceptInvitation = async () => {
     if (submitting()) return

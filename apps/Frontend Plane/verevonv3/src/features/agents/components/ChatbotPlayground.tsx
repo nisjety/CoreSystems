@@ -14,7 +14,7 @@ import {
   UserRound,
   Wrench,
   Zap,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'

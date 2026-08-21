@@ -1,4 +1,5 @@
-import { createResource, For, Show } from 'solid-js'
+import { For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { formatTimestamp } from '@/features/inbox/lib/inbox-model'
 import { listConversationActivity, type ConversationActivity } from '@/shared/api/inbox-client'
 import { useI18n } from '@/shared/i18n'
@@ -48,7 +49,7 @@ function ConversationActivityItem(props: { event: ConversationActivity }) {
       <span aria-hidden="true" class="verevon-inbox-activity-timeline__marker" />
       <div>
         <strong>{activityLabel(props.event, i18n.tr)}</strong>
-        <time dateTime={props.event.created_at}>{formatTimestamp(props.event.created_at)}</time>
+        <time datetime={props.event.created_at}>{formatTimestamp(props.event.created_at)}</time>
       </div>
     </li>
   )

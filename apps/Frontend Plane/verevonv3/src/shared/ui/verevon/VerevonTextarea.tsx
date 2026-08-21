@@ -1,15 +1,16 @@
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 
 type VerevonTextareaProps = JSX.TextareaHTMLAttributes<HTMLTextAreaElement>
 
 export function VerevonTextarea(allProps: VerevonTextareaProps) {
-  const [local, props] = splitProps(allProps, ['class'])
+  const rest = omit(allProps, 'class')
 
   return (
     <textarea
-      {...props}
-      class={cn('verevon-field-compact verevon-textarea-compact', local.class)}
+      {...rest}
+      class={cn('verevon-field-compact verevon-textarea-compact', allProps.class)}
     />
   )
 }

@@ -1,5 +1,4 @@
-import { A } from '@solidjs/router'
-import { ArrowLeft } from 'lucide-solid'
+import { ArrowLeft } from '@/shared/icons'
 import { Show } from 'solid-js'
 import { cn } from '@/shared/lib/cn'
 
@@ -17,10 +16,10 @@ export function VerevonBackButton(props: VerevonBackButtonProps) {
     <Show
       when={props.onClick}
       fallback={
-        <A href={props.href ?? '/'} class={cn('onboarding-back', props.class)}>
+        <a href={props.href ?? '/'} link class={cn('onboarding-back', props.class)}>
           <ArrowLeft size={16} />
           {label()}
-        </A>
+        </a>
       }
     >
       <button type="button" class={cn('onboarding-back', props.class)} onClick={() => props.onClick?.()}>

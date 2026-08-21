@@ -1,4 +1,4 @@
-import { onCleanup, onMount } from 'solid-js'
+import { createEffect } from 'solid-js'
 import {
   readActiveChatThreadId,
   readChatThreadHistory,
@@ -154,44 +154,47 @@ export interface UseChatShortcutsOptions {
  * keydown listener, cleaned up on unmount.
  */
 export function useChatShortcuts(options: UseChatShortcutsOptions): void {
-  onMount(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null
-      const action = matchChatShortcut(event, target)
-      if (!action) return
+  createEffect(
+    () => undefined,
+    () => {
+      const handleKeyDown = (event: KeyboardEvent) => {
+        const target = event.target as HTMLElement | null
+        const action = matchChatShortcut(event, target)
+        if (!action) return
 
-      switch (action.type) {
-        case 'new-chat': {
-          event.preventDefault()
-          options.startNewChat()
-          break
-        }
-        case 'focus-composer': {
-          event.preventDefault()
-          document.querySelector<HTMLTextAreaElement>(CHAT_COMPOSER_SELECTOR)?.focus()
-          break
-        }
-        case 'select-thread': {
-          const nextId = nextThreadIdForDirection(
-            readChatThreadHistory(),
-            readActiveChatThreadId(),
-            action.direction,
-          )
-          if (nextId) {
+        switch (action.type) {
+          case 'new-chat': {
             event.preventDefault()
-            selectChatThread(nextId)
+            options.startNewChat()
+            break
           }
-          break
-        }
-        case 'dismiss': {
-          const active = document.activeElement as HTMLElement | null
-          if (active && isChatComposerTarget(active)) active.blur()
-          break
+          case 'focus-composer': {
+            event.preventDefault()
+            document.querySelector<HTMLTextAreaElement>(CHAT_COMPOSER_SELECTOR)?.focus()
+            break
+          }
+          case 'select-thread': {
+            const nextId = nextThreadIdForDirection(
+              readChatThreadHistory(),
+              readActiveChatThreadId(),
+              action.direction,
+            )
+            if (nextId) {
+              event.preventDefault()
+              selectChatThread(nextId)
+            }
+            break
+          }
+          case 'dismiss': {
+            const active = document.activeElement as HTMLElement | null
+            if (active && isChatComposerTarget(active)) active.blur()
+            break
+          }
         }
       }
-    }
 
-    document.addEventListener('keydown', handleKeyDown)
-    onCleanup(() => document.removeEventListener('keydown', handleKeyDown))
-  })
+      document.addEventListener('keydown', handleKeyDown)
+      return () => document.removeEventListener('keydown', handleKeyDown)
+    },
+  )
 }

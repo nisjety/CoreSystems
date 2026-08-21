@@ -1,4 +1,5 @@
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { cn } from '@/shared/lib/cn'
 
 type VerevonSegmentedProps = JSX.HTMLAttributes<HTMLDivElement>
@@ -7,25 +8,25 @@ type VerevonSegmentedButtonProps = JSX.ButtonHTMLAttributes<HTMLButtonElement> &
 }
 
 export function VerevonSegmented(allProps: VerevonSegmentedProps) {
-  const [local, props] = splitProps(allProps, ['class'])
+  const props = omit(allProps, 'class')
 
   return (
     <div
       {...props}
-      class={cn('verevon-segmented', local.class)}
+      class={cn('verevon-segmented', allProps.class)}
     />
   )
 }
 
 export function VerevonSegmentedButton(allProps: VerevonSegmentedButtonProps) {
-  const [local, props] = splitProps(allProps, ['class', 'selected', 'type'])
+  const props = omit(allProps, 'class', 'selected', 'type')
 
   return (
     <button
       {...props}
-      aria-pressed={local.selected}
-      class={cn('verevon-segmented-button', local.selected && 'verevon-segmented-button--selected', local.class)}
-      type={local.type ?? 'button'}
+      aria-pressed={allProps.selected ? 'true' : 'false'}
+      class={cn('verevon-segmented-button', allProps.selected && 'verevon-segmented-button--selected', allProps.class)}
+      type={allProps.type ?? 'button'}
     />
   )
 }

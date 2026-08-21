@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import SupportOutboundPage from './SupportOutboundPage'
 import { I18nProvider } from '@/shared/i18n'
@@ -32,11 +33,15 @@ beforeEach(() => {
 
 describe('SupportOutboundPage', () => {
   it('keeps creation disabled while presenting the canonical receipt-ledger empty state', () => {
+    const TestRouter = createRouter({
+      routes: [{ path: '/', component: SupportOutboundPage }],
+      history: memoryHistory('/'),
+      explicitLinks: true,
+    })
+
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/" component={SupportOutboundPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
@@ -54,11 +59,15 @@ describe('SupportOutboundPage', () => {
       },
     ])
 
+    const TestRouter = createRouter({
+      routes: [{ path: '/', component: SupportOutboundPage }],
+      history: memoryHistory('/'),
+      explicitLinks: true,
+    })
+
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/" component={SupportOutboundPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
@@ -68,14 +77,17 @@ describe('SupportOutboundPage', () => {
   })
 
   it('passes only the supported provider and delivery filters to the canonical ledger', async () => {
-    window.history.pushState(null, '', '/?outbound_provider=whatsapp&outbound_delivery_status=failed')
     listOrganizationOutboundIntents.mockResolvedValue([])
+
+    const TestRouter = createRouter({
+      routes: [{ path: '/', component: SupportOutboundPage }],
+      history: memoryHistory('/?outbound_provider=whatsapp&outbound_delivery_status=failed'),
+      explicitLinks: true,
+    })
 
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/" component={SupportOutboundPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
@@ -90,11 +102,15 @@ describe('SupportOutboundPage', () => {
       delivery_status: 'unconfirmed', created_at: '2026-08-03T10:00:00.000Z', updated_at: '2026-08-03T10:10:00.000Z',
     }])
 
+    const TestRouter = createRouter({
+      routes: [{ path: '/', component: SupportOutboundPage }],
+      history: memoryHistory('/'),
+      explicitLinks: true,
+    })
+
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/" component={SupportOutboundPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
@@ -112,11 +128,15 @@ describe('SupportOutboundPage', () => {
       created_at: '2026-08-03T10:00:00.000Z', updated_at: '2026-08-03T10:10:00.000Z',
     }])
 
+    const TestRouter = createRouter({
+      routes: [{ path: '/', component: SupportOutboundPage }],
+      history: memoryHistory('/'),
+      explicitLinks: true,
+    })
+
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/" component={SupportOutboundPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 
@@ -126,11 +146,13 @@ describe('SupportOutboundPage', () => {
     expect(screen.getByText(/provider timeout|provider_timeout/i)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('tab', { name: /actions|handlinger/i }))
+    flush()
     const reconciliationLinks = screen.getAllByRole('link', { name: /open source conversation|åpne kildesamtale/i })
     expect(reconciliationLinks.some((link) => link.getAttribute('href') === '/support?view=all&conversation_id=conv_unknown')).toBe(true)
     expect(screen.getByText(/do not retry automatically|ikke prøv automatisk på nytt/i)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('tab', { name: /audit|revisjon/i }))
+    flush()
     expect(screen.getByText(/content-free audit context|innholdsfri revisjonskontekst/i)).toBeTruthy()
     expect(screen.getByText(/outbound_unknown/)).toBeTruthy()
     expect(screen.queryByRole('button', { name: /retry|prøv igjen/i })).toBeNull()
@@ -142,11 +164,15 @@ describe('SupportOutboundPage', () => {
       delivery_status: 'unconfirmed', created_at: '2026-08-03T10:00:00.000Z', updated_at: '2026-08-03T10:01:00.000Z',
     }])
 
+    const TestRouter = createRouter({
+      routes: [{ path: '/', component: SupportOutboundPage }],
+      history: memoryHistory('/'),
+      explicitLinks: true,
+    })
+
     render(() => (
       <I18nProvider>
-        <Router root={(props) => <>{props.children}</>}>
-          <Route path="/" component={SupportOutboundPage} />
-        </Router>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
       </I18nProvider>
     ))
 

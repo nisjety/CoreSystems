@@ -20,8 +20,6 @@ import {
   createEffect,
   createMemo,
   createSignal,
-  on,
-  onCleanup,
 } from 'solid-js'
 import {
   CameraOff,
@@ -32,7 +30,7 @@ import {
   MonitorPlay,
   PanelRightClose,
   PanelRightOpen,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   BrowserChrome,
 } from '@/features/dashboard/home/BrowserChrome'
@@ -179,67 +177,70 @@ export function ChatLiveRunPanel(props: {
     setWatch((current) => (current && current.runId === runId ? apply(current) : current))
   }
 
-  createEffect(on(() => props.runId, (runId) => {
-    setExpandedStep(null)
-    if (!runId) {
-      setWatch(null)
-      return
-    }
-    setWatch(emptyChatRunWatch(runId, props.zdr))
-    const controller = new AbortController()
-    void streamRunEvents(runId, {
-      onApproval: (event) => update(runId, (state) => appendActivity(state, {
-        at: event.at ?? new Date().toISOString(),
-        detail: event.approvalKind ?? '',
-        id: `approval-${event.approvalId ?? state.activity.length}`,
-        kind: 'approval',
-        status: event.to,
-        title: 'Godkjenning',
-      })),
-      onBrowserAction: (event) => update(runId, (state) => applyBrowserAction(state, event)),
-      onBrowserObservation: (event) => update(runId, (state) => applyBrowserObservation(state, event)),
-      onBrowserRunPaused: (event) => update(runId, (state) => appendActivity(state, {
-        at: event.at ?? new Date().toISOString(),
-        detail: 'Nettleserkjøringen ble satt på pause.',
-        id: `paused-${state.activity.length}`,
-        kind: 'pause',
-        title: 'Pauset',
-      })),
-      onBrowserRunResumed: (event) => update(runId, (state) => appendActivity(state, {
-        at: event.at ?? new Date().toISOString(),
-        detail: 'Nettleserkjøringen fortsatte.',
-        id: `resumed-${state.activity.length}`,
-        kind: 'resume',
-        title: 'Fortsatte',
-      })),
-      onDone: () => update(runId, (state) => closeChatRunWatch(state)),
-      onError: () => update(runId, (state) => closeChatRunWatch(state, RUN_STREAM_ERROR)),
-      onPlan: (event) => update(runId, (state) => appendActivity(state, {
-        at: event.at ?? new Date().toISOString(),
-        detail: [event.from, event.to].filter(Boolean).join(' → '),
-        id: `plan-${event.planId ?? state.activity.length}`,
-        kind: 'plan',
-        status: event.to,
-        title: 'Plan',
-      })),
-      onStep: (event) => update(runId, (state) => appendActivity(state, {
-        at: new Date().toISOString(),
-        detail: event.detail ?? '',
-        id: `step-${event.id ?? state.activity.length}`,
-        kind: 'step',
-        status: event.status,
-        title: event.title ?? 'Steg',
-      })),
-      onSubagentAttached: (event) => update(runId, (state) => appendActivity(state, {
-        at: event.at ?? new Date().toISOString(),
-        detail: event.role ?? '',
-        id: `subagent-${event.childRunId ?? state.activity.length}`,
-        kind: 'subagent',
-        title: 'Underagent',
-      })),
-    }, controller.signal)
-    onCleanup(() => controller.abort())
-  }))
+  createEffect(
+    () => props.runId,
+    (runId) => {
+      setExpandedStep(null)
+      if (!runId) {
+        setWatch(null)
+        return
+      }
+      setWatch(emptyChatRunWatch(runId, props.zdr))
+      const controller = new AbortController()
+      void streamRunEvents(runId, {
+        onApproval: (event) => update(runId, (state) => appendActivity(state, {
+          at: event.at ?? new Date().toISOString(),
+          detail: event.approvalKind ?? '',
+          id: `approval-${event.approvalId ?? state.activity.length}`,
+          kind: 'approval',
+          status: event.to,
+          title: 'Godkjenning',
+        })),
+        onBrowserAction: (event) => update(runId, (state) => applyBrowserAction(state, event)),
+        onBrowserObservation: (event) => update(runId, (state) => applyBrowserObservation(state, event)),
+        onBrowserRunPaused: (event) => update(runId, (state) => appendActivity(state, {
+          at: event.at ?? new Date().toISOString(),
+          detail: 'Nettleserkjøringen ble satt på pause.',
+          id: `paused-${state.activity.length}`,
+          kind: 'pause',
+          title: 'Pauset',
+        })),
+        onBrowserRunResumed: (event) => update(runId, (state) => appendActivity(state, {
+          at: event.at ?? new Date().toISOString(),
+          detail: 'Nettleserkjøringen fortsatte.',
+          id: `resumed-${state.activity.length}`,
+          kind: 'resume',
+          title: 'Fortsatte',
+        })),
+        onDone: () => update(runId, (state) => closeChatRunWatch(state)),
+        onError: () => update(runId, (state) => closeChatRunWatch(state, RUN_STREAM_ERROR)),
+        onPlan: (event) => update(runId, (state) => appendActivity(state, {
+          at: event.at ?? new Date().toISOString(),
+          detail: [event.from, event.to].filter(Boolean).join(' → '),
+          id: `plan-${event.planId ?? state.activity.length}`,
+          kind: 'plan',
+          status: event.to,
+          title: 'Plan',
+        })),
+        onStep: (event) => update(runId, (state) => appendActivity(state, {
+          at: new Date().toISOString(),
+          detail: event.detail ?? '',
+          id: `step-${event.id ?? state.activity.length}`,
+          kind: 'step',
+          status: event.status,
+          title: event.title ?? 'Steg',
+        })),
+        onSubagentAttached: (event) => update(runId, (state) => appendActivity(state, {
+          at: event.at ?? new Date().toISOString(),
+          detail: event.role ?? '',
+          id: `subagent-${event.childRunId ?? state.activity.length}`,
+          kind: 'subagent',
+          title: 'Underagent',
+        })),
+      }, controller.signal)
+      return () => controller.abort()
+    },
+  )
 
   const steps = () => watch()?.steps ?? []
   const activity = () => watch()?.activity ?? []
@@ -271,15 +272,14 @@ export function ChatLiveRunPanel(props: {
     <Show when={props.runId}>
       {(runId) => (
         <aside
-          class="verevon-chat-run-panel"
-          classList={{ 'verevon-chat-run-panel--collapsed': props.collapsed }}
+          class={['verevon-chat-run-panel', { 'verevon-chat-run-panel--collapsed': props.collapsed }]}
           aria-label="Live agentkjøring"
         >
           <header class="verevon-chat-run-panel__head">
             <button
               type="button"
               class="verevon-chat-run-panel__toggle"
-              aria-expanded={!props.collapsed}
+              aria-expanded={!props.collapsed ? 'true' : 'false'}
               aria-label={props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
               title={props.collapsed ? 'Vis live-panelet' : 'Skjul live-panelet'}
               onClick={() => props.onToggleCollapsed()}
@@ -320,9 +320,8 @@ export function ChatLiveRunPanel(props: {
                       {(step) => (
                         <button
                           type="button"
-                          class="verevon-chat-run-shot"
-                          classList={{ 'verevon-chat-run-shot--active': expandedStep() === step.step }}
-                          aria-pressed={expandedStep() === step.step}
+                          class={['verevon-chat-run-shot', { 'verevon-chat-run-shot--active': expandedStep() === step.step }]}
+                          aria-pressed={expandedStep() === step.step ? 'true' : 'false'}
                           title={`Steg ${step.step} · ${stepLabel(step)}`}
                           onClick={() => setExpandedStep((current) => (current === step.step ? null : step.step))}
                         >

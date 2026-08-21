@@ -1,6 +1,6 @@
-import { A } from '@solidjs/router'
-import { AlertCircle, BarChart3, Clock3, PackageSearch, ShoppingBag } from 'lucide-solid'
-import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
+import { AlertCircle, BarChart3, Clock3, PackageSearch, ShoppingBag } from '@/shared/icons'
+import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { loadSocialContext, platformLabels } from '@/features/social/lib/social-workspace'
 import {
   listSocialCatalogProducts,
@@ -95,7 +95,7 @@ export default function SocialCommercePage() {
             )}
           </p>
         </div>
-        <A href="/settings/integrations">{i18n.tr('Administrer integrasjoner', 'Manage integrations')}</A>
+        <a href="/settings/integrations" link>{i18n.tr('Administrer integrasjoner', 'Manage integrations')}</a>
       </section>
 
       <Show when={!workspace()}>
@@ -167,7 +167,7 @@ export default function SocialCommercePage() {
                   </Show>
                 </p>
                 <footer class="verevon-social-ops-card__footer">
-                  <A href="/settings/integrations">{i18n.tr('Koble til kontoer', 'Connect accounts')}</A>
+                  <a href="/settings/integrations" link>{i18n.tr('Koble til kontoer', 'Connect accounts')}</a>
                 </footer>
               </article>
             }

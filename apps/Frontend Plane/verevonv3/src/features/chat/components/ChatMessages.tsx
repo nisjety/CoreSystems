@@ -27,7 +27,7 @@ import {
   Volume2,
   Wrench,
   X,
-} from 'lucide-solid'
+} from '@/shared/icons'
 import {
   For,
   Match,
@@ -36,9 +36,8 @@ import {
   createEffect,
   createMemo,
   createSignal,
-  onCleanup,
-  type JSX,
 } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import {
   dataUriByteSize,
   friendlyMimeLabel,
@@ -163,7 +162,7 @@ export function AssistantMessage(props: {
             when={!errored()}
             fallback={<ErrorNotice message={props.message.content || 'Stream error'} onRetry={props.onRegenerate} />}
           >
-            <div classList={{ 'verevon-chat-streaming': waiting() }}>
+            <div class={{ 'verevon-chat-streaming': waiting() }}>
               <Show when={displayContent()}>
                 {(content) => <ChatMarkdown content={content()} />}
               </Show>
@@ -291,9 +290,12 @@ export function UserMessage(props: {
   const [editing, setEditing] = createSignal(false)
   const [draft, setDraft] = createSignal('')
 
-  createEffect(() => {
-    if (!editing()) setDraft(props.message.content)
-  })
+  createEffect(
+    () => ({ editing: editing(), content: props.message.content }),
+    ({ editing, content }) => {
+      if (!editing) setDraft(content)
+    },
+  )
 
   const startEditing = () => {
     setDraft(props.message.content)
@@ -504,10 +506,10 @@ export function ReasoningTrace(props: { text: string; streaming: boolean }) {
   return (
     <Show when={trimmed()}>
       <div class="verevon-chat-reasoning">
-        <button type="button" aria-expanded={expanded()} onClick={() => setOpen((value) => !value)}>
+        <button type="button" aria-expanded={expanded() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
           <Brain size={14} />
           {props.streaming ? 'Tenker ...' : 'Tenkte'}
-          <ChevronRight size={14} classList={{ 'verevon-chat-rotate': expanded() }} />
+          <ChevronRight size={14} class={{ 'verevon-chat-rotate': expanded() }} />
         </button>
         <Show when={expanded()}>
           <p>{trimmed()}</p>
@@ -541,26 +543,29 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
     ...(props.message.grounding || (props.message.citations?.length ?? 0) > 0 ? [{ id: 'sources', label: 'Kilder' }] : []),
   ]
 
-  createEffect(() => {
-    if (!open()) return
-    const onPointer = (event: PointerEvent) => {
-      if (ref && !ref.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    })
-  })
+  createEffect(
+    () => open(),
+    (isOpen) => {
+      if (!isOpen) return
+      const onPointer = (event: PointerEvent) => {
+        if (ref && !ref.contains(event.target as Node)) setOpen(false)
+      }
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') setOpen(false)
+      }
+      document.addEventListener('pointerdown', onPointer)
+      document.addEventListener('keydown', onKey)
+      return () => {
+        document.removeEventListener('pointerdown', onPointer)
+        document.removeEventListener('keydown', onKey)
+      }
+    },
+  )
 
   return (
     <Show when={hasMetrics()}>
       <div ref={ref} class="verevon-chat-reasoning-popover">
-        <button type="button" aria-expanded={open()} onClick={() => setOpen((value) => !value)}>
+        <button type="button" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
           <Sparkles size={12} />
           <Show when={model()}><span>{prettyModel(model() ?? '')}</span></Show>
           <Show when={props.message.outputTokens}><em>{props.message.outputTokens} tokens</em></Show>
@@ -577,7 +582,7 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
               <div class="verevon-chat-reasoning-popover__tabs">
                 <For each={tabs()}>
                   {(item) => (
-                    <button type="button" classList={{ 'is-active': tab() === item.id }} onClick={() => setTab(item.id)}>
+                    <button type="button" class={{ 'is-active': tab() === item.id }} onClick={() => setTab(item.id)}>
                       {item.label}
                     </button>
                   )}
@@ -662,21 +667,24 @@ export function MessageMetricsBadge(props: { message: ChatTurn }) {
     return parts.join(' · ')
   }
 
-  createEffect(() => {
-    if (!open()) return
-    const onPointer = (event: PointerEvent) => {
-      if (ref && !ref.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    })
-  })
+  createEffect(
+    () => open(),
+    (isOpen) => {
+      if (!isOpen) return
+      const onPointer = (event: PointerEvent) => {
+        if (ref && !ref.contains(event.target as Node)) setOpen(false)
+      }
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') setOpen(false)
+      }
+      document.addEventListener('pointerdown', onPointer)
+      document.addEventListener('keydown', onKey)
+      return () => {
+        document.removeEventListener('pointerdown', onPointer)
+        document.removeEventListener('keydown', onKey)
+      }
+    },
+  )
 
   return (
     <Show when={hasAnyMetric()}>
@@ -797,11 +805,11 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
 
   return (
     <div class="verevon-chat-tool-call">
-      <button type="button" aria-expanded={open()} onClick={() => setOpen((value) => !value)}>
+      <button type="button" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
         <Wrench size={14} />
         <span>{props.call.name}</span>
-        <em classList={{ 'is-error': failed(), 'is-running': running() }}>{statusLabel()}</em>
-        <ChevronRight size={14} classList={{ 'verevon-chat-rotate': open() }} />
+        <em class={{ 'is-error': failed(), 'is-running': running() }}>{statusLabel()}</em>
+        <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
       <Show when={open() && (args() || props.call.output || props.call.error)}>
         <div>
@@ -1017,8 +1025,8 @@ export function MessageAction(props: { active?: boolean; children: JSX.Element; 
       type="button"
       title={props.label}
       aria-label={props.label}
-      aria-pressed={props.active}
-      classList={{ 'verevon-chat-action-button': true, 'verevon-chat-action-button--active': Boolean(props.active) }}
+      aria-pressed={props.active === undefined ? undefined : (props.active ? 'true' : 'false')}
+      class={{ 'verevon-chat-action-button': true, 'verevon-chat-action-button--active': Boolean(props.active) }}
       onClick={() => props.onClick()}
     >
       {props.children}
@@ -1030,29 +1038,32 @@ export function MessageMenu(props: { align?: 'start' | 'end'; items: Array<{ lab
   const [open, setOpen] = createSignal(false)
   let ref!: HTMLDivElement
 
-  createEffect(() => {
-    if (!open()) return
-    const onPointer = (event: PointerEvent) => {
-      if (ref && !ref.contains(event.target as Node)) setOpen(false)
-    }
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    })
-  })
+  createEffect(
+    () => open(),
+    (isOpen) => {
+      if (!isOpen) return
+      const onPointer = (event: PointerEvent) => {
+        if (ref && !ref.contains(event.target as Node)) setOpen(false)
+      }
+      const onKey = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') setOpen(false)
+      }
+      document.addEventListener('pointerdown', onPointer)
+      document.addEventListener('keydown', onKey)
+      return () => {
+        document.removeEventListener('pointerdown', onPointer)
+        document.removeEventListener('keydown', onKey)
+      }
+    },
+  )
 
   return (
     <div ref={ref} class="verevon-chat-menu">
-      <button type="button" aria-label="Flere handlinger" aria-expanded={open()} onClick={() => setOpen((value) => !value)}>
+      <button type="button" aria-label="Flere handlinger" aria-expanded={open() ? 'true' : 'false'} onClick={() => setOpen((value) => !value)}>
         <MoreHorizontal size={14} />
       </button>
       <Show when={open()}>
-        <div classList={{ 'verevon-chat-menu__panel': true, 'verevon-chat-menu__panel--end': props.align === 'end' }}>
+        <div class={{ 'verevon-chat-menu__panel': true, 'verevon-chat-menu__panel--end': props.align === 'end' }}>
           <For each={props.items}>
             {(item) => (
               <button
@@ -1101,7 +1112,7 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
   const hasRichDetail = () => Boolean(props.step.expandedDetail?.trim()) || (props.step.evidence?.length ?? 0) > 0
   const detailsId = () => domId(`step-details-${props.step.id}`)
   return (
-    <div classList={{ 'verevon-chat-step': true, 'verevon-chat-step--expandable': true, 'is-open': open() }}>
+    <div class={{ 'verevon-chat-step': true, 'verevon-chat-step--expandable': true, 'is-open': open() }}>
       <Show when={!props.isLast}>
         <span class="verevon-chat-step__line" />
       </Show>
@@ -1110,7 +1121,7 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
         <button
           type="button"
           class="verevon-chat-step__heading"
-          aria-expanded={open()}
+          aria-expanded={open() ? 'true' : 'false'}
           aria-controls={detailsId()}
           onClick={() => setOpen((value) => !value)}
         >
@@ -1118,7 +1129,7 @@ export function TaskStep(props: { isLast: boolean; step: AgentTaskStep }) {
             <strong>{props.step.title}</strong>
             <time>{formatTime(props.step.createdAt)}</time>
           </span>
-          <ChevronRight size={13} classList={{ 'verevon-chat-rotate': open() }} />
+          <ChevronRight size={13} class={{ 'verevon-chat-rotate': open() }} />
         </button>
         <span class="verevon-chat-step__summary">{props.step.detail}</span>
         <Show when={open()}>
@@ -1161,17 +1172,20 @@ export function EmptyChatState(props: { children: JSX.Element; onSelectPrompt: (
   const [moreOpen, setMoreOpen] = createSignal(false)
   let moreRef!: HTMLDivElement
 
-  createEffect(() => {
-    if (!moreOpen()) return
-    const onPointer = (e: PointerEvent) => { if (!moreRef?.contains(e.target as Node)) setMoreOpen(false) }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMoreOpen(false) }
-    document.addEventListener('pointerdown', onPointer)
-    document.addEventListener('keydown', onKey)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', onPointer)
-      document.removeEventListener('keydown', onKey)
-    })
-  })
+  createEffect(
+    () => moreOpen(),
+    (isMoreOpen) => {
+      if (!isMoreOpen) return
+      const onPointer = (e: PointerEvent) => { if (!moreRef?.contains(e.target as Node)) setMoreOpen(false) }
+      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMoreOpen(false) }
+      document.addEventListener('pointerdown', onPointer)
+      document.addEventListener('keydown', onKey)
+      return () => {
+        document.removeEventListener('pointerdown', onPointer)
+        document.removeEventListener('keydown', onKey)
+      }
+    },
+  )
 
   const select = (prompt: string) => {
     props.onSelectPrompt(prompt)
@@ -1204,7 +1218,7 @@ export function EmptyChatState(props: { children: JSX.Element; onSelectPrompt: (
             <button
               type="button"
               class="verevon-quick-chip"
-              aria-expanded={moreOpen()}
+              aria-expanded={moreOpen() ? 'true' : 'false'}
               onClick={() => setMoreOpen((o) => !o)}
             >
               <MoreHorizontal size={16} strokeWidth={1.9} />

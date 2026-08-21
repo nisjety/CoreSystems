@@ -31,7 +31,7 @@ export function AssemblyStepContent(props: AssemblyStepContentProps) {
 				>
 					{(item, index) => (
 						<li
-							classList={{
+							class={{
 								"onboarding-assembly-list__item--done":
 									index() < props.assemblyTicks,
 							}}

@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, Show } from 'solid-js'
+import { createEffect, createSignal, Show } from 'solid-js'
 
 type TurnstileChallengeProps = {
   siteKey: string
@@ -61,46 +61,47 @@ export function TurnstileChallenge(props: TurnstileChallengeProps) {
   let containerRef: HTMLDivElement | undefined
   let widgetId: string | null = null
 
-  createEffect(() => {
-    const siteKey = props.siteKey
-    const onToken = props.onToken
-    let disposed = false
+  createEffect(
+    () => ({ siteKey: props.siteKey, onToken: props.onToken }),
+    ({ siteKey, onToken }) => {
+      let disposed = false
 
-    if (!siteKey || !containerRef || widgetId) return
+      if (!siteKey || !containerRef || widgetId) return
 
-    void loadTurnstileScript()
-      .then(() => {
-        if (disposed || !containerRef || !window.turnstile) return
-        widgetId = window.turnstile.render(containerRef, {
-          sitekey: siteKey,
-          action: 'signup',
-          theme: 'light',
-          size: 'flexible',
-          callback: (token) => onToken(token),
-          'expired-callback': () => onToken(''),
-          'error-callback': () => onToken(''),
+      void loadTurnstileScript()
+        .then(() => {
+          if (disposed || !containerRef || !window.turnstile) return
+          widgetId = window.turnstile.render(containerRef, {
+            sitekey: siteKey,
+            action: 'signup',
+            theme: 'light',
+            size: 'flexible',
+            callback: (token) => onToken(token),
+            'expired-callback': () => onToken(''),
+            'error-callback': () => onToken(''),
+          })
         })
-      })
-      .catch(() => {
-        if (disposed) return
-        onToken('')
-        setLoadFailed(true)
-      })
+        .catch(() => {
+          if (disposed) return
+          onToken('')
+          setLoadFailed(true)
+        })
 
-    onCleanup(() => {
-      disposed = true
-      onToken('')
-      if (widgetId && window.turnstile?.remove) {
-        window.turnstile.remove(widgetId)
+      return () => {
+        disposed = true
+        onToken('')
+        if (widgetId && window.turnstile?.remove) {
+          window.turnstile.remove(widgetId)
+          widgetId = null
+          return
+        }
+        if (widgetId && window.turnstile?.reset) {
+          window.turnstile.reset(widgetId)
+        }
         widgetId = null
-        return
       }
-      if (widgetId && window.turnstile?.reset) {
-        window.turnstile.reset(widgetId)
-      }
-      widgetId = null
-    })
-  })
+    },
+  )
 
   return (
     <div class="auth-captcha" aria-label={props.locale === 'nb' ? 'Sikkerhetssjekk' : 'Security check'}>

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { OnboardingTopbar } from '@/features/onboarding/components/shared/OnboardingTopbar'
 import { onboardingSteps } from '@/features/onboarding/lib/model'
@@ -51,6 +52,7 @@ describe('OnboardingTopbar', () => {
     ))
 
     fireEvent.click(screen.getByRole('button', { name: 'Bytt språk til English' }))
+    flush()
 
     expect(screen.getByText('Step 3 of 6')).toBeTruthy()
     expect(screen.getByLabelText('Step 1')).toBeTruthy()

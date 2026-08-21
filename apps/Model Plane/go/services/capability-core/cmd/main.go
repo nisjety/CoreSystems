@@ -465,7 +465,6 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 		slog.Error("dial orchestrator-core workflow service failed", "addr", addr, "error", err)
 		return fallback, false
 	}
-	dispatcher.SetScheduledRunSession(sessionClient)
 	dispatcher, err := taskexec.NewWorkflowDispatcher(
 		pool,
 		mpv1.NewOrchestratorWorkflowServiceClient(conn),
@@ -480,6 +479,7 @@ func buildTaskDispatcher(pool *pgxpool.Pool, pub publisher.EventPublisher, fireA
 		_ = conn.Close()
 		return fallback, false
 	}
+	dispatcher.SetScheduledRunSession(sessionClient)
 	slog.Info("task workflow dispatch enabled",
 		"orchestrator_workflow_addr", addr,
 		"credential", map[bool]string{true: "minted service JWT (signed retention posture)",

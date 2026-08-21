@@ -2,7 +2,8 @@
 
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatbotStudio } from '@/features/agents/components/ChatbotStudio'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
@@ -65,6 +66,7 @@ describe('ChatbotStudio', () => {
     expect(screen.getByText('1 verktøy aktivert')).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: 'Tøm' }))
+    flush()
     expect(screen.getByText('Verktøy klart til å aktiveres')).toBeTruthy()
     expect(screen.queryByText('Fjern valgt verktøy')).toBeNull()
 

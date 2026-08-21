@@ -1,4 +1,4 @@
-import { A, useLocation, useNavigate } from '@solidjs/router'
+import { useLocation, useNavigate } from '@solidjs/router'
 import {
   BarChart3,
   BookOpen,
@@ -13,9 +13,9 @@ import {
   Plus,
   ShieldCheck,
   type LucideProps,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, createUniqueId, For, onCleanup, onMount, Show, type Component } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
+} from '@/shared/icons'
+import { createEffect, createMemo, createSignal, createUniqueId, For, Show, type Component } from 'solid-js'
+import { Dynamic } from '@solidjs/web'
 import {
   SidebarEmptyState,
   SidebarPanelTitle,
@@ -97,36 +97,41 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
   const visibleSources = () => filterKnowledgeSources(scopedSources(), normalizedSearch())
   const visibleTags = createMemo(() => getVisibleKnowledgeTags(scopedSources(), normalizedSearch()))
 
-  onMount(() => {
-    const controller = new AbortController()
-    setLoading(true)
-    setError(null)
-    loadKnowledgeSources(controller.signal)
-      .then((payload) => {
-        setLiveKnowledge(payload)
-      })
-      .catch((reason) => {
-        if (controller.signal.aborted) return
-        setLiveKnowledge(null)
-        setError(reason instanceof Error ? reason.message : i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.'))
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false)
-      })
+  createEffect(
+    () => undefined,
+    () => {
+      const controller = new AbortController()
+      setLoading(true)
+      setError(null)
+      loadKnowledgeSources(controller.signal)
+        .then((payload) => {
+          setLiveKnowledge(payload)
+        })
+        .catch((reason) => {
+          if (controller.signal.aborted) return
+          setLiveKnowledge(null)
+          setError(reason instanceof Error ? reason.message : i18n.tr('Kunnskaps-API er utilgjengelig.', 'Knowledge API unavailable.'))
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setLoading(false)
+        })
 
-    onCleanup(() => controller.abort())
-  })
+      return () => controller.abort()
+    },
+  )
 
-  createEffect(() => {
-    const data = sidebarData()
-    if (!data) return
-    if (!activeFolderId() || !folderExists(data.folders, activeFolderId())) {
-      setActiveFolderId(data.folders[0]?.id ?? '')
-    }
-    if (!activeSourceId() || !data.sources.some((source) => source.id === activeSourceId())) {
-      setActiveSourceId(data.sources[0]?.id ?? '')
-    }
-  })
+  createEffect(
+    () => ({ data: sidebarData(), folderId: activeFolderId(), sourceId: activeSourceId() }),
+    ({ data, folderId, sourceId }) => {
+      if (!data) return
+      if (!folderId || !folderExists(data.folders, folderId)) {
+        setActiveFolderId(data.folders[0]?.id ?? '')
+      }
+      if (!sourceId || !data.sources.some((source) => source.id === sourceId)) {
+        setActiveSourceId(data.sources[0]?.id ?? '')
+      }
+    },
+  )
 
   return (
     <div class="core-sidebar-dedicated-panel">
@@ -201,10 +206,10 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
                 <h2 class="verevon-sidebar-group-title">{i18n.tr('Innsikt', 'Insights')}</h2>
               </div>
               <div class="core-sidebar-link-list">
-                <A href="/insights/overview" class="core-sidebar-section-link">
+                <a href="/insights/overview" link class="core-sidebar-section-link">
                   <BarChart3 class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
                   <span>{i18n.tr('Innsikt', 'Insights')}</span>
-                </A>
+                </a>
               </div>
             </section>
           </div>
@@ -238,7 +243,7 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
                       <button
                         type="button"
                         class={cn('core-sidebar-section-link', knowledgeSearchQuery() === tag.label && 'core-sidebar-source-link--active')}
-                        aria-pressed={knowledgeSearchQuery() === tag.label}
+                        aria-pressed={knowledgeSearchQuery() === tag.label ? 'true' : 'false'}
                         onClick={() => applyKnowledgeFilter(tag.label)}
                       >
                         <KeyRound class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
@@ -326,30 +331,36 @@ function KnowledgeModeSelector(props: {
     }
   }
 
-  createEffect(() => {
-    setActiveIndex(selectedIndex())
-  })
+  createEffect(
+    () => selectedIndex(),
+    (index) => {
+      setActiveIndex(index)
+    },
+  )
 
-  createEffect(() => {
-    if (!open()) return
+  createEffect(
+    () => open(),
+    (isOpen) => {
+      if (!isOpen) return
 
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (target && rootRef.contains(target)) return
-      setOpen(false)
-    }
+      const closeOnOutsidePointer = (event: PointerEvent) => {
+        const target = event.target as Node | null
+        if (target && rootRef.contains(target)) return
+        setOpen(false)
+      }
 
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
-    }
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') setOpen(false)
+      }
 
-    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
-    window.addEventListener('keydown', closeOnEscape)
-    onCleanup(() => {
-      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
-      window.removeEventListener('keydown', closeOnEscape)
-    })
-  })
+      document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+      window.addEventListener('keydown', closeOnEscape)
+      return () => {
+        document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+        window.removeEventListener('keydown', closeOnEscape)
+      }
+    },
+  )
 
   return (
     <div ref={rootRef} class="core-sidebar-select">
@@ -360,7 +371,7 @@ function KnowledgeModeSelector(props: {
         type="button"
         aria-label={i18n.tr('Velg kunnskapsvisning', 'Select knowledge view')}
         aria-haspopup="menu"
-        aria-expanded={open()}
+        aria-expanded={open() ? 'true' : 'false'}
         aria-controls={open() ? listboxId : undefined}
         onClick={() => {
           setActiveIndex(selectedIndex())
@@ -384,7 +395,7 @@ function KnowledgeModeSelector(props: {
                     id={`${listboxId}-${option.id}`}
                     type="button"
                     role="menuitemradio"
-                    aria-checked={selected()}
+                    aria-checked={selected() ? 'true' : 'false'}
                     class={cn(
                       'core-sidebar-select__option',
                       selected() && 'core-sidebar-select__option--selected',
@@ -435,7 +446,7 @@ function KnowledgeSourcesList(props: {
                 return (
                   <button
                     type="button"
-                    aria-pressed={active()}
+                    aria-pressed={active() ? 'true' : 'false'}
                     onClick={() => props.onSelect(source)}
                     class={cn('core-sidebar-source-link', active() && 'core-sidebar-source-link--active')}
                   >
@@ -474,7 +485,7 @@ function KnowledgeSidebarTreeItem(props: {
     <div>
       <button
         type="button"
-        aria-pressed={active()}
+        aria-pressed={active() ? 'true' : 'false'}
         onClick={() => props.onSelect(props.folder)}
         class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
       >

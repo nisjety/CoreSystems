@@ -5,10 +5,10 @@
 // fabricated-posture strings (the removed security toggles / status cards /
 // webhook rows) appear in the DOM. Fails if any concrete-false posture string
 // is reintroduced without a backing live resource.
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { QueryClient, QueryClientProvider } from '@tanstack/solid-query'
 import { cleanup, render, screen } from '@solidjs/testing-library'
-import type { JSX } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { VerevonWorkspaceSettingsPage } from '@/features/settings/components/WorkspaceSettingsPage'
 import { workspaceSettingsSections } from '@/features/settings/lib/settings-sections'
@@ -38,11 +38,14 @@ function escapeRegExp(value: string): string {
 
 function renderSection(component: () => JSX.Element) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  const TestRouter = createRouter({
+    routes: [{ path: '/*all', component }],
+    history: memoryHistory(),
+    explicitLinks: true,
+  })
   return render(() => (
     <QueryClientProvider client={queryClient}>
-      <Router root={(props) => <>{props.children}</>}>
-        <Route path="/*all" component={component} />
-      </Router>
+      <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
     </QueryClientProvider>
   ))
 }

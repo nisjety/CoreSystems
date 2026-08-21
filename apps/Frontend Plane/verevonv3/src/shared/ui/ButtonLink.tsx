@@ -1,5 +1,5 @@
-import { A } from '@solidjs/router'
-import { splitProps, type JSX } from 'solid-js'
+import { omit } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import { buttonClasses, type ButtonShape, type ButtonSize, type ButtonVariant } from '@/shared/ui/button-classes'
 
 type ButtonLinkProps = Omit<JSX.AnchorHTMLAttributes<HTMLAnchorElement>, 'href' | 'shape' | 'size'> & {
@@ -11,13 +11,14 @@ type ButtonLinkProps = Omit<JSX.AnchorHTMLAttributes<HTMLAnchorElement>, 'href' 
 }
 
 export function ButtonLink(allProps: ButtonLinkProps) {
-  const [local, props] = splitProps(allProps, ['class', 'href', 'variant', 'size', 'fullWidth', 'shape'])
+  const rest = omit(allProps, 'class', 'href', 'variant', 'size', 'fullWidth', 'shape')
 
   return (
-    <A
-      {...props}
-      href={local.href}
-      class={buttonClasses(local)}
+    <a
+      {...rest}
+      href={allProps.href}
+      link
+      class={buttonClasses(allProps)}
     />
   )
 }

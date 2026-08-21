@@ -1,5 +1,5 @@
 import type { Component } from 'solid-js'
-import type { LucideProps } from 'lucide-solid'
+import type { LucideProps } from '@/shared/icons'
 
 export type SupportProvider =
   | 'email'

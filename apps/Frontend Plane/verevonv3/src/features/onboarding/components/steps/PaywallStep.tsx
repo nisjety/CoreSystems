@@ -149,11 +149,13 @@ export function PaywallStep(props: PaywallStepProps) {
               const copy = () => planCopy(plan.id, i18n)
               return (
             <article
-              class="onboarding-paywall-card"
-              classList={{
-                'onboarding-paywall-card--active': props.activePlanId === plan.id,
-                'onboarding-paywall-card--recommended': hasRecommendation() && recommendedPlanId() === plan.id,
-              }}
+              class={[
+                'onboarding-paywall-card',
+                {
+                  'onboarding-paywall-card--active': props.activePlanId === plan.id,
+                  'onboarding-paywall-card--recommended': hasRecommendation() && recommendedPlanId() === plan.id,
+                },
+              ]}
             >
               <div class="onboarding-paywall-card__head">
                 <strong>{copy().name}</strong>

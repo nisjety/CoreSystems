@@ -1,20 +1,20 @@
 // @vitest-environment jsdom
 
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
+import { flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { CoreSidebar } from '@/features/core/components/CoreSidebar'
 import { routeFromPath } from '@/features/core/lib/shell-data'
 import VerevonIngestionsPage from '@/features/ingestions/components/VerevonIngestionsPage'
 
 function renderIngestions() {
-  window.history.pushState(null, '', '/ingestions')
-
-  return render(() => (
-    <Router root={(props) => <>{props.children}</>}>
-      <Route path="/ingestions" component={VerevonIngestionsPage} />
-    </Router>
-  ))
+  const TestRouter = createRouter({
+    routes: [{ path: '/ingestions', component: VerevonIngestionsPage }],
+    history: memoryHistory('/ingestions'),
+    explicitLinks: true,
+  })
+  return render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 }
 
 function mockIngestionApi() {
@@ -187,6 +187,7 @@ describe('VerevonIngestionsPage', () => {
     renderIngestions()
 
     fireEvent.click(screen.getByRole('button', { name: /overvåking/i }))
+    flush()
 
     expect(screen.getByRole('heading', { name: /sjekk en side for endringer/i })).toBeTruthy()
     // On-demand only: there must be no cron / schedule affordance on this surface.
@@ -195,7 +196,9 @@ describe('VerevonIngestionsPage', () => {
 
     const urlField = screen.getByRole('textbox', { name: /side-url/i })
     fireEvent.input(urlField, { target: { value: 'https://example.com/' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /sjekk nå/i }))
+    flush()
 
     // The live result and the real baseline history both render.
     await waitFor(() => expect(screen.getByText(/siste sjekk/i)).toBeTruthy())
@@ -256,10 +259,13 @@ describe('VerevonIngestionsPage', () => {
     fireEvent.input(screen.getByRole('textbox', { name: /^navn$/i }), {
       target: { value: 'Acme pricing' },
     })
+    flush()
     fireEvent.input(screen.getByRole('textbox', { name: /^url$/i }), {
       target: { value: 'https://acme.example/pricing' },
     })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /legg til kilde/i }))
+    flush()
 
     // The newly created source appears after the post-create refetch.
     await waitFor(() => expect(screen.getByText('Acme pricing')).toBeTruthy())
@@ -355,23 +361,22 @@ describe('VerevonIngestionsPage', () => {
   })
 
   it('keeps the v2 ingestion sidebar menu available on the v3 shell', () => {
-    window.history.pushState(null, '', '/ingestions')
-
-    render(() => (
-      <Router root={(props) => <>{props.children}</>}>
-        <Route
-          path="/*all"
-          component={() => (
-            <CoreSidebar
-              activeRoute={routeFromPath('/ingestions')}
-              expanded
-              onExpandedChange={vi.fn()}
-              onOpenSearch={vi.fn()}
-            />
-          )}
-        />
-      </Router>
-    ))
+    const TestRouter = createRouter({
+      explicitLinks: true,
+      routes: [{
+        path: '/*all',
+        component: () => (
+          <CoreSidebar
+            activeRoute={routeFromPath('/ingestions')}
+            expanded
+            onExpandedChange={vi.fn()}
+            onOpenSearch={vi.fn()}
+          />
+        ),
+      }],
+      history: memoryHistory('/ingestions'),
+    })
+    render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 
     const navigation = screen.getByRole('navigation', { name: /innhenting navigasjon/i })
     expect(within(navigation).getByRole('link', { name: /^arbeidsflate$/i }).getAttribute('href')).toBe('/ingestions')

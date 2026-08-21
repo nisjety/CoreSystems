@@ -3,8 +3,6 @@ import {
   createEffect,
   createMemo,
   createSignal,
-  onCleanup,
-  onMount,
   Show,
 } from 'solid-js'
 import { AuthFormPanel } from '@/features/auth/components/sections/AuthFormPanel'
@@ -192,46 +190,54 @@ export default function AuthPage() {
     return Math.max(0, height + 6)
   })
 
-  onMount(() => {
-    const params = new URLSearchParams(window.location.search)
-    const resetToken = params.get('token')
-    const resetError = params.get('error')
-    if (resetToken) {
-      setPasswordResetToken(resetToken)
-      setMode('signin')
-    } else if (window.location.pathname === '/reset-password' && resetError) {
-      setMode('signin')
-      setAuthFailure(
-        nb()
-          ? 'Tilbakestillingslenken er ugyldig eller utløpt. Be om en ny lenke.'
-          : 'The reset link is invalid or expired. Request a new link.',
-      )
-    }
-    if (window.location.pathname === '/reset-password' && (resetToken || resetError)) {
-      // Reset tokens are bearer credentials. Keep the captured value only in
-      // component memory and remove it from the address bar/history immediately.
-      window.history.replaceState(null, '', '/reset-password')
-    }
-
-    const updateViewport = () => setViewportHeight(window.innerHeight)
-    updateViewport()
-    const frame = window.requestAnimationFrame(() => setPageVisible(true))
-    window.addEventListener('resize', updateViewport)
-
-    onCleanup(() => {
-      window.cancelAnimationFrame(frame)
-      window.removeEventListener('resize', updateViewport)
-    })
-  })
-
-  createEffect(() => {
-    mode()
-    window.requestAnimationFrame(() => {
-      if (contentRef) {
-        setContentHeight(contentRef.scrollHeight)
+  createEffect(
+    () => undefined,
+    () => {
+      const params = new URLSearchParams(window.location.search)
+      const resetToken = params.get('token')
+      const resetError = params.get('error')
+      if (resetToken) {
+        setPasswordResetToken(resetToken)
+        setMode('signin')
+      } else if (window.location.pathname === '/reset-password' && resetError) {
+        setMode('signin')
+        setAuthFailure(
+          nb()
+            ? 'Tilbakestillingslenken er ugyldig eller utløpt. Be om en ny lenke.'
+            : 'The reset link is invalid or expired. Request a new link.',
+        )
       }
-    })
-  })
+      if (window.location.pathname === '/reset-password' && (resetToken || resetError)) {
+        // Reset tokens are bearer credentials. Keep the captured value only in
+        // component memory and remove it from the address bar/history immediately.
+        window.history.replaceState(null, '', '/reset-password')
+      }
+
+      const updateViewport = () => setViewportHeight(window.innerHeight)
+      updateViewport()
+      const frame = window.requestAnimationFrame(() => setPageVisible(true))
+      window.addEventListener('resize', updateViewport)
+
+      // createEffect's effect (second) function runs with no owner context —
+      // onCleanup() here always warns NO_OWNER_CLEANUP and silently never
+      // runs. Returning the cleanup directly is what actually gets wired up.
+      return () => {
+        window.cancelAnimationFrame(frame)
+        window.removeEventListener('resize', updateViewport)
+      }
+    },
+  )
+
+  createEffect(
+    () => mode(),
+    () => {
+      window.requestAnimationFrame(() => {
+        if (contentRef) {
+          setContentHeight(contentRef.scrollHeight)
+        }
+      })
+    },
+  )
 
   const completeAuth = async () => {
     if (submitting()) return
@@ -378,7 +384,12 @@ export default function AuthPage() {
           ? 'Passordet er oppdatert. Logg inn med det nye passordet.'
           : 'Your password has been updated. Sign in with the new password.',
       })
-      navigate('/login', { replace: true })
+      // Deliberately stay put rather than navigate('/login'): AuthPage renders
+      // the sign-in form for this same mode regardless of route, and
+      // navigating to a different route entry remounts this component (fresh
+      // signal state), which would discard the success notice above before
+      // the reviewer ever sees it — the same reason the analogous
+      // email-verification success-but-signin-failed path below never navigates.
     } catch (err) {
       setAuthFailure(err instanceof Error ? err.message : nb() ? 'Kunne ikke oppdatere passordet.' : 'Could not update password.')
     } finally {

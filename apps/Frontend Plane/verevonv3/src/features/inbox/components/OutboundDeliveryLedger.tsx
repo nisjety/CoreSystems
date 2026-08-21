@@ -1,4 +1,5 @@
-import { createEffect, createResource, For, onCleanup, Show } from 'solid-js'
+import { createEffect, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
 import { formatTimestamp } from '@/features/inbox/lib/inbox-model'
 import { listOutboundIntents, type OutboundIntent } from '@/shared/api/inbox-client'
 import { useI18n } from '@/shared/i18n'
@@ -17,11 +18,13 @@ export function OutboundDeliveryLedger(props: {
   // Provider delivery/read callbacks arrive asynchronously. Re-read the
   // content-free authority on a modest interval while this conversation is
   // open; a callback is never inferred from local UI state.
-  createEffect(() => {
-    void props.refreshKey
-    const interval = window.setInterval(() => void refetch(), 30_000)
-    onCleanup(() => window.clearInterval(interval))
-  })
+  createEffect(
+    () => props.refreshKey,
+    () => {
+      const interval = window.setInterval(() => void refetch(), 30_000)
+      return () => window.clearInterval(interval)
+    },
+  )
 
   return (
     <Show when={intents.error} fallback={

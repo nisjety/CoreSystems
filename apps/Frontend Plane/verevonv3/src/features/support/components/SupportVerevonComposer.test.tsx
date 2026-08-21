@@ -2,7 +2,8 @@
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { Route, Router } from '@solidjs/router'
+import { createRouter, memoryHistory } from '@solidjs/router'
+import { flush } from 'solid-js'
 import { SupportVerevonComposer } from './SupportVerevonComposer'
 import type { ModelContextPack } from '@/shared/context-packs/context-pack'
 import { upsertChatThreadTranscript } from '@/features/chat/lib/chat-thread-history'
@@ -68,9 +69,11 @@ describe('SupportVerevonComposer', () => {
       ],
     })
 
-    render(() => (
-      <Router root={(props) => <>{props.children}</>}>
-        <Route path="/*all" component={() => (
+    const TestRouter = createRouter({
+      explicitLinks: true,
+      routes: [{
+        path: '/*all',
+        component: () => (
           <SupportVerevonComposer
             contextLabel="Context: TCK-001"
             contextPack={contextPack}
@@ -79,9 +82,12 @@ describe('SupportVerevonComposer', () => {
             orgId="org-1"
             userId="user-1"
           />
-        )} />
-      </Router>
-    ))
+        ),
+      }],
+      history: memoryHistory('/'),
+    })
+
+    render(() => <TestRouter>{(props) => <>{props.children}</>}</TestRouter>)
 
     expect(await screen.findByRole('region', { name: /verevon-svar|verevon answer/i })).toBeTruthy()
     expect(screen.getByText('The safest next step is to verify the account detail.')).toBeTruthy()
@@ -118,6 +124,7 @@ describe('SupportVerevonComposer', () => {
       conversationId: 'conv-1',
       bodyText: 'Please confirm that you initiated this registration.',
     }))
+    flush()
     expect(screen.getByText(/sent for review|sendt til gjennomgang/i)).toBeTruthy()
   })
 
@@ -159,6 +166,7 @@ describe('SupportVerevonComposer', () => {
       evidenceMessageIds: ['message-1'],
       suggestedFields: { status: 'waiting_customer', category: 'identity' },
     }))
+    flush()
     expect(screen.getByText(/sent for review|sendt til gjennomgang/i)).toBeTruthy()
     expect(within(screen.getByRole('status')).getByText(/identity[\s\S]*waiting_customer/i)).toBeTruthy()
     expect(screen.queryByText(/ticket updated|sak oppdatert/i)).toBeNull()

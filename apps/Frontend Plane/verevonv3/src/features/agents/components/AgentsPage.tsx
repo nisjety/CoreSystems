@@ -4,16 +4,15 @@ import {
   Match,
   Show,
   Switch,
-  type JSX,
 } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import {
   ChevronRight,
   Gauge,
   Play,
   Rocket,
   Sparkles,
-} from 'lucide-solid'
-import { A } from '@solidjs/router'
+} from '@/shared/icons'
 import { Button } from '@/shared/ui/Button'
 import { VerevonIconButton } from '@/shared/ui/verevon/VerevonIconButton'
 import { cn } from '@/shared/lib/cn'
@@ -133,7 +132,7 @@ function AllRolesOverview(props: { onRoleSelect: (role: AgentRoleId) => void }) 
 function TaskConsoleEntry() {
   const i18n = useI18n()
   return (
-    <A href="/agents/runs" class={cn('agents-task-console-entry', controlFocusClass)} aria-label={i18n.tr('Åpne Agent Run Console for å kjøre og godkjenne agentoppgaver', 'Open the Agent Run Console to run and approve agent tasks')}>
+    <a href="/agents/runs" link class={cn('agents-task-console-entry', controlFocusClass)} aria-label={i18n.tr('Åpne Agent Run Console for å kjøre og godkjenne agentoppgaver', 'Open the Agent Run Console to run and approve agent tasks')}>
       <span class="agents-task-console-entry__icon">
         <Gauge class="size-5" strokeWidth={2.1} />
       </span>
@@ -150,7 +149,7 @@ function TaskConsoleEntry() {
         {i18n.tr('Åpne konsoll', 'Open console')}
         <ChevronRight class="size-4" strokeWidth={2.2} />
       </span>
-    </A>
+    </a>
   )
 }
 
@@ -255,7 +254,7 @@ function SelectedAgentWorkspace(props: {
                       <button
                         type="button"
                         aria-label={i18n.tr(`Åpne arbeidsområdet ${option.label}`, `Open ${option.label} workspace`)}
-                        aria-pressed={option.id === view().activeFeature}
+                        aria-pressed={option.id === view().activeFeature ? 'true' : 'false'}
                         onClick={() => props.onFeatureSelect(option.id)}
                         class={cn(
                           'min-h-8 rounded-[7px] px-2 py-1 text-[11px] font-semibold leading-4 transition-colors',

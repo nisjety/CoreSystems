@@ -1,3 +1,4 @@
+import { type Component, For, Show, createEffect, createMemo, createSignal } from 'solid-js'
 import {
   ArrowDown,
   ArrowDownUp,
@@ -15,10 +16,9 @@ import {
   Search,
   SlidersHorizontal,
   type LucideProps,
-} from 'lucide-solid'
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component, type JSX } from 'solid-js'
-import { Dynamic } from 'solid-js/web'
-import { A } from '@solidjs/router'
+} from '@/shared/icons'
+import type { JSX } from '@solidjs/web'
+import { Dynamic } from '@solidjs/web'
 import {
   formatRelativeTime,
   type InboxTab,
@@ -225,30 +225,33 @@ export function TicketQueue(props: {
     }
   })
 
-  createEffect(() => {
-    if (!filtersOpen() && !sortOpen()) return
+  createEffect(
+    () => ({ filtersOpen: filtersOpen(), sortOpen: sortOpen() }),
+    ({ filtersOpen, sortOpen }) => {
+      if (!filtersOpen && !sortOpen) return
 
-    const closeOnOutside = (event: MouseEvent) => {
-      const target = event.target as Node
-      if (filtersRef?.contains(target) || sortRef?.contains(target)) return
-      setFiltersOpen(false)
-      setSortOpen(false)
-    }
-
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      const closeOnOutside = (event: MouseEvent) => {
+        const target = event.target as Node
+        if (filtersRef?.contains(target) || sortRef?.contains(target)) return
         setFiltersOpen(false)
         setSortOpen(false)
       }
-    }
 
-    document.addEventListener('mousedown', closeOnOutside)
-    document.addEventListener('keydown', closeOnEscape)
-    onCleanup(() => {
-      document.removeEventListener('mousedown', closeOnOutside)
-      document.removeEventListener('keydown', closeOnEscape)
-    })
-  })
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') {
+          setFiltersOpen(false)
+          setSortOpen(false)
+        }
+      }
+
+      document.addEventListener('mousedown', closeOnOutside)
+      document.addEventListener('keydown', closeOnEscape)
+      return () => {
+        document.removeEventListener('mousedown', closeOnOutside)
+        document.removeEventListener('keydown', closeOnEscape)
+      }
+    },
+  )
 
   return (
     <section class="verevon-inbox-queue" aria-label={props.label}>
@@ -316,7 +319,7 @@ export function TicketQueue(props: {
                 setSortOpen(false)
               }}
               class={cn('verevon-inbox-icon-action', filtersOpen() && 'verevon-inbox-icon-action--active')}
-              aria-expanded={filtersOpen()}
+              aria-expanded={filtersOpen() ? 'true' : 'false'}
               aria-label={i18n.tr('Åpne innboksfiltre', 'Open inbox filters')}
               title={i18n.tr('Åpne innboksfiltre', 'Open inbox filters')}
             >
@@ -341,7 +344,7 @@ export function TicketQueue(props: {
                 setFiltersOpen(false)
               }}
               class={cn('verevon-inbox-icon-action', sortOpen() && 'verevon-inbox-icon-action--active')}
-              aria-expanded={sortOpen()}
+              aria-expanded={sortOpen() ? 'true' : 'false'}
               aria-label={i18n.tr('Sorter samtaler', 'Sort conversations')}
               title={i18n.tr('Sorter samtaler', 'Sort conversations')}
             >
@@ -381,12 +384,12 @@ export function TicketQueue(props: {
                     textFilter ? 'verevon-inbox-quick-filter--text' : 'verevon-inbox-quick-filter--icon',
                     quickFilter() === filter.id && 'verevon-inbox-quick-filter--active',
                   )}
-                  aria-pressed={quickFilter() === filter.id}
+                  aria-pressed={quickFilter() === filter.id ? 'true' : 'false'}
                   aria-label={i18n.tr(`Vis ${filter.label.toLowerCase()} samtaler`, `Show ${filter.label.toLowerCase()} conversations`)}
                   title={i18n.tr(`Vis ${filter.label.toLowerCase()} samtaler`, `Show ${filter.label.toLowerCase()} conversations`)}
                 >
                   {Icon ? <Icon class="size-3.5" strokeWidth={1.9} /> : null}
-                  <span classList={{ 'sr-only': !textFilter }}>{filter.label}</span>
+                  <span class={{ 'sr-only': !textFilter }}>{filter.label}</span>
                 </button>
               )
             }}
@@ -423,9 +426,9 @@ export function TicketQueue(props: {
           >
             <Show when={metaSetupEmptyState() || discordSetupEmptyState()}>
               <div class="verevon-inbox-queue-empty__actions">
-                <A href="/settings/integrations" class="verevon-inbox-button verevon-inbox-button--primary verevon-inbox-button--sm">
+                <a href="/settings/integrations" link class="verevon-inbox-button verevon-inbox-button--primary verevon-inbox-button--sm">
                   {i18n.tr('Åpne Integrasjoner', 'Open Integrations')}
-                </A>
+                </a>
               </div>
             </Show>
             <Show when={props.connectedSources.length === 0 && !props.activeChannel && props.onConnectInbox}>
@@ -593,7 +596,7 @@ function QueueEmptyState(props: { body: string; children?: JSX.Element; title: s
           <MessageCircle class="size-5" strokeWidth={1.45} />
         </div>
         <h2>{props.title}</h2>
-        <p classList={{ 'verevon-inbox-queue-empty__error': props.tone === 'error' }}>{props.body}</p>
+        <p class={{ 'verevon-inbox-queue-empty__error': props.tone === 'error' }}>{props.body}</p>
         {props.children}
       </div>
     </div>
@@ -615,7 +618,7 @@ function TicketRow(props: {
       <button
         type="button"
         aria-label={props.ticket.title}
-        aria-pressed={props.active}
+        aria-pressed={props.active ? 'true' : 'false'}
         onClick={() => props.onClick()}
         class="verevon-inbox-ticket-row__main"
       >
@@ -725,7 +728,7 @@ function StatusLaneButton(props: { active: boolean; label: string; onClick: () =
       type="button"
       onClick={() => props.onClick()}
       class={cn('verevon-inbox-focus-button', props.active && 'verevon-inbox-focus-button--active')}
-      aria-pressed={props.active}
+      aria-pressed={props.active ? 'true' : 'false'}
     >
       <span>{props.label}</span>
     </button>

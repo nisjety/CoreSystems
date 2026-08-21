@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
-import { createSignal } from 'solid-js'
+import { createSignal, flush } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { InboxAside } from './InboxAside'
 import type { ZammadArticle, ZammadTicket } from '@/features/inbox/lib/inbox-model'
@@ -55,10 +55,12 @@ afterEach(() => {
 
 function openConversationActivity() {
   fireEvent.click(screen.getByRole('tab', { name: /audit|revisjon/i }))
+  flush()
 }
 
 function openFollowUpCalendar() {
   fireEvent.click(screen.getByRole('tab', { name: /actions|handlinger/i }))
+  flush()
 }
 
 describe('InboxAside Verevon actions', () => {
@@ -100,6 +102,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
+    flush()
 
     expect(screen.getByRole('region', { name: /conversation context|samtalegrunnlag/i })).toBeTruthy()
     expect(screen.getByText('The package is missing and I need it tomorrow.')).toBeTruthy()
@@ -133,8 +136,10 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
+    flush()
     expect(screen.queryByRole('link', { name: /open in chat|åpne i chat/i })).toBeNull()
     fireEvent.input(screen.getByRole('textbox', { name: /ask verevon a question|spør verevon et spørsmål/i }), { target: { value: 'What should I do next?' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /send verevon question|send spørsmål til verevon/i }))
 
     expect(await screen.findByText('Use the verified delivery workflow.')).toBeTruthy()
@@ -185,7 +190,9 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: /verevon/i }))
+    flush()
     fireEvent.input(screen.getByRole('textbox', { name: /ask verevon a question|spør verevon et spørsmål/i }), { target: { value: 'Question for organization A' } })
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /send verevon question|send spørsmål til verevon/i }))
     await waitFor(() => expect(resolveInvoke).toBeTypeOf('function'))
 
@@ -303,7 +310,7 @@ describe('InboxAside Verevon actions', () => {
     fireEvent.click(screen.getByRole('button', { name: /følg samtale|follow conversation/i }))
 
     await waitFor(() => expect(actionBody).not.toBeNull())
-    expect(actionBody).toEqual({ actionId: 'inbox.follow_conversation', input: { conversationId: 'conversation-42', following: true } })
+    expect(actionBody).toEqual({ actionId: 'inbox.follow_conversation', idempotencyKey: expect.any(String), input: { conversationId: 'conversation-42', following: true } })
     await waitFor(() => expect(screen.getByRole('button', { name: /slutt å følge|unfollow/i })).toBeTruthy())
     expect(fetchMock.mock.calls.some(([request]) => String(request).endsWith('/api/v1/actions/execute'))).toBe(true)
   })
@@ -355,7 +362,7 @@ describe('InboxAside Verevon actions', () => {
     fireEvent.click(screen.getByRole('button', { name: /registrer samtykke|record consent/i }))
 
     await waitFor(() => expect(actionBody).not.toBeNull())
-    expect(actionBody).toEqual({ actionId: 'inbox.set_csat_preference', input: { conversationId: 'conversation-42', optedIn: true } })
+    expect(actionBody).toEqual({ actionId: 'inbox.set_csat_preference', idempotencyKey: expect.any(String), input: { conversationId: 'conversation-42', optedIn: true } })
     await waitFor(() => expect(screen.getByRole('button', { name: /trekk tilbake samtykke|withdraw consent/i })).toBeTruthy())
     expect(fetchMock.mock.calls.filter(([request]) => String(request).endsWith('/api/v1/inbox/conversations/conversation-42/csat-preference'))).toHaveLength(2)
   })
@@ -586,9 +593,10 @@ describe('InboxAside Verevon actions', () => {
     openConversationActivity()
     await screen.findByText(/no customer rating has been recorded|ingen kundevurdering er registrert/i)
     fireEvent.click(screen.getByRole('button', { name: '5' }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: /record rating|registrer vurdering/i }))
 
-    await waitFor(() => expect(actionBody).toEqual({ actionId: 'tickets.record_csat_outcome', input: { ticketId: 'ticket-42', score: 5 } }))
+    await waitFor(() => expect(actionBody).toEqual({ actionId: 'tickets.record_csat_outcome', idempotencyKey: expect.any(String), input: { ticketId: 'ticket-42', score: 5 } }))
     expect(await screen.findByText(/customer rating recorded: 5\/5|kunden ga 5\/5/i)).toBeTruthy()
     expect(screen.queryByText(/survey sent|undersøkelse sendt/i)).toBeNull()
   })
@@ -662,6 +670,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const action = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     expect(action).toBeTruthy()
     fireEvent.click(within(action as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -688,6 +697,7 @@ describe('InboxAside Verevon actions', () => {
     const actionCall = fetchMock.mock.calls.find(([input]) => String(input) === '/api/v1/actions/execute')
     expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
       actionId: 'tickets.classify_conversation',
+      idempotencyKey: expect.any(String),
       input: {
         conversationId: 'conversation-42',
         confidence: 0.84,
@@ -729,6 +739,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const triageCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!triageCard) throw new Error('Expected triage card')
     fireEvent.click(within(triageCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -777,6 +788,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const triageCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!triageCard) throw new Error('Expected triage card')
     fireEvent.click(within(triageCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -843,6 +855,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const triageCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!triageCard) throw new Error('Expected triage card')
     fireEvent.click(within(triageCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -903,6 +916,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const triageCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!triageCard) throw new Error('Expected triage card')
     fireEvent.click(within(triageCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -949,6 +963,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const routeCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!routeCard) throw new Error('Expected routing card')
     fireEvent.click(within(routeCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -988,6 +1003,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const triageCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!triageCard) throw new Error('Expected triage card')
     fireEvent.click(within(triageCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -1026,6 +1042,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const triageCard = screen.getByText('Foreslå triage').closest('.verevon-inbox-action-suggestion')
     if (!triageCard) throw new Error('Expected triage card')
     fireEvent.click(within(triageCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -1079,6 +1096,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const planCard = screen.getByText('Lag løsningsplan').closest('.verevon-inbox-action-suggestion')
     if (!planCard) throw new Error('Expected resolution plan card')
     fireEvent.click(within(planCard as HTMLElement).getByRole('button', { name: 'Forbered' }))
@@ -1102,6 +1120,7 @@ describe('InboxAside Verevon actions', () => {
     const noteCard = note.closest('.verevon-inbox-field-stack')
     if (!noteCard) throw new Error('Expected internal-note plan card')
     fireEvent.click(within(noteCard as HTMLElement).getByRole('button', { name: 'Legg i svarhjelp' }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Sett inn utkast' }))
     await waitFor(() => expect(onQueueInternalNote).toHaveBeenCalledWith(
       'Check the carrier exception before promising a date.',
@@ -1144,6 +1163,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const sourceCard = screen.getByText('Kildebasert svar').closest('.verevon-inbox-action-suggestion')
     if (!sourceCard) throw new Error('Expected source-backed reply card')
     fireEvent.click(within(sourceCard as HTMLElement).getByRole('button', { name: 'Kjør' }))
@@ -1194,6 +1214,7 @@ describe('InboxAside Verevon actions', () => {
     ))
 
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     fireEvent.click(screen.getByRole('button', { name: 'Makroer' }))
     const macroRow = (await screen.findByText('Route billing')).closest('li')
     if (!macroRow) throw new Error('Expected the canonical macro row')
@@ -1207,6 +1228,7 @@ describe('InboxAside Verevon actions', () => {
     const actionCall = fetchMock.mock.calls.find(([url]) => String(url) === '/api/v1/actions/execute')
     expect(JSON.parse(String(actionCall?.[1]?.body))).toEqual({
       actionId: 'tickets.run_macro',
+      idempotencyKey: expect.any(String),
       input: { ticketId: 'ticket-42', macroId: 'macro-route', expectedMacroUpdatedAt: '2026-08-02T10:00:00.000Z' },
     })
   })
@@ -1263,6 +1285,7 @@ describe('InboxAside Verevon actions', () => {
     }))
     render(() => <InboxAside orgId="org-coresystem" articles={articles} recent={[]} onSelectRecent={vi.fn()} onQueueDraftReply={vi.fn(async () => true)} onQueueInternalNote={onQueueInternalNote} onMacroExecuted={vi.fn()} onOpenModal={vi.fn()} selectedTicket={{ ...ticket, conversationId: 'conversation-42' }} userId="user-coresystem" />)
     fireEvent.click(screen.getByRole('tab', { name: 'Verevon' }))
+    flush()
     const noteCard = screen.getByText('Internt handlingsnotat').closest('.verevon-inbox-action-suggestion')
     if (!noteCard) throw new Error('Expected internal-note card')
     fireEvent.click(within(noteCard as HTMLElement).getByRole('button', { name: 'Utkast' }))
