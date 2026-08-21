@@ -23,7 +23,13 @@ export CONVEX_SELF_HOSTED_URL="http://convex-backend:3210"
 # aborted the script, and `restart: unless-stopped` looped the container -- 916
 # times, with the healthcheck reporting healthy throughout. Fail loudly instead.
 # Regenerate with: docker compose exec convex-backend ./generate_admin_key.sh
-# (deterministic - derived from the backend INSTANCE_NAME + INSTANCE_SECRET).
+# That script is NOT deterministic: every call mints a NEW, independently valid
+# key (measured - five calls, five distinct keys, all of which authenticated).
+# Keys are additive and all validate against the backend's instance secret, so
+# generating a fresh one is safe but revokes nothing. The instance identity
+# itself comes from CONVEX_INSTANCE_SECRET in convex-core/.env via compose
+# interpolation - NOT from .env.local, which only reaches this service and
+# convex-subscriber as container env.
 : "${CONVEX_ADMIN_KEY:?CONVEX_ADMIN_KEY must be set - generate it with 'docker compose exec convex-backend ./generate_admin_key.sh' and write it to convex-core/.env.local as CONVEX_ADMIN_KEY=<key>}"
 export CONVEX_SELF_HOSTED_ADMIN_KEY="${CONVEX_ADMIN_KEY}"
 
