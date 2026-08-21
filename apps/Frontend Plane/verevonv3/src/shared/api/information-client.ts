@@ -47,14 +47,19 @@ export type InformationObservation = {
 
 export type InformationTrafficStation = {
   averageSpeed: InformationObservation
-  county: string
+  // information-core's Go struct tags both `county` and `roadReference` as
+  // `,omitempty`: when the derivation can't place a station (countyNameFor
+  // only covers Oslo/Akershus/Innlandet; the road-reference prefix match has
+  // its own fallback), the empty string is omitted from the JSON entirely,
+  // so a parsed response has no key here at all, not "".
+  county?: string
   countyProvenance: InformationDerivedFieldProvenance
   distanceKm?: number
   id: string
   lastUpdated: string
   locationName: string
   name: string
-  roadReference: string
+  roadReference?: string
   roadReferenceProvenance: InformationDerivedFieldProvenance
   status: string
   trafficVolume: InformationObservation
@@ -147,7 +152,9 @@ export function formatDerivedTrafficMetadata(
   metadata: Pick<InformationTrafficStation, 'county' | 'roadReference'>,
   locale: string,
 ): string {
-  const values = [metadata.roadReference, metadata.county].filter((value) => value.trim())
+  const values = [metadata.roadReference, metadata.county].filter(
+    (value): value is string => typeof value === 'string' && value.trim().length > 0,
+  )
   const norwegian = /^(nb|nn|no)(-|$)/i.test(locale)
   if (values.length === 0) {
     return norwegian ? 'Metadata utilgjengelig' : 'Metadata unavailable'

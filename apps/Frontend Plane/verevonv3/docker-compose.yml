@@ -207,6 +207,28 @@ services:
       - /app/.next
       # Exclude dist build output
       - /app/dist
+      # .claude/worktrees holds full extra monorepo checkouts (one per
+      # background Claude Code session cut from this branch; 10+ observed in
+      # a single long-running session). vite.config.ts already documents that
+      # scoping chokidar's `ignored` to this path, and separately enabling
+      # `usePolling`, both failed to fix Vite becoming unresponsive on a cold
+      # watcher init -- both are app-level scan-then-filter (or poll-then-
+      # filter) approaches, so the cost of walking these trees is paid either
+      # way. An anonymous volume hides the path at the mount layer instead:
+      # the directory is empty from the container's point of view, so
+      # chokidar/esbuild never see it exist and there is nothing to filter.
+      # (A bare `du -sh` against this path from the host took >120s to even
+      # finish, which is the same class of cost a cold file-watcher init pays.)
+      - /app/.claude/worktrees
+      # apps/gateway/target is the gateway's Rust build directory: measured at
+      # 6.6 GB, i.e. the same order as all nine worktrees combined (also 6.6 GB),
+      # and it churns on every `cargo build`. The frontend container never reads
+      # it -- the gateway is a separate service built from apps/gateway -- so it
+      # is pure cost here. Excluding worktrees alone left this half of the load
+      # in place, which is why the dev server stayed slow to settle after a cold
+      # start; vite.config.ts's comment records this path defeating an earlier
+      # chokidar `ignored` attempt for the same scan-then-filter reason.
+      - /app/apps/gateway/target
     environment:
       # Node otherwise derives a ~256 MiB heap from the container cgroup and
       # Vite enters a GC/OOM loop while transforming this large workspace.
@@ -238,11 +260,48 @@ services:
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     healthcheck:
-      test: ["CMD-SHELL", "curl --max-time 5 -sf http://127.0.0.1:5173 >/dev/null || exit 1"]
+      # Probe the TCP listener, NOT `GET /`.
+      #
+      # 127.0.0.1 is a correct target: `vite --host 0.0.0.0` binds the wildcard
+      # address (verified in-container - /proc/net/tcp shows 00000000:1435), so
+      # loopback is served. The address was never the problem.
+      #
+      # Widening the HTTP budget is not enough either, and that was measured, not
+      # assumed: `GET /` on this host does not run slow, it HANGS. Probe failures
+      # land on curl's own ceiling at exactly whatever you set - observed at 5s,
+      # 20s, 25s and once 42s - and over 10 samples `/` hung 6/10 times while
+      # `nc -z` returned in 0ms every time. Two back-to-back requests (`/` then
+      # `/@vite/client`) each hung 25s, so it is the whole HTTP surface. During a
+      # stall the container burns 30-60% CPU with RSS climbing: Vite is saturating
+      # its event loop transforming this large, OneDrive-backed module graph and
+      # is not servicing connections. Warm, `/` answers in ~18ms - but a
+      # file-mtime touch on the synced bind mount re-invalidates it and the stall
+      # returns, so this recurs indefinitely rather than only at boot.
+      #
+      # A tried-and-rejected HTTP variant: --max-time 20 / timeout 35s /
+      # retries 5 / start_period 120s STILL let FailingStreak climb to 3
+      # repeatedly. There is no HTTP budget that is both meaningful and stable
+      # here.
+      #
+      # A TCP probe is the only non-flapping signal available, and it is the one
+      # `depends_on: service_healthy` actually needs: "the dev server is up and
+      # accepting connections". Verified from a cold --force-recreate: healthy at
+      # t+16s, streak 0 sustained well past start_period. It deliberately does
+      # NOT assert that a page renders - assert that from tests/e2e, not from a
+      # 30s container probe.
+      #
+      # `nc` is BusyBox built into node:*-alpine (no package to add) and it does
+      # discriminate: closed port -> rc=1, open port -> rc=0.
+      #
+      # timeout is 20s rather than a few seconds because `docker exec` overhead
+      # alone measured ~7s on this host (a probe took 12.08s wall while curl's own
+      # ceiling was 5s), and start_period covers `pnpm dev` re-verifying the
+      # lockfile before it even execs vite.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5173 || exit 1"]
       interval: 30s
-      timeout: 10s
+      timeout: 20s
       retries: 3
-      start_period: 30s
+      start_period: 60s
     logging:
       driver: json-file
       options:

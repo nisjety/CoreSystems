@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createSignal, onCleanup } from 'solid-js'
+import { For, Match, Show, Switch, createEffect, createSignal, onCleanup, untrack } from 'solid-js'
 
 import { Activity, ArrowUpRight, CloudSun, MessageSquare, Newspaper, RefreshCw, Wind } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
@@ -403,7 +403,7 @@ function InformationCardState<T>(props: {
         {(message) => <InformationError text={message()} />}
       </Show>
       <Show when={props.data}>
-        {(payload) => props.render(payload())}
+        {(payload) => props.render(untrack(payload))}
       </Show>
     </>
   )

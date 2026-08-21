@@ -123,6 +123,16 @@ random_value() {
   openssl rand -hex 32
 }
 
+# base64url WITHOUT padding — the encoding every Space-decision peer uses.
+# Verified against both verifier implementations: Go reads the key with
+# `base64.RawURLEncoding` (documents-api-go/internal/handler/space_import.go,
+# user-core/internal/spaces/decision.go) and Rust with `URL_SAFE_NO_PAD`
+# (execution-core/src/scheduled_step_decision.rs). Standard base64 would decode
+# to the wrong bytes (or fail outright) on any key containing - or _.
+base64url_no_pad() {
+  openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+
 # Convex-Auth JWT/JWKS signing key (RS256). docker-compose.yml volume-mounts
 # ./auth-core/keys read-only into the container at /app/keys; without a real
 # keypair there, convex-token.service.ts's readKeyFile() throws "Configured
@@ -145,6 +155,42 @@ if [[ ! -s "$convex_auth_private_key" || ! -s "$convex_auth_public_key" ]]; then
   openssl pkey -in "$convex_auth_private_key" -pubout -out "$convex_auth_public_key" >/dev/null 2>&1
   chmod 600 "$convex_auth_private_key"
   chmod 644 "$convex_auth_public_key"
+fi
+
+# Space-decision signing keypair (Ed25519). Control (user-core) SIGNS Space
+# decisions with the private half; Model, Data and Ingestion plane services
+# VERIFY with the public half, so the two must be generated together and stay
+# in lockstep — a mismatched pair fails every Space authority check with a
+# signature error rather than a config error, which is far harder to read.
+#
+# These arrived as new `${..:?}` requirements with the Spaces authority work and
+# nothing provisioned them, so every Control Plane `docker compose` invocation
+# (including a single-service build) failed interpolation before reaching any
+# service. Generated once here and reused, matching the Convex-Auth keypair
+# above and bootstrap_runtime_environment.sh's ensure_event_keypair pattern.
+#
+# Ed25519 PKCS#8 DER is a fixed 48-byte structure whose trailing 32 bytes are
+# the seed, and the SubjectPublicKeyInfo DER's trailing 32 bytes are the public
+# key — hence `tail -c 32`. user-core accepts either a 32-byte seed or a
+# 64-byte expanded key (decision.go's ed25519.SeedSize / PrivateKeySize switch);
+# the seed is the smaller, canonical form.
+if ! lookup_value CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 >/dev/null 2>&1 \
+  || ! lookup_value CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64 >/dev/null 2>&1; then
+  space_decision_der=$(mktemp)
+  openssl genpkey -algorithm ed25519 -outform DER -out "$space_decision_der" >/dev/null 2>&1
+  space_decision_private=$(tail -c 32 "$space_decision_der" | base64url_no_pad)
+  space_decision_public=$(openssl pkey -inform DER -in "$space_decision_der" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 | base64url_no_pad)
+  rm -f "$space_decision_der"
+  if [[ -n "$space_decision_private" && -n "$space_decision_public" ]]; then
+    # Regenerate BOTH halves whenever either is missing, so a half-provisioned
+    # store can never leave a public key that does not match the private one.
+    persist_if_missing CONTROL_SPACE_DECISION_KEY_ID "control-space-decision-$(openssl rand -hex 8)"
+    persist_if_missing CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 "$space_decision_private"
+    persist_if_missing CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64 "$space_decision_public"
+  else
+    printf 'WARNING: could not generate the Space-decision Ed25519 keypair; Space authority checks will fail.\n' >&2
+  fi
 fi
 
 # Keep local database URLs internally consistent with the generated database
@@ -213,6 +259,7 @@ required_credentials=(
   INTEGRATION_AUDIT_CORE_SERVICE_TOKEN INTEGRATION_BILLING_CORE_SERVICE_TOKEN
   INTEGRATION_ORG_CORE_SERVICE_TOKEN MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN
   MODEL_NATS_PROVISIONER_PASSWORD
+  ORG_GROUP_GRANT_SERVICE_TOKEN
   ORG_NATS_PASSWORD ORG_SHARED_NATS_PASSWORD QUARRY_AUTH_INTERNAL_SERVICE_TOKEN
   RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN SESSION_BILLING_CORE_SERVICE_TOKEN
   SESSION_CORE_SERVICE_TOKEN SESSION_NATS_PASSWORD SESSION_ORG_CORE_SERVICE_TOKEN

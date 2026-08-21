@@ -66,11 +66,20 @@ export function AgentsProvider(props: { children: JSX.Element; routeLocation?: A
   // client-side navigation without emitting a browser `popstate` event, so
   // keep this URL-derived state in sync through that reactive boundary rather
   // than letting a prior /agents selection leak into another workspace.
+  //
+  // props.routeLocation is @solidjs/router's live `location` object -- a
+  // single stable reference whose `pathname`/`search` are reactive getters.
+  // compute must actually READ those getters (not just return the outer
+  // object) or it tracks nothing: the reference never changes, so `isEqual`
+  // (plain ===) never sees a difference and the effect phase below would run
+  // exactly once, on mount, and never again on navigation.
   createEffect(
-    () => props.routeLocation,
-    (routeLocation) => {
-      if (!routeLocation) return
-      setState(() => readLocationStateFromSnapshot(routeLocation.pathname, routeLocation.search))
+    () => (props.routeLocation
+      ? { pathname: props.routeLocation.pathname, search: props.routeLocation.search }
+      : undefined),
+    (snapshot) => {
+      if (!snapshot) return
+      setState(() => readLocationStateFromSnapshot(snapshot.pathname, snapshot.search))
     },
   )
 

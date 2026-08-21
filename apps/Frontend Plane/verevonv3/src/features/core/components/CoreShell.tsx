@@ -1,5 +1,5 @@
 import { useLocation } from '@solidjs/router'
-import { createEffect, createMemo, createSignal, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, Show, untrack } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
@@ -26,7 +26,9 @@ const DELETION_BANNER_HEIGHT_PX = 40
 export function CoreShell(props: { children?: JSX.Element }) {
   const location = useLocation()
   const session = getSession()
-  const initialRoute = routeFromPath(location.pathname)
+  // One-time peek to seed the initial signal value; the reactive read for
+  // ongoing updates is activeRoute (below), a proper createMemo.
+  const initialRoute = untrack(() => routeFromPath(location.pathname))
   const [sidebarExpanded, setSidebarExpanded] = createSignal(defaultSidebarExpandedForRoute(initialRoute))
   const [searchOpen, setSearchOpen] = createSignal(false)
   const [navbarData, { refetch: refetchNavbar }] = createResource(fetchNavbarData)
