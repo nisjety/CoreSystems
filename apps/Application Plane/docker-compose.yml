@@ -154,15 +154,33 @@ services:
         networks:
             - app-net
         healthcheck:
+            # The pattern MUST stay bracketed. `pgrep -f 'convex dev'` matches the
+            # healthcheck's own `sh -c` process, because that process's command line
+            # literally contains the string "convex dev" -- so the old check returned 0
+            # unconditionally and reported this container healthy through 916 restarts
+            # in which `convex dev` never started at all. `[c]onvex dev` matches the
+            # same processes but does not appear as a literal substring of itself,
+            # so the probe can no longer see its own shell. Verified in-container:
+            # `pgrep -af 'convex dev'` -> rc=0 (self-match); `[c]onvex dev` -> rc=1.
+            #
+            # Deliberately no longer probes convex-backend. This container exposes no
+            # port of its own, but reaching into a *different* service made this
+            # service's health report the backend's liveness instead of its own.
+            # Ordering against the backend is already handled by depends_on below.
             test:
                 [
                     "CMD-SHELL",
-                    "pgrep -f 'convex dev' >/dev/null && wget --quiet --tries=1 -O /dev/null http://convex-backend:3210/version || exit 1",
+                    "pgrep -f '[c]onvex dev' >/dev/null || exit 1",
                 ]
             interval: 30s
             timeout: 10s
             retries: 3
-            start_period: 60s
+            # 120s, not 60s: `npx convex dev` is only up ~90s after start on this
+            # host (it runs 13 `convex env set` calls plus a force `convex deploy`
+            # first). With start_period 60s a NORMAL cold boot was measured reaching
+            # FailingStreak 2 of 3 before recovering -- one probe from being declared
+            # unhealthy while it was starting perfectly well.
+            start_period: 120s
         deploy:
             resources:
                 limits:

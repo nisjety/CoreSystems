@@ -156,11 +156,19 @@ services:
       - app-net
     healthcheck:
       # This container is a schema deployer/watcher, not an HTTP gateway.
-      test: ["CMD-SHELL", "pgrep -f 'convex dev' >/dev/null && curl -fsS http://convex-backend:3210/version >/dev/null"]
+      # Bracketed pattern is load-bearing: `pgrep -f 'convex dev'` matches the
+      # healthcheck's own `sh -c` command line and so always succeeded, reporting
+      # this container healthy while `convex dev` was never running. Kept in step
+      # with the same service in ../docker-compose.yml, which is the file the
+      # running `application-plane` project actually uses.
+      test: ["CMD-SHELL", "pgrep -f '[c]onvex dev' >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # 120s, not 60s: `npx convex dev` is only up ~90s after start (13 `convex env
+      # set` calls plus a force `convex deploy` run first), and at 60s a normal cold
+      # boot was measured hitting FailingStreak 2 of 3 before recovering.
+      start_period: 120s
     deploy:
       resources:
         limits:

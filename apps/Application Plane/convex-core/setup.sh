@@ -47,7 +47,13 @@ fi
 
 echo
 echo "🔑 Generating admin key..."
-ADMIN_KEY=$(docker compose exec backend ./generate_admin_key.sh 2>/dev/null | grep "Admin key:" | awk '{print $3}')
+# generate_admin_key.sh echoes the bare key ("<instance>|<secret>") and nothing
+# else -- it never prints an "Admin key:" label -- and the service is named
+# convex-backend, not backend. The old parse therefore always yielded an empty
+# string and fell through to the warning below, which is why .env.local was
+# never written and convex-gateway crash-looped on an empty admin key.
+# Select the key by its '|' separator so any future banner lines are ignored.
+ADMIN_KEY=$(docker compose exec -T convex-backend ./generate_admin_key.sh 2>/dev/null | tr -d '\r' | grep -E '\|' | tail -n 1 | tr -d '[:space:]')
 
 if [ -z "$ADMIN_KEY" ]; then
     echo "⚠️  Could not auto-generate admin key. Run manually:"

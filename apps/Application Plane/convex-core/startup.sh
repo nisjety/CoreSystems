@@ -16,8 +16,16 @@ echo "[Convex] Starting gateway service..."
 
 # Force Convex self-hosted bypass using official env vars
 export CONVEX_SELF_HOSTED_URL="http://convex-backend:3210"
-# Use the generated admin key if present in .env.local
-export CONVEX_SELF_HOSTED_ADMIN_KEY="${CONVEX_ADMIN_KEY:-}"
+# The admin key arrives from convex-core/.env.local, which compose mounts through
+# `env_file: {path: ./convex-core/.env.local, required: false}`. Because that entry
+# is optional, a missing file used to leave this EMPTY and fail silently: every
+# `npx convex env set` below then died with "No CONVEX_DEPLOYMENT set", `set -e`
+# aborted the script, and `restart: unless-stopped` looped the container -- 916
+# times, with the healthcheck reporting healthy throughout. Fail loudly instead.
+# Regenerate with: docker compose exec convex-backend ./generate_admin_key.sh
+# (deterministic - derived from the backend INSTANCE_NAME + INSTANCE_SECRET).
+: "${CONVEX_ADMIN_KEY:?CONVEX_ADMIN_KEY must be set - generate it with 'docker compose exec convex-backend ./generate_admin_key.sh' and write it to convex-core/.env.local as CONVEX_ADMIN_KEY=<key>}"
+export CONVEX_SELF_HOSTED_ADMIN_KEY="${CONVEX_ADMIN_KEY}"
 
 retry_convex_cli() {
   local description="$1"
