@@ -203,6 +203,7 @@ impl BrowserDriverAdapter {
             headers: vec![],
             body: body_bytes.to_vec(),
             duration_ms: start.elapsed().as_millis() as u64,
+            served_by: DriverKind::Browser,
         };
 
         if let Err(e) = self.inner.release(session).await {

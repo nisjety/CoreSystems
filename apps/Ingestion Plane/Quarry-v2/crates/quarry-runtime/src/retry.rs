@@ -121,6 +121,7 @@ mod tests {
                     headers: vec![],
                     body: b"ok".to_vec(),
                     duration_ms: 1,
+                    served_by: DriverKind::Static,
                 })
             }
         }

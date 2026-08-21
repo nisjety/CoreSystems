@@ -489,7 +489,11 @@ impl PageRunner {
                 .await;
 
             use quarry_core::output::DriverKind;
-            let plan = match self.driver.kind() {
+            // Attribute from the response, not `self.driver.kind()`:
+            // `self.driver` may be a FallbackDriver whose kind() reports the
+            // planned primary even when a chain rotation meant a different
+            // driver served this fetch.
+            let plan = match resp.served_by {
                 DriverKind::Static => crate::driver_plan::DriverPlan::static_fetch("default"),
                 DriverKind::Tls => crate::driver_plan::DriverPlan::tls_fetch(
                     self.driver.tls_profile().unwrap_or_default(),
@@ -571,7 +575,9 @@ impl PageRunner {
             driver: {
                 let meta = self.driver.browser_meta();
                 DriverInfo {
-                    kind: self.driver.kind(),
+                    // `resp.served_by`, not `self.driver.kind()` — the wrapper
+                    // reports the planned primary even after chain rotation.
+                    kind: resp.served_by,
                     duration_ms: resp.duration_ms,
                     profile: self.driver.tls_profile().map(|p| match p {
                         quarry_tls::TlsProfile::Chrome => "chrome".to_string(),
